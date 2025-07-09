@@ -256,12 +256,12 @@ def build_chat_pipeline(generator_config: GeneratorConfig) -> Tuple[Pipeline, Co
     chat_generator = generator_config.create_chat_generator(
         tools=tools,
         generation_kwargs={
-            "temperature": 0.9,
+            # "temperature": 0.9,
         }
     )
     response_chat_generator = generator_config.create_chat_generator(
         generation_kwargs={
-            "temperature": 0.9,
+            # "temperature": 0.9,
         }
     )
 
@@ -290,7 +290,7 @@ def build_agent_pipeline(generator_config: GeneratorConfig) -> Tuple[Pipeline, C
         tools=tools,
         generation_kwargs={
             # "num_predict": 100,  # Ollama only?
-            "temperature": 0.9,
+            # "temperature": 0.9,
         }
     )
     assistant = Agent(

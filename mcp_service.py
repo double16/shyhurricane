@@ -24,7 +24,7 @@ from haystack.core.errors import PipelineRuntimeError
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 from mcp import McpError
 from mcp.server.elicitation import AcceptedElicitation, DeclinedElicitation, CancelledElicitation
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import FastMCP, Context
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
 
@@ -435,7 +435,7 @@ class RunUnixCommand(BaseModel):
 
 
 @mcp.tool()
-async def run_unix_command(command: str) -> Optional[RunUnixCommand]:
+async def run_unix_command(command: str, ctx: Context) -> Optional[RunUnixCommand]:
     """
     Run a Linux or macOS command and return its output. If the command has an option to disable
     progress, it should be used.
@@ -447,7 +447,7 @@ async def run_unix_command(command: str) -> Optional[RunUnixCommand]:
     Any commands that take arguments and respond to standard out, and don't require user input are good for this tool.
     """
     try:
-        result = await _run_unix_command(command)
+        result = await _run_unix_command(command, ctx)
         return result
     except Exception as e:
         exc_type, exc_value, exc_tb = sys.exc_info()
@@ -458,14 +458,23 @@ async def run_unix_command(command: str) -> Optional[RunUnixCommand]:
         )
 
 
-async def _run_unix_command(command: str) -> Optional[RunUnixCommand]:
-    ctx = mcp.get_context()
+async def _run_unix_command(command: str, ctx: Context) -> Optional[RunUnixCommand]:
     logger.info(f"run_unix_command {command}")
 
     cache_path: str = ctx.request_context.lifespan_context.get_cache_path_for_tool(command)
     meta_path = os.path.join(cache_path, 'meta.json')
     stdout_path = os.path.join(cache_path, 'stdout.txt')
     stderr_path = os.path.join(cache_path, 'stderr.txt')
+    # Use a common working directory for the session to chain together commands
+    cwd = cache_path
+    if ctx.client_id:
+        client_id = str(ctx.client_id)
+        logger.info(f"Using client id {client_id} for command CWD")
+        cwd = os.path.join(
+            ctx.request_context.lifespan_context.cache_path,
+            "mcp_client",
+            hashlib.sha512(client_id.encode("utf-8")).hexdigest())
+        os.makedirs(cwd, exist_ok=True)
 
     meta = {}
     cached = False
@@ -510,7 +519,7 @@ async def _run_unix_command(command: str) -> Optional[RunUnixCommand]:
             with open(stderr_path, "w") as stderr_file:
                 last_report = time.time()
                 # ARGH: this is so dangerous!
-                proc = subprocess.Popen(command, shell=True, cwd=cache_path, universal_newlines=True,
+                proc = subprocess.Popen(command, shell=True, cwd=cwd, universal_newlines=True,
                                         stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 os.set_blocking(proc.stdout.fileno(), False)
                 os.set_blocking(proc.stderr.fileno(), False)
