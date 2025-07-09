@@ -1,6 +1,7 @@
 haystack-ai==2.15.2
 chroma-haystack==3.3.0
 ollama-haystack==3.3.0
+google-genai-haystack==1.3.0
 mcp-haystack==0.4.0
 chardet==5.2.0
 sentence-transformers>=4.1.0

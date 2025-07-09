@@ -4,12 +4,13 @@ import hashlib
 import json
 import logging
 import os
+import queue
 import subprocess
 import sys
 import time
 import traceback
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from json import JSONDecodeError
 from multiprocessing import Queue, Process
 from pathlib import Path
@@ -33,9 +34,11 @@ from pydantic import BaseModel, AnyUrl, Field
 from ingest_queue import start_ingest_worker
 from pipeline import build_document_pipeline, build_website_context_pipeline, urlparse_ext
 from spider_queue import start_spider_worker, SpiderQueueItem
-from utils import HttpResource, latest_mtime
+from utils import HttpResource, latest_mtime, add_generator_args, GeneratorConfig
 
 logger = logging.getLogger(__name__)
+
+generator_config: Optional[GeneratorConfig] = GeneratorConfig.from_env()
 
 
 @dataclass
@@ -52,8 +55,6 @@ class AppContext:
     stores: Dict[str, ChromaDocumentStore]
     chroma_client: chromadb.PersistentClient
     top_k: int
-    ollama_url: Optional[str] = None,
-    ollama_model: Optional[str] = None,
     last_mtime: float = None
 
     def get_cache_path_for_tool(self, tool_id_str: str) -> str:
@@ -75,8 +76,7 @@ class AppContext:
             self.last_mtime = cur
             document_pipeline, retrievers, stores = build_document_pipeline(
                 db=self.db_path,
-                base_url=self.ollama_url,
-                ollama_model=self.ollama_model,
+                generator_config=generator_config,
                 top_k=self.top_k,
             )
             self.document_pipeline = document_pipeline
@@ -104,17 +104,13 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     chroma_client = chromadb.PersistentClient(path=db_path)
     cache_path = os.path.join(db_path, 'tool_cache')
     os.makedirs(cache_path, exist_ok=True)
-    ollama_url = os.environ.get('OLLAMA_URL', 'http://localhost:11434')
-    ollama_model = os.environ.get('OLLAMA_MODEL', 'qwen2.5:7b-instruct')
     document_pipeline, retrievers, stores = build_document_pipeline(
         db=db_path,
-        base_url=ollama_url,
-        ollama_model=ollama_model,
+        generator_config=generator_config,
         top_k=top_k,
     )
     website_context_pipeline = build_website_context_pipeline(
-        ollama_base_url=ollama_url,
-        ollama_model=ollama_model
+        generator_config=generator_config,
     )
     ingest_queue, ingest_process = start_ingest_worker(db_path=db_path)
     spider_queue, spider_result_queue, spider_process = start_spider_worker(db_path=db_path)
@@ -133,8 +129,6 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
             stores=stores,
             chroma_client=chroma_client,
             top_k=top_k,
-            ollama_url=ollama_url,
-            ollama_model=ollama_model,
             last_mtime=time.time(),
         )
     finally:
@@ -160,15 +154,41 @@ def _append_in_filter(conditions: List[Dict[str, Any]], field: str, values: List
         conditions.append({"field": field, "operator": "in", "value": values})
 
 
+def _documents_to_http_resources(documents: List[Document]) -> List[HttpResource]:
+    https_resources = []
+    for doc in documents:
+        if doc.content:
+            resource = Resource(
+                name=doc.meta['url'],
+                uri=AnyUrl(f"document://{doc.meta['type']}/{doc.id}"),
+                mimeType=doc.meta.get('content_type', 'text/plain'),
+                size=len(doc.content),
+            )
+        else:
+            resource = None
+        https_resources.append(HttpResource(
+            score=doc.score,
+            url=doc.meta['url'],
+            host=doc.meta.get('host', ''),
+            port=doc.meta.get('port', 0),
+            domain=doc.meta.get('domain', ''),
+            status_code=doc.meta.get('status_code', 0),
+            method=doc.meta.get('http_method', ''),
+            resource=resource,
+        ))
+    return https_resources
+
+
 @mcp.tool(
     annotations=ToolAnnotations(readOnlyHint=True),
 )
 async def find_web_resources(query: str) -> List[HttpResource]:
-    """Query indexed resources about a website and return the request and response bodies, URL, HTTP method, MIME type, HTTP status code, technologies found. This tool will search using several parameters including response body matching, URL matching, MIME type matching of the response, HTTP request method matching and HTTP response body matching.
+    """Query indexed resources about a website using natural language and return the request and response bodies, URL, HTTP method, MIME type, HTTP status code, technologies found. This tool will search using several parameters including response body matching, URL matching, MIME type matching of the response, HTTP request method matching, and HTTP response body matching.
 
     Invoke this tool when the user asks about vulnerabilities,
     misconfigurations or exploit techniques **specific to a target website**
-    (e.g. XSS, CSP issues, IDOR paths, outdated JS libs).
+    (e.g. XSS, CSP issues, IDOR paths, outdated JS libs). Including the user's query will improve
+    the results.
 
     Invoke this tool when the user asks for summary information about a website, such as technology in use, and type of responses.
 
@@ -177,12 +197,34 @@ async def find_web_resources(query: str) -> List[HttpResource]:
     If there is content available for the results, there will be a resource_link object containing
     a URI. The URI can use the fetch_web_resource_content tool to get the content.
     """
+    query = query.strip()
     logger.info("finding web resources for %s", query)
 
     ctx = mcp.get_context()
     document_pipeline: Pipeline = ctx.request_context.lifespan_context.get_document_pipeline()
     website_context_pipeline: Pipeline = ctx.request_context.lifespan_context.website_context_pipeline
     top_k = ctx.request_context.lifespan_context.top_k
+
+    # handle a case where a query is only URL
+    try:
+        urlparse_ext(query)
+        query_url = query
+        urls_munged = [query]
+        if '?' in query_url:
+            query_url = query_url.split('?')[0]
+            urls_munged.append(query_url)
+        if query_url.endswith('/'):
+            urls_munged.append(query_url[:-1])
+        else:
+            urls_munged.append(query_url+'/')
+        logger.info("Searching for exact web resource for %s", ', '.join(urls_munged))
+        filters = {"field": "meta.url", "operator": "in", "value": urls_munged}
+        store = ctx.request_context.lifespan_context.stores["content"]
+        docs = store.filter_documents(filters=filters)
+        if docs:
+            return _documents_to_http_resources(docs)
+    except Exception:
+        pass
 
     doc_types: list[str] = []
     urls: list[str] = []
@@ -296,29 +338,7 @@ async def find_web_resources(query: str) -> List[HttpResource]:
             ctx.request_context.lifespan_context.maybe_reload(force=True)
             document_pipeline = ctx.request_context.lifespan_context.get_document_pipeline()
 
-    https_resources = []
-    for doc in documents:
-        if doc.content:
-            resource = Resource(
-                name=doc.meta['url'],
-                uri=AnyUrl(f"document://{doc.meta['type']}/{doc.id}"),
-                mimeType=doc.meta.get('content_type', 'text/plain'),
-                size=len(doc.content),
-            )
-        else:
-            resource = None
-        https_resources.append(HttpResource(
-            score=doc.score,
-            url=doc.meta['url'],
-            host=doc.meta.get('host', ''),
-            port=doc.meta.get('port', 0),
-            domain=doc.meta.get('domain', ''),
-            status_code=doc.meta.get('status_code', 0),
-            method=doc.meta.get('http_method', ''),
-            resource=resource,
-        ))
-    return https_resources
-
+    return _documents_to_http_resources(documents)
 
 async def _find_document_by_type_and_id(doc_type: str, doc_id: str) -> Optional[Document]:
     ctx = mcp.get_context()
@@ -424,7 +444,7 @@ async def run_unix_command(command: str) -> Optional[RunUnixCommand]:
     program and the request can't be fulfilled by other MCP tools. Invoke this tool when the user
     asks to run a specific command.
 
-    Examples of commands that this tool is good for: nmap, curl, wget, ffuf, dirb, feroxbuster
+    Any commands that take arguments and respond to standard out, and don't require user input are good for this tool.
     """
     try:
         result = await _run_unix_command(command)
@@ -611,6 +631,7 @@ async def index_http_url(url: str, user_agent: Optional[str] = None,
 
     Invoke this tool when the user needs the content of one specific URL.
     """
+    logger.info("indexing HTTP URL %s", url)
     curl_args = ["-i", "-s"]
     if user_agent:
         curl_args.extend(["-H", f"User-Agent: {user_agent}"])
@@ -641,6 +662,30 @@ async def index_http_url(url: str, user_agent: Optional[str] = None,
     else:
         return None
 
+def is_spider_time_recent(url: str) -> Optional[float]:
+    try:
+        ctx = mcp.get_context()
+        chroma_client: chromadb.PersistentClient = ctx.request_context.lifespan_context.get_chroma_client()
+        collection: chromadb.Collection = chroma_client.get_collection("network")
+        url_parsed = urlparse_ext(url)
+        netloc = url_parsed.netloc
+        now = datetime.now(timezone.utc)
+        for metadata in collection.get(where={"netloc": netloc}, include=["metadatas"]).get("metadatas", []):
+            try:
+                timestamp = datetime.fromisoformat(metadata["timestamp"])
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=timezone.utc)
+                seconds_since_spider = (now - timestamp).total_seconds()
+                if seconds_since_spider < 24*3600:
+                    logger.info(f"Spider for {url} was done {seconds_since_spider} seconds ago")
+                    return True
+            except (ValueError, TypeError):
+                pass
+        return False
+    except Exception as e:
+        logger.error("Failed checking for last spider time", exc_info=e)
+        return False
+
 
 @mcp.tool()
 async def spider_website(url: str, user_agent: Optional[str] = None,
@@ -654,7 +699,14 @@ async def spider_website(url: str, user_agent: Optional[str] = None,
 
     Returns a list of resources found, including URL, response code, content type, and content length. Indexes each URL that can be queried using the find_web_resources tool. URL content can be returned using the fetch_web_resource_content tool.
     """
+    url = url.strip()
+    if is_spider_time_recent(url):
+        logger.info(f"{url} has been recently spidered, returning saved results")
+        return await find_web_resources(url)
+
     ctx = mcp.get_context()
+    spider_queue: Queue = ctx.request_context.lifespan_context.spider_queue
+    spider_result_queue: Queue = ctx.request_context.lifespan_context.spider_result_queue
     url_parsed = urlparse_ext(url)
     spider_queue_item = SpiderQueueItem(
         uri=url,
@@ -662,8 +714,6 @@ async def spider_website(url: str, user_agent: Optional[str] = None,
         user_agent=user_agent,
         request_headers=request_headers,
     )
-    spider_queue: Queue = ctx.request_context.lifespan_context.spider_queue
-    spider_result_queue: Queue = ctx.request_context.lifespan_context.spider_result_queue
     spider_queue.put_nowait(spider_queue_item)
     results: List[HttpResource] = []
     time_limit = time.time() + 45
@@ -671,8 +721,8 @@ async def spider_website(url: str, user_agent: Optional[str] = None,
         try:
             http_resource: HttpResource = spider_result_queue.get(
                 block=True,
-                timeout=(max(1, time_limit - time.time())))
-        except TimeoutError:
+                timeout=(max(1.0, time_limit - time.time())))
+        except queue.Empty:
             break
         if http_resource is None:
             break
@@ -693,9 +743,15 @@ def _query_to_netloc(query: str) -> Tuple[str | None, int | None]:
         query = query.lower()
         if "://" in query:
             try:
-                parsed = urlparse(query)
+                parsed = urlparse_ext(query)
                 query = parsed.hostname
                 port = parsed.port
+            except Exception:
+                pass
+        elif ":" in query:
+            try:
+                query, _, port_str = query.partition(":")
+                port = int(port_str)
             except Exception:
                 pass
     return query, port
@@ -740,7 +796,8 @@ def find_hosts(domain_query: str) -> List[str]:
             if "host" in metadata:
                 hostname = metadata['host'].lower()
                 if not domain_query or hostname.endswith(domain_query):
-                    result.add(hostname)
+                    if port is None or port <= 0 or (metadata.get('port', None) == port):
+                        result.add(hostname)
         return sorted(list(result))
     except Exception as e:
         logger.error("find_hosts error: %s", domain_query, exc_info=e)
@@ -763,7 +820,8 @@ def find_netloc(domain_query: str) -> List[str]:
         if "host" in metadata:
             hostname = metadata['host'].lower()
             if not domain_query or hostname.endswith(domain_query):
-                result.add(metadata.get('netloc', hostname).lower())
+                if port is None or port <= 0 or (metadata.get('port', None) == port):
+                    result.add(metadata.get('netloc', hostname).lower())
     return sorted(list(result))
 
 
@@ -791,9 +849,10 @@ async def find_urls(host_query: str, limit: int = 100) -> List[str]:
         if "host" in metadata and "url" in metadata:
             hostname = metadata['host'].lower()
             if not host_query or hostname.endswith(host_query):
-                result.add(metadata["url"])
-                if len(result) >= limit:
-                    break
+                if port is None or port <= 0 or (metadata.get('port', None) == port):
+                    result.add(metadata["url"])
+                    if len(result) >= limit:
+                        break
     return sorted(list(result))
 
 
@@ -810,5 +869,7 @@ if __name__ == "__main__":
         default="streamable-http",
         help="Transport method to use: stdio, sse, or streamable-http"
     )
+    add_generator_args(ap)
     args = ap.parse_args()
+    generator_config = GeneratorConfig.from_args(args)
     mcp.run(transport=args.transport)

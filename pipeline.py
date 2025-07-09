@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+from json import JSONDecodeError
 from typing import Dict, List, Optional, Any, Tuple
 
 from haystack.components.agents import Agent
@@ -14,7 +15,7 @@ from haystack.components.tools import ToolInvoker
 from haystack.core.component import Component
 from haystack.dataclasses import ChatMessage
 from haystack.tools import Toolset
-from tldextract import tldextract
+from more_itertools import first
 
 from doc_type_model_map import get_model_for_doc_type, doc_type_to_model, map_mime_to_type
 
@@ -23,13 +24,12 @@ import mcp
 import chromadb
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 from haystack_integrations.components.retrievers.chroma import ChromaEmbeddingRetriever
-from haystack_integrations.components.generators.ollama import OllamaGenerator, OllamaChatGenerator
 from haystack.components.embedders import SentenceTransformersTextEmbedder, SentenceTransformersDocumentEmbedder
 from haystack.components.builders import PromptBuilder, AnswerBuilder, ChatPromptBuilder
 from haystack import Pipeline, component, Document
 from haystack_integrations.tools.mcp import StreamableHttpServerInfo, MCPToolset
 
-from utils import urlparse_ext
+from utils import urlparse_ext, GeneratorConfig, extract_domain
 
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 os.environ['ANONYMIZED_TELEMETRY'] = "False"
@@ -38,8 +38,6 @@ os.environ['HAYSTACK_TELEMETRY_DISABLED'] = "1"
 
 logger = logging.getLogger(__name__)
 
-
-# ───────── helpers ─────────
 
 def list_collections(db_path: str) -> List[str]:
     """Return collection names using a raw Chroma client."""
@@ -102,19 +100,16 @@ class Query:
 
 @component
 class QueryExpander:
-    def __init__(self, prompt: Optional[str] = None, model: str = "llama3.1",
-                 ollama_base_url: str = "http://localhost:11434"):
+    def __init__(self, generator_config: GeneratorConfig, prompt: Optional[str] = None):
 
         self.query_expansion_prompt = prompt
-        self.ollama_base_url = ollama_base_url
-        self.model = model
         if prompt is None:
             self.query_expansion_prompt = """
           You are a cybersecurity search assistant that processes users queries.
           You expand a given query into at most {{ number }} queries that are similar in meaning. The expanded query should not be less specific.
           
           Structure:
-          Output the expanded queries as a valid JSON list. Only output the list. Do not include any other text except the JSON list of expanded queries.
+          Output the expanded queries as a valid JSON list of strings. Only output the list. Do not include any other text except the JSON list of expanded queries.
           Examples:
             1. Example Query 1: "cross-site scripting mitigation"  
                Example Expanded Queries: ["XSS prevention techniques", "sanitizing user input", "reflected XSS protection", "stored XSS defense"]
@@ -126,7 +121,7 @@ class QueryExpander:
           Example Expanded Queries:
           """
         builder = PromptBuilder(self.query_expansion_prompt, required_variables=["number", "query"])
-        llm = OllamaGenerator(url=ollama_base_url, model=self.model)
+        llm = generator_config.create_generator()
         self.pipeline = Pipeline()
         self.pipeline.add_component(name="builder", instance=builder)
         self.pipeline.add_component(name="llm", instance=llm)
@@ -141,13 +136,20 @@ class QueryExpander:
             ctx.info(f"Expanding query")
         except Exception:
             pass
-        result = self.pipeline.run({'builder': {'query': query, 'number': number}}).get('llm', {}).get('replies', [""])[
-            0]
-        logger.debug(f"Expanded query result:\n{result}")
+        result = self.pipeline.run({'builder': {'query': query, 'number': number}}).get('llm', {}).get('replies', [""])[0]
+        logger.info(f"Expanded query result:\n{result}")
         if not result:
             return {"queries": [query]}
-        expanded_query = json.loads(result) + [query]
-        return {"queries": list(expanded_query)}
+        try:
+            expanded_list = [query]
+            expanded_json = json.loads(result)
+            if isinstance(expanded_json, list):
+                expanded_list.extend(list(map(
+                    lambda e: first(e.values()) if isinstance(e, dict) else str(e),
+                    expanded_json)))
+            return {"queries": expanded_list}
+        except JSONDecodeError:
+            return {"queries": [query]}
 
 
 @component
@@ -186,17 +188,15 @@ class MultiQueryChromaRetriever:
         return {"documents": results}
 
 
-def build_answer_pipeline(db: str, base_url: str, ollama_model: str, top_k: int) -> Tuple[Pipeline, Component]:
+def build_answer_pipeline(db: str, generator_config: GeneratorConfig, top_k: int) -> Tuple[Pipeline, Component]:
     """
     Builds a pipeline for making security related queries.
     :param db: path to the database.
-    :param base_url: Ollama base URL
-    :param ollama_model: the Ollama model
     :param top_k: Maximum number of documents to return.
     :return: Pipeline
     """
 
-    pipe, retrievers, stores = build_document_pipeline(db=db, base_url=base_url, ollama_model=ollama_model, top_k=top_k)
+    pipe, retrievers, stores = build_document_pipeline(db=db, generator_config=generator_config, top_k=top_k)
 
     prompt_tmpl = """
 You are an experienced web‑application penetration tester. Below are crawl/scan artefacts from a single website. Identify high‑impact vulnerabilities and exploitation paths.
@@ -211,7 +211,7 @@ Question: {{ query }}
 Answer in concise Markdown with PoCs/examples. Include the URL for documents that contributed to the answer.
 """
 
-    generator = OllamaGenerator(url=base_url, model=ollama_model)
+    generator = generator_config.create_generator()
     pipe.add_component("prompt", PromptBuilder(template=prompt_tmpl, required_variables=["documents", "query"]))
     pipe.add_component("llm", generator)
     pipe.add_component("ans", AnswerBuilder())
@@ -246,26 +246,20 @@ Provide explanations for found vulnerabilities and exploit paths. Provide concis
 """
 
 
-def build_chat_pipeline(base_url: str, ollama_model: str) -> Tuple[Pipeline, Component, Toolset]:
+def build_chat_pipeline(generator_config: GeneratorConfig) -> Tuple[Pipeline, Component, Toolset]:
     """
     Builds a pipeline for a cyber-security chat.
-    :param base_url: Ollama base URL
-    :param ollama_model: the Ollama model
     :return: Pipeline, generator component
     """
 
     tools = _create_shyhurriance_toolset()
-    chat_generator = OllamaChatGenerator(
-        url=base_url,
-        model=ollama_model,
+    chat_generator = generator_config.create_chat_generator(
         tools=tools,
         generation_kwargs={
             "temperature": 0.9,
         }
     )
-    response_chat_generator = OllamaChatGenerator(
-        url=base_url,
-        model=ollama_model,
+    response_chat_generator = generator_config.create_chat_generator(
         generation_kwargs={
             "temperature": 0.9,
         }
@@ -284,22 +278,18 @@ def build_chat_pipeline(base_url: str, ollama_model: str) -> Tuple[Pipeline, Com
     return pipeline, response_chat_generator, tools
 
 
-def build_agent_pipeline(base_url: str, ollama_model: str) -> Tuple[Pipeline, Component, Toolset]:
+def build_agent_pipeline(generator_config: GeneratorConfig) -> Tuple[Pipeline, Component, Toolset]:
     """
     Builds a pipeline for a cyber-security agent.
-    :param base_url: Ollama base URL
-    :param ollama_model: the Ollama model
     :return: Pipeline
     """
 
     tools = _create_shyhurriance_toolset()
     prompt_builder = ChatPromptBuilder()
-    chat_generator = OllamaChatGenerator(
-        url=base_url,
-        model=ollama_model,
+    chat_generator = generator_config.create_chat_generator(
         tools=tools,
         generation_kwargs={
-            "num_predict": 100,
+            # "num_predict": 100,  # Ollama only?
             "temperature": 0.9,
         }
     )
@@ -318,13 +308,11 @@ def build_agent_pipeline(base_url: str, ollama_model: str) -> Tuple[Pipeline, Co
     return pipe, chat_generator, tools
 
 
-def build_document_pipeline(db: str, base_url: str, ollama_model: str, top_k: int) -> Tuple[
+def build_document_pipeline(db: str, generator_config: GeneratorConfig, top_k: int) -> Tuple[
     Pipeline, Dict[str, MultiQueryChromaRetriever], Dict[str, ChromaDocumentStore]]:
     """
     Builds a pipeline for retrieving documents from the store.
     :param db: path to the database.
-    :param base_url: Ollama base URL
-    :param ollama_model: the Ollama model
     :param top_k: Maximum number of documents to return.
     :return: Pipeline
     """
@@ -334,7 +322,7 @@ def build_document_pipeline(db: str, base_url: str, ollama_model: str, top_k: in
     comb = CombineDocs([f"{col}_documents" for col in collections])
     pipe.add_component("combine", comb)
     pipe.add_component("query", Query())
-    pipe.add_component("query_expander", QueryExpander(ollama_base_url=base_url, model=ollama_model))
+    pipe.add_component("query_expander", QueryExpander(generator_config))
     pipe.connect("query.text", "query_expander.query")
 
     retrievers: Dict[str, MultiQueryChromaRetriever] = {}
@@ -368,7 +356,7 @@ def build_document_pipeline(db: str, base_url: str, ollama_model: str, top_k: in
     return pipe, retrievers, stores
 
 
-def build_website_context_pipeline(ollama_base_url: str, ollama_model: str) -> Pipeline:
+def build_website_context_pipeline(generator_config: GeneratorConfig) -> Pipeline:
     prompt = """
       You are a cybersecurity search assistant that processes users queries for websites.
       You determine the site url(s) and/or ip address(es) and ports the user is interested in. You
@@ -413,7 +401,7 @@ def build_website_context_pipeline(ollama_base_url: str, ollama_model: str) -> P
       JSON targets, optional content, optional tech:
       """
     builder = PromptBuilder(prompt, required_variables=["query"])
-    llm = OllamaGenerator(url=ollama_base_url, model=ollama_model)
+    llm = generator_config.create_generator()
     pipeline = Pipeline()
     pipeline.add_component(name="builder", instance=builder)
     pipeline.add_component(name="llm", instance=llm)
@@ -483,12 +471,14 @@ class KatanaDocument:
             host = url_parsed.hostname.lower()
             port = url_parsed.port
             netloc = f"{host}:{port}"
-            domain = tldextract.extract(host).top_domain_under_public_suffix
+            domain = extract_domain(host)
         except Exception:
             logger.warning(f"Malformed URL: {url}")
             return {"documents": []}
 
-        timestamp = entry["timestamp"]
+        # quantize timestamp to avoid too many duplicate results
+        timestamp = entry["timestamp"]  # 2025-06-28T22:52:07.882000
+        timestamp_for_id = timestamp[0:11]  # one document per URL per day
         response_body = entry.get("response", {}).get("body", None)
         content = "\n".join(
             list(filter(lambda x: x is not None, [
@@ -532,7 +522,7 @@ class KatanaDocument:
             doc = Document(
                 content=response_body,
                 meta=base_meta | {"type": "content"},
-                id=hashlib.sha256(f"{url}:content:{timestamp}".encode()).hexdigest()
+                id=hashlib.sha256(f"{url}:content:{timestamp_for_id}".encode()).hexdigest()
             )
             embedder = self.embedders.get("content", self.embedders["default"])
             documents.extend(embedder.run(documents=[doc])["documents"])
@@ -545,7 +535,7 @@ class KatanaDocument:
                 doc = Document(
                     content=content,
                     meta=base_meta | {"type": doc_type},
-                    id=hashlib.sha256(f"{url}:{doc_type}:{timestamp}".encode()).hexdigest()
+                    id=hashlib.sha256(f"{url}:{doc_type}:{timestamp_for_id}".encode()).hexdigest()
                 )
                 try:
                     doc = self.doc_cleaner.run(documents=[doc])["documents"][0]
@@ -571,7 +561,7 @@ class KatanaDocument:
         net_doc = Document(
             content=net_text,
             meta=base_meta | {"type": "network"},
-            id=hashlib.sha256(f"{url}:network:{timestamp}".encode()).hexdigest()
+            id=hashlib.sha256(f"{url}:network:{timestamp_for_id}".encode()).hexdigest()
         )
         net_embedder = self.embedders["network"]
         documents.extend(net_embedder.run(documents=[net_doc])["documents"])
@@ -583,7 +573,7 @@ class KatanaDocument:
             forms_doc = Document(
                 content=json.dumps(sorted_forms, indent=None, separators=(',', ':'), sort_keys=True),
                 meta=base_meta | {"type": "forms"},
-                id=hashlib.sha256(f"{url}:forms:{timestamp}".encode()).hexdigest()
+                id=hashlib.sha256(f"{url}:forms:{timestamp_for_id}".encode()).hexdigest()
             )
             forms_embedder = self.embedders["forms"]
             documents.extend(forms_embedder.run(documents=[forms_doc])["documents"])
@@ -676,6 +666,7 @@ def build_ingest_pipeline(db: str) -> Pipeline:
             persist_path=db,
             collection_name=dtype,
         )
+        document_store.count_documents()  # ensure the collection exists
         stores[dtype] = document_store
         embedders[dtype] = embedder
 

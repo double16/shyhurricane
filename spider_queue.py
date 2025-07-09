@@ -7,11 +7,10 @@ from multiprocessing import Queue, Process
 from typing import Optional, Dict, Tuple
 
 from mcp import Resource
-from pydantic import BaseModel, AnyUrl
-from tldextract import tldextract
+from pydantic import AnyUrl
 
 from ingest_queue import get_ingest_queue
-from utils import urlparse_ext, HttpResource
+from utils import urlparse_ext, HttpResource, extract_domain
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +96,7 @@ def _katana_ingest(
                             url=resource.name,
                             host=url_parsed.hostname,
                             port=url_parsed.port,
-                            domain=tldextract.extract(url_parsed.hostname).top_domain_under_public_suffix,
+                            domain=extract_domain(url_parsed.hostname),
                             status_code=parsed.get('response', {}).get('status_code', 0),
                             method=parsed.get('request', {}).get('method', 'GET'),
                             resource=resource,

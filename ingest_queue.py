@@ -1,3 +1,4 @@
+import logging
 import multiprocessing
 import os
 from multiprocessing import Queue, Process
@@ -9,6 +10,7 @@ from pipeline import build_ingest_pipeline
 
 _ingest_queues: Dict[str, Queue] = {}
 
+logger = logging.getLogger(__name__)
 
 def get_ingest_queue(db_path: str) -> Queue:
     abs_path = os.path.abspath(db_path)
@@ -23,7 +25,10 @@ def _ingest_worker(db_path: str, queue: Queue):
         item = queue.get()
         if item is None:
             break  # Sentinel to stop
-        pipeline.run({"input_router": {"text": str(item)}})
+        try:
+            pipeline.run({"input_router": {"text": str(item)}})
+        except Exception as e:
+            logger.error("Error in ingestion pipeline", exc_info=e)
 
 
 def start_ingest_worker(db_path: str) -> Tuple[Queue, Process]:

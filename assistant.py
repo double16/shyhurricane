@@ -16,6 +16,7 @@ from rich import get_console
 from rich.markdown import Markdown
 
 from pipeline import build_chat_pipeline, build_agent_pipeline
+from utils import add_generator_args, GeneratorConfig
 
 # 1. Mute Haystack and integrations
 for name in [
@@ -46,18 +47,18 @@ def main():
         default="chat",
         help="AI mode to use: chat or agent"
     )
-    ap.add_argument("--ollama-url", default="http://localhost:11434")
-    ap.add_argument("--ollama-model", default="llama3.1")
+    add_generator_args(ap)
     ap.add_argument("--stream", action="store_true")
     ap.add_argument("--history", default="chat_history.md")
     args = ap.parse_args()
+    generator_config = GeneratorConfig.from_args(args)
 
     top_k = 100
 
     if args.mode == "agent":
-        pipe, generator, tools = build_agent_pipeline(args.ollama_url, args.ollama_model)
+        pipe, generator, tools = build_agent_pipeline(generator_config)
     else:
-        pipe, generator, tools = build_chat_pipeline(args.ollama_url, args.ollama_model)
+        pipe, generator, tools = build_chat_pipeline(generator_config)
 
     if args.stream and generator is not None:
         generator.streaming_callback = lambda chunk: print(chunk.content, end="")
@@ -87,8 +88,10 @@ def main():
                 console.print(Markdown(f"""
 ## Config
 - DB `{args.db}`
-- Ollama URL `{args.ollama_url}`
-- Ollama Model `{args.ollama_model}`
+- Ollama URL `{generator_config.ollama_url}`
+- Ollama Model `{generator_config.ollama_model}`
+- Gemini Model `{generator_config.gemini_model}`
+- OpenAI Model `{generator_config.openai_model}`
 
 ## Tools
 {"\n".join(['- **' + tool.name + '(' + ', '.join(tool.parameters.keys()) + ')**: ' + tool.description for tool in tools])}
