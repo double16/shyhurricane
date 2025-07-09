@@ -64,3 +64,27 @@ python3 assistant.py --ollama-model llama3.1 --mode agent
 ### Other MCP Client
 
 Or connect the MCP server at http://127.0.0.1:8000 in your client, such as "5ire".
+
+## Google AI
+
+Remove the Ollama options. Set the following environment variables before running the MCP server and assistant. The
+model may be set using `--gemini-model`. The API key must be an environment variable.
+
+- `GEMINI_MODEL=gemini-2.5-pro`
+- `GEMINI_API_KEY`
+
+# OpenAI
+
+Remove the Ollama options. Set the following environment variables before running the MCP server and assistant. The
+model may be set using `--openai-model`. The API key must be an environment variable.
+
+- `OPENAI_MODEL=o4-mini`
+- `OPENAI_API_KEY`
+
+## Ollama
+
+Ollama can be configured to use a remote server by setting the URL. The URL can also be set using `--ollama-url` and the
+model with `--ollama-model`.
+
+- `OLLAMA_MODEL=llama3.1`
+- `OLLAMA_URL=http://localhost:11434`
