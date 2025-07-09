@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from haystack.core.errors import PipelineRuntimeError
-from haystack.dataclasses import ChatMessage
+from haystack.dataclasses import ChatMessage, ChatRole
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from rich import get_console
@@ -87,7 +87,6 @@ def main():
             if user_in.startswith("/show"):
                 console.print(Markdown(f"""
 ## Config
-- DB `{args.db}`
 - Ollama URL `{generator_config.ollama_url}`
 - Ollama Model `{generator_config.ollama_model}`
 - Gemini Model `{generator_config.gemini_model}`
@@ -102,12 +101,11 @@ def main():
 
             # Build the pipeline input
             user_in_message = ChatMessage.from_user(user_in)
-            messages.append(user_in_message)
             run_input = {}
             # TODO: use haystack-ai to introspect inputs/outputs
             try:
                 pipe.get_component("llm")
-                run_input["llm"] = {"messages": messages}
+                run_input["llm"] = {"messages": messages+[user_in_message]}
             except ValueError:
                 pass
             try:
@@ -130,10 +128,21 @@ def main():
 
             # Process the output
             if "response_llm" in res:
-                messages = res["response_llm"]["replies"]
+                replies = [user_in_message] + res["response_llm"]["replies"]
             elif "agent" in res:
-                messages = res["agent"]["messages"]
-            ans_md = "\n".join(messages[-1].texts)
+                replies = res["agent"]["messages"]
+            else:
+                replies = []
+
+            has_system_message = any(filter(lambda m: m.role == ChatRole.SYSTEM, messages))
+            for r in replies:
+                if r is None or not r.text:
+                    continue
+                if has_system_message and r.role == ChatRole.SYSTEM:
+                    continue
+                messages.append(r)
+
+            ans_md = "\n".join(replies[-1].texts)
             if args.stream:
                 print()
             else:

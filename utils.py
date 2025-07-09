@@ -63,9 +63,9 @@ def extract_domain(hostname: str) -> str:
 
 def add_generator_args(ap: argparse.ArgumentParser):
     ap.add_argument("--ollama-url", help="The URL for the Ollama service", default="http://localhost:11434", required=False)
-    ap.add_argument("--ollama-model", help="Use Ollama with the specified model, must already be pulled", required=False)
-    ap.add_argument("--gemini-model", help="Use Google Gemini with the specified model, API key must be in env var GOOGLE_API_KEY or GEMINI_API_KEY", required=False)
-    ap.add_argument("--openai-model", help="Use OpenAI with the specified model, API key must be in env var OPENAI_API_KEY", required=False)
+    ap.add_argument("--ollama-model", help="Use Ollama with the specified model (qwen instruct models are recommended), must already be pulled", required=False)
+    ap.add_argument("--gemini-model", help="Use Google Gemini with the specified model (gemini-2.5-pro is recommended), API key must be in env var GOOGLE_API_KEY or GEMINI_API_KEY", required=False)
+    ap.add_argument("--openai-model", help="Use OpenAI with the specified model (o4-mini is recommended), API key must be in env var OPENAI_API_KEY", required=False)
 
 
 class GeneratorConfig(BaseModel):

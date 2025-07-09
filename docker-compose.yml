@@ -1,0 +1,20 @@
+
+volumes:
+  data:
+
+services:
+  unix_command:
+    build: src/docker/unix_command
+    image: shyhurricane_unix_command:latest
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      OLLAMA_MODEL: llama3.1
+      OLLAMA_URL: "http://127.0.0.1:11434"
+    ports:
+      - "8000:8000"
+    volumes:
+      - "data:/data"
+

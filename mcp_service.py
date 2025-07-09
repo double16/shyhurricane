@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -10,7 +11,7 @@ import sys
 import time
 import traceback
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from json import JSONDecodeError
 from multiprocessing import Queue, Process
 from pathlib import Path
@@ -19,6 +20,7 @@ from urllib.parse import urlparse
 
 import chromadb
 import mcp
+import validators
 from haystack import Pipeline, Document
 from haystack.core.errors import PipelineRuntimeError
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
@@ -29,7 +31,7 @@ from dataclasses import dataclass
 from contextlib import asynccontextmanager
 
 from mcp.types import ToolAnnotations, Resource, TextResourceContents
-from pydantic import BaseModel, AnyUrl, Field
+from pydantic import BaseModel, AnyUrl, Field, ValidationError
 
 from ingest_queue import start_ingest_worker
 from pipeline import build_document_pipeline, build_website_context_pipeline, urlparse_ext
@@ -435,19 +437,27 @@ class RunUnixCommand(BaseModel):
 
 
 @mcp.tool()
-async def run_unix_command(command: str, ctx: Context) -> Optional[RunUnixCommand]:
+async def run_unix_command(command: str, additional_hosts: Dict[str, str], ctx: Context) -> Optional[RunUnixCommand]:
     """
     Run a Linux or macOS command and return its output. If the command has an option to disable
-    progress, it should be used.
+    progress, it should be included. The command is run in a containerized environment for safety.
 
     Invoke this tool when the user request can be fulfilled by a known Linux or macOS command line
     program and the request can't be fulfilled by other MCP tools. Invoke this tool when the user
     asks to run a specific command.
 
     Any commands that take arguments and respond to standard out, and don't require user input are good for this tool.
+
+    The following commands are available: curl, nmap, rustscan, feroxbuster, interactsh-client, katana, meg, anew, unfurl, gf, gau, 403jump, waybackurls, httpx, subfinder, gowitness, hakrawler, ffuf, dirb, wfuzz, nc (netcat)
+
+    The command 'sudo' is not available.
+
+    The additional_hosts parameter is a mapping of host name to IP address for hosts that do not have DNS records. This
+    also includes CTF targets or web server virtual hosts found during other scans. Be sure to include these hosts for
+    commands to run properly in a containerized environment.
     """
     try:
-        result = await _run_unix_command(command, ctx)
+        result = await _run_unix_command(command, additional_hosts, ctx)
         return result
     except Exception as e:
         exc_type, exc_value, exc_tb = sys.exc_info()
@@ -458,7 +468,7 @@ async def run_unix_command(command: str, ctx: Context) -> Optional[RunUnixComman
         )
 
 
-async def _run_unix_command(command: str, ctx: Context) -> Optional[RunUnixCommand]:
+async def _run_unix_command(command: str, additional_hosts: Dict[str, str], ctx: Context) -> Optional[RunUnixCommand]:
     logger.info(f"run_unix_command {command}")
 
     cache_path: str = ctx.request_context.lifespan_context.get_cache_path_for_tool(command)
@@ -468,12 +478,16 @@ async def _run_unix_command(command: str, ctx: Context) -> Optional[RunUnixComma
     # Use a common working directory for the session to chain together commands
     cwd = cache_path
     if ctx.client_id:
-        client_id = str(ctx.client_id)
-        logger.info(f"Using client id {client_id} for command CWD")
+        session_id = str(ctx.client_id)
+        logger.info(f"Using client_id {session_id} for command CWD")
+    else:
+        logger.info("No client_id available for command CWD")
+        session_id = None
+    if session_id:
         cwd = os.path.join(
             ctx.request_context.lifespan_context.cache_path,
-            "mcp_client",
-            hashlib.sha512(client_id.encode("utf-8")).hexdigest())
+            "session",
+            hashlib.sha512(session_id.encode("utf-8")).hexdigest())
         os.makedirs(cwd, exist_ok=True)
 
     meta = {}
@@ -514,13 +528,22 @@ async def _run_unix_command(command: str, ctx: Context) -> Optional[RunUnixComma
         except McpError as e:
             logger.warning("elicit not supported, continuing")
 
-        logger.info(f"Executing command {command}")
+        docker_command = ["docker", "run", "--rm",
+            # "-v", f"{cache_path}:/work",
+        ]
+        for host, ip in additional_hosts.items():
+            try:
+                if validators.domain(host) == True and ipaddress.ip_address(ip):
+                    docker_command.extend(["--add-host", f"{host}:{ip}"])
+            except (ValueError, ValidationError):
+                pass
+        docker_command.extend(["shyhurricane_unix_command:latest", "/usr/bin/rbash", "-c", command])
+        logger.info(f"Executing command {docker_command}")
         with open(stdout_path, "w") as stdout_file:
             with open(stderr_path, "w") as stderr_file:
                 last_report = time.time()
-                # ARGH: this is so dangerous!
-                proc = subprocess.Popen(command, shell=True, cwd=cwd, universal_newlines=True,
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                proc = subprocess.Popen(docker_command, shell=False, cwd=cwd, universal_newlines=True,
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 os.set_blocking(proc.stdout.fileno(), False)
                 os.set_blocking(proc.stderr.fileno(), False)
                 while proc.poll() is None:
@@ -555,6 +578,7 @@ async def _run_unix_command(command: str, ctx: Context) -> Optional[RunUnixComma
                         break
 
         return_code = proc.poll()
+        logger.info("Command complete, exit code %d", return_code)
         meta = {
             "last_run_ts": time.time(),
             "return_code": return_code,
