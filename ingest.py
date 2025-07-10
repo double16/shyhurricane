@@ -6,7 +6,7 @@ from pipeline import build_ingest_pipeline
 
 # ─── Argument Parser ───────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Stream documents into Chroma via stdin (Katana format).")
-parser.add_argument("--db", "-d", default="chroma_store", help="Chroma document store directory")
+parser.add_argument("--db", "-d", default="chroma_store", help="Chroma document store directory or host:port")
 args = parser.parse_args()
 persist_dir = args.db
 

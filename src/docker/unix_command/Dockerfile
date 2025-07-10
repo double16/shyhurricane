@@ -29,7 +29,7 @@ RUN apt-get update &&\
 
 COPY --from=gobuild /usr/local/bin/* /usr/local/bin/
 COPY --from=cargobuild /usr/local/bin/* /usr/local/bin/
-COPY --from=wordlists /usr/share/seclists /usr/share/
+COPY --from=wordlists /usr/share/seclists /usr/share/seclists/
 
 RUN useradd -u 2000 --home-dir /work --create-home --shell /usr/bin/rbash runner
 USER 2000

@@ -43,14 +43,14 @@ def streaming_chunk_callback(chunk: StreamingChunk):
     if chunk.tool_calls:
         for tool_call in chunk.tool_calls:
             if tool_call.tool_name:
-                console.print(f"{tool_call.tool_name}({', '.join(tool_call.arguments or [])}")
+                console.print(f"{tool_call.tool_name}({tool_call.arguments or ""})")
         if chunk.tool_call_result:
             if chunk.tool_call_result.origin:
                 console.print(
-                    f"{chunk.tool_call_result.origin.tool_name}({', '.join(chunk.tool_call_result.origin.arguments or [])}")
+                    f"{chunk.tool_call_result.origin.tool_name}({chunk.tool_call_result.origin.arguments or ""})")
             console.print(f"{chunk.tool_call_result.result}")
     if chunk.finish_reason:
-        console.print(f"\n--🛑 {chunk.finish_reason} --")
+        console.print(f"\n🛑 {chunk.finish_reason}")
 
 
 def main():
