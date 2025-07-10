@@ -63,6 +63,7 @@ def main():
         help="AI mode to use: chat or agent"
     )
     add_generator_args(ap)
+    ap.add_argument("--mcp-url", required=False, help="URL for the MCP server, i.e. http://127.0.0.1:8000/mcp/")
     ap.add_argument("--stream", action="store_true")
     ap.add_argument("--history", default="chat_history.md")
     args = ap.parse_args()
@@ -72,9 +73,9 @@ def main():
 
     if args.mode == "agent":
         args.stream = True
-        pipe, generator, tools = build_agent_pipeline(generator_config)
+        pipe, generator, tools = build_agent_pipeline(generator_config, args.mcp_url)
     else:
-        pipe, generator, tools = build_chat_pipeline(generator_config)
+        pipe, generator, tools = build_chat_pipeline(generator_config, args.mcp_url)
 
     if args.stream and generator is not None:
         generator.streaming_callback = streaming_chunk_callback
@@ -84,6 +85,11 @@ def main():
     sess = PromptSession(history=FileHistory(os.fspath(prompt_history_path)),
                          # completer=WordCompleter(["/set","/show","/reload","/exit","/quit"], ignore_case=True)
                          )
+    console.print(f"""
+This is a penetration test assistant in {args.mode} mode using {generator_config.describe()}. You can say things like:
+- Conduct a penetration test on 192.168.1.1
+- Look for vulnerabilities on http://192.168.1.1
+""")
     console.print("🛡️  Ready. Commands: /show • /exit\n")
 
     def chat_logger(q, a):

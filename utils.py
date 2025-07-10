@@ -98,6 +98,14 @@ class GeneratorConfig(BaseModel):
         )
         return generator_config
 
+    def describe(self) -> str:
+        if self.openai_model:
+            return f"OpenAI {self.openai_model}"
+        elif self.gemini_model:
+            return f"Gemini {self.gemini_model}"
+        else:
+            return f"Ollama {self.ollama_model} at {self.ollama_url}"
+
     def create_chat_generator(self, generation_kwargs: Optional[Dict[str, Any]] = None, tools: Optional[Union[List[Tool], Toolset]] = None):
         if self.openai_model:
             logger.info("Using OpenAI chat with model %s", self.openai_model)

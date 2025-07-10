@@ -240,9 +240,11 @@ Answer in concise Markdown with PoCs/examples. Include the URL for documents tha
     return pipe, generator
 
 
-def _create_shyhurriance_toolset() -> MCPToolset:
+def _create_shyhurriance_toolset(mcp_url: Optional[str] = None) -> MCPToolset:
+    if mcp_url is None:
+        mcp_url = "http://127.0.0.1:8000/mcp/"
     return MCPToolset(
-        server_info=StreamableHttpServerInfo(url="http://127.0.0.1:8000/mcp/"),
+        server_info=StreamableHttpServerInfo(url=mcp_url),
         invocation_timeout=120.0
     )
 
@@ -255,19 +257,20 @@ You must stay in the target scope given by the user. If given a URL or host name
 
 For websites, you start looking for vulnerabilities from the OWASP Top 10. Follow common penetration testing methodologies.
 
-Use available tools to enumerate the targets to gather more information to accomplish your task.
+Use available tools to enumerate the targets to gather more information to accomplish your task. Web site resources are indexed for
+efficient searching and retrieval. Prefer to use indexed resources, if possible.
 
-Provide explanations for found vulnerabilities and exploit paths. Provide concise Markdown. Include URLs for cross-reference as appropriate. Answer with the same language as the user. 
+Provide explanations for found vulnerabilities, exploit paths and PoCs. Provide concise Markdown. Include URLs for cross-reference as appropriate. Answer with the same language as the user. 
 """
 
 
-def build_chat_pipeline(generator_config: GeneratorConfig) -> Tuple[Pipeline, Component, Toolset]:
+def build_chat_pipeline(generator_config: GeneratorConfig, mcp_url: Optional[str] = None) -> Tuple[Pipeline, Component, Toolset]:
     """
     Builds a pipeline for a cyber-security chat.
     :return: Pipeline, generator component
     """
 
-    tools = _create_shyhurriance_toolset()
+    tools = _create_shyhurriance_toolset(mcp_url)
     chat_generator = generator_config.create_chat_generator(
         tools=tools,
         generation_kwargs={
@@ -293,13 +296,13 @@ def build_chat_pipeline(generator_config: GeneratorConfig) -> Tuple[Pipeline, Co
     return pipeline, response_chat_generator, tools
 
 
-def build_agent_pipeline(generator_config: GeneratorConfig) -> Tuple[Pipeline, Component, Toolset]:
+def build_agent_pipeline(generator_config: GeneratorConfig, mcp_url: Optional[str] = None) -> Tuple[Pipeline, Component, Toolset]:
     """
     Builds a pipeline for a cyber-security agent.
     :return: Pipeline
     """
 
-    tools = _create_shyhurriance_toolset()
+    tools = _create_shyhurriance_toolset(mcp_url)
     prompt_builder = ChatPromptBuilder()
     chat_generator = generator_config.create_chat_generator(
         tools=tools,
