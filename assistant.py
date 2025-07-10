@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from haystack.core.errors import PipelineRuntimeError
-from haystack.dataclasses import ChatMessage, ChatRole
+from haystack.dataclasses import ChatMessage, ChatRole, StreamingChunk
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from rich import get_console
@@ -38,6 +38,21 @@ logger = logging.getLogger(__name__)
 console = get_console()
 
 
+def streaming_chunk_callback(chunk: StreamingChunk):
+    console.print(chunk.content, end="")
+    if chunk.tool_calls:
+        for tool_call in chunk.tool_calls:
+            if tool_call.tool_name:
+                console.print(f"{tool_call.tool_name}({', '.join(tool_call.arguments or [])}")
+        if chunk.tool_call_result:
+            if chunk.tool_call_result.origin:
+                console.print(
+                    f"{chunk.tool_call_result.origin.tool_name}({', '.join(chunk.tool_call_result.origin.arguments or [])}")
+            console.print(f"{chunk.tool_call_result.result}")
+    if chunk.finish_reason:
+        console.print(f"\n--🛑 {chunk.finish_reason} --")
+
+
 def main():
     ap = argparse.ArgumentParser()
     # ap.add_argument("--db", default="chroma_store")
@@ -56,12 +71,13 @@ def main():
     top_k = 100
 
     if args.mode == "agent":
+        args.stream = True
         pipe, generator, tools = build_agent_pipeline(generator_config)
     else:
         pipe, generator, tools = build_chat_pipeline(generator_config)
 
     if args.stream and generator is not None:
-        generator.streaming_callback = lambda chunk: print(chunk.content, end="")
+        generator.streaming_callback = streaming_chunk_callback
 
     prompt_history_path = Path(Path.home(), ".local", "state", "web_rag", "prompt_history")
     os.makedirs(prompt_history_path.parent, mode=0o755, exist_ok=True)
@@ -97,7 +113,7 @@ def main():
 """))
                 continue
 
-            print("🧠 ", end="", flush=True)
+            console.print("🧠 ", end="")
 
             # Build the pipeline input
             user_in_message = ChatMessage.from_user(user_in)
@@ -143,9 +159,8 @@ def main():
                 messages.append(r)
 
             ans_md = "\n".join(replies[-1].texts)
-            if args.stream:
-                print()
-            else:
+            console.print("")
+            if not args.stream or args.mode == "agent":
                 console.print(Markdown(ans_md))
             chat_logger(user_in, ans_md)
         except (KeyboardInterrupt, EOFError):

@@ -7,6 +7,7 @@ import re
 from json import JSONDecodeError
 from typing import Dict, List, Optional, Any, Tuple
 
+from chromadb import ClientAPI
 from haystack.components.agents import Agent
 from haystack.components.joiners import ListJoiner
 from haystack.components.preprocessors import DocumentCleaner
@@ -39,9 +40,23 @@ os.environ['HAYSTACK_TELEMETRY_DISABLED'] = "1"
 logger = logging.getLogger(__name__)
 
 
-def list_collections(db_path: str) -> List[str]:
+def create_chroma_client(db: str) -> ClientAPI:
+    if re.match(r'\S+:\d+$', db):
+        host, _, port = db.rpartition(':')
+        return chromadb.HttpClient(host=host, port=int(port))
+    return chromadb.PersistentClient(path=db)
+
+
+def create_chrome_document_store(db: str, **kwargs) -> ChromaDocumentStore:
+    if re.match(r'\S+:\d+$', db):
+        host, _, port = db.rpartition(':')
+        return ChromaDocumentStore(host=host, port=int(port), **kwargs)
+    return ChromaDocumentStore(persist_path=db, **kwargs)
+
+
+def list_collections(db: str) -> List[str]:
     """Return collection names using a raw Chroma client."""
-    client = chromadb.PersistentClient(path=db_path)
+    client = create_chroma_client(db)
     return [c.name for c in client.list_collections()]
 
 
@@ -334,7 +349,7 @@ def build_document_pipeline(db: str, generator_config: GeneratorConfig, top_k: i
         ret_name = f"ret_{col}"
 
         embedder = SentenceTransformersTextEmbedder(model=model_name, progress_bar=False)
-        store = ChromaDocumentStore(persist_path=db, collection_name=col)
+        store = create_chrome_document_store(db=db, collection_name=col)
         retriever = ChromaEmbeddingRetriever(document_store=store, top_k=top_k)
         multiquery_retriever = MultiQueryChromaRetriever(embedder, retriever, top_k=top_k)
 
@@ -653,7 +668,8 @@ def is_http_raw(value: str):
 
 
 def build_ingest_pipeline(db: str) -> Pipeline:
-    os.makedirs(db, exist_ok=True)
+    if ":" not in db:
+        os.makedirs(db, exist_ok=True)
 
     stores = {}
     embedders = {}
@@ -662,8 +678,8 @@ def build_ingest_pipeline(db: str) -> Pipeline:
             model=model_name,
             progress_bar=False)
         embedder.warm_up()
-        document_store = ChromaDocumentStore(
-            persist_path=db,
+        document_store = create_chrome_document_store(
+            db=db,
             collection_name=dtype,
         )
         document_store.count_documents()  # ensure the collection exists

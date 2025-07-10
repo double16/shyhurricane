@@ -1,4 +1,5 @@
 import argparse
+import logging
 import os
 from pathlib import Path
 from urllib.parse import ParseResult, urlparse
@@ -12,6 +13,8 @@ from haystack_integrations.components.generators.ollama import OllamaChatGenerat
 from mcp import Resource, Tool
 from pydantic import BaseModel, Field
 from tldextract import tldextract
+
+logger = logging.getLogger(__name__)
 
 
 class HttpResource(BaseModel):
@@ -62,7 +65,7 @@ def extract_domain(hostname: str) -> str:
 
 
 def add_generator_args(ap: argparse.ArgumentParser):
-    ap.add_argument("--ollama-url", help="The URL for the Ollama service", default="http://localhost:11434", required=False)
+    ap.add_argument("--ollama-url", help="The URL for the Ollama service", required=False)
     ap.add_argument("--ollama-model", help="Use Ollama with the specified model (qwen instruct models are recommended), must already be pulled", required=False)
     ap.add_argument("--gemini-model", help="Use Google Gemini with the specified model (gemini-2.5-pro is recommended), API key must be in env var GOOGLE_API_KEY or GEMINI_API_KEY", required=False)
     ap.add_argument("--openai-model", help="Use OpenAI with the specified model (o4-mini is recommended), API key must be in env var OPENAI_API_KEY", required=False)
@@ -97,26 +100,34 @@ class GeneratorConfig(BaseModel):
 
     def create_chat_generator(self, generation_kwargs: Optional[Dict[str, Any]] = None, tools: Optional[Union[List[Tool], Toolset]] = None):
         if self.openai_model:
+            logger.info("Using OpenAI chat with model %s", self.openai_model)
             return OpenAIChatGenerator(model=self.openai_model, generation_kwargs=generation_kwargs, tools=tools)
         elif self.gemini_model:
+            logger.info("Using Google Gemini chat with model %s", self.gemini_model)
             return GoogleGenAIChatGenerator(model=self.gemini_model, generation_kwargs=generation_kwargs, tools=tools)
         elif self.ollama_model:
             if self.ollama_url:
+                logger.info("Using Ollama chat with model %s at %s", self.ollama_model, self.ollama_url)
                 return OllamaChatGenerator(url=self.ollama_url, model=self.ollama_model, generation_kwargs=generation_kwargs, tools=tools)
             else:
+                logger.info("Using Ollama chat with model %s", self.ollama_model)
                 return OllamaChatGenerator(model=self.ollama_model, generation_kwargs=generation_kwargs, tools=tools)
         else:
             raise NotImplementedError
 
     def create_generator(self, generation_kwargs: Optional[Dict[str, Any]] = None):
         if self.openai_model:
+            logger.info("Using OpenAI generator with model %s", self.openai_model)
             return OpenAIGenerator(model=self.openai_model, generation_kwargs=generation_kwargs)
         elif self.gemini_model:
+            logger.info("Using Google Gemini chat with model %s", self.gemini_model)
             return GoogleGenAIChatGenerator(model=self.gemini_model, generation_kwargs=generation_kwargs)
         elif self.ollama_model:
             if self.ollama_url:
+                logger.info("Using Ollama generator with model %s at %s", self.ollama_model, self.ollama_url)
                 return OllamaGenerator(url=self.ollama_url, model=self.ollama_model, generation_kwargs=generation_kwargs)
             else:
+                logger.info("Using Ollama generator with model %s", self.ollama_model)
                 return OllamaGenerator(model=self.ollama_model, generation_kwargs=generation_kwargs)
         else:
             raise NotImplementedError

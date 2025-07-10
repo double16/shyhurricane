@@ -1,3 +1,4 @@
+import ipaddress
 import json
 import logging
 import os
@@ -6,6 +7,7 @@ import time
 from multiprocessing import Queue, Process
 from typing import Optional, Dict, Tuple
 
+import validators
 from mcp import Resource
 from pydantic import AnyUrl
 
@@ -21,11 +23,13 @@ class SpiderQueueItem:
                  depth: int = 3,
                  user_agent: Optional[str] = None,
                  request_headers: Optional[Dict[str, str]] = None,
+                 additional_hosts: Dict[str, str] = None,
                  ):
         self.uri = uri
         self.depth = depth
         self.user_agent = user_agent
         self.request_headers = request_headers
+        self.additional_hosts = additional_hosts
 
 
 def _spider_worker(spider_queue: Queue, ingest_queue: Queue, spider_result_queue: Queue):
@@ -40,11 +44,12 @@ def _spider_worker(spider_queue: Queue, ingest_queue: Queue, spider_result_queue
             user_agent=item.user_agent,
             request_headers=item.request_headers,
             result_queue=spider_result_queue,
+            additional_hosts=item.additional_hosts,
         )
 
 
-def start_spider_worker(db_path: str) -> Tuple[Queue, Queue, Process]:
-    ingest_queue = get_ingest_queue(db_path)
+def start_spider_worker(db: str) -> Tuple[Queue, Queue, Process]:
+    ingest_queue = get_ingest_queue(db)
     spider_queue = Queue()
     spider_result_queue = Queue()
     process = Process(target=_spider_worker, args=(spider_queue, ingest_queue, spider_result_queue))
@@ -59,20 +64,32 @@ def _katana_ingest(
         user_agent: Optional[str] = None,
         request_headers: Optional[Dict[str, str]] = None,
         result_queue: Queue = None,
+        additional_hosts: Dict[str, str] = None,
 ) -> None:
     katana_command = ["katana", "-u", uri, "-js-crawl", "-jsluice", "-known-files", "all", "-field-scope", "fqdn",
                       "-form-extraction", "-tech-detect", "-ignore-query-params", "-strategy", "breadth-first",
                       "-jsonl", "-rate-limit", "5", "-omit-raw", "-depth", str(depth), "-retry", "3", "-no-color",
                       "-silent"]
+
     if user_agent:
         katana_command.extend(["-H", f"User-Agent: {user_agent}"])
     if request_headers:
         for k, v in request_headers.items():
             katana_command.extend(["-H", f"{k}: {v}"])
 
-    logger.info(f"Spidering with command {' '.join(katana_command)}")
+    docker_command = ["docker", "run", "--rm"]
+    for host, ip in (additional_hosts or {}).items():
+        try:
+            if validators.domain(host) == True and ipaddress.ip_address(ip):
+                docker_command.extend(["--add-host", f"{host}:{ip}"])
+        except ValueError:
+            pass
+    docker_command.extend(["shyhurricane_unix_command:latest"])
+    docker_command.extend(katana_command)
+
+    logger.info(f"Spidering with command {' '.join(docker_command)}")
     last_report = time.time()
-    proc = subprocess.Popen(katana_command, universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(docker_command, universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     os.set_blocking(proc.stdout.fileno(), False)
     os.set_blocking(proc.stderr.fileno(), False)
 
@@ -82,7 +99,8 @@ def _katana_ingest(
             try:
                 parsed = json.loads(data)
                 url = parsed.get("request", {}).get("endpoint", "")
-                if url:
+                status_code = parsed.get('response', {}).get('status_code', 0)
+                if url and status_code > 0:
                     resource = Resource(
                         name=url,
                         uri=AnyUrl(url),
@@ -97,7 +115,7 @@ def _katana_ingest(
                             host=url_parsed.hostname,
                             port=url_parsed.port,
                             domain=extract_domain(url_parsed.hostname),
-                            status_code=parsed.get('response', {}).get('status_code', 0),
+                            status_code=status_code,
                             method=parsed.get('request', {}).get('method', 'GET'),
                             resource=resource,
                         )

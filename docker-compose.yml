@@ -1,20 +1,66 @@
 
 volumes:
   data:
+  tool_cache:
+  dind-storage:
 
 services:
-  unix_command:
-    build: src/docker/unix_command
-    image: shyhurricane_unix_command:latest
+  chroma:
+    image: ghcr.io/chroma-core/chroma:latest
+    container_name: chroma
+    command: run --path /data --host 0.0.0.0 --port 8000
+    environment:
+      CHROMA_SERVER_HTTP_PORT: "8000"
+      CHROMA_SERVER_GRPC_PORT: "8030"
+      CHROMA_DB_IMPL: "duckdb"
+      CHROMA_TELEMETRY: "FALSE"
+    volumes:
+      - data:/data
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat" ]
+      interval: 30s
+      retries: 3
+      start_period: 10s
+      timeout: 5s
+
+  dind:
+    image: docker:dind
+    privileged: true
+    environment:
+      - DOCKER_TLS_CERTDIR=
+    volumes:
+      - dind-storage:/var/lib/docker
+
+  unix_command_builder:
+    image: docker:cli
+    depends_on:
+      - dind
+    volumes:
+      - .:/src
+    environment:
+      DOCKER_HOST: "tcp://dind:2375"
+    entrypoint: [ "sh", "-c", "cd /src && docker build -t shyhurricane_unix_command:latest src/docker/unix_command" ]
+
   mcp:
     build:
       context: .
       dockerfile: Dockerfile
+    depends_on:
+      - dind
+      - unix_command_builder
+      - chroma
     environment:
-      OLLAMA_MODEL: llama3.1
-      OLLAMA_URL: "http://127.0.0.1:11434"
+      DOCKER_HOST: "tcp://dind:2375"
+      CHROMA: "chroma:8000"
+      TOOL_CACHE: "/tool_cache"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-qwen2.5:7b-instruct}"
+      OLLAMA_URL: "${OLLAMA_URL:-http://127.0.0.1:11434}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY}"
+      GEMINI_MODEL: "${GEMINI_MODEL}"
+      OPENAI_MODEL: "${OPENAI_MODEL}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY}"
     ports:
       - "8000:8000"
     volumes:
       - "data:/data"
-
+      - "tool_cache:/tool_cache"

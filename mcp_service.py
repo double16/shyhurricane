@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 import chromadb
 import mcp
+import requests
 import validators
 from haystack import Pipeline, Document
 from haystack.core.errors import PipelineRuntimeError
@@ -34,7 +35,7 @@ from mcp.types import ToolAnnotations, Resource, TextResourceContents
 from pydantic import BaseModel, AnyUrl, Field, ValidationError
 
 from ingest_queue import start_ingest_worker
-from pipeline import build_document_pipeline, build_website_context_pipeline, urlparse_ext
+from pipeline import build_document_pipeline, build_website_context_pipeline, urlparse_ext, create_chroma_client
 from spider_queue import start_spider_worker, SpiderQueueItem
 from utils import HttpResource, latest_mtime, add_generator_args, GeneratorConfig
 
@@ -45,7 +46,7 @@ generator_config: Optional[GeneratorConfig] = GeneratorConfig.from_env()
 
 @dataclass
 class AppContext:
-    db_path: str
+    db: str
     cache_path: str
     document_pipeline: Pipeline
     website_context_pipeline: Pipeline
@@ -68,7 +69,9 @@ class AppContext:
         return path
 
     def maybe_reload(self, force=False):
-        persist = Path(self.db_path)
+        if not os.path.exists(self.db):
+            return
+        persist = Path(self.db)
         cur = latest_mtime(persist)
         if self.last_mtime is None:
             self.last_mtime = cur
@@ -77,13 +80,13 @@ class AppContext:
             logger.info(f"Reloaded pipeline (modified {int(cur - self.last_mtime)} seconds since last change)")
             self.last_mtime = cur
             document_pipeline, retrievers, stores = build_document_pipeline(
-                db=self.db_path,
+                db=self.db,
                 generator_config=generator_config,
                 top_k=self.top_k,
             )
             self.document_pipeline = document_pipeline
             self.stores = stores
-            self.chroma_client = chromadb.PersistentClient(path=self.db_path)
+            self.chroma_client = create_chroma_client(db=self.db)
 
     def get_document_pipeline(self) -> Pipeline:
         self.maybe_reload()
@@ -99,27 +102,25 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     """Manage application lifecycle with type-safe context"""
     # Initialize on startup
     top_k = max(1, min(1000, int(os.environ.get('TOP_K', '100'))))
-    db_path = os.environ.get('CHROMA_STORE_PATH', 'chroma_store')
-    logger.info("Using chroma database at %s", db_path)
-    if not os.path.exists(db_path):
-        logger.warning("Creating new chroma database at %s", db_path)
-    chroma_client = chromadb.PersistentClient(path=db_path)
-    cache_path = os.path.join(db_path, 'tool_cache')
+    db = os.environ.get('CHROMA', 'chroma_store')
+    logger.info("Using chroma database at %s", db)
+    chroma_client = create_chroma_client(db=db)
+    cache_path = os.path.join(os.environ.get('TOOL_CACHE', os.environ.get('TMPDIR', '/tmp')), 'tool_cache')
     os.makedirs(cache_path, exist_ok=True)
     document_pipeline, retrievers, stores = build_document_pipeline(
-        db=db_path,
+        db=db,
         generator_config=generator_config,
         top_k=top_k,
     )
     website_context_pipeline = build_website_context_pipeline(
         generator_config=generator_config,
     )
-    ingest_queue, ingest_process = start_ingest_worker(db_path=db_path)
-    spider_queue, spider_result_queue, spider_process = start_spider_worker(db_path=db_path)
+    ingest_queue, ingest_process = start_ingest_worker(db=db)
+    spider_queue, spider_result_queue, spider_process = start_spider_worker(db=db)
 
     try:
         yield AppContext(
-            db_path=db_path,
+            db=db,
             cache_path=cache_path,
             document_pipeline=document_pipeline,
             website_context_pipeline=website_context_pipeline,
@@ -174,7 +175,7 @@ def _documents_to_http_resources(documents: List[Document]) -> List[HttpResource
             host=doc.meta.get('host', ''),
             port=doc.meta.get('port', 0),
             domain=doc.meta.get('domain', ''),
-            status_code=doc.meta.get('status_code', 0),
+            status_code=doc.meta.get('status_code', 200),
             method=doc.meta.get('http_method', ''),
             resource=resource,
         ))
@@ -439,8 +440,8 @@ class RunUnixCommand(BaseModel):
 @mcp.tool()
 async def run_unix_command(command: str, additional_hosts: Dict[str, str], ctx: Context) -> Optional[RunUnixCommand]:
     """
-    Run a Linux or macOS command and return its output. If the command has an option to disable
-    progress, it should be included. The command is run in a containerized environment for safety.
+    Run a Linux or macOS command and return its output. The command is run in a containerized environment for safety.
+    Progress options should be enabled so that the caller is aware the command is still processing.
 
     Invoke this tool when the user request can be fulfilled by a known Linux or macOS command line
     program and the request can't be fulfilled by other MCP tools. Invoke this tool when the user
@@ -448,13 +449,18 @@ async def run_unix_command(command: str, additional_hosts: Dict[str, str], ctx: 
 
     Any commands that take arguments and respond to standard out, and don't require user input are good for this tool.
 
-    The following commands are available: curl, nmap, rustscan, feroxbuster, interactsh-client, katana, meg, anew, unfurl, gf, gau, 403jump, waybackurls, httpx, subfinder, gowitness, hakrawler, ffuf, dirb, wfuzz, nc (netcat)
+    The following commands are available: curl, wget, nmap, rustscan, feroxbuster, interactsh-client, katana, meg, anew, unfurl, gf, gau, 403jump, waybackurls, httpx, subfinder, gowitness, hakrawler, ffuf, dirb, wfuzz, nc (netcat), graphql-path-enum,
+    DumpNTLMInfo.py, Get,GPPPassword.py, GetADComputers.py, GetADUsers.py, GetLAPSPassword.py, GetNPUsers.py, GetUserSPNs.py, addcomputer.py, atexec.py, changepasswd.py, dacledit.py, dcomexec.py, describeTicket.py, dpapi.py, esentutl.py, exchanger.py, findDelegation.py, getArch.py, getPac.py, getST.py, getTGT.py, goldenPac.py, karmaSMB.py, keylistattack.py, kintercept.py, lookupsid.py, machine_role.py, mimikatz.py, mqtt_check.py, mssqlclient.py, mssqlinstance.py, net.py, netview.py, ntfs,read.py, ntlmrelayx.py, owneredit.py, ping.py, ping6.py, psexec.py, raiseChild.py, rbcd.py, rdp_check.py, reg.py, registry,read.py, rpcdump.py, rpcmap.py, sambaPipe.py, samrdump.py, secretsdump.py, services.py, smbclient.py, smbexec.py, smbserver.py, sniff.py, sniffer.py, split.py, ticketConverter.py, ticketer.py, tstool.py, wmiexec.py, wmipersist.py, wmiquery.py
 
     The command 'sudo' is not available.
 
     The additional_hosts parameter is a mapping of host name to IP address for hosts that do not have DNS records. This
     also includes CTF targets or web server virtual hosts found during other scans. Be sure to include these hosts for
     commands to run properly in a containerized environment.
+
+    The SecLists word lists repository is installed at /usr/share/seclists
+
+    Commands such as nmap can take a long time to run, so be patient.
     """
     try:
         result = await _run_unix_command(command, additional_hosts, ctx)
@@ -531,7 +537,7 @@ async def _run_unix_command(command: str, additional_hosts: Dict[str, str], ctx:
         docker_command = ["docker", "run", "--rm",
             # "-v", f"{cache_path}:/work",
         ]
-        for host, ip in additional_hosts.items():
+        for host, ip in (additional_hosts or {}).items():
             try:
                 if validators.domain(host) == True and ipaddress.ip_address(ip):
                     docker_command.extend(["--add-host", f"{host}:{ip}"])
@@ -578,7 +584,8 @@ async def _run_unix_command(command: str, additional_hosts: Dict[str, str], ctx:
                         break
 
         return_code = proc.poll()
-        logger.info("Command complete, exit code %d", return_code)
+        logger.info("Command complete, exit code %d, output size %d, error size %d", return_code,
+                    os.stat(stdout_path).st_size, os.stat(stderr_path).st_size)
         meta = {
             "last_run_ts": time.time(),
             "return_code": return_code,
@@ -662,37 +669,39 @@ async def index_http_url(url: str, user_agent: Optional[str] = None,
     """
     Index an HTTP URL to allow for further analysis.
 
+    The user_agent can be used to specify the "User-Agent" request header. This is useful if a particular browser needs
+    to be spoofed or the user requests extra information in the user agent header to identify themselves as a bug bounty hunter.
+
+    The request_headers map is extra request headers sent with the request.
+
     Invoke this tool when the user needs the content of one specific URL.
     """
     logger.info("indexing HTTP URL %s", url)
-    curl_args = ["-i", "-s"]
+    the_headers = request_headers or {}
     if user_agent:
-        curl_args.extend(["-H", f"User-Agent: {user_agent}"])
-    if request_headers:
-        for k, v in request_headers.items():
-            curl_args.extend(["-H", f"{k}: {v}"])
-    curl_args.append(url)
-    curl_result = await _run_unix_command("curl", curl_args)
-    if curl_result:
-        status_code, headers, body = parse_http_response(curl_result.output)
-        if not curl_result.cached:
-            await index_http_request_response(json.dumps({
-                "timestamp": datetime.now().isoformat(),
-                "request": {
-                    "endpoint": url,
-                },
-                "response": {
-                    "status_code": status_code,
-                    "headers": headers,
-                    "body": body,
-                }
-            }))
+        the_headers['User-Agent'] = user_agent
+    try:
+        response = requests.get(url, headers=the_headers)
+        status_code = response.status_code
+        headers = response.headers
+        body = response.text
+        await index_http_request_response(json.dumps({
+            "timestamp": datetime.now().isoformat(),
+            "request": {
+                "endpoint": url,
+            },
+            "response": {
+                "status_code": status_code,
+                "headers": headers,
+                "body": body,
+            }
+        }))
         return TextResourceContents(
             uri=AnyUrl(url),
             mimeType=headers.get("Content-Type", "text/plain"),
             text=body,
         )
-    else:
+    except requests.exceptions.RequestException as e:
         return None
 
 def is_spider_time_recent(url: str) -> Optional[float]:
@@ -721,7 +730,8 @@ def is_spider_time_recent(url: str) -> Optional[float]:
 
 
 @mcp.tool()
-async def spider_website(url: str, user_agent: Optional[str] = None,
+async def spider_website(url: str, additional_hosts: Dict[str, str] = None,
+                         user_agent: Optional[str] = None,
                          request_headers: Optional[Dict[str, str]] = None) -> List[HttpResource]:
     """
     Spider the website at the url and index the results for further analysis. The find_web_resources
@@ -729,6 +739,15 @@ async def spider_website(url: str, user_agent: Optional[str] = None,
     a website has already been spidered.
 
     Invoke this tool when the user specifically asks to spider a URL or when the user wants to examine or analyze a site for which nothing has been indexed.
+
+    The additional_hosts parameter is a mapping of host name to IP address for hosts that do not have DNS records. This
+    also includes CTF targets or web server virtual hosts found during other scans. Be sure to include these hosts for
+    commands to run properly in a containerized environment.
+
+    The user_agent can be used to specify the "User-Agent" request header. This is useful if a particular browser needs
+    to be spoofed or the user requests extra information in the user agent header to identify themselves as a bug bounty hunter.
+
+    The request_headers map is extra request headers sent with the request.
 
     Returns a list of resources found, including URL, response code, content type, and content length. Indexes each URL that can be queried using the find_web_resources tool. URL content can be returned using the fetch_web_resource_content tool.
     """
@@ -746,6 +765,7 @@ async def spider_website(url: str, user_agent: Optional[str] = None,
         depth=3,
         user_agent=user_agent,
         request_headers=request_headers,
+        additional_hosts=additional_hosts,
     )
     spider_queue.put_nowait(spider_queue_item)
     results: List[HttpResource] = []
@@ -894,7 +914,8 @@ async def find_urls(host_query: str, limit: int = 100) -> List[str]:
 # TODO: add prompt for bug bounty agent
 
 
-if __name__ == "__main__":
+def main():
+    global generator_config
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--transport",
@@ -902,7 +923,15 @@ if __name__ == "__main__":
         default="streamable-http",
         help="Transport method to use: stdio, sse, or streamable-http"
     )
+    ap.add_argument("--host", default="127.0.0.1", help="Host to listen on")
+    ap.add_argument("--port", type=int, default=8000, help="Port to listen on")
     add_generator_args(ap)
     args = ap.parse_args()
     generator_config = GeneratorConfig.from_args(args)
+    mcp.settings.host = args.host
+    mcp.settings.port = args.port
     mcp.run(transport=args.transport)
+
+
+if __name__ == "__main__":
+    main()
