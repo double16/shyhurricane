@@ -38,7 +38,7 @@ services:
       - .:/src
     environment:
       DOCKER_HOST: "tcp://dind:2375"
-    entrypoint: [ "sh", "-c", "cd /src && docker build -t shyhurricane_unix_command:latest src/docker/unix_command" ]
+    entrypoint: [ "sh", "-c", "sleep 20 && cd /src && docker build -t shyhurricane_unix_command:latest src/docker/unix_command" ]
 
   mcp:
     build:

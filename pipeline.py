@@ -245,7 +245,7 @@ def _create_shyhurriance_toolset(mcp_url: Optional[str] = None) -> MCPToolset:
         mcp_url = "http://127.0.0.1:8000/mcp/"
     return MCPToolset(
         server_info=StreamableHttpServerInfo(url=mcp_url),
-        invocation_timeout=120.0
+        invocation_timeout=600.0
     )
 
 
