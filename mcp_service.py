@@ -19,6 +19,7 @@ from typing import List, AsyncIterator, Optional, Tuple, Dict, Any, Union
 from urllib.parse import urlparse
 
 import chromadb
+from chromadb.errors import NotFoundError
 import mcp
 import requests
 import validators
@@ -37,7 +38,7 @@ from pydantic import BaseModel, AnyUrl, Field, ValidationError
 from ingest_queue import start_ingest_worker
 from pipeline import build_document_pipeline, build_website_context_pipeline, urlparse_ext, create_chroma_client
 from spider_queue import start_spider_worker, SpiderQueueItem
-from utils import HttpResource, latest_mtime, add_generator_args, GeneratorConfig
+from utils import HttpResource, latest_mtime, add_generator_args, GeneratorConfig, extract_domain
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +116,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     website_context_pipeline = build_website_context_pipeline(
         generator_config=generator_config,
     )
-    ingest_queue, ingest_process = start_ingest_worker(db=db)
+    ingest_queue, ingest_process = start_ingest_worker(db=db, generator_config=generator_config)
     spider_queue, spider_result_queue, spider_process = start_spider_worker(db=db)
 
     try:
@@ -184,6 +185,7 @@ def _documents_to_http_resources(documents: List[Document]) -> List[HttpResource
             status_code=doc.meta.get('status_code', 200),
             method=doc.meta.get('http_method', ''),
             resource=resource,
+            contents=None,
             response_headers=response_headers,
         ))
     return https_resources
@@ -544,7 +546,6 @@ async def _run_unix_command(command: str, additional_hosts: Dict[str, str], ctx:
             logger.warning("elicit not supported, continuing")
 
         docker_command = ["docker", "run", "--rm",
-                          "--network=host",
                           "--cap-add", "NET_BIND_SERVICE",
                           "--cap-add", "NET_ADMIN",
                           "--cap-add", "NET_RAW",
@@ -678,9 +679,10 @@ def parse_http_response(response_text) -> Tuple[
 
 @mcp.tool()
 async def index_http_url(url: str, user_agent: Optional[str] = None,
-                         request_headers: Optional[Dict[str, str]] = None) -> Optional[TextResourceContents]:
+                         request_headers: Optional[Dict[str, str]] = None) -> Optional[HttpResource]:
     """
-    Index an HTTP URL to allow for further analysis.
+    Index an HTTP URL to allow for further analysis and return the context, response code, response headers. Use this
+    for GET requests instead of curl or wget, if it provides the user with the information required.
 
     The user_agent can be used to specify the "User-Agent" request header. This is useful if a particular browser needs
     to be spoofed or the user requests extra information in the user agent header to identify themselves as a bug bounty hunter.
@@ -694,6 +696,7 @@ async def index_http_url(url: str, user_agent: Optional[str] = None,
     if user_agent:
         the_headers['User-Agent'] = user_agent
     try:
+        parsed_url = urlparse_ext(url)
         response = requests.get(url, headers=the_headers)
         status_code = response.status_code
         headers = response.headers
@@ -709,10 +712,22 @@ async def index_http_url(url: str, user_agent: Optional[str] = None,
                 "body": body,
             }
         }))
-        return TextResourceContents(
+        resource = TextResourceContents(
             uri=AnyUrl(url),
             mimeType=headers.get("Content-Type", "text/plain"),
             text=body,
+        )
+        return HttpResource(
+            score=100,
+            url=url,
+            host=parsed_url.hostname,
+            port=parsed_url.port,
+            domain=extract_domain(parsed_url.hostname),
+            status_code=status_code,
+            method="GET",
+            resource=None,
+            contents=resource,
+            response_headers=dict(headers),
         )
     except requests.exceptions.RequestException as e:
         return None
@@ -736,6 +751,9 @@ def is_spider_time_recent(url: str) -> Optional[float]:
                     return True
             except (ValueError, TypeError):
                 pass
+        return False
+    except NotFoundError:
+        # new database
         return False
     except Exception as e:
         logger.error("Failed checking for last spider time", exc_info=e)

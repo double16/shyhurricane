@@ -25,7 +25,6 @@ services:
   dind:
     image: docker:dind
     privileged: true
-    network_mode: host
     environment:
       - DOCKER_TLS_CERTDIR=
     volumes:
