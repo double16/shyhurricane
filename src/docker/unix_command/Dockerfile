@@ -23,7 +23,7 @@ ENV PIPX_HOME=/usr/local/share
 ENV PIP_CACHE_DIR=/usr/local/share/pip-cache
 
 RUN apt-get update &&\
-    apt-get install -y --install-recommends nmap curl wget dirb ffuf wfuzz netcat-openbsd git pipx &&\
+    apt-get install -y --install-recommends nmap curl wget dirb ffuf wfuzz netcat-openbsd git pipx iputils-ping &&\
     apt-get clean &&\
     pipx install impacket
 
@@ -31,7 +31,7 @@ COPY --from=gobuild /usr/local/bin/* /usr/local/bin/
 COPY --from=cargobuild /usr/local/bin/* /usr/local/bin/
 COPY --from=wordlists /usr/share/seclists /usr/share/seclists/
 
-RUN useradd -u 2000 --home-dir /work --create-home --shell /usr/bin/rbash runner
+RUN useradd -u 2000 --home-dir /work --create-home --shell /bin/bash runner
 USER 2000
 WORKDIR /work
 

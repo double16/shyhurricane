@@ -26,6 +26,7 @@ class HttpResource(BaseModel):
     status_code: int = Field(description="The HTTP status code for the response")
     method: str = Field(description="The HTTP method that was used to request the resource")
     resource: Optional[Resource] = Field(description="A link to the resource content")
+    response_headers: Optional[Dict[str, str]] = Field(description="The HTTP response headers")
 
 
 def urlparse_ext(url: str) -> ParseResult:

@@ -163,12 +163,18 @@ def _documents_to_http_resources(documents: List[Document]) -> List[HttpResource
         if doc.content:
             resource = Resource(
                 name=doc.meta['url'],
+                title=doc.meta.get('title', None),
+                description=doc.meta.get('description', None),
                 uri=AnyUrl(f"document://{doc.meta['type']}/{doc.id}"),
                 mimeType=doc.meta.get('content_type', 'text/plain'),
                 size=len(doc.content),
             )
         else:
             resource = None
+        try:
+            response_headers = json.loads(doc.meta.get("response_headers", "{}"))
+        except json.decoder.JSONDecodeError:
+            response_headers = None
         https_resources.append(HttpResource(
             score=doc.score,
             url=doc.meta['url'],
@@ -178,6 +184,7 @@ def _documents_to_http_resources(documents: List[Document]) -> List[HttpResource
             status_code=doc.meta.get('status_code', 200),
             method=doc.meta.get('http_method', ''),
             resource=resource,
+            response_headers=response_headers,
         ))
     return https_resources
 
@@ -441,6 +448,7 @@ class RunUnixCommand(BaseModel):
 async def run_unix_command(command: str, additional_hosts: Dict[str, str], ctx: Context) -> Optional[RunUnixCommand]:
     """
     Run a Linux or macOS command and return its output. The command is run in a containerized environment for safety.
+    The containerized environment is ephemeral. The command is run using the bash shell.
     Progress options should be enabled so that the caller is aware the command is still processing.
 
     Invoke this tool when the user request can be fulfilled by a known Linux or macOS command line
@@ -449,7 +457,8 @@ async def run_unix_command(command: str, additional_hosts: Dict[str, str], ctx: 
 
     Any commands that take arguments and respond to standard out, and don't require user input are good for this tool.
 
-    The following commands are available: curl, wget, nmap, rustscan, feroxbuster, interactsh-client, katana, meg, anew, unfurl, gf, gau, 403jump, waybackurls, httpx, subfinder, gowitness, hakrawler, ffuf, dirb, wfuzz, nc (netcat), graphql-path-enum,
+    The following commands are available: curl, wget, grep, awk, printf, base64, cut, cp, mv, date, factor, gzip, sha256sum, sha512sum, md5sum, echo, seq, true, false, tee, tar, sort,head, tail,
+    nmap, rustscan, feroxbuster, interactsh-client, katana, meg, anew, unfurl, gf, gau, 403jump, waybackurls, httpx, subfinder, gowitness, hakrawler, ffuf, dirb, wfuzz, nc (netcat), graphql-path-enum, ping
     DumpNTLMInfo.py, Get,GPPPassword.py, GetADComputers.py, GetADUsers.py, GetLAPSPassword.py, GetNPUsers.py, GetUserSPNs.py, addcomputer.py, atexec.py, changepasswd.py, dacledit.py, dcomexec.py, describeTicket.py, dpapi.py, esentutl.py, exchanger.py, findDelegation.py, getArch.py, getPac.py, getST.py, getTGT.py, goldenPac.py, karmaSMB.py, keylistattack.py, kintercept.py, lookupsid.py, machine_role.py, mimikatz.py, mqtt_check.py, mssqlclient.py, mssqlinstance.py, net.py, netview.py, ntfs,read.py, ntlmrelayx.py, owneredit.py, ping.py, ping6.py, psexec.py, raiseChild.py, rbcd.py, rdp_check.py, reg.py, registry,read.py, rpcdump.py, rpcmap.py, sambaPipe.py, samrdump.py, secretsdump.py, services.py, smbclient.py, smbexec.py, smbserver.py, sniff.py, sniffer.py, split.py, ticketConverter.py, ticketer.py, tstool.py, wmiexec.py, wmipersist.py, wmiquery.py
 
     The command 'sudo' is not available.
@@ -535,6 +544,10 @@ async def _run_unix_command(command: str, additional_hosts: Dict[str, str], ctx:
             logger.warning("elicit not supported, continuing")
 
         docker_command = ["docker", "run", "--rm",
+                          "--network=host",
+                          "--cap-add", "NET_BIND_SERVICE",
+                          "--cap-add", "NET_ADMIN",
+                          "--cap-add", "NET_RAW",
             # "-v", f"{cache_path}:/work",
         ]
         for host, ip in (additional_hosts or {}).items():
@@ -543,7 +556,7 @@ async def _run_unix_command(command: str, additional_hosts: Dict[str, str], ctx:
                     docker_command.extend(["--add-host", f"{host}:{ip}"])
             except (ValueError, ValidationError):
                 pass
-        docker_command.extend(["shyhurricane_unix_command:latest", "/usr/bin/rbash", "-c", command])
+        docker_command.extend(["shyhurricane_unix_command:latest", "/bin/bash", "-c", command])
         logger.info(f"Executing command {docker_command}")
         with open(stdout_path, "w") as stdout_file:
             with open(stderr_path, "w") as stderr_file:
@@ -785,6 +798,11 @@ async def spider_website(url: str, additional_hosts: Dict[str, str] = None,
         await ctx.info(f"Found: {http_resource.url}")
 
     return results
+
+
+# TODO: add port scanning tool that controls options for nmap for our use case and store in document
+
+# TODO: add tool to fetch port scan results
 
 
 # TODO: add busting tool (using feroxbuster), and prompt

@@ -6,7 +6,7 @@ volumes:
 
 services:
   chroma:
-    image: ghcr.io/chroma-core/chroma:latest
+    image: ghcr.io/chroma-core/chroma:1.0.15
     command: run --path /data --host 0.0.0.0 --port 8000
     environment:
       CHROMA_SERVER_HTTP_PORT: "8000"
@@ -25,6 +25,7 @@ services:
   dind:
     image: docker:dind
     privileged: true
+    network_mode: host
     environment:
       - DOCKER_TLS_CERTDIR=
     volumes:

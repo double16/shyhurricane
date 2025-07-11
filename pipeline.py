@@ -4,9 +4,11 @@ import json
 import logging
 import os
 import re
+import sys
 from json import JSONDecodeError
 from typing import Dict, List, Optional, Any, Tuple
 
+from bs4 import BeautifulSoup, SoupStrainer
 from chromadb import ClientAPI
 from haystack.components.agents import Agent
 from haystack.components.joiners import ListJoiner
@@ -385,7 +387,7 @@ def build_website_context_pipeline(generator_config: GeneratorConfig) -> Pipelin
       You also determine if anything in the query implies a specific set of HTTP methods such as "GET", "POST", "PUT", if any. Usually the user will intended HTTP methods that are in the RFC, but may ask for specific non-standard methods.
       
       Structure:
-      Output the two pieces of information as a valid JSON object. Only output the JSON. Do not include any other text except the JSON.
+      Output the information as a valid JSON object. Only output the JSON. Do not include any other text except the JSON.
       
       The list of web sites uses key "target". The value of "target" is a valid JSON list. It is a list of site url(s) or ip address(es) and port numbers in the form of URLs. If no protocol is specified and the port contains "443", use "https". If no protocol is specified and the url host TLD is typically for a public site like .com, .net, .etc, use protocol "https". Otherwise use "http". 
       Examples are: http://example.com, https://example.com, http://example.com:8080, http://10.10.10.10, http://10.10.10.11:8000, etc.
@@ -469,6 +471,7 @@ class KatanaDocument:
     def __init__(self, embedders: Dict[str, Any], doc_cleaner: DocumentCleaner):
         self.embedders = embedders
         self.doc_cleaner = doc_cleaner
+        self._title_soup_strainer = SoupStrainer(['title', 'meta'])
 
     @component.output_types(documents=List[Document])
     def run(self, text: str | dict):
@@ -497,7 +500,7 @@ class KatanaDocument:
         # quantize timestamp to avoid too many duplicate results
         timestamp = entry["timestamp"]  # 2025-06-28T22:52:07.882000
         timestamp_for_id = timestamp[0:11]  # one document per URL per day
-        response_body = entry.get("response", {}).get("body", None)
+        response_body: Optional[str] = entry.get("response", {}).get("body", None)
         content = "\n".join(
             list(filter(lambda x: x is not None, [
                 entry.get("request", {}).get("body", None),
@@ -517,6 +520,42 @@ class KatanaDocument:
             technologies = [str(technologies)]
         technologies_str = json.dumps(technologies, indent=None, separators=(',', ':'), sort_keys=True)
 
+        title: Optional[str] = None
+        description: Optional[str] = None
+        if response_body and raw_mime == "text/html":
+            soup = BeautifulSoup(response_body, 'html.parser', parse_only=self._title_soup_strainer)
+
+            if soup.title and soup.title.string:
+                title = soup.title.string.strip()
+            else:
+                # Try fallback meta tags in priority order
+                title_fallbacks = [
+                    ('property', 'og:title'),
+                    ('name', 'twitter:title'),
+                    ('itemprop', 'name'),
+                ]
+                for attr, value in title_fallbacks:
+                    tag = soup.find('meta', attrs={attr: value})
+                    if tag and tag.get('content', ''):
+                        title = tag['content'].strip()
+                        break
+
+            # extract description
+            for meta in soup.find_all('meta'):
+                attrs = meta.attrs
+                content = attrs.get('content', '')
+                if not content:
+                    continue
+
+                if attrs.get('name') == 'description':
+                    description = content.strip()
+                elif attrs.get('property') == 'og:description':
+                    description = content.strip()
+                elif attrs.get('name') == 'twitter:description':
+                    description = content.strip()
+                elif attrs.get('itemprop') == 'description':
+                    description = content.strip()
+
         base_meta = {
             "url": url,
             "netloc": netloc,
@@ -529,6 +568,10 @@ class KatanaDocument:
             "http_method": http_method,
             "technologies": technologies_str,
         }
+        if title:
+            base_meta["title"] = title
+        if description:
+            base_meta["description"] = description
 
         documents = []
 
@@ -539,7 +582,11 @@ class KatanaDocument:
         if response_body and not is_binary(response_body, raw_mime):
             doc = Document(
                 content=response_body,
-                meta=base_meta | {"type": "content"},
+                meta=base_meta | {
+                    "type": "content",
+                    "request_headers": json.dumps(request_headers),
+                    "response_headers": json.dumps(response_headers),
+                },
                 id=hashlib.sha256(f"{url}:content:{timestamp_for_id}".encode()).hexdigest()
             )
             embedder = self.embedders.get("content", self.embedders["default"])
@@ -578,7 +625,11 @@ class KatanaDocument:
 
         net_doc = Document(
             content=net_text,
-            meta=base_meta | {"type": "network"},
+            meta=base_meta | {
+                "type": "network",
+                "description": "HTTP request and response headers",
+                "content_type": "text/plain"
+            },
             id=hashlib.sha256(f"{url}:network:{timestamp_for_id}".encode()).hexdigest()
         )
         net_embedder = self.embedders["network"]
@@ -590,7 +641,11 @@ class KatanaDocument:
             sorted_forms = sorted(forms, key=lambda f: f.get("method", "GET") + "." + f.get("action", ""))
             forms_doc = Document(
                 content=json.dumps(sorted_forms, indent=None, separators=(',', ':'), sort_keys=True),
-                meta=base_meta | {"type": "forms"},
+                meta=base_meta | {
+                    "type": "forms",
+                    "description": "HTTP form information in JSON format",
+                    "content_type": "text/json"
+                },
                 id=hashlib.sha256(f"{url}:forms:{timestamp_for_id}".encode()).hexdigest()
             )
             forms_embedder = self.embedders["forms"]
@@ -626,9 +681,67 @@ class IngestMultiStore:
     def __init__(self, stores: Dict[str, ChromaDocumentStore]):
         self.stores = stores
 
+    @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]):
         for doc in documents:
             self.stores.get(doc.meta.get('type')).write_documents([doc])
+        return {"documents": documents}
+
+
+@component
+class GenerateTitleAndDescription:
+    prompt: str = """
+      You are a web site content analyst. You are good at summarizing the content of a web resource, whether it be
+      HTML, text, javascript or css, into a short title and 2-3 sentence description. The consumer of the title and
+      description is another LLM such as yourself.
+      
+      Structure:
+      Output the title and description information as a valid JSON object. Only output the JSON. Do not include any other text except the JSON.
+      
+      The title uses the key "title" and the value is a string. It should be between 5 and 30 words long.
+      
+      The description uses the key "description" and the value is a string. It should be about 2 or 3 sentences.
+
+      Your Task:
+      Query: "%s"
+      JSON title and description:
+"""
+
+    def __init__(self, generator_config: GeneratorConfig):
+        self.generator = generator_config.create_generator()
+
+    @component.output_types(documents=List[Document])
+    def run(self, documents: List[Document]):
+        cached_title = {}
+        cached_description = {}
+        for doc in documents:
+            if doc.meta.get("status_code", 0) != 200:
+                continue
+            if doc.meta.get("type") in ["network"]:
+                continue
+            url = None
+            if 'url' in doc.meta:
+                url = doc.meta["url"]
+                if url in cached_title and "title" not in doc.meta:
+                    doc.meta["title"] = cached_title[url]
+                if url in cached_description and "description" not in doc.meta:
+                    doc.meta["description"] = cached_description[url]
+            if doc.content and "title" not in doc.meta or "description" not in doc.meta:
+                try:
+                    result = self.generator.run(prompt=self.prompt % (doc.content[0:2048])).get("replies", ["{}"])[-1]
+                    parsed = json.loads(result)
+                    print(f"title_and_desc: {doc.meta.get('type', '')} {result}", file=sys.stderr)
+                    if "title" in parsed and "title" not in doc.meta:
+                        doc.meta["title"] = str(parsed["title"])
+                        if url:
+                            cached_title[url] = doc.meta["title"]
+                    if "description" in parsed and "description" not in doc.meta:
+                        doc.meta["description"] = str(parsed["description"])
+                        if url:
+                            cached_description[url] = doc.meta["description"]
+                except Exception:
+                    pass
+
         return {"documents": documents}
 
 
@@ -670,7 +783,7 @@ def is_http_raw(value: str):
         return False
 
 
-def build_ingest_pipeline(db: str) -> Pipeline:
+def build_ingest_pipeline(db: str, generator_config: GeneratorConfig) -> Pipeline:
     if ":" not in db:
         os.makedirs(db, exist_ok=True)
 
@@ -739,13 +852,20 @@ def build_ingest_pipeline(db: str) -> Pipeline:
     pipe.add_component("katana_store", IngestMultiStore(stores))
     pipe.add_component("raw_store", IngestMultiStore(stores))
     pipe.add_component("har_store", IngestMultiStore(stores))
+    pipe.add_component("katana_gen_title", GenerateTitleAndDescription(generator_config))
+    pipe.add_component("raw_gen_title", GenerateTitleAndDescription(generator_config))
+    pipe.add_component("har_gen_title", GenerateTitleAndDescription(generator_config))
 
     pipe.connect("input_router.katana_jsonl", "katana_document.text")
     pipe.connect("input_router.http_raw_text", "raw_document.text")
     pipe.connect("input_router.har_json", "har_document.text")
 
-    pipe.connect("katana_document", "katana_store")
-    pipe.connect("raw_document", "raw_store")
-    pipe.connect("har_document", "har_store")
+    pipe.connect("katana_document", "katana_gen_title")
+    pipe.connect("raw_document", "raw_gen_title")
+    pipe.connect("har_document", "har_gen_title")
+
+    pipe.connect("katana_gen_title", "katana_store")
+    pipe.connect("raw_gen_title", "raw_store")
+    pipe.connect("har_gen_title", "har_store")
 
     return pipe
