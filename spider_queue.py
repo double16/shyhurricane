@@ -1,4 +1,3 @@
-import ipaddress
 import json
 import logging
 import os
@@ -7,7 +6,6 @@ import time
 from multiprocessing import Queue, Process
 from typing import Optional, Dict, Tuple
 
-import validators
 from mcp import Resource
 from pydantic import AnyUrl
 
@@ -79,11 +77,7 @@ def _katana_ingest(
 
     docker_command = ["docker", "run", "--rm"]
     for host, ip in (additional_hosts or {}).items():
-        try:
-            if validators.domain(host) == True and ipaddress.ip_address(ip):
-                docker_command.extend(["--add-host", f"{host}:{ip}"])
-        except ValueError:
-            pass
+        docker_command.extend(["--add-host", f"{host}:{ip}"])
     docker_command.extend(["shyhurricane_unix_command:latest"])
     docker_command.extend(katana_command)
 

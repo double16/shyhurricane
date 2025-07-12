@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from haystack.core.errors import PipelineRuntimeError
-from haystack.dataclasses import ChatMessage, ChatRole, StreamingChunk
+from haystack.dataclasses import ChatMessage, StreamingChunk
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from rich import get_console
@@ -17,16 +17,6 @@ from rich.markdown import Markdown
 
 from pipeline import build_chat_pipeline, build_agent_pipeline
 from utils import add_generator_args, GeneratorConfig
-
-# 1. Mute Haystack and integrations
-for name in [
-    "haystack",  # core
-    "haystack_integrations",  # all integrations
-    "haystack_telemetry",  # optional telemetry
-    "chromadb",  # Chroma client (can be noisy)
-    "sentence_transformers",
-]:
-    logging.getLogger(name).setLevel(logging.CRITICAL)  # or logging.CRITICAL
 
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 os.environ['ANONYMIZED_TELEMETRY'] = "False"
@@ -36,6 +26,17 @@ os.environ['HAYSTACK_TELEMETRY_DISABLED'] = "1"
 logger = logging.getLogger(__name__)
 
 console = get_console()
+
+
+def configure_logging(level=logging.CRITICAL):
+    for name in [
+        "haystack",  # core
+        "haystack_integrations",  # all integrations
+        "haystack_telemetry",  # optional telemetry
+        "chromadb",  # Chroma client (can be noisy)
+        "sentence_transformers",
+    ]:
+        logging.getLogger(name).setLevel(level)
 
 
 def streaming_chunk_callback(chunk: StreamingChunk):
@@ -62,14 +63,19 @@ def main():
         default="chat",
         help="AI mode to use: chat or agent"
     )
+    ap.add_argument("--verbose", "-v", action="store_true", help="Verbose mode")
     add_generator_args(ap)
     ap.add_argument("--mcp-url", required=False, help="URL for the MCP server, i.e. http://127.0.0.1:8000/mcp/")
     ap.add_argument("--stream", action="store_true")
     ap.add_argument("--history", default="chat_history.md")
     args = ap.parse_args()
-    generator_config = GeneratorConfig.from_args(args)
 
-    top_k = 100
+    if args.verbose:
+        configure_logging(logging.INFO)
+    else:
+        configure_logging(logging.CRITICAL)
+
+    generator_config = GeneratorConfig.from_args(args)
 
     if args.mode == "agent":
         args.stream = True
@@ -102,6 +108,8 @@ This is a penetration test assistant in {args.mode} mode using {generator_config
     while True:
         try:
             user_in = sess.prompt("💬 ")
+            # TODO: configure maximum documents (top_k)
+            # TODO: clear tool cache
             if not user_in.strip():
                 continue
             if user_in.lower() in {"/exit", "/quit"}:

@@ -175,10 +175,9 @@ class QueryExpander:
 
 @component
 class MultiQueryChromaRetriever:
-    def __init__(self, embedder: SentenceTransformersTextEmbedder, retriever: ChromaEmbeddingRetriever, top_k: int = 3):
+    def __init__(self, embedder: SentenceTransformersTextEmbedder, retriever: ChromaEmbeddingRetriever):
         self.embedder = embedder
         self.retriever = retriever
-        self.top_k = top_k
 
     def warm_up(self):
         self.embedder.warm_up()
@@ -187,8 +186,10 @@ class MultiQueryChromaRetriever:
     def run(self, queries: List[str], filters: Optional[Dict[str, Any]] = None):
         try:
             ctx = mcp.get_context()
+            top_k = ctx.request_context.lifespan_context.top_k
             ctx.info("Retrieving documents")
         except Exception:
+            top_k = 100
             pass
         results = []
         ids = set()
@@ -198,7 +199,7 @@ class MultiQueryChromaRetriever:
                 result = self.retriever.run(
                     query_embedding=self.embedder.run(query)["embedding"],
                     filters=filters,
-                    top_k=self.top_k)
+                    top_k=top_k)
                 for doc in result['documents']:
                     if doc.id not in ids:
                         results.append(doc)
@@ -209,15 +210,14 @@ class MultiQueryChromaRetriever:
         return {"documents": results}
 
 
-def build_answer_pipeline(db: str, generator_config: GeneratorConfig, top_k: int) -> Tuple[Pipeline, Component]:
+def build_answer_pipeline(db: str, generator_config: GeneratorConfig) -> Tuple[Pipeline, Component]:
     """
     Builds a pipeline for making security related queries.
     :param db: path to the database.
-    :param top_k: Maximum number of documents to return.
     :return: Pipeline
     """
 
-    pipe, retrievers, stores = build_document_pipeline(db=db, generator_config=generator_config, top_k=top_k)
+    pipe, retrievers, stores = build_document_pipeline(db=db, generator_config=generator_config)
 
     prompt_tmpl = """
 You are an experienced web‑application penetration tester. Below are crawl/scan artefacts from a single website. Identify high‑impact vulnerabilities and exploitation paths.
@@ -246,6 +246,7 @@ Answer in concise Markdown with PoCs/examples. Include the URL for documents tha
     return pipe, generator
 
 
+# TODO: Handle multiple URLs
 def _create_shyhurriance_toolset(mcp_url: Optional[str] = None) -> MCPToolset:
     if mcp_url is None:
         mcp_url = "http://127.0.0.1:8000/mcp/"
@@ -389,12 +390,11 @@ def build_agent_pipeline(generator_config: GeneratorConfig, mcp_url: Optional[st
     return pipeline, chat_generator, tools
 
 
-def build_document_pipeline(db: str, generator_config: GeneratorConfig, top_k: int) -> Tuple[
+def build_document_pipeline(db: str, generator_config: GeneratorConfig) -> Tuple[
     Pipeline, Dict[str, MultiQueryChromaRetriever], Dict[str, ChromaDocumentStore]]:
     """
     Builds a pipeline for retrieving documents from the store.
     :param db: path to the database.
-    :param top_k: Maximum number of documents to return.
     :return: Pipeline
     """
     collections = list_collections(db)
@@ -416,8 +416,8 @@ def build_document_pipeline(db: str, generator_config: GeneratorConfig, top_k: i
 
         embedder = SentenceTransformersTextEmbedder(model=model_name, progress_bar=False)
         store = create_chrome_document_store(db=db, collection_name=col)
-        retriever = ChromaEmbeddingRetriever(document_store=store, top_k=top_k)
-        multiquery_retriever = MultiQueryChromaRetriever(embedder, retriever, top_k=top_k)
+        retriever = ChromaEmbeddingRetriever(document_store=store)
+        multiquery_retriever = MultiQueryChromaRetriever(embedder, retriever)
 
         pipe.add_component(ret_name, multiquery_retriever)
 
