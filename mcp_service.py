@@ -608,6 +608,19 @@ async def _run_unix_command(command: str, additional_hosts: Dict[str, str], ctx:
         with open(meta_path, "w") as meta_file:
             json.dump(meta, meta_file)
 
+    try:
+        with open(os.path.join(ctx.request_context.lifespan_context.cache_path, 'history.jsonl'), 'at') as history_file:
+            history_file.write(json.dumps({
+                "timestamp": datetime.now().isoformat(),
+                "command": command,
+                "return_code": return_code,
+                "stdout": stdout_path,
+                "stderr": stderr_path,
+            }))
+            history_file.write("\n")
+    except IOError as e:
+        logger.info("Cannot write to history file", exc_info=e)
+
     if return_code == 0:
         with open(stdout_path, "r", encoding="utf-8", errors='replace') as f:
             return RunUnixCommand(return_code=return_code, output=f.read(), error="", cached=cached)
