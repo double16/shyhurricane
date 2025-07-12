@@ -485,6 +485,9 @@ class KatanaDocument:
         if "response" not in entry:
             logger.warning("Missing response")
             return {"documents": []}
+        if "status_code" not in entry["response"]:
+            logger.info("No status_code, usually indicates out of scope")
+            return {"documents": []}
 
         url = entry["request"]["endpoint"]
         try:
@@ -507,7 +510,7 @@ class KatanaDocument:
                 response_body,
             ]))
         )
-        status_code = entry["response"].get("status_code", 0)
+        status_code = entry["response"].get("status_code", 200)
         http_method = entry["request"].get("method", "").upper()
         request_headers = entry["request"].get("headers", {})
         request_headers.pop("raw", None)
