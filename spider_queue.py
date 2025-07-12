@@ -110,7 +110,7 @@ def _katana_ingest(
                     try:
                         url_parsed = urlparse_ext(resource.name)
                         http_resource = HttpResource(
-                            score=None,
+                            score=100,
                             url=resource.name,
                             host=url_parsed.hostname,
                             port=url_parsed.port,

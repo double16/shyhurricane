@@ -614,6 +614,7 @@ async def _run_unix_command(command: str, additional_hosts: Dict[str, str], ctx:
                 "timestamp": datetime.now().isoformat(),
                 "command": command,
                 "return_code": return_code,
+                "additional_hosts": additional_hosts or {},
                 "stdout": stdout_path,
                 "stderr": stderr_path,
             }))
@@ -750,6 +751,7 @@ async def index_http_url(
         return None
 
 def is_spider_time_recent(url: str) -> Optional[float]:
+    # TODO: consider the user_agent and headers, they may make a difference in the result
     try:
         ctx = mcp.get_context()
         chroma_client: chromadb.PersistentClient = ctx.request_context.lifespan_context.get_chroma_client()
