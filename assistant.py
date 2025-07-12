@@ -97,7 +97,7 @@ This is a penetration test assistant in {args.mode} mode using {generator_config
         with open(args.history, "a", encoding="utf-8") as f:
             f.write(f"# Q: {q}\n\n{a}\n\n---\n\n")
 
-    messages: list[ChatMessage] = []
+    chat_logger("Assistant Info", f"{args.mode} mode using {generator_config.describe()}")
 
     while True:
         try:
@@ -124,20 +124,14 @@ This is a penetration test assistant in {args.mode} mode using {generator_config
             # Build the pipeline input
             user_in_message = ChatMessage.from_user(user_in)
             run_input = {}
-            # TODO: use haystack-ai to introspect inputs/outputs
-            try:
-                pipe.get_component("llm")
-                run_input["llm"] = {"messages": messages+[user_in_message]}
-            except ValueError:
-                pass
-            try:
-                pipe.get_component("list_joiner")
-                run_input["list_joiner"] = {"values": [user_in_message]}
-            except ValueError:
-                pass
             try:
                 pipe.get_component("prompt_builder")
-                run_input["prompt_builder"] = {"template": [user_in_message]}
+                run_input["prompt_builder"] = {"query": [user_in_message]}
+            except ValueError:
+                pass
+            try:
+                pipe.get_component("memory_joiner")
+                run_input["memory_joiner"] = {"values": [user_in_message]}
             except ValueError:
                 pass
 
@@ -156,17 +150,9 @@ This is a penetration test assistant in {args.mode} mode using {generator_config
             else:
                 replies = []
 
-            has_system_message = any(filter(lambda m: m.role == ChatRole.SYSTEM, messages))
-            for r in replies:
-                if r is None or not r.text:
-                    continue
-                if has_system_message and r.role == ChatRole.SYSTEM:
-                    continue
-                messages.append(r)
-
             ans_md = "\n".join(replies[-1].texts)
             console.print("")
-            if not args.stream or args.mode == "agent":
+            if not args.stream:
                 console.print(Markdown(ans_md))
             chat_logger(user_in, ans_md)
         except (KeyboardInterrupt, EOFError):

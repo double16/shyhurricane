@@ -7,12 +7,14 @@ MCP server and AI assistant for penetration testing.
 Install Ollama and the qwen2.5:7b-instruct model:
 
 Ubuntu:
+
 ```shell
 apt-get install ollama
 ollama pull qwen2.5:7b-instruct
 ```
 
 macOS:
+
 ```shell
 brew install ollama
 brew services start ollama
@@ -35,6 +37,7 @@ OPENAI_API_KEY=
 ```
 
 Run the MCP server:
+
 ```shell
 docker-compose up -d
 ```
@@ -42,6 +45,7 @@ docker-compose up -d
 #### Running Locally
 
 The unix command is run in a container to prevent bad things, so you still need docker.
+
 ```shell
 docker build -t shyhurricane_unix_command:latest src/docker/unix_command
 python3 mcp_service.py --ollama-model qwen2.5:7b-instruct
@@ -50,6 +54,7 @@ python3 mcp_service.py --ollama-model qwen2.5:7b-instruct
 ### Run the assistant
 
 Run the assistant as a chat:
+
 ```shell
 pip install -r requirements.txt
 
@@ -57,6 +62,7 @@ python3 assistant.py --ollama-model qwen2.5:7b-instruct --mode chat
 ```
 
 Run the assistant as an agent:
+
 ```shell
 pip install -r requirements.txt
 

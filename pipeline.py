@@ -18,6 +18,9 @@ from haystack.components.tools import ToolInvoker
 from haystack.core.component import Component
 from haystack.dataclasses import ChatMessage
 from haystack.tools import Toolset
+from haystack_experimental.chat_message_stores import InMemoryChatMessageStore
+from haystack_experimental.components.retrievers import ChatMessageRetriever
+from haystack_experimental.components.writers import ChatMessageWriter
 from more_itertools import first
 
 from doc_type_model_map import get_model_for_doc_type, doc_type_to_model, map_mime_to_type
@@ -153,7 +156,8 @@ class QueryExpander:
             ctx.info(f"Expanding query")
         except Exception:
             pass
-        result = self.pipeline.run({'builder': {'query': query, 'number': number}}).get('llm', {}).get('replies', [""])[0]
+        result = self.pipeline.run({'builder': {'query': query, 'number': number}}).get('llm', {}).get('replies', [""])[
+            0]
         logger.info(f"Expanded query result:\n{result}")
         if not result:
             return {"queries": [query]}
@@ -259,20 +263,35 @@ You must stay in the target scope given by the user. If given a URL or host name
 
 For websites, you start looking for vulnerabilities from the OWASP Top 10. Follow common penetration testing methodologies.
 
-Use available tools to enumerate the targets to gather more information to accomplish your task. Web site resources are indexed for
-efficient searching and retrieval. Prefer to use indexed resources, if possible.
+Use available tools to enumerate the targets to gather more information to accomplish your task. Web site resources are indexed for efficient searching and retrieval. Prefer to use indexed resources, if possible.
 
 Provide explanations for found vulnerabilities, exploit paths and PoCs. Provide concise Markdown. Include URLs for cross-reference as appropriate. Answer with the same language as the user. 
 """
 
+user_chat_message_template = """Given the conversation history, complete the task requested.
 
-def build_chat_pipeline(generator_config: GeneratorConfig, mcp_url: Optional[str] = None) -> Tuple[Pipeline, Component, Toolset]:
+    Conversation history:
+    {% for memory in memories %}
+        {{ memory.text }}
+    {% endfor %}
+
+    Task: {{query}}
+"""
+
+
+def build_chat_pipeline(generator_config: GeneratorConfig, mcp_url: Optional[str] = None) -> Tuple[
+    Pipeline, Component, Toolset]:
     """
     Builds a pipeline for a cyber-security chat.
     :return: Pipeline, generator component
     """
 
     tools = _create_shyhurriance_toolset(mcp_url)
+    prompt_builder = ChatPromptBuilder(
+        template=[ChatMessage.from_system(pentester_system_prompt), ChatMessage.from_user(user_chat_message_template)],
+        variables=["query", "memories"],
+        required_variables=["query", "memories"]
+    )
     chat_generator = generator_config.create_chat_generator(
         tools=tools,
         generation_kwargs={
@@ -285,27 +304,53 @@ def build_chat_pipeline(generator_config: GeneratorConfig, mcp_url: Optional[str
         }
     )
 
+    memory_store = InMemoryChatMessageStore()
+    memory_retriever = ChatMessageRetriever(memory_store)
+    memory_writer = ChatMessageWriter(memory_store)
+
     pipeline = Pipeline()
+    pipeline.add_component("prompt_builder", prompt_builder)
     pipeline.add_component("llm", chat_generator)
     pipeline.add_component("tool_invoker", ToolInvoker(tools=tools))
     pipeline.add_component("list_joiner", ListJoiner(List[ChatMessage]))
+    pipeline.add_component("memory_retriever", memory_retriever)
+    pipeline.add_component("memory_writer", memory_writer)
+    pipeline.add_component("memory_joiner", ListJoiner(List[ChatMessage]))
     pipeline.add_component("response_llm", response_chat_generator)
+
+    pipeline.connect("prompt_builder.prompt", "llm.messages")
     pipeline.connect("llm.replies", "tool_invoker.messages")
     pipeline.connect("llm.replies", "list_joiner")
+    pipeline.connect("llm.replies", "memory_joiner")
     pipeline.connect("tool_invoker.tool_messages", "list_joiner")
     pipeline.connect("list_joiner.values", "response_llm.messages")
+
+    pipeline.connect("memory_joiner", "memory_writer")
+    pipeline.connect("memory_retriever", "prompt_builder.memories")
 
     return pipeline, response_chat_generator, tools
 
 
-def build_agent_pipeline(generator_config: GeneratorConfig, mcp_url: Optional[str] = None) -> Tuple[Pipeline, Component, Toolset]:
+@component
+class ChatMessageToListAdapter:
+    @component.output_types(values=List[ChatMessage])
+    def run(self, value: ChatMessage):
+        return {"values": [value]}
+
+
+def build_agent_pipeline(generator_config: GeneratorConfig, mcp_url: Optional[str] = None) -> Tuple[
+    Pipeline, Component, Toolset]:
     """
     Builds a pipeline for a cyber-security agent.
     :return: Pipeline
     """
 
     tools = _create_shyhurriance_toolset(mcp_url)
-    prompt_builder = ChatPromptBuilder()
+    prompt_builder = ChatPromptBuilder(
+        template=[ChatMessage.from_user(user_chat_message_template)],
+        variables=["query", "memories"],
+        required_variables=["query", "memories"]
+    )
     chat_generator = generator_config.create_chat_generator(
         tools=tools,
         generation_kwargs={
@@ -321,11 +366,27 @@ def build_agent_pipeline(generator_config: GeneratorConfig, mcp_url: Optional[st
         max_agent_steps=100,
         raise_on_tool_invocation_failure=False
     )
-    pipe = Pipeline()
-    pipe.add_component("prompt_builder", prompt_builder)
-    pipe.add_component("agent", assistant)
-    pipe.connect("prompt_builder", "agent")
-    return pipe, chat_generator, tools
+
+    memory_store = InMemoryChatMessageStore()
+    memory_retriever = ChatMessageRetriever(memory_store)
+    memory_writer = ChatMessageWriter(memory_store)
+
+    pipeline = Pipeline()
+    pipeline.add_component("prompt_builder", prompt_builder)
+    pipeline.add_component("agent", assistant)
+    pipeline.add_component("memory_retriever", memory_retriever)
+    pipeline.add_component("memory_writer", memory_writer)
+    pipeline.add_component("memory_joiner", ListJoiner(List[ChatMessage]))
+    pipeline.add_component("str_to_list", ChatMessageToListAdapter())
+
+    pipeline.connect("prompt_builder", "agent")
+
+    pipeline.connect("agent.last_message", "str_to_list")
+    pipeline.connect("str_to_list", "memory_joiner")
+    pipeline.connect("memory_joiner", "memory_writer")
+    pipeline.connect("memory_retriever", "prompt_builder.memories")
+
+    return pipeline, chat_generator, tools
 
 
 def build_document_pipeline(db: str, generator_config: GeneratorConfig, top_k: int) -> Tuple[

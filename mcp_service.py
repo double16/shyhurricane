@@ -61,9 +61,11 @@ class AppContext:
     top_k: int
     last_mtime: float = None
 
-    def get_cache_path_for_tool(self, tool_id_str: str) -> str:
+    def get_cache_path_for_tool(self, tool_id_str: str, additional_hosts: Dict[str, str]) -> str:
         digest = hashlib.sha512()
         digest.update(tool_id_str.encode("utf-8"))
+        if additional_hosts:
+            digest.update(json.dumps(additional_hosts).encode("utf-8"))
         sha512_str = digest.hexdigest()
         path = os.path.join(self.cache_path, sha512_str[0:2], sha512_str[2:4], sha512_str[4:])
         os.makedirs(path, exist_ok=True)
@@ -228,7 +230,7 @@ async def find_web_resources(query: str) -> List[HttpResource]:
         if query_url.endswith('/'):
             urls_munged.append(query_url[:-1])
         else:
-            urls_munged.append(query_url+'/')
+            urls_munged.append(query_url + '/')
         logger.info("Searching for exact web resource for %s", ', '.join(urls_munged))
         filters = {"field": "meta.url", "operator": "in", "value": urls_munged}
         store = ctx.request_context.lifespan_context.stores["content"]
@@ -314,8 +316,7 @@ async def find_web_resources(query: str) -> List[HttpResource]:
                     return []
         except McpError as e:
             await ctx.info(f"Ask to spider {', '.join(missing_urls)}.")
-            logger.warning("elicit not supported, exiting", exc_info=e)
-            return []
+            logger.warning("elicit not supported, continuing")
 
     conditions = []
     _append_in_filter(conditions, "meta.netloc", filter_netloc)
@@ -351,6 +352,7 @@ async def find_web_resources(query: str) -> List[HttpResource]:
             document_pipeline = ctx.request_context.lifespan_context.get_document_pipeline()
 
     return _documents_to_http_resources(documents)
+
 
 async def _find_document_by_type_and_id(doc_type: str, doc_id: str) -> Optional[Document]:
     ctx = mcp.get_context()
@@ -444,8 +446,10 @@ class RunUnixCommand(BaseModel):
     output: str = Field(description="Output of command as string")
     error: str = Field(description="Error messages from the command")
     cached: bool = Field(description="Indicates if the results are from the cache", default=False)
+    notes: Optional[str] = Field(description="Notes for understanding the command output or fixing failed commands")
 
 
+# TODO: consider caching additional hosts, or adding a tool to register them
 @mcp.tool()
 async def run_unix_command(command: str, additional_hosts: Dict[str, str], ctx: Context) -> Optional[RunUnixCommand]:
     """
@@ -459,8 +463,8 @@ async def run_unix_command(command: str, additional_hosts: Dict[str, str], ctx: 
 
     Any commands that take arguments and respond to standard out, and don't require user input are good for this tool.
 
-    The following commands are available: curl, wget, grep, awk, printf, base64, cut, cp, mv, date, factor, gzip, sha256sum, sha512sum, md5sum, echo, seq, true, false, tee, tar, sort,head, tail,
-    nmap, rustscan, feroxbuster, interactsh-client, katana, nuclei, meg, anew, unfurl, gf, gau, 403jump, waybackurls, httpx, subfinder, gowitness, hakrawler, ffuf, dirb, wfuzz, nc (netcat), graphql-path-enum, ping
+    The following commands are available: curl, wget, grep, awk, printf, base64, cut, cp, mv, date, factor, gzip, sha256sum, sha512sum, md5sum, echo, seq, true, false, tee, tar, sort, head, tail, ping,
+    nmap, rustscan, feroxbuster, interactsh-client, katana, nuclei, meg, anew, unfurl, gf, gau, 403jump, waybackurls, httpx, subfinder, gowitness, hakrawler, ffuf, dirb, wfuzz, nc (netcat), graphql-path-enum, evil-winrm,
     DumpNTLMInfo.py, Get,GPPPassword.py, GetADComputers.py, GetADUsers.py, GetLAPSPassword.py, GetNPUsers.py, GetUserSPNs.py, addcomputer.py, atexec.py, changepasswd.py, dacledit.py, dcomexec.py, describeTicket.py, dpapi.py, esentutl.py, exchanger.py, findDelegation.py, getArch.py, getPac.py, getST.py, getTGT.py, goldenPac.py, karmaSMB.py, keylistattack.py, kintercept.py, lookupsid.py, machine_role.py, mimikatz.py, mqtt_check.py, mssqlclient.py, mssqlinstance.py, net.py, netview.py, ntfs,read.py, ntlmrelayx.py, owneredit.py, ping.py, ping6.py, psexec.py, raiseChild.py, rbcd.py, rdp_check.py, reg.py, registry,read.py, rpcdump.py, rpcmap.py, sambaPipe.py, samrdump.py, secretsdump.py, services.py, smbclient.py, smbexec.py, smbserver.py, sniff.py, sniffer.py, split.py, ticketConverter.py, ticketer.py, tstool.py, wmiexec.py, wmipersist.py, wmiquery.py
 
     The command 'sudo' is not available.
@@ -482,13 +486,14 @@ async def run_unix_command(command: str, additional_hosts: Dict[str, str], ctx: 
             return_code=-1,
             output="",
             error=''.join(traceback.format_exception(exc_type, exc_value, exc_tb)),
+            notes=None,
         )
 
 
 async def _run_unix_command(command: str, additional_hosts: Dict[str, str], ctx: Context) -> Optional[RunUnixCommand]:
     logger.info(f"run_unix_command {command}")
 
-    cache_path: str = ctx.request_context.lifespan_context.get_cache_path_for_tool(command)
+    cache_path: str = ctx.request_context.lifespan_context.get_cache_path_for_tool(command, additional_hosts)
     meta_path = os.path.join(cache_path, 'meta.json')
     stdout_path = os.path.join(cache_path, 'stdout.txt')
     stderr_path = os.path.join(cache_path, 'stderr.txt')
@@ -549,8 +554,8 @@ async def _run_unix_command(command: str, additional_hosts: Dict[str, str], ctx:
                           "--cap-add", "NET_BIND_SERVICE",
                           "--cap-add", "NET_ADMIN",
                           "--cap-add", "NET_RAW",
-            # "-v", f"{cache_path}:/work",
-        ]
+                          # "-v", f"{cache_path}:/work",
+                          ]
         for host, ip in (additional_hosts or {}).items():
             try:
                 if validators.domain(host) == True and ipaddress.ip_address(ip):
@@ -563,7 +568,7 @@ async def _run_unix_command(command: str, additional_hosts: Dict[str, str], ctx:
             with open(stderr_path, "w") as stderr_file:
                 last_report = time.time()
                 proc = subprocess.Popen(docker_command, shell=False, cwd=cwd, universal_newlines=True,
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 os.set_blocking(proc.stdout.fileno(), False)
                 os.set_blocking(proc.stderr.fileno(), False)
                 while proc.poll() is None:
@@ -624,7 +629,7 @@ async def _run_unix_command(command: str, additional_hosts: Dict[str, str], ctx:
 
     if return_code == 0:
         with open(stdout_path, "r", encoding="utf-8", errors='replace') as f:
-            return RunUnixCommand(return_code=return_code, output=f.read(), error="", cached=cached)
+            return RunUnixCommand(return_code=return_code, output=f.read(), error="", cached=cached, notes=None)
     else:
         with open(stdout_path, "r", encoding="utf-8", errors='replace') as stdout_file:
             with open(stderr_path, 'r', encoding="utf-8", errors='replace') as stderr_file:
@@ -633,6 +638,7 @@ async def _run_unix_command(command: str, additional_hosts: Dict[str, str], ctx:
                     output=stdout_file.read(),
                     error=''.join(deque(stderr_file, maxlen=20)),
                     cached=cached,
+                    notes=None,
                 )
 
 
@@ -750,6 +756,7 @@ async def index_http_url(
     except requests.exceptions.RequestException as e:
         return None
 
+
 def is_spider_time_recent(url: str) -> Optional[float]:
     # TODO: consider the user_agent and headers, they may make a difference in the result
     try:
@@ -765,7 +772,7 @@ def is_spider_time_recent(url: str) -> Optional[float]:
                 if timestamp.tzinfo is None:
                     timestamp = timestamp.replace(tzinfo=timezone.utc)
                 seconds_since_spider = (now - timestamp).total_seconds()
-                if seconds_since_spider < 24*3600:
+                if seconds_since_spider < 24 * 3600:
                     logger.info(f"Spider for {url} was done {seconds_since_spider} seconds ago")
                     return True
             except (ValueError, TypeError):
@@ -780,7 +787,8 @@ def is_spider_time_recent(url: str) -> Optional[float]:
 
 
 @mcp.tool()
-async def spider_website(url: str, additional_hosts: Dict[str, str] = None,
+async def spider_website(url: str,
+                         additional_hosts: Dict[str, str] = None,
                          user_agent: Optional[str] = None,
                          request_headers: Optional[Dict[str, str]] = None) -> List[HttpResource]:
     """
@@ -819,7 +827,7 @@ async def spider_website(url: str, additional_hosts: Dict[str, str] = None,
     )
     spider_queue.put_nowait(spider_queue_item)
     results: List[HttpResource] = []
-    time_limit = time.time() + 45
+    time_limit = time.time() + 90
     while time.time() < time_limit:
         try:
             http_resource: HttpResource = spider_result_queue.get(
