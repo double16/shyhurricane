@@ -10,6 +10,7 @@ RUN pip install -r requirements.txt
 COPY *.py /app/
 
 RUN useradd -u 2000 -m --shell /usr/bin/rbash runner
+RUN mkdir -p /data /tool_cache && chown 2000:2000 /data /tool_cache
 USER 2000
 
 ENV CHROMA=/data

@@ -20,6 +20,7 @@ if command -v go; then
 	for GOPKG in \
 github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest \
 github.com/projectdiscovery/katana/cmd/katana@latest \
+github.com/projectdiscovery/nuclei/cmd/nuclei@latest \
 github.com/tomnomnom/meg@latest \
 github.com/tomnomnom/anew@latest \
 github.com/tomnomnom/unfurl@latest \

@@ -460,7 +460,7 @@ async def run_unix_command(command: str, additional_hosts: Dict[str, str], ctx: 
     Any commands that take arguments and respond to standard out, and don't require user input are good for this tool.
 
     The following commands are available: curl, wget, grep, awk, printf, base64, cut, cp, mv, date, factor, gzip, sha256sum, sha512sum, md5sum, echo, seq, true, false, tee, tar, sort,head, tail,
-    nmap, rustscan, feroxbuster, interactsh-client, katana, meg, anew, unfurl, gf, gau, 403jump, waybackurls, httpx, subfinder, gowitness, hakrawler, ffuf, dirb, wfuzz, nc (netcat), graphql-path-enum, ping
+    nmap, rustscan, feroxbuster, interactsh-client, katana, nuclei, meg, anew, unfurl, gf, gau, 403jump, waybackurls, httpx, subfinder, gowitness, hakrawler, ffuf, dirb, wfuzz, nc (netcat), graphql-path-enum, ping
     DumpNTLMInfo.py, Get,GPPPassword.py, GetADComputers.py, GetADUsers.py, GetLAPSPassword.py, GetNPUsers.py, GetUserSPNs.py, addcomputer.py, atexec.py, changepasswd.py, dacledit.py, dcomexec.py, describeTicket.py, dpapi.py, esentutl.py, exchanger.py, findDelegation.py, getArch.py, getPac.py, getST.py, getTGT.py, goldenPac.py, karmaSMB.py, keylistattack.py, kintercept.py, lookupsid.py, machine_role.py, mimikatz.py, mqtt_check.py, mssqlclient.py, mssqlinstance.py, net.py, netview.py, ntfs,read.py, ntlmrelayx.py, owneredit.py, ping.py, ping6.py, psexec.py, raiseChild.py, rbcd.py, rdp_check.py, reg.py, registry,read.py, rpcdump.py, rpcmap.py, sambaPipe.py, samrdump.py, secretsdump.py, services.py, smbclient.py, smbexec.py, smbserver.py, sniff.py, sniffer.py, split.py, ticketConverter.py, ticketer.py, tstool.py, wmiexec.py, wmipersist.py, wmiquery.py
 
     The command 'sudo' is not available.
@@ -678,8 +678,12 @@ def parse_http_response(response_text) -> Tuple[
 
 
 @mcp.tool()
-async def index_http_url(url: str, user_agent: Optional[str] = None,
-                         request_headers: Optional[Dict[str, str]] = None) -> Optional[HttpResource]:
+async def index_http_url(
+        url: str,
+        user_agent: Optional[str] = None,
+        request_headers: Optional[Dict[str, str]] = None,
+        # TODO: add more curl-like options
+) -> Optional[HttpResource]:
     """
     Index an HTTP URL to allow for further analysis and return the context, response code, response headers. Use this
     for GET requests instead of curl or wget, if it provides the user with the information required.

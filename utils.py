@@ -19,6 +19,13 @@ logger = logging.getLogger(__name__)
 
 
 class HttpResource(BaseModel):
+    """
+    This is the response from an HTTP request. Several important attributes of the request are present, including the URL,
+    the HTTP method, the response code (status_code).
+
+    The "contents" field has the resource content if the tool provides the full content. The "resource" field has the
+    content metadata and a URI that can be used to fetch the content.
+    """
     score: Optional[float] = Field(description="Matching score, higher is better")
     url: str = Field(description="The URL for the HTTP resource")
     host: str = Field(description="The host name of the HTTP server")
