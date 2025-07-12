@@ -705,8 +705,7 @@ async def index_http_url(
         # TODO: add more curl-like options
 ) -> Optional[HttpResource]:
     """
-    Index an HTTP URL to allow for further analysis and return the context, response code, response headers. Use this
-    for GET requests instead of curl or wget, if it provides the user with the information required.
+    Index an HTTP URL to allow for further analysis and return the context, response code, response headers.
 
     The user_agent can be used to specify the "User-Agent" request header. This is useful if a particular browser needs
     to be spoofed or the user requests extra information in the user agent header to identify themselves as a bug bounty hunter.
