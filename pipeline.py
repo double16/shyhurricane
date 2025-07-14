@@ -283,14 +283,10 @@ def build_chat_pipeline(generator_config: GeneratorConfig, mcp_url: Optional[str
     )
     chat_generator = generator_config.create_chat_generator(
         tools=tools,
-        generation_kwargs={
-            # "temperature": 0.9,
-        }
+        generation_kwargs={}
     )
     response_chat_generator = generator_config.create_chat_generator(
-        generation_kwargs={
-            # "temperature": 0.9,
-        }
+        generation_kwargs={}
     )
 
     memory_store = InMemoryChatMessageStore()
@@ -342,10 +338,7 @@ def build_agent_pipeline(generator_config: GeneratorConfig, mcp_url: Optional[st
     )
     chat_generator = generator_config.create_chat_generator(
         tools=tools,
-        generation_kwargs={
-            # "num_predict": 100,  # Ollama only?
-            # "temperature": 0.9,
-        }
+        generation_kwargs={}
     )
     assistant = Agent(
         chat_generator=chat_generator,
