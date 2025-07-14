@@ -108,7 +108,6 @@ This is a penetration test assistant in {args.mode} mode using {generator_config
     while True:
         try:
             user_in = sess.prompt("💬 ")
-            # TODO: configure maximum documents (top_k)
             # TODO: clear tool cache
             if not user_in.strip():
                 continue

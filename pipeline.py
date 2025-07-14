@@ -35,6 +35,7 @@ from haystack.components.builders import PromptBuilder, AnswerBuilder, ChatPromp
 from haystack import Pipeline, component, Document
 from haystack_integrations.tools.mcp import StreamableHttpServerInfo, MCPToolset
 
+from prompts import pentester_system_prompt
 from utils import urlparse_ext, GeneratorConfig, extract_domain
 
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
@@ -113,9 +114,10 @@ class TraceDocs:
 
 @component
 class Query:
-    @component.output_types(text=str, filters=Dict[str, Any])
-    def run(self, text: str, filters: Optional[Dict[str, Any]] = None):
-        return {"text": text, "filters": filters or {}}
+    @component.output_types(text=str, filters=Dict[str, Any], max_results=int)
+    def run(self, text: str, filters: Optional[Dict[str, Any]] = None, max_results: Optional[int] = None):
+        max_results = min(1000, max(1, max_results or 100))
+        return {"text": text, "filters": filters or {}, "max_results": max_results}
 
 
 @component
@@ -126,7 +128,7 @@ class QueryExpander:
         if prompt is None:
             self.query_expansion_prompt = """
           You are a cybersecurity search assistant that processes users queries.
-          You expand a given query into at most {{ number }} queries that are similar in meaning. The expanded query should not be less specific.
+          You expand a given query into at most {{ number }} queries that are similar in meaning. The expanded query should not be less specific. All URLs or IP addresses that appear in the original query must be included in the expanded query.
           
           Structure:
           Output the expanded queries as a valid JSON list of strings. Only output the list. Do not include any other text except the JSON list of expanded queries.
@@ -183,14 +185,13 @@ class MultiQueryChromaRetriever:
         self.embedder.warm_up()
 
     @component.output_types(documents=List[Document])
-    def run(self, queries: List[str], filters: Optional[Dict[str, Any]] = None):
+    def run(self, queries: List[str], top_k: int, filters: Optional[Dict[str, Any]] = None):
         try:
             ctx = mcp.get_context()
-            top_k = ctx.request_context.lifespan_context.top_k
             ctx.info("Retrieving documents")
         except Exception:
-            top_k = 100
             pass
+        top_k = min(1000, max(1, top_k))
         results = []
         ids = set()
         for query in queries:
@@ -255,19 +256,6 @@ def _create_shyhurriance_toolset(mcp_url: Optional[str] = None) -> MCPToolset:
         invocation_timeout=600.0
     )
 
-
-pentester_system_prompt = """
-You are an experienced penetration tester assistant.
-Your task is to find and exploit vulnerabilities in networks, computers and websites. Use the available tools to gather more information to accomplish your task.
-
-You must stay in the target scope given by the user. If given a URL or host name, do not perform tasks outside the host name, including subdomains. You may report if a subdomain is found. If given an IP address, do not look beyond that IP address. You may examine host names mapped to that IP address. If given a subnet, do not look for hosts beyond that subnet. The user is allowed to instruct you to increase the scope by giving more IP addresses, host names or subnets.
-
-For websites, you start looking for vulnerabilities from the OWASP Top 10. Follow common penetration testing methodologies.
-
-Use available tools to enumerate the targets to gather more information to accomplish your task. Web site resources are indexed for efficient searching and retrieval. Prefer to use indexed resources, if possible.
-
-Provide explanations for found vulnerabilities, exploit paths and PoCs. Provide concise Markdown. Include URLs for cross-reference as appropriate. Answer with the same language as the user. 
-"""
 
 user_chat_message_template = """Given the conversation history, complete the task requested.
 
@@ -387,7 +375,7 @@ def build_agent_pipeline(generator_config: GeneratorConfig, mcp_url: Optional[st
     pipeline.connect("memory_joiner", "memory_writer")
     pipeline.connect("memory_retriever", "prompt_builder.memories")
 
-    return pipeline, chat_generator, tools
+    return pipeline, assistant, tools
 
 
 def build_document_pipeline(db: str, generator_config: GeneratorConfig) -> Tuple[
@@ -422,6 +410,7 @@ def build_document_pipeline(db: str, generator_config: GeneratorConfig) -> Tuple
         pipe.add_component(ret_name, multiquery_retriever)
 
         # wiring: Query → embedder → retriever → combiner
+        pipe.connect("query.max_results", ret_name + ".top_k")
         pipe.connect("query_expander.queries", ret_name + ".queries")
         pipe.connect("query.filters", ret_name + ".filters")
         pipe.connect(ret_name + ".documents", f"combine.{col}_documents")
@@ -666,6 +655,7 @@ class KatanaDocument:
                     meta=base_meta | {"type": doc_type},
                     id=hashlib.sha256(f"{url}:{doc_type}:{timestamp_for_id}".encode()).hexdigest()
                 )
+                # TODO: de-obfuscate javascript
                 try:
                     doc = self.doc_cleaner.run(documents=[doc])["documents"][0]
                 except Exception:

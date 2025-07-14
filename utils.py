@@ -1,4 +1,5 @@
 import argparse
+import ipaddress
 import logging
 import os
 from pathlib import Path
@@ -67,7 +68,12 @@ def latest_mtime(db: Path) -> float:
     return max(f.stat().st_mtime for f in db.rglob("*.sqlite3") if f.is_file())
 
 
-def extract_domain(hostname: str) -> str:
+def extract_domain(hostname: str) -> Optional[str]:
+    try:
+        if ipaddress.ip_address(hostname):
+            return ""
+    except ValueError:
+        pass
     domain = tldextract.extract(hostname, include_psl_private_domains=True).top_domain_under_public_suffix
     if not domain:
         return '.'.join(hostname.split(".")[-2:])

@@ -37,6 +37,7 @@ from pydantic import BaseModel, AnyUrl, Field, ValidationError
 
 from ingest_queue import start_ingest_worker
 from pipeline import build_document_pipeline, build_website_context_pipeline, urlparse_ext, create_chroma_client
+from prompts import pentester_system_prompt
 from spider_queue import start_spider_worker, SpiderQueueItem
 from utils import HttpResource, latest_mtime, add_generator_args, GeneratorConfig, extract_domain
 
@@ -58,7 +59,6 @@ class AppContext:
     spider_process: Process
     stores: Dict[str, ChromaDocumentStore]
     chroma_client: chromadb.PersistentClient
-    top_k: int
     last_mtime: float = None
 
     def get_cache_path_for_tool(self, tool_id_str: str, additional_hosts: Dict[str, str]) -> str:
@@ -103,8 +103,6 @@ class AppContext:
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     """Manage application lifecycle with type-safe context"""
     # Initialize on startup
-    top_k = max(1, min(1000, int(os.environ.get('TOP_K', '100'))))
-    logger.info("Maximum documents is %d", top_k)
     db = os.environ.get('CHROMA', 'chroma_store')
     logger.info("Using chroma database at %s", db)
     chroma_client = create_chroma_client(db=db)
@@ -133,7 +131,6 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
             spider_process=spider_process,
             stores=stores,
             chroma_client=chroma_client,
-            top_k=top_k,
             last_mtime=time.time(),
         )
     finally:
@@ -167,7 +164,7 @@ def _documents_to_http_resources(documents: List[Document]) -> List[HttpResource
                 name=doc.meta['url'],
                 title=doc.meta.get('title', None),
                 description=doc.meta.get('description', None),
-                uri=AnyUrl(f"document://{doc.meta['type']}/{doc.id}"),
+                uri=AnyUrl(f"web://{doc.meta['type']}/{doc.id}"),
                 mimeType=doc.meta.get('content_type', 'text/plain'),
                 size=len(doc.content),
             )
@@ -192,10 +189,32 @@ def _documents_to_http_resources(documents: List[Document]) -> List[HttpResource
     return https_resources
 
 
+def log_history(ctx: Context, data: Dict[str, Any]):
+    try:
+        with open(os.path.join(ctx.request_context.lifespan_context.cache_path, 'history.jsonl'), 'at') as history_file:
+            data["timestamp"] = datetime.now().isoformat()
+            history_file.write(json.dumps(data))
+            history_file.write("\n")
+    except IOError as e:
+        logger.info("Cannot write to history file", exc_info=e)
+
+
+def log_tool_history(ctx: Context, title: str, **kwargs):
+    data = {
+        "tool": title,
+        "arguments": kwargs or {},
+    }
+    log_history(ctx, data)
+    logger.info(f"{title}: {json.dumps(data)}")
+
+
 @mcp.tool(
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(
+        title="Find Web Resources",
+        readOnlyHint=True,
+        openWorldHint=False),
 )
-async def find_web_resources(query: str) -> List[HttpResource]:
+async def find_web_resources(query: str, limit: int = 100) -> List[HttpResource]:
     """Query indexed resources about a website using natural language and return the request and response bodies, URL, HTTP method, MIME type, HTTP status code, technologies found. This tool will search using several parameters including response body matching, URL matching, MIME type matching of the response, HTTP request method matching, and HTTP response body matching.
 
     Invoke this tool when the user asks about vulnerabilities,
@@ -216,16 +235,21 @@ async def find_web_resources(query: str) -> List[HttpResource]:
         3. What pages on http://target.local have potential XSS vulnerabilities?
         4. Find Javascript with eval() calls on http://target.local
         5. Find URLs with possible IDOR vulnerabilities on http://target.local
+        6. http://target.local/
+        7. http://target.local/account/dashboard?page=account
 
-    Always include your target URLs. http://target.local is only an example, do not use it as a URL.
+    A target URL or hostname is required. Always include your target URLs. http://target.local is only an example, do not use it as a URL.
+s
+    The limit parameter is used to limit how many results are returned. The default is 100. The value must range between 10 and 1000.
     """
-    query = query.strip()
-    logger.info("finding web resources for %s", query)
-
     ctx = mcp.get_context()
+    log_tool_history(ctx, "find_web_resources", query=query, limit=limit)
+    query = query.strip()
+    limit = min(1000, max(10, limit or 100))
+    logger.info("finding web resources for %s up to %d results", query, limit)
+
     document_pipeline: Pipeline = ctx.request_context.lifespan_context.get_document_pipeline()
     website_context_pipeline: Pipeline = ctx.request_context.lifespan_context.website_context_pipeline
-    top_k = ctx.request_context.lifespan_context.top_k
 
     # handle a case where a query is only URL
     try:
@@ -259,7 +283,7 @@ async def find_web_resources(query: str) -> List[HttpResource]:
         for doc in store.filter_documents(filters=filters):
             if doc.meta.get("url", "").startswith(url_prefix) and doc.meta.get("url") not in urls_munged:
                 docs.append(doc)
-            if len(docs) >= top_k:
+            if len(docs) >= limit:
                 break
 
         if docs:
@@ -314,7 +338,7 @@ async def find_web_resources(query: str) -> List[HttpResource]:
 
     # check if we have data
     missing_netloc = set(filter_netloc.copy())
-    for known_netloc in find_netloc(None):
+    for known_netloc in find_netloc(""):
         try:
             missing_netloc.remove(known_netloc)
         except KeyError:
@@ -363,14 +387,14 @@ async def find_web_resources(query: str) -> List[HttpResource]:
     logger.info(f"Searching for {', '.join(urls)} with filter {json.dumps(filters)}")
     await ctx.info(f"Searching for {', '.join(urls)}")
 
+    documents = []
     pipeline_retry = 1
     while pipeline_retry > 0:
         pipeline_retry -= 1
         try:
-            # TODO: specify top_k
-            res = document_pipeline.run(data={"query": {"text": query, "filters": filters}},
+            res = document_pipeline.run(data={"query": {"text": query, "filters": filters, "max_results": limit}},
                                         include_outputs_from={"combine"})
-            documents: List[Document] = res.get("combine", {}).get("documents", [])[0:top_k]
+            documents: List[Document] = res.get("combine", {}).get("documents", [])[0:limit]
         except PipelineRuntimeError as e:
             if pipeline_retry < 0:
                 raise e
@@ -398,23 +422,29 @@ async def _find_document_by_type_and_id(doc_type: str, doc_id: str) -> Optional[
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(
+        title="Fetch Web Resource Content",
+        readOnlyHint=True,
+        openWorldHint=False),
 )
-async def fetch_web_resource_content(uri: str) -> Optional[TextResourceContents]:
+async def fetch_web_resource_content(ctx: Context, uri: str) -> Optional[TextResourceContents]:
     """Fetch the content of a web resource that has already been indexed. The URI argument takes one of two forms.
 
-    The URI may be an http:// or https:// URI of a website that has been indexed.
+    The URI may be a http:// or https:// URI of a website that has been indexed.
 
-    The URI may be a document://{doc_type}/{doc_id} URI supplied by the
+    The URI may be a web://{doc_type}/{doc_id} URI supplied by the
     find_web_resources tool. The URI can be found in the resource_link JSON object.
 
     Invoke this tool when the user requests analysis of resource content that has already been indexed, spidered or scanned.
     """
+    log_tool_history(ctx, "fetch_web_resource_content", uri=uri)
+    doc_type: Optional[str] = None
+    doc_id: Optional[str] = None
     doc: Optional[Document] = None
     logger.info("Fetching web resource %s", uri)
     try_http_url = False
-    if uri.startswith("document://"):
-        doc_type, doc_id = uri.replace("document://", "").split("/", maxsplit=1)
+    if uri.startswith("web://"):
+        doc_type, doc_id = uri.replace("web://", "").split("/", maxsplit=1)
         if "://" in doc_id:
             uri = doc_id
             try_http_url = True
@@ -424,7 +454,6 @@ async def fetch_web_resource_content(uri: str) -> Optional[TextResourceContents]
         try_http_url = True
 
     if try_http_url:
-        ctx = mcp.get_context()
         filters = {"field": "meta.url", "operator": "==", "value": uri}
         store = ctx.request_context.lifespan_context.stores["content"]
         docs = store.filter_documents(filters=filters)
@@ -443,8 +472,8 @@ async def fetch_web_resource_content(uri: str) -> Optional[TextResourceContents]
     )
 
 
-@mcp.resource("document://{doc_type}/{doc_id}")
-async def document_resource(doc_type: str, doc_id: str) -> Optional[TextResourceContents]:
+@mcp.resource("web://{doc_type}/{doc_id}", title="Web Resource")
+async def web_resource(doc_type: str, doc_id: str) -> Optional[TextResourceContents]:
     """
     Fetch a document using the type and document ID.
     """
@@ -452,18 +481,16 @@ async def document_resource(doc_type: str, doc_id: str) -> Optional[TextResource
     if doc is None:
         return None
     return TextResourceContents(
-        uri=AnyUrl(f"document://{doc_type}/{doc_id}"),
+        uri=AnyUrl(f"web://{doc_type}/{doc_id}"),
         mimeType=doc.meta.get('content_type', 'text/plain'),
         text=doc.content,
     )
 
 
-@mcp.prompt(title="Vulnerability Discovery")
+@mcp.prompt(title="Penetration Tester")
 def web_vuln(prompt: str) -> str:
-    return f"""You are an experienced web‑application pentester. Run query_web_resources with the prompt to obtain crawl/scan artefacts. Identify high‑impact vulnerabilities and exploitation paths.
-
-Question: "{prompt}"
-Answer with PoCs/examples. Include the URL for documents that contributed to the answer.
+    return pentester_system_prompt + f"""
+Task: "{prompt}"
 """
 
 
@@ -471,7 +498,7 @@ Answer with PoCs/examples. Include the URL for documents that contributed to the
 cached_get_additional_hosts: Dict[str, str] = {}
 
 
-def get_additional_hosts(additional_hosts: Dict[str, str]):
+def get_additional_hosts(additional_hosts: Dict[str, str]) -> Dict[str, str]:
     if not additional_hosts:
         return cached_get_additional_hosts
     validated: Dict[str, str] = {}
@@ -485,14 +512,21 @@ def get_additional_hosts(additional_hosts: Dict[str, str]):
     return cached_get_additional_hosts | validated
 
 
-@mcp.tool()
-async def register_hostname_address(host: str, address: str):
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Register Hostname Address",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False),
+)
+async def register_hostname_address(ctx: Context, host: str, address: str) -> Dict[str, str]:
     """
-    Registers an IP address with a hostname. This is useful when a hostname has no DNS entry
-    but we know the IP address by other means. Especially useful in CTF or private networks.
+    Registers a hostname with an IP address. This is useful when a hostname has no DNS entry
+    and we know the IP address by other means. Especially useful in CTF or private networks.
     """
-    get_additional_hosts({host: address})
-    return None
+    log_tool_history(ctx, "register_hostname_address", host=host, address=address)
+    return get_additional_hosts({host: address})
 
 
 class RunCommandConfirmation(BaseModel):
@@ -507,9 +541,14 @@ class RunUnixCommand(BaseModel):
     notes: Optional[str] = Field(description="Notes for understanding the command output or fixing failed commands")
 
 
-# TODO: consider caching additional hosts, or adding a tool to register them
-@mcp.tool()
-async def run_unix_command(command: str, additional_hosts: Optional[Dict[str, str]] = None, ctx: Context = None) -> RunUnixCommand:
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Run Command",
+        readOnlyHint=True,
+        openWorldHint=True),
+)
+async def run_unix_command(ctx: Context, command: str,
+                           additional_hosts: Optional[Dict[str, str]] = None) -> RunUnixCommand:
     """
     Run a Linux or macOS command and return its output. The command is run in a containerized environment for safety.
     The containerized environment is ephemeral. The command is run using the bash shell.
@@ -527,7 +566,7 @@ async def run_unix_command(command: str, additional_hosts: Optional[Dict[str, st
 
     The command 'sudo' is not available.
 
-    The additional_hosts parameter is a mapping of host name to IP address for hosts that do not have DNS records. This also includes CTF targets or web server virtual hosts found during other scans. If you
+    The additional_hosts parameter is a dictionary of host name (the key) to IP address (the value) for hosts that do not have DNS records. This also includes CTF targets or web server virtual hosts found during other scans. If you
     know the IP address for a host, be sure to include these in the additional_hosts parameter for
     commands to run properly in a containerized environment.
 
@@ -536,7 +575,7 @@ async def run_unix_command(command: str, additional_hosts: Optional[Dict[str, st
     Commands such as nmap can take a long time to run, so be patient.
     """
     try:
-        result = await _run_unix_command(command, additional_hosts, ctx)
+        result = await _run_unix_command(ctx, command, additional_hosts)
         return result
     except Exception as e:
         exc_type, exc_value, exc_tb = sys.exc_info()
@@ -548,7 +587,8 @@ async def run_unix_command(command: str, additional_hosts: Optional[Dict[str, st
         )
 
 
-async def _run_unix_command(command: str, additional_hosts: Optional[Dict[str, str]], ctx: Context) -> Optional[RunUnixCommand]:
+async def _run_unix_command(ctx: Context, command: str, additional_hosts: Optional[Dict[str, str]]) -> Optional[
+    RunUnixCommand]:
     logger.info(f"run_unix_command {command}")
 
     cache_path: str = ctx.request_context.lifespan_context.get_cache_path_for_tool(command, additional_hosts)
@@ -668,19 +708,13 @@ async def _run_unix_command(command: str, additional_hosts: Optional[Dict[str, s
         with open(meta_path, "w") as meta_file:
             json.dump(meta, meta_file)
 
-    try:
-        with open(os.path.join(ctx.request_context.lifespan_context.cache_path, 'history.jsonl'), 'at') as history_file:
-            history_file.write(json.dumps({
-                "timestamp": datetime.now().isoformat(),
-                "command": command,
-                "return_code": return_code,
-                "additional_hosts": additional_hosts or {},
-                "stdout": stdout_path,
-                "stderr": stderr_path,
-            }))
-            history_file.write("\n")
-    except IOError as e:
-        logger.info("Cannot write to history file", exc_info=e)
+    log_history(ctx, {
+        "command": command,
+        "return_code": return_code,
+        "additional_hosts": additional_hosts or {},
+        "stdout": stdout_path,
+        "stderr": stderr_path,
+    })
 
     if return_code == 0:
         with open(stdout_path, "r", encoding="utf-8", errors='replace') as f:
@@ -697,7 +731,14 @@ async def _run_unix_command(command: str, additional_hosts: Optional[Dict[str, s
                 )
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Index HTTP Request/Response",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=False),
+)
 async def index_http_request_response(data: str):
     """
     Indexes HTTP one request/response to allow for further analysis. The input can take several
@@ -707,6 +748,7 @@ async def index_http_request_response(data: str):
     {"request": {"headers": {"sec_fetch_mode": "navigate", "priority": "u=0, i", "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "sec_fetch_dest": "document", "host": "example.com", "accept_language": "en-US,en;q=0.5", "connection": "keep-alive", "sec_fetch_site": "none", "upgrade_insecure_requests": "1", "sec_fetch_user": "?1", "user_agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"}, "method": "GET", "source": "katana", "body": "", "endpoint": "https://example.com/", "tag": "katana", "attribute": "http"}, "response": {"headers": {"date": "Sun, 29 Jun 2025 03:44:52 GMT", "content_type": "text/html", "connection": "keep-alive", "location": "https://www.example.com/", "content_length": "169"}, "status_code": 301, "body": "<html>\r\n<head><title>301 Moved Permanently</title></head>\r\n<body>\r\n<center><h1>301 Moved Permanently</h1></center>\r\n<hr><center>nginx/1.20.1</center>\r\n</body>\r\n</html>\r\n"}, "timestamp": "2025-06-28T22:44:52.798000"}
     """
     ctx = mcp.get_context()
+    log_tool_history(ctx, "index_http_request_response", data=data[0:64])
     ingest_queue: Queue = ctx.request_context.lifespan_context.ingest_queue
     ingest_queue.put_nowait(data)
     return None
@@ -752,8 +794,16 @@ def parse_http_response(response_text) -> Tuple[
     return status_code, headers, body
 
 
-@mcp.tool()
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Index HTTP URL",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True),
+)
 async def index_http_url(
+        ctx: Context,
         url: str,
         user_agent: Optional[str] = None,
         request_headers: Optional[Dict[str, str]] = None,
@@ -769,7 +819,9 @@ async def index_http_url(
 
     Invoke this tool when the user needs the content of one specific URL.
     """
-    logger.info("indexing HTTP URL %s", url)
+    method = "GET"
+    log_tool_history(ctx, "index_http_url", url=url, method=method, user_agent=user_agent,
+                     request_headers=request_headers)
     the_headers = request_headers or {}
     if user_agent:
         the_headers['User-Agent'] = user_agent
@@ -777,22 +829,24 @@ async def index_http_url(
         parsed_url = urlparse_ext(url)
         response = requests.get(url, headers=the_headers)
         status_code = response.status_code
-        headers = dict(response.headers)
+        response_headers = dict(response.headers)
         body = response.text
         await index_http_request_response(json.dumps({
             "timestamp": datetime.now().isoformat(),
             "request": {
                 "endpoint": url,
+                "method": method,
+                "headers": the_headers,
             },
             "response": {
                 "status_code": status_code,
-                "headers": headers,
+                "headers": response_headers,
                 "body": body,
             }
         }))
         resource = TextResourceContents(
             uri=AnyUrl(url),
-            mimeType=headers.get("Content-Type", "text/plain"),
+            mimeType=response.headers.get("Content-Type", "text/plain"),
             text=body,
         )
         return HttpResource(
@@ -802,10 +856,10 @@ async def index_http_url(
             port=parsed_url.port,
             domain=extract_domain(parsed_url.hostname),
             status_code=status_code,
-            method="GET",
+            method=method,
             resource=None,
             contents=resource,
-            response_headers=headers,
+            response_headers=response_headers,
         )
     except requests.exceptions.RequestException as e:
         return None
@@ -846,8 +900,16 @@ class SpiderResults(BaseModel):
         description="Whether the spider has more resources available that can be retrieved using the find_web_resources tool or listed by the find_urls tool")
 
 
-@mcp.tool()
-async def spider_website(url: str,
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Spider Website",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True),
+)
+async def spider_website(ctx: Context,
+                         url: str,
                          additional_hosts: Optional[Dict[str, str]] = None,
                          user_agent: Optional[str] = None,
                          request_headers: Optional[Dict[str, str]] = None) -> SpiderResults:
@@ -858,7 +920,7 @@ async def spider_website(url: str,
 
     Invoke this tool when the user specifically asks to spider a URL or when the user wants to examine or analyze a site for which nothing has been indexed.
 
-    The additional_hosts parameter is a mapping of host name to IP address for hosts that do not have DNS records. This also includes CTF targets or web server virtual hosts found during other scans. If you
+    The additional_hosts parameter is a dictionary of host name (the key) to IP address (the value) for hosts that do not have DNS records. This also includes CTF targets or web server virtual hosts found during other scans. If you
     know the IP address for a host, be sure to include these in the additional_hosts parameter for
     commands to run properly in a containerized environment.
 
@@ -869,6 +931,8 @@ async def spider_website(url: str,
 
     Returns a list of resources found, including URL, response code, content type, and content length. Indexes each URL that can be queried using the find_web_resources tool. URL content can be returned using the fetch_web_resource_content tool.
     """
+    log_tool_history(ctx, "spider_website", url=url, additional_hosts=additional_hosts, user_agent=user_agent,
+                     request_headers=request_headers)
     url = url.strip()
     if is_spider_time_recent(url):
         logger.info(f"{url} has been recently spidered, returning saved results")
@@ -877,7 +941,6 @@ async def spider_website(url: str,
             has_more=False,
         )
 
-    ctx = mcp.get_context()
     spider_queue: Queue = ctx.request_context.lifespan_context.spider_queue
     spider_result_queue: Queue = ctx.request_context.lifespan_context.spider_result_queue
     url_parsed = urlparse_ext(url)
@@ -890,6 +953,7 @@ async def spider_website(url: str,
     )
     spider_queue.put_nowait(spider_queue_item)
     results: List[HttpResource] = []
+    has_more = True
     time_limit = time.time() + 90
     while time.time() < time_limit:
         try:
@@ -897,17 +961,22 @@ async def spider_website(url: str,
                 block=True,
                 timeout=(max(1.0, time_limit - time.time())))
         except queue.Empty:
+            has_more = False
             break
         if http_resource is None:
+            has_more = False
             break
+        logger.debug(f"{http_resource} has been retrieved")
         if http_resource.host != url_parsed.hostname or http_resource.port != url_parsed.port:
+            logger.debug(
+                f"Spider queued {http_resource.host}:{http_resource.port}, expecting {url_parsed.hostname}:{url_parsed.port}")
             continue
         results.append(http_resource)
         await ctx.info(f"Found: {http_resource.url}")
 
     return SpiderResults(
         resources=results,
-        has_more=time.time() >= time_limit,
+        has_more=has_more,
     )
 
 
@@ -916,16 +985,20 @@ async def spider_website(url: str,
 # TODO: add tool to fetch port scan results
 
 @mcp.tool(
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(
+        title="List Wordlists",
+        readOnlyHint=True,
+        openWorldHint=False),
 )
-async def find_wordlists() -> List[str]:
+async def find_wordlists(ctx: Context) -> List[str]:
     """
     Find available word lists. The results can be used with other commands that have options to
     accept word lists.
 
     Invoke this tool when the user wants to run a brute-forcing tool and needs to use a wordlist.
     """
-    result: RunUnixCommand = await run_unix_command("find /usr/share/seclists -type f", None, mcp.get_context())
+    log_tool_history(ctx, "find_wordlists")
+    result: RunUnixCommand = await run_unix_command(ctx, "find /usr/share/seclists -type f", None)
     if result.return_code != 0:
         raise RuntimeError(f"Failed to find word lists: {result.error}")
     return result.output.splitlines()
@@ -955,16 +1028,19 @@ def _query_to_netloc(query: str) -> Tuple[str | None, int | None]:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(
+        title="List Indexed Domains",
+        readOnlyHint=True,
+        openWorldHint=False),
 )
-async def find_domains(query: Optional[str] = None) -> List[str]:
+async def find_domains(ctx: Context, query: Optional[str] = None) -> List[str]:
     """
     Query indexed resources for a list of domains that have resources that can be researched.
 
     Invoke this tool when the user asks about websites that have been scanned, spidered or indexed. The
     query parameter is optional and will limit the results using a "contains" operator.
     """
-    ctx = mcp.get_context()
+    log_tool_history(ctx, "find_domains", query=query)
     chroma_client: chromadb.PersistentClient = ctx.request_context.lifespan_context.get_chroma_client()
     collection: chromadb.Collection = chroma_client.get_collection("network")
     result = set()
@@ -972,15 +1048,18 @@ async def find_domains(query: Optional[str] = None) -> List[str]:
     for metadata in collection.get(include=["metadatas"]).get("metadatas", []):
         if "domain" in metadata:
             domain = metadata['domain'].lower()
-            if not query or query.lower() in domain:
+            if domain and (not query or query.lower() in domain):
                 result.add(domain)
     return sorted(list(result))
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(
+        title="List Indexed Hostnames",
+        readOnlyHint=True,
+        openWorldHint=False),
 )
-def find_hosts(domain_query: str) -> List[str]:
+def find_hosts(ctx: Context, domain_query: str) -> List[str]:
     """
     Query indexed resources for a list of hosts for the given domain.
 
@@ -988,8 +1067,8 @@ def find_hosts(domain_query: str) -> List[str]:
 
     The domain_query parameter will limit the results using the "ends with" operator.
     """
+    log_tool_history(ctx, "find_hosts", domain_query=domain_query)
     try:
-        ctx = mcp.get_context()
         chroma_client: chromadb.PersistentClient = ctx.request_context.lifespan_context.get_chroma_client()
         collection: chromadb.Collection = chroma_client.get_collection("network")
         result = set()
@@ -1007,9 +1086,12 @@ def find_hosts(domain_query: str) -> List[str]:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(
+        title="List Indexed Network Locations (host:port)",
+        readOnlyHint=True,
+        openWorldHint=False),
 )
-def find_netloc(domain_query: str) -> List[str]:
+def find_netloc(ctx: Context, domain_query: str) -> List[str]:
     """
     Query indexed resources for a list of network locations, i.e. host:port, for a given domain.
 
@@ -1017,7 +1099,7 @@ def find_netloc(domain_query: str) -> List[str]:
 
     The domain_query parameter will limit the results using the "ends with" operator on the host name.
     """
-    ctx = mcp.get_context()
+    log_tool_history(ctx, "find_netloc", domain_query=domain_query)
     chroma_client: chromadb.PersistentClient = ctx.request_context.lifespan_context.get_chroma_client()
     collection: chromadb.Collection = chroma_client.get_collection("network")
     result = set()
@@ -1026,16 +1108,19 @@ def find_netloc(domain_query: str) -> List[str]:
         if "host" in metadata:
             hostname = metadata['host'].lower()
             if not domain_query or hostname.endswith(domain_query):
-                if port is None or port <= 0 or (metadata.get('port', None) == port):
+                if port is None or port <= 0 or (metadata.get('port', -1) == port):
                     result.add(metadata.get('netloc', hostname).lower())
     return sorted(list(result))
 
 
 # TODO: add a parameter for URLs to skip
 @mcp.tool(
-    annotations=ToolAnnotations(readOnlyHint=True),
+    annotations=ToolAnnotations(
+        title="List Indexed URLs",
+        readOnlyHint=True,
+        openWorldHint=False),
 )
-async def find_urls(host_query: str, limit: int = 100) -> List[str]:
+async def find_urls(ctx: Context, host_query: str, limit: int = 100) -> List[str]:
     """
     Query indexed resources for a list of URLs for the given host or domain.
 
@@ -1047,8 +1132,8 @@ async def find_urls(host_query: str, limit: int = 100) -> List[str]:
 
     The limit parameter limits the number of results. The default limit is 100.
     """
+    log_tool_history(ctx, "find_urls", host_query=host_query, limit=limit)
     assert limit > 0
-    ctx = mcp.get_context()
     chroma_client: chromadb.PersistentClient = ctx.request_context.lifespan_context.get_chroma_client()
     collection: chromadb.Collection = chroma_client.get_collection("network")
     result = set()

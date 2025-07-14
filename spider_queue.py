@@ -82,14 +82,11 @@ def _katana_ingest(
     docker_command.extend(katana_command)
 
     logger.info(f"Spidering with command {' '.join(docker_command)}")
-    last_report = time.time()
-    proc = subprocess.Popen(docker_command, universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    os.set_blocking(proc.stdout.fileno(), False)
-    os.set_blocking(proc.stderr.fileno(), False)
+    proc = subprocess.Popen(docker_command, universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 
     def process_stdout(data: str):
         ingest_queue.put_nowait(data)
-        if result_queue:
+        if result_queue is not None:
             try:
                 parsed = json.loads(data)
                 url = parsed.get("request", {}).get("endpoint", "")
@@ -111,32 +108,34 @@ def _katana_ingest(
                             domain=extract_domain(url_parsed.hostname),
                             status_code=status_code,
                             method=parsed.get('request', {}).get('method', 'GET'),
+                            response_headers=parsed.get('response', {}).get('headers', {}),
                             resource=resource,
+                            contents=None,
                         )
                         result_queue.put_nowait(http_resource)
-                    except Exception:
+                    except Exception as e:
+                        logger.warning(f"Queueing spider results: {e}", exc_info=e)
                         pass
-            except Exception:
+            except json.decoder.JSONDecodeError as e:
+                logger.warning(f"Parsing katana output: {e}\n\n{data}", exc_info=e)
+            except Exception as e:
+                logger.warning(f"Queueing spider results: {e}", exc_info=e)
                 pass
 
-    while proc.poll() is None:
-        line_err = proc.stderr.readline()
-        line_out = proc.stdout.readline()
-        if line_out and '"request"' in line_out:
-            process_stdout(line_out)
-
-        if time.time() - last_report > 5:
-            last_report = time.time()
-            # TODO: report to user
-
-        if not line_err and not line_out:
-            time.sleep(0.2)
-    while True:
-        line_out = proc.stdout.readline()
-        if line_out and '"request"' in line_out:
-            process_stdout(line_out)
-        else:
-            break
+    try:
+        while proc.poll() is None:
+            line_out = proc.stdout.readline()
+            if line_out and '"request"' in line_out:
+                process_stdout(line_out)
+        # read any buffered output
+        while True:
+            line_out = proc.stdout.readline()
+            if not line_out:
+                break
+            if '"request"' in line_out:
+                process_stdout(line_out)
+    except EOFError:
+        pass
 
     return_code = proc.wait()
     if return_code != 0:
