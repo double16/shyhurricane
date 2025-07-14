@@ -32,7 +32,7 @@ from mcp.server.fastmcp import FastMCP, Context
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
 
-from mcp.types import ToolAnnotations, Resource, TextResourceContents
+from mcp.types import ToolAnnotations, Resource, TextResourceContents, ErrorData
 from pydantic import BaseModel, AnyUrl, Field, ValidationError
 
 from ingest_queue import start_ingest_worker
@@ -60,6 +60,7 @@ class AppContext:
     stores: Dict[str, ChromaDocumentStore]
     chroma_client: chromadb.PersistentClient
     last_mtime: float = None
+    disable_elicitation: bool = False
 
     def get_cache_path_for_tool(self, tool_id_str: str, additional_hosts: Dict[str, str]) -> str:
         digest = hashlib.sha512()
@@ -99,11 +100,17 @@ class AppContext:
         return self.chroma_client
 
 
+def assert_elicitation(ctx: Context):
+    if ctx.request_context.lifespan_context.disable_elicitation:
+        raise McpError(ErrorData(code=200, message="elicitation disabled"))
+
+
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     """Manage application lifecycle with type-safe context"""
     # Initialize on startup
     db = os.environ.get('CHROMA', 'chroma_store')
+    disable_elicitation = bool(os.environ.get('DISABLE_ELICITATION', 'False'))
     logger.info("Using chroma database at %s", db)
     chroma_client = create_chroma_client(db=db)
     cache_path = os.path.join(os.environ.get('TOOL_CACHE', os.environ.get('TMPDIR', '/tmp')), 'tool_cache')
@@ -132,6 +139,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
             stores=stores,
             chroma_client=chroma_client,
             last_mtime=time.time(),
+            disable_elicitation=disable_elicitation,
         )
     finally:
         # Cleanup on shutdown
@@ -314,6 +322,7 @@ s
     if not urls:
         try:
             logger.info("Asking user for URL(s)")
+            assert_elicitation(ctx)
             target_elicit_result = await ctx.elicit(
                 message=f"What URL(s) should we look for?", schema=RequestTargetUrl
             )
@@ -352,6 +361,7 @@ s
     if missing_urls:
         logger.info(f"Asking user to spider {', '.join(missing_urls)}")
         try:
+            assert_elicitation(ctx)
             spider_elicit_result = await ctx.elicit(
                 message=f"There is no data for {', '.join(missing_urls)}. Would you like to start a scan?",
                 schema=RequestTargetUrl
@@ -634,6 +644,7 @@ async def _run_unix_command(ctx: Context, command: str, additional_hosts: Option
         cached = True
     else:
         try:
+            assert_elicitation(ctx)
             confirm_result = await ctx.elicit(
                 message=f"{command}\nShould I run this command?",
                 schema=RunCommandConfirmation)
