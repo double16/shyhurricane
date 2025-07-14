@@ -584,6 +584,7 @@ async def run_unix_command(ctx: Context, command: str,
 
     Commands such as nmap can take a long time to run, so be patient.
     """
+    log_tool_history(ctx, title="run_unix_command", command=command, additional_hosts=additional_hosts)
     try:
         result = await _run_unix_command(ctx, command, additional_hosts)
         return result
