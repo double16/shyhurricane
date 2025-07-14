@@ -294,7 +294,7 @@ def build_chat_pipeline(generator_config: GeneratorConfig, mcp_url: Optional[str
     )
 
     memory_store = InMemoryChatMessageStore()
-    memory_retriever = ChatMessageRetriever(memory_store)
+    memory_retriever = ChatMessageRetriever(memory_store, last_k=15)
     memory_writer = ChatMessageWriter(memory_store)
 
     pipeline = Pipeline()
