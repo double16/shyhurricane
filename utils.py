@@ -4,7 +4,7 @@ import logging
 import os
 from pathlib import Path
 from urllib.parse import ParseResult, urlparse
-from typing import Optional, Generator, Dict, Any, Union, List
+from typing import Optional, Generator, Dict, Any, Union, List, Sequence
 
 import aiofiles
 from haystack.components.generators import OpenAIGenerator

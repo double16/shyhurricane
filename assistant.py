@@ -58,7 +58,6 @@ def streaming_chunk_callback(chunk: StreamingChunk):
 
 def main():
     ap = argparse.ArgumentParser()
-    # ap.add_argument("--db", default="chroma_store")
     ap.add_argument(
         "--mode",
         choices=["chat", "agent"],

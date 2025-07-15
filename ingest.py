@@ -8,7 +8,7 @@ from utils import add_generator_args, GeneratorConfig
 
 # ─── Argument Parser ───────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Stream documents into Chroma via stdin (Katana format).")
-parser.add_argument("--db", "-d", default="chroma_store", help="Chroma document store directory or host:port")
+parser.add_argument("--db", "-d", default="127.0.0.1:8200", help="Chroma location host:port")
 add_generator_args(parser)
 args = parser.parse_args()
 generator_config = GeneratorConfig.from_args(args)

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import queue
+import re
 import sys
 import time
 import traceback
@@ -14,17 +15,16 @@ import aiofiles
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from multiprocessing import Queue, Process
-from pathlib import Path
 from typing import List, AsyncIterator, Optional, Tuple, Dict, Any, Union
 from urllib.parse import urlparse
 
 import chromadb
 from chromadb.errors import NotFoundError
+from chromadb.api.models.AsyncCollection import AsyncCollection
 import mcp
 import requests
 import validators
 from haystack import Pipeline, Document
-from haystack.core.errors import PipelineRuntimeError
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 from mcp import McpError
 from mcp.server.elicitation import AcceptedElicitation, DeclinedElicitation, CancelledElicitation
@@ -39,7 +39,7 @@ from ingest_queue import start_ingest_worker
 from pipeline import build_document_pipeline, build_website_context_pipeline, urlparse_ext, create_chroma_client
 from prompts import pentester_agent_system_prompt
 from spider_queue import start_spider_worker, SpiderQueueItem
-from utils import HttpResource, latest_mtime, add_generator_args, GeneratorConfig, extract_domain, read_last_text_bytes
+from utils import HttpResource, add_generator_args, GeneratorConfig, extract_domain, read_last_text_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +58,7 @@ class AppContext:
     spider_result_queue: Queue
     spider_process: Process
     stores: Dict[str, ChromaDocumentStore]
-    chroma_client: chromadb.PersistentClient
+    chroma_client: chromadb.AsyncClientAPI
     last_mtime: float = None
     disable_elicitation: bool = False
 
@@ -72,31 +72,10 @@ class AppContext:
         os.makedirs(path, exist_ok=True)
         return path
 
-    def maybe_reload(self, force=False):
-        if not os.path.exists(self.db):
-            return
-        persist = Path(self.db)
-        cur = latest_mtime(persist)
-        if self.last_mtime is None:
-            self.last_mtime = cur
-            return
-        if force or cur > self.last_mtime:
-            logger.info(f"Reloaded pipeline (modified {int(cur - self.last_mtime)} seconds since last change)")
-            self.last_mtime = cur
-            document_pipeline, retrievers, stores = build_document_pipeline(
-                db=self.db,
-                generator_config=generator_config,
-            )
-            self.document_pipeline = document_pipeline
-            self.stores = stores
-            self.chroma_client = create_chroma_client(db=self.db)
-
     def get_document_pipeline(self) -> Pipeline:
-        self.maybe_reload()
         return self.document_pipeline
 
-    def get_chroma_client(self) -> chromadb.PersistentClient:
-        self.maybe_reload()
+    def get_chroma_client(self) -> chromadb.AsyncClientAPI:
         return self.chroma_client
 
 
@@ -109,13 +88,13 @@ def assert_elicitation(ctx: Context):
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     """Manage application lifecycle with type-safe context"""
     # Initialize on startup
-    db = os.environ.get('CHROMA', 'chroma_store')
+    db = os.environ.get('CHROMA', '127.0.0.1:8200')
     disable_elicitation = bool(os.environ.get('DISABLE_ELICITATION', 'False'))
     logger.info("Using chroma database at %s", db)
-    chroma_client = create_chroma_client(db=db)
+    chroma_client = await create_chroma_client(db=db)
     cache_path = os.path.join(os.environ.get('TOOL_CACHE', os.environ.get('TMPDIR', '/tmp')), 'tool_cache')
     os.makedirs(cache_path, exist_ok=True)
-    document_pipeline, retrievers, stores = build_document_pipeline(
+    document_pipeline, retrievers, stores = await build_document_pipeline(
         db=db,
         generator_config=generator_config,
     )
@@ -397,21 +376,9 @@ s
     logger.info(f"Searching for {', '.join(urls)} with filter {json.dumps(filters)}")
     asyncio.create_task(ctx.info(f"Searching for {', '.join(urls)}"))
 
-    documents = []
-    pipeline_retry = 1
-    while pipeline_retry > 0:
-        pipeline_retry -= 1
-        try:
-            res = document_pipeline.run(data={"query": {"text": query, "filters": filters, "max_results": limit}},
-                                        include_outputs_from={"combine"})
-            documents: List[Document] = res.get("combine", {}).get("documents", [])[0:limit]
-        except PipelineRuntimeError as e:
-            if pipeline_retry < 0:
-                raise e
-            logger.info(f"Retrying pipeline due to {e}")
-            # sometimes the chromadb state fails because of writes
-            ctx.request_context.lifespan_context.maybe_reload(force=True)
-            document_pipeline = ctx.request_context.lifespan_context.get_document_pipeline()
+    res = document_pipeline.run(data={"query": {"text": query, "filters": filters, "max_results": limit}},
+                                include_outputs_from={"combine"})
+    documents: List[Document] = res.get("combine", {}).get("documents", [])[0:limit]
 
     return _documents_to_http_resources(documents)
 
@@ -869,16 +836,17 @@ async def index_http_url(
         return None
 
 
-def is_spider_time_recent(url: str) -> Optional[float]:
+async def is_spider_time_recent(url: str) -> Optional[float]:
     # TODO: consider the user_agent and headers, they may make a difference in the result
     try:
         ctx = mcp.get_context()
-        chroma_client: chromadb.PersistentClient = ctx.request_context.lifespan_context.get_chroma_client()
-        collection: chromadb.Collection = chroma_client.get_collection("network")
+        chroma_client: chromadb.AsyncClientAPI = ctx.request_context.lifespan_context.get_chroma_client()
+        collection: AsyncCollection = await chroma_client.get_collection("network")
         url_parsed = urlparse_ext(url)
         netloc = url_parsed.netloc
         now = datetime.now(timezone.utc)
-        for metadata in collection.get(where={"netloc": netloc}, include=["metadatas"]).get("metadatas", []):
+        get_result = await collection.get(where={"netloc": netloc}, include=["metadatas"])
+        for metadata in get_result.get("metadatas", []):
             try:
                 timestamp = datetime.fromisoformat(metadata["timestamp"])
                 if timestamp.tzinfo is None:
@@ -937,7 +905,7 @@ async def spider_website(ctx: Context,
     """
     await log_tool_history(ctx, "spider_website", url=url, additional_hosts=additional_hosts, user_agent=user_agent, request_headers=request_headers)
     url = url.strip()
-    if is_spider_time_recent(url) and False:
+    if await is_spider_time_recent(url):
         logger.info(f"{url} has been recently spidered, returning saved results")
         return SpiderResults(
             resources=await find_web_resources(url),
@@ -993,15 +961,21 @@ async def spider_website(ctx: Context,
         readOnlyHint=True,
         openWorldHint=False),
 )
-async def find_wordlists(ctx: Context) -> List[str]:
+async def find_wordlists(ctx: Context, query: str) -> List[str]:
     """
     Find available word lists. The results can be used with other commands that have options to
     accept word lists.
 
     Invoke this tool when the user wants to run a brute-forcing tool and needs to use a wordlist.
+
+    The query is a substring search of the path. Examples: Web, DNS, LFI, etc.
     """
     await log_tool_history(ctx, "find_wordlists")
-    result: RunUnixCommand = await run_unix_command(ctx, "find /usr/share/seclists -type f", None)
+    command = "find /usr/share/seclists -type f -not -path '*/.*'"
+    if query and query.strip():
+        query_clean = re.sub(r'[^\w\-_]', '', query)
+        command = f"find /usr/share/seclists -type f -ipath '*{query_clean}*' -not -path '*/.*'"
+    result: RunUnixCommand = await run_unix_command(ctx, command, None)
     if result.return_code != 0:
         raise RuntimeError(f"Failed to find word lists: {result.error}")
     return result.output.splitlines()
@@ -1044,11 +1018,12 @@ async def find_domains(ctx: Context, query: Optional[str] = None) -> List[str]:
     query parameter is optional and will limit the results using a "contains" operator.
     """
     await log_tool_history(ctx, "find_domains", query=query)
-    chroma_client: chromadb.PersistentClient = ctx.request_context.lifespan_context.get_chroma_client()
-    collection: chromadb.Collection = chroma_client.get_collection("network")
+    chroma_client: chromadb.AsyncClientAPI = ctx.request_context.lifespan_context.get_chroma_client()
+    collection: AsyncCollection = await chroma_client.get_collection("network")
     result = set()
     query, port = _query_to_netloc(query)
-    for metadata in collection.get(include=["metadatas"]).get("metadatas", []):
+    get_result = await collection.get(include=["metadatas"])
+    for metadata in get_result.get("metadatas", []):
         if "domain" in metadata:
             domain = metadata['domain'].lower()
             if domain and (not query or query.lower() in domain):
@@ -1072,11 +1047,12 @@ async def find_hosts(ctx: Context, domain_query: str) -> List[str]:
     """
     await log_tool_history(ctx, "find_hosts", domain_query=domain_query)
     try:
-        chroma_client: chromadb.PersistentClient = ctx.request_context.lifespan_context.get_chroma_client()
-        collection: chromadb.Collection = chroma_client.get_collection("network")
+        chroma_client: chromadb.AsyncClientAPI = ctx.request_context.lifespan_context.get_chroma_client()
+        collection: AsyncCollection = await chroma_client.get_collection("network")
         result = set()
         domain_query, port = _query_to_netloc(domain_query)
-        for metadata in collection.get(include=["metadatas"]).get("metadatas", []):
+        get_result = await collection.get(include=["metadatas"])
+        for metadata in get_result.get("metadatas", []):
             if "host" in metadata:
                 hostname = metadata['host'].lower()
                 if not domain_query or hostname.endswith(domain_query):
@@ -1103,11 +1079,12 @@ async def find_netloc(ctx: Context, domain_query: str) -> List[str]:
     The domain_query parameter will limit the results using the "ends with" operator on the host name.
     """
     await log_tool_history(ctx, "find_netloc", domain_query=domain_query)
-    chroma_client: chromadb.PersistentClient = ctx.request_context.lifespan_context.get_chroma_client()
-    collection: chromadb.Collection = chroma_client.get_collection("network")
+    chroma_client: chromadb.AsyncClientAPI = ctx.request_context.lifespan_context.get_chroma_client()
+    collection: AsyncCollection = await chroma_client.get_collection("network")
     result = set()
     domain_query, port = _query_to_netloc(domain_query)
-    for metadata in collection.get(include=["metadatas"]).get("metadatas", []):
+    get_result = await collection.get(include=["metadatas"])
+    for metadata in get_result.get("metadatas", []):
         if "host" in metadata:
             hostname = metadata['host'].lower()
             if not domain_query or hostname.endswith(domain_query):
@@ -1137,12 +1114,12 @@ async def find_urls(ctx: Context, host_query: str, limit: int = 100) -> List[str
     """
     await log_tool_history(ctx, "find_urls", host_query=host_query, limit=limit)
     assert limit > 0
-    chroma_client: chromadb.PersistentClient = ctx.request_context.lifespan_context.get_chroma_client()
-    collection: chromadb.Collection = chroma_client.get_collection("network")
+    chroma_client: chromadb.AsyncClientAPI = ctx.request_context.lifespan_context.get_chroma_client()
+    collection: AsyncCollection = await chroma_client.get_collection("network")
     result = set()
     host_query, port = _query_to_netloc(host_query)
-    get_results = await asyncio.to_thread(collection.get, include=["metadatas"])
-    for metadata in await get_results.get("metadatas", []):
+    get_results = await collection.get(include=["metadatas"])
+    for metadata in get_results.get("metadatas", []):
         if "host" in metadata and "url" in metadata:
             hostname = metadata['host'].lower()
             if not host_query or hostname.endswith(host_query):

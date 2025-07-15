@@ -4,6 +4,15 @@ MCP server and AI assistant for penetration testing.
 
 ## TL;DR
 
+### Dependencies
+
+```shell
+virtualenv .venv
+source .venv/bin/activate
+```
+
+### Ollama
+
 Install Ollama and the qwen2.5:7b-instruct model:
 
 Ubuntu:
@@ -19,6 +28,12 @@ macOS:
 brew install ollama
 brew services start ollama
 ollama pull qwen2.5:7b-instruct
+```
+
+### Chroma Database
+
+```shell
+chroma run --path chroma_store --host 127.0.0.1 --port 8200 
 ```
 
 ### MCP Server

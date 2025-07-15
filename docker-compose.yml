@@ -6,16 +6,16 @@ volumes:
 services:
   chroma:
     image: ghcr.io/chroma-core/chroma:1.0.15
-    command: run --path /data --host 0.0.0.0 --port 8000
+    command: run --path /data --host 0.0.0.0 --port 8200
     environment:
-      CHROMA_SERVER_HTTP_PORT: "8000"
-      CHROMA_SERVER_GRPC_PORT: "8030"
+      CHROMA_SERVER_HTTP_PORT: "8200"
+      CHROMA_SERVER_GRPC_PORT: "8230"
       CHROMA_DB_IMPL: "duckdb"
       CHROMA_TELEMETRY: "FALSE"
     volumes:
       - data:/data
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8000/api/v1/heartbeat" ]
+      test: [ "CMD", "curl", "-f", "http://localhost:8200/api/v1/heartbeat" ]
       interval: 30s
       retries: 3
       start_period: 10s
@@ -49,8 +49,9 @@ services:
       - chroma
     environment:
       DOCKER_HOST: "tcp://dind:2375"
-      CHROMA: "chroma:8000"
+      CHROMA: "chroma:8200"
       TOOL_CACHE: "/tool_cache"
+      #DISABLE_ELICITATION: "True"
       OLLAMA_MODEL: "${OLLAMA_MODEL:-qwen2.5:7b-instruct}"
       OLLAMA_URL: "${OLLAMA_URL:-http://127.0.0.1:11434}"
       GEMINI_API_KEY: "${GEMINI_API_KEY}"

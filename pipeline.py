@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import asyncio
 import hashlib
 import json
 import logging
@@ -9,7 +10,7 @@ from json import JSONDecodeError
 from typing import Dict, List, Optional, Any, Tuple
 
 from bs4 import BeautifulSoup, SoupStrainer
-from chromadb import ClientAPI
+from chromadb import AsyncClientAPI
 from haystack.components.agents import Agent
 from haystack.components.joiners import ListJoiner
 from haystack.components.preprocessors import DocumentCleaner
@@ -47,24 +48,24 @@ os.environ['HAYSTACK_TELEMETRY_DISABLED'] = "1"
 logger = logging.getLogger(__name__)
 
 
-def create_chroma_client(db: str) -> ClientAPI:
+async def create_chroma_client(db: str) -> AsyncClientAPI:
     if re.match(r'\S+:\d+$', db):
         host, _, port = db.rpartition(':')
-        return chromadb.HttpClient(host=host, port=int(port))
-    return chromadb.PersistentClient(path=db)
+        return await chromadb.AsyncHttpClient(host=host, port=int(port))
+    return await chromadb.AsyncHttpClient(host="127.0.0.1", port=8200)
 
 
 def create_chrome_document_store(db: str, **kwargs) -> ChromaDocumentStore:
     if re.match(r'\S+:\d+$', db):
         host, _, port = db.rpartition(':')
         return ChromaDocumentStore(host=host, port=int(port), **kwargs)
-    return ChromaDocumentStore(persist_path=db, **kwargs)
+    return ChromaDocumentStore(host="127.0.0.1", port=8200, **kwargs)
 
 
-def list_collections(db: str) -> List[str]:
+async def list_collections(db: str) -> List[str]:
     """Return collection names using a raw Chroma client."""
-    client = create_chroma_client(db)
-    return [c.name for c in client.list_collections()]
+    client = await create_chroma_client(db)
+    return [c.name for c in (await client.list_collections())]
 
 
 @component
@@ -212,42 +213,6 @@ class MultiQueryChromaRetriever:
         return {"documents": results}
 
 
-def build_answer_pipeline(db: str, generator_config: GeneratorConfig) -> Tuple[Pipeline, Component]:
-    """
-    Builds a pipeline for making security related queries.
-    :param db: path to the database.
-    :return: Pipeline
-    """
-
-    pipe, retrievers, stores = build_document_pipeline(db=db, generator_config=generator_config)
-
-    prompt_tmpl = """
-You are an experienced web‑application penetration tester. Below are crawl/scan artefacts from a single website. Identify high‑impact vulnerabilities and exploitation paths.
-
-{% for doc in documents %}
-URL: {{ doc.meta.url }}
-Collection: {{ doc.meta.collection }}
-{{ doc.content }}
-{% endfor %}
-
-Question: {{ query }}
-Answer in concise Markdown with PoCs/examples. Include the URL for documents that contributed to the answer.
-"""
-
-    generator = generator_config.create_generator()
-    pipe.add_component("prompt", PromptBuilder(template=prompt_tmpl, required_variables=["documents", "query"]))
-    pipe.add_component("llm", generator)
-    pipe.add_component("ans", AnswerBuilder())
-
-    pipe.connect("combine", "prompt.documents")
-    pipe.connect("query", "prompt.query")
-    pipe.connect("query", "ans.query")
-    pipe.connect("prompt", "llm.prompt")
-    pipe.connect("llm", "ans.replies")
-
-    return pipe, generator
-
-
 def _create_tools(mcp_urls: Optional[List[str]] = None) -> Toolset:
     if mcp_urls is None:
         mcp_urls = ["http://127.0.0.1:8000/mcp/"]
@@ -379,14 +344,14 @@ def build_agent_pipeline(generator_config: GeneratorConfig, mcp_urls: Optional[L
     return pipeline, assistant, tools
 
 
-def build_document_pipeline(db: str, generator_config: GeneratorConfig) -> Tuple[
+async def build_document_pipeline(db: str, generator_config: GeneratorConfig) -> Tuple[
     Pipeline, Dict[str, MultiQueryChromaRetriever], Dict[str, ChromaDocumentStore]]:
     """
     Builds a pipeline for retrieving documents from the store.
     :param db: path to the database.
     :return: Pipeline
     """
-    collections = list_collections(db)
+    collections = await list_collections(db)
 
     pipe = Pipeline()
     comb = CombineDocs([f"{col}_documents" for col in collections])
