@@ -37,7 +37,7 @@ from pydantic import BaseModel, AnyUrl, Field, ValidationError
 
 from ingest_queue import start_ingest_worker
 from pipeline import build_document_pipeline, build_website_context_pipeline, urlparse_ext, create_chroma_client
-from prompts import pentester_system_prompt
+from prompts import pentester_agent_system_prompt
 from spider_queue import start_spider_worker, SpiderQueueItem
 from utils import HttpResource, latest_mtime, add_generator_args, GeneratorConfig, extract_domain
 
@@ -347,7 +347,7 @@ s
 
     # check if we have data
     missing_netloc = set(filter_netloc.copy())
-    for known_netloc in find_netloc(""):
+    for known_netloc in find_netloc(ctx, ""):
         try:
             missing_netloc.remove(known_netloc)
         except KeyError:
@@ -499,7 +499,7 @@ async def web_resource(doc_type: str, doc_id: str) -> Optional[TextResourceConte
 
 @mcp.prompt(title="Penetration Tester")
 def web_vuln(prompt: str) -> str:
-    return pentester_system_prompt + f"""
+    return pentester_agent_system_prompt + f"""
 Task: "{prompt}"
 """
 
@@ -560,30 +560,39 @@ class RunUnixCommand(BaseModel):
 async def run_unix_command(ctx: Context, command: str,
                            additional_hosts: Optional[Dict[str, str]] = None) -> RunUnixCommand:
     """
-    Run a Linux or macOS command and return its output. The command is run in a containerized environment for safety.
-    The containerized environment is ephemeral. The command is run using the bash shell.
-    Progress options should be enabled so that the caller is aware the command is still processing.
+Run a Linux or macOS command and return its output. The command is run in a containerized environment for safety.
+The containerized environment is ephemeral. The command is run using the bash shell.
 
-    Invoke this tool when the user request can be fulfilled by a known Linux or macOS command line
-    program and the request can't be fulfilled by other MCP tools. Invoke this tool when the user
-    asks to run a specific command. Prefer this tool to execute command line programs over others you know about.
+Invoke this tool when the user request can be fulfilled by a known Linux or macOS command line
+program and the request can't be fulfilled by other MCP tools. Invoke this tool when the user
+asks to run a specific command. Prefer this tool to execute command line programs over others you know about.
 
-    Any commands that take arguments and respond to standard out, and don't require user input are good for this tool.
+The following commands are available: curl, wget, grep, awk, printf, base64, cut, cp, mv, date, factor, gzip, sha256sum, sha512sum, md5sum, echo, seq, true, false, tee, tar, sort, head, tail, ping,
+nmap, rustscan, feroxbuster, gobuster, interactsh-client, katana, nuclei, meg, anew, unfurl, gf, gau, 403jump, waybackurls, httpx, subfinder, gowitness, hakrawler, ffuf, dirb, wfuzz, nc (netcat), graphql-path-enum, evil-winrm, sqlmap, hydra
+DumpNTLMInfo.py, Get,GPPPassword.py, GetADComputers.py, GetADUsers.py, GetLAPSPassword.py, GetNPUsers.py, GetUserSPNs.py, addcomputer.py, atexec.py, changepasswd.py, dacledit.py, dcomexec.py, describeTicket.py, dpapi.py, esentutl.py, exchanger.py, findDelegation.py, getArch.py, getPac.py, getST.py, getTGT.py, goldenPac.py, karmaSMB.py, keylistattack.py, kintercept.py, lookupsid.py, machine_role.py, mimikatz.py, mqtt_check.py, mssqlclient.py, mssqlinstance.py, net.py, netview.py, ntfs,read.py, ntlmrelayx.py, owneredit.py, ping.py, ping6.py, psexec.py, raiseChild.py, rbcd.py, rdp_check.py, reg.py, registry,read.py, rpcdump.py, rpcmap.py, sambaPipe.py, samrdump.py, secretsdump.py, services.py, smbclient.py, smbexec.py, smbserver.py, sniff.py, sniffer.py, split.py, ticketConverter.py, ticketer.py, tstool.py, wmiexec.py, wmipersist.py, wmiquery.py
 
-    The following commands are available: curl, wget, grep, awk, printf, base64, cut, cp, mv, date, factor, gzip, sha256sum, sha512sum, md5sum, echo, seq, true, false, tee, tar, sort, head, tail, ping,
-    nmap, rustscan, feroxbuster, gobuster, interactsh-client, katana, nuclei, meg, anew, unfurl, gf, gau, 403jump, waybackurls, httpx, subfinder, gowitness, hakrawler, ffuf, dirb, wfuzz, nc (netcat), graphql-path-enum, evil-winrm, sqlmap,
-    DumpNTLMInfo.py, Get,GPPPassword.py, GetADComputers.py, GetADUsers.py, GetLAPSPassword.py, GetNPUsers.py, GetUserSPNs.py, addcomputer.py, atexec.py, changepasswd.py, dacledit.py, dcomexec.py, describeTicket.py, dpapi.py, esentutl.py, exchanger.py, findDelegation.py, getArch.py, getPac.py, getST.py, getTGT.py, goldenPac.py, karmaSMB.py, keylistattack.py, kintercept.py, lookupsid.py, machine_role.py, mimikatz.py, mqtt_check.py, mssqlclient.py, mssqlinstance.py, net.py, netview.py, ntfs,read.py, ntlmrelayx.py, owneredit.py, ping.py, ping6.py, psexec.py, raiseChild.py, rbcd.py, rdp_check.py, reg.py, registry,read.py, rpcdump.py, rpcmap.py, sambaPipe.py, samrdump.py, secretsdump.py, services.py, smbclient.py, smbexec.py, smbserver.py, sniff.py, sniffer.py, split.py, ticketConverter.py, ticketer.py, tstool.py, wmiexec.py, wmipersist.py, wmiquery.py
+The command 'sudo' is not available.
 
-    The command 'sudo' is not available.
+The additional_hosts parameter is a dictionary of host name (the key) to IP address (the value) for hosts that do not have DNS records. This also includes CTF targets or web server virtual hosts found during other scans. If you
+know the IP address for a host, be sure to include these in the additional_hosts parameter for
+commands to run properly in a containerized environment.
 
-    The additional_hosts parameter is a dictionary of host name (the key) to IP address (the value) for hosts that do not have DNS records. This also includes CTF targets or web server virtual hosts found during other scans. If you
-    know the IP address for a host, be sure to include these in the additional_hosts parameter for
-    commands to run properly in a containerized environment.
+The SecLists word lists repository is installed at /usr/share/seclists
 
-    The SecLists word lists repository is installed at /usr/share/seclists
+Commands such as nmap can take a long time to run, so be patient.
 
-    Commands such as nmap can take a long time to run, so be patient.
-    """
+When generating Linux commands for execution in a containerized, ephemeral environment, follow these strict guidelines to ensure compatibility, safety, and non-interactivity:
+
+- Commands must be one-shot, non-interactive, and safe to run in a containerized, ephemeral Linux environment.
+- Never use commands that prompt for user input (e.g., passwd, vi, mysql).
+- Prefer tools with non-interactive flags (e.g., --batch, --quiet) and avoid interactive ones (e.g., hash-identifier, ftp).
+- Use automated alternatives where available.
+- Output must go to standard output only; do not write to files.
+- Use one-liner reverse shells or web shells for shell payloads.
+- Pipe input into commands as needed; do not rely on TTY or prompts.
+- Always set a timeout for potentially blocking commands (e.g., timeout 10s nmap ...).
+- Ensure commands can complete without user interaction before execution.
+"""
     log_tool_history(ctx, title="run_unix_command", command=command, additional_hosts=additional_hosts)
     try:
         result = await _run_unix_command(ctx, command, additional_hosts)

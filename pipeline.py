@@ -35,7 +35,7 @@ from haystack.components.builders import PromptBuilder, AnswerBuilder, ChatPromp
 from haystack import Pipeline, component, Document
 from haystack_integrations.tools.mcp import StreamableHttpServerInfo, MCPToolset
 
-from prompts import pentester_system_prompt
+from prompts import pentester_agent_system_prompt, pentester_chat_system_prompt
 from utils import urlparse_ext, GeneratorConfig, extract_domain
 
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
@@ -277,7 +277,7 @@ def build_chat_pipeline(generator_config: GeneratorConfig, mcp_url: Optional[str
 
     tools = _create_shyhurriance_toolset(mcp_url)
     prompt_builder = ChatPromptBuilder(
-        template=[ChatMessage.from_system(pentester_system_prompt), ChatMessage.from_user(user_chat_message_template)],
+        template=[ChatMessage.from_system(pentester_chat_system_prompt), ChatMessage.from_user(user_chat_message_template)],
         variables=["query", "memories"],
         required_variables=["query", "memories"]
     )
@@ -343,7 +343,7 @@ def build_agent_pipeline(generator_config: GeneratorConfig, mcp_url: Optional[st
     assistant = Agent(
         chat_generator=chat_generator,
         tools=tools,
-        system_prompt=pentester_system_prompt,
+        system_prompt=pentester_agent_system_prompt,
         exit_conditions=["text"],
         max_agent_steps=100,
         raise_on_tool_invocation_failure=False

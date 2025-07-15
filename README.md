@@ -96,3 +96,9 @@ model with `--ollama-model`.
 
 - `OLLAMA_MODEL=qwen2.5:7b-instruct`
 - `OLLAMA_URL=http://localhost:11434`
+
+
+# misc.
+
+Disable user elicitation:
+`DISABLE_ELICITATION=True`
