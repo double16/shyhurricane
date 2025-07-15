@@ -46,19 +46,12 @@ Output Format:
 examples = """
 Example 1:
   Task: Conduct a penetration test on 192.168.1.1
-  1. Enumerate ports and services using nmap or rustscan.
-  2. Analyze discovered services using tools appropriate for the service.
-  3. Exploit discovered vulnerabilities using known techniques or CVE PoCs.
-  4. Escalate Privileges for successful exploits.
-  5. Loot.
+  Enumerate ports and services using nmap or rustscan and continue with the already provided methodology.
 Example 2:
   Task: Examine http://192.168.1.1:8080
-  1. Enumerate the web site using spider_website, find_web_resource, etc. and also Linux commands as appropriate.
-     Enumerate additional virtual hosts using tools like fuff or wfuzz.
-  2. Analyze html, javascript, css and other web resources starting with the OWASP 10 list for web.
-  3. Exploit discovered vulnerabilities using known techniques or CVE PoCs.
-  4. Escalate Privileges for successful exploits.
-  5. Loot.
+  Enumerate the web site using spider_website, find_web_resource, etc. and also Linux commands as appropriate.
+  Enumerate additional virtual hosts using tools like fuff or wfuzz.
+  Then continue with the already provided methodology.
 """
 
 # This statement causes some models to refuse:

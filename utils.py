@@ -6,6 +6,7 @@ from pathlib import Path
 from urllib.parse import ParseResult, urlparse
 from typing import Optional, Generator, Dict, Any, Union, List
 
+import aiofiles
 from haystack.components.generators import OpenAIGenerator
 from haystack.components.generators.chat import OpenAIChatGenerator
 from haystack.tools import Toolset
@@ -78,6 +79,27 @@ def extract_domain(hostname: str) -> Optional[str]:
     if not domain:
         return '.'.join(hostname.split(".")[-2:])
     return domain
+
+
+async def read_last_text_bytes(path, max_bytes=1024, encoding='utf-8') -> str:
+    async with aiofiles.open(path, 'rb') as f:
+        await f.seek(0, 2)
+        size = await f.tell()
+        to_read = min(size, max_bytes)
+        await f.seek(-to_read, 2)
+        chunk = await f.read(to_read)
+
+    # Ensure we return valid UTF-8 characters only (trim partial character from start)
+    try:
+        return chunk.decode(encoding)
+    except UnicodeDecodeError:
+        # Strip partial character from the start until it decodes
+        for i in range(1, 5):  # UTF-8 characters are up to 4 bytes
+            try:
+                return chunk[i:].decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        return ""
 
 
 TEMPERATURE_DEFAULT: float = 0.2
@@ -156,14 +178,14 @@ class GeneratorConfig(BaseModel):
                 return OllamaChatGenerator(
                     url=self.ollama_url,
                     model=self.ollama_model,
-                    generation_kwargs={"temperature": self.temperature, "num_predict": 100} | (generation_kwargs or {}),
+                    generation_kwargs={"temperature": self.temperature} | (generation_kwargs or {}),
                     tools=tools
                 )
             else:
                 logger.info("Using Ollama chat with model %s", self.ollama_model)
                 return OllamaChatGenerator(
                     model=self.ollama_model,
-                    generation_kwargs={"temperature": self.temperature, "num_predict": 100} | (generation_kwargs or {}),
+                    generation_kwargs={"temperature": self.temperature} | (generation_kwargs or {}),
                     tools=tools
                 )
         else:
@@ -188,13 +210,13 @@ class GeneratorConfig(BaseModel):
                 return OllamaGenerator(
                     url=self.ollama_url,
                     model=self.ollama_model,
-                    generation_kwargs={"temperature": self.temperature, "num_predict": 100} | (generation_kwargs or {}),
+                    generation_kwargs={"temperature": self.temperature} | (generation_kwargs or {}),
                 )
             else:
                 logger.info("Using Ollama generator with model %s", self.ollama_model)
                 return OllamaGenerator(
                     model=self.ollama_model,
-                    generation_kwargs={"temperature": self.temperature, "num_predict": 100} | (generation_kwargs or {}),
+                    generation_kwargs={"temperature": self.temperature} | (generation_kwargs or {}),
                 )
         else:
             raise NotImplementedError

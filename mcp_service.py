@@ -6,11 +6,11 @@ import json
 import logging
 import os
 import queue
-import subprocess
 import sys
 import time
 import traceback
-from collections import deque
+import asyncio
+import aiofiles
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from multiprocessing import Queue, Process
@@ -39,7 +39,7 @@ from ingest_queue import start_ingest_worker
 from pipeline import build_document_pipeline, build_website_context_pipeline, urlparse_ext, create_chroma_client
 from prompts import pentester_agent_system_prompt
 from spider_queue import start_spider_worker, SpiderQueueItem
-from utils import HttpResource, latest_mtime, add_generator_args, GeneratorConfig, extract_domain
+from utils import HttpResource, latest_mtime, add_generator_args, GeneratorConfig, extract_domain, read_last_text_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -197,22 +197,22 @@ def _documents_to_http_resources(documents: List[Document]) -> List[HttpResource
     return https_resources
 
 
-def log_history(ctx: Context, data: Dict[str, Any]):
+async def log_history(ctx: Context, data: Dict[str, Any]):
     try:
-        with open(os.path.join(ctx.request_context.lifespan_context.cache_path, 'history.jsonl'), 'at') as history_file:
+        async with aiofiles.open(os.path.join(ctx.request_context.lifespan_context.cache_path, 'history.jsonl'), 'ta') as history_file:
             data["timestamp"] = datetime.now().isoformat()
-            history_file.write(json.dumps(data))
-            history_file.write("\n")
+            await history_file.write(json.dumps(data))
+            await history_file.write("\n")
     except IOError as e:
         logger.info("Cannot write to history file", exc_info=e)
 
 
-def log_tool_history(ctx: Context, title: str, **kwargs):
+async def log_tool_history(ctx: Context, title: str, **kwargs):
     data = {
         "tool": title,
         "arguments": kwargs or {},
     }
-    log_history(ctx, data)
+    await log_history(ctx, data)
     logger.info(f"{title}: {json.dumps(data)}")
 
 
@@ -251,7 +251,7 @@ s
     The limit parameter is used to limit how many results are returned. The default is 100. The value must range between 10 and 1000.
     """
     ctx = mcp.get_context()
-    log_tool_history(ctx, "find_web_resources", query=query, limit=limit)
+    await log_tool_history(ctx, "find_web_resources", query=query, limit=limit)
     query = query.strip()
     limit = min(1000, max(10, limit or 100))
     logger.info("finding web resources for %s up to %d results", query, limit)
@@ -305,7 +305,7 @@ s
     response_codes: list[str] = []
 
     async def determine_targets(target_query: str):
-        await ctx.info("Determining target(s)")
+        asyncio.create_task(ctx.info("Determining target(s)"))
         target_result = \
             website_context_pipeline.run({'builder': {'query': target_query}}).get('llm', {}).get('replies', [""])[0]
         if target_result:
@@ -339,7 +339,7 @@ s
                 case CancelledElicitation():
                     return []
         except McpError as e:
-            await ctx.info("Specify a target URL for searching.")
+            asyncio.create_task(ctx.info("Specify a target URL for searching."))
             logger.warning("elicit not supported, exiting", exc_info=e)
             return []
 
@@ -376,7 +376,7 @@ s
                 case CancelledElicitation():
                     return []
         except McpError as e:
-            await ctx.info(f"Ask to spider {', '.join(missing_urls)}.")
+            asyncio.create_task(ctx.info(f"Ask to spider {', '.join(missing_urls)}."))
             logger.warning("elicit not supported, continuing")
 
     conditions = []
@@ -395,7 +395,7 @@ s
         }
 
     logger.info(f"Searching for {', '.join(urls)} with filter {json.dumps(filters)}")
-    await ctx.info(f"Searching for {', '.join(urls)}")
+    asyncio.create_task(ctx.info(f"Searching for {', '.join(urls)}"))
 
     documents = []
     pipeline_retry = 1
@@ -447,7 +447,7 @@ async def fetch_web_resource_content(ctx: Context, uri: str) -> Optional[TextRes
 
     Invoke this tool when the user requests analysis of resource content that has already been indexed, spidered or scanned.
     """
-    log_tool_history(ctx, "fetch_web_resource_content", uri=uri)
+    asyncio.create_task(log_tool_history(ctx, "fetch_web_resource_content", uri=uri))
     doc_type: Optional[str] = None
     doc_id: Optional[str] = None
     doc: Optional[Document] = None
@@ -535,7 +535,7 @@ async def register_hostname_address(ctx: Context, host: str, address: str) -> Di
     Registers a hostname with an IP address. This is useful when a hostname has no DNS entry
     and we know the IP address by other means. Especially useful in CTF or private networks.
     """
-    log_tool_history(ctx, "register_hostname_address", host=host, address=address)
+    asyncio.create_task(log_tool_history(ctx, "register_hostname_address", host=host, address=address))
     return get_additional_hosts({host: address})
 
 
@@ -593,7 +593,7 @@ When generating Linux commands for execution in a containerized, ephemeral envir
 - Always set a timeout for potentially blocking commands (e.g., timeout 10s nmap ...).
 - Ensure commands can complete without user interaction before execution.
 """
-    log_tool_history(ctx, title="run_unix_command", command=command, additional_hosts=additional_hosts)
+    asyncio.create_task(log_tool_history(ctx, title="run_unix_command", command=command, additional_hosts=additional_hosts))
     try:
         result = await _run_unix_command(ctx, command, additional_hosts)
         return result
@@ -680,45 +680,19 @@ async def _run_unix_command(ctx: Context, command: str, additional_hosts: Option
             docker_command.extend(["--add-host", f"{host}:{ip}"])
         docker_command.extend(["shyhurricane_unix_command:latest", "/bin/bash", "-c", command])
         logger.info(f"Executing command {docker_command}")
-        with open(stdout_path, "w") as stdout_file:
-            with open(stderr_path, "w") as stderr_file:
-                last_report = time.time()
-                proc = subprocess.Popen(docker_command, shell=False, cwd=cwd, universal_newlines=True,
-                                        stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-                os.set_blocking(proc.stdout.fileno(), False)
-                os.set_blocking(proc.stderr.fileno(), False)
-                while proc.poll() is None:
-                    line_err = proc.stderr.readline()
-                    if line_err:
-                        stderr_file.write(line_err)
 
-                    line_out = proc.stdout.readline()
-                    if line_out:
-                        stdout_file.write(line_out)
+        proc = await asyncio.create_subprocess_exec(
+            *docker_command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=cwd)
 
-                    if time.time() - last_report > 5:
-                        last_report = time.time()
-                        try:
-                            await ctx.info(line_err or line_out or "Running")
-                        except Exception:
-                            pass
+        await asyncio.gather(
+            _write_stream_to_file(proc.stdout, stdout_path),
+            _write_stream_to_file(proc.stderr, stderr_path),
+        )
 
-                    if not line_err and not line_out:
-                        time.sleep(0.2)
-                while True:
-                    line_err = proc.stderr.readline()
-                    if line_err:
-                        stderr_file.write(line_err)
-                    else:
-                        break
-                while True:
-                    line_out = proc.stdout.readline()
-                    if line_out:
-                        stdout_file.write(line_out)
-                    else:
-                        break
-
-        return_code = proc.poll()
+        return_code = await proc.wait()
         logger.info("Command complete, exit code %d, output size %d, error size %d", return_code,
                     os.stat(stdout_path).st_size, os.stat(stderr_path).st_size)
         meta = {
@@ -729,27 +703,36 @@ async def _run_unix_command(ctx: Context, command: str, additional_hosts: Option
         with open(meta_path, "w") as meta_file:
             json.dump(meta, meta_file)
 
-    log_history(ctx, {
+    asyncio.create_task(log_history(ctx, {
         "command": command,
         "return_code": return_code,
         "additional_hosts": additional_hosts or {},
         "stdout": stdout_path,
         "stderr": stderr_path,
-    })
+    }))
 
     if return_code == 0:
-        with open(stdout_path, "r", encoding="utf-8", errors='replace') as f:
-            return RunUnixCommand(return_code=return_code, output=f.read(), error="", cached=cached, notes=None)
+        async with aiofiles.open(stdout_path, "r", encoding="utf-8", errors='replace') as f:
+            return RunUnixCommand(return_code=return_code, output=await f.read(), error="", cached=cached, notes=None)
     else:
-        with open(stdout_path, "r", encoding="utf-8", errors='replace') as stdout_file:
-            with open(stderr_path, 'r', encoding="utf-8", errors='replace') as stderr_file:
-                return RunUnixCommand(
-                    return_code=return_code,
-                    output=stdout_file.read(),
-                    error=''.join(deque(stderr_file, maxlen=20)),
-                    cached=cached,
-                    notes=None,
-                )
+        error_tail = await read_last_text_bytes(stderr_path, max_bytes=1024)
+        async with aiofiles.open(stdout_path, "r", encoding="utf-8", errors='replace') as stdout_file:
+            return RunUnixCommand(
+                return_code=return_code,
+                output=await stdout_file.read(),
+                error=error_tail,
+                cached=cached,
+                notes=None,
+            )
+
+
+async def _write_stream_to_file(stream, path):
+    async with aiofiles.open(path, 'w', encoding='utf-8') as f:
+        while True:
+            line = await stream.readline()
+            if not line:
+                break
+            await f.write(line.decode('utf-8', errors='replace'))
 
 
 @mcp.tool(
@@ -769,9 +752,9 @@ async def index_http_request_response(data: str):
     {"request": {"headers": {"sec_fetch_mode": "navigate", "priority": "u=0, i", "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "sec_fetch_dest": "document", "host": "example.com", "accept_language": "en-US,en;q=0.5", "connection": "keep-alive", "sec_fetch_site": "none", "upgrade_insecure_requests": "1", "sec_fetch_user": "?1", "user_agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"}, "method": "GET", "source": "katana", "body": "", "endpoint": "https://example.com/", "tag": "katana", "attribute": "http"}, "response": {"headers": {"date": "Sun, 29 Jun 2025 03:44:52 GMT", "content_type": "text/html", "connection": "keep-alive", "location": "https://www.example.com/", "content_length": "169"}, "status_code": 301, "body": "<html>\r\n<head><title>301 Moved Permanently</title></head>\r\n<body>\r\n<center><h1>301 Moved Permanently</h1></center>\r\n<hr><center>nginx/1.20.1</center>\r\n</body>\r\n</html>\r\n"}, "timestamp": "2025-06-28T22:44:52.798000"}
     """
     ctx = mcp.get_context()
-    log_tool_history(ctx, "index_http_request_response", data=data[0:64])
+    await log_tool_history(ctx, "index_http_request_response", data=data[0:64])
     ingest_queue: Queue = ctx.request_context.lifespan_context.ingest_queue
-    ingest_queue.put_nowait(data)
+    await asyncio.to_thread(ingest_queue.put, data)
     return None
 
 
@@ -841,7 +824,7 @@ async def index_http_url(
     Invoke this tool when the user needs the content of one specific URL.
     """
     method = "GET"
-    log_tool_history(ctx, "index_http_url", url=url, method=method, user_agent=user_agent,
+    await log_tool_history(ctx, "index_http_url", url=url, method=method, user_agent=user_agent,
                      request_headers=request_headers)
     the_headers = request_headers or {}
     if user_agent:
@@ -952,10 +935,9 @@ async def spider_website(ctx: Context,
 
     Returns a list of resources found, including URL, response code, content type, and content length. Indexes each URL that can be queried using the find_web_resources tool. URL content can be returned using the fetch_web_resource_content tool.
     """
-    log_tool_history(ctx, "spider_website", url=url, additional_hosts=additional_hosts, user_agent=user_agent,
-                     request_headers=request_headers)
+    await log_tool_history(ctx, "spider_website", url=url, additional_hosts=additional_hosts, user_agent=user_agent, request_headers=request_headers)
     url = url.strip()
-    if is_spider_time_recent(url):
+    if is_spider_time_recent(url) and False:
         logger.info(f"{url} has been recently spidered, returning saved results")
         return SpiderResults(
             resources=await find_web_resources(url),
@@ -972,14 +954,14 @@ async def spider_website(ctx: Context,
         request_headers=request_headers,
         additional_hosts=get_additional_hosts(additional_hosts),
     )
-    spider_queue.put_nowait(spider_queue_item)
+    await asyncio.to_thread(spider_queue.put, spider_queue_item)
     results: List[HttpResource] = []
     has_more = True
     time_limit = time.time() + 90
     while time.time() < time_limit:
         try:
-            http_resource: HttpResource = spider_result_queue.get(
-                block=True,
+            http_resource: HttpResource = await asyncio.to_thread(
+                spider_result_queue.get,
                 timeout=(max(1.0, time_limit - time.time())))
         except queue.Empty:
             has_more = False
@@ -993,7 +975,7 @@ async def spider_website(ctx: Context,
                 f"Spider queued {http_resource.host}:{http_resource.port}, expecting {url_parsed.hostname}:{url_parsed.port}")
             continue
         results.append(http_resource)
-        await ctx.info(f"Found: {http_resource.url}")
+        asyncio.create_task(ctx.info(f"Found: {http_resource.url}"))
 
     return SpiderResults(
         resources=results,
@@ -1018,7 +1000,7 @@ async def find_wordlists(ctx: Context) -> List[str]:
 
     Invoke this tool when the user wants to run a brute-forcing tool and needs to use a wordlist.
     """
-    log_tool_history(ctx, "find_wordlists")
+    await log_tool_history(ctx, "find_wordlists")
     result: RunUnixCommand = await run_unix_command(ctx, "find /usr/share/seclists -type f", None)
     if result.return_code != 0:
         raise RuntimeError(f"Failed to find word lists: {result.error}")
@@ -1061,7 +1043,7 @@ async def find_domains(ctx: Context, query: Optional[str] = None) -> List[str]:
     Invoke this tool when the user asks about websites that have been scanned, spidered or indexed. The
     query parameter is optional and will limit the results using a "contains" operator.
     """
-    log_tool_history(ctx, "find_domains", query=query)
+    await log_tool_history(ctx, "find_domains", query=query)
     chroma_client: chromadb.PersistentClient = ctx.request_context.lifespan_context.get_chroma_client()
     collection: chromadb.Collection = chroma_client.get_collection("network")
     result = set()
@@ -1080,7 +1062,7 @@ async def find_domains(ctx: Context, query: Optional[str] = None) -> List[str]:
         readOnlyHint=True,
         openWorldHint=False),
 )
-def find_hosts(ctx: Context, domain_query: str) -> List[str]:
+async def find_hosts(ctx: Context, domain_query: str) -> List[str]:
     """
     Query indexed resources for a list of hosts for the given domain.
 
@@ -1088,7 +1070,7 @@ def find_hosts(ctx: Context, domain_query: str) -> List[str]:
 
     The domain_query parameter will limit the results using the "ends with" operator.
     """
-    log_tool_history(ctx, "find_hosts", domain_query=domain_query)
+    await log_tool_history(ctx, "find_hosts", domain_query=domain_query)
     try:
         chroma_client: chromadb.PersistentClient = ctx.request_context.lifespan_context.get_chroma_client()
         collection: chromadb.Collection = chroma_client.get_collection("network")
@@ -1112,7 +1094,7 @@ def find_hosts(ctx: Context, domain_query: str) -> List[str]:
         readOnlyHint=True,
         openWorldHint=False),
 )
-def find_netloc(ctx: Context, domain_query: str) -> List[str]:
+async def find_netloc(ctx: Context, domain_query: str) -> List[str]:
     """
     Query indexed resources for a list of network locations, i.e. host:port, for a given domain.
 
@@ -1120,7 +1102,7 @@ def find_netloc(ctx: Context, domain_query: str) -> List[str]:
 
     The domain_query parameter will limit the results using the "ends with" operator on the host name.
     """
-    log_tool_history(ctx, "find_netloc", domain_query=domain_query)
+    await log_tool_history(ctx, "find_netloc", domain_query=domain_query)
     chroma_client: chromadb.PersistentClient = ctx.request_context.lifespan_context.get_chroma_client()
     collection: chromadb.Collection = chroma_client.get_collection("network")
     result = set()
@@ -1153,13 +1135,14 @@ async def find_urls(ctx: Context, host_query: str, limit: int = 100) -> List[str
 
     The limit parameter limits the number of results. The default limit is 100.
     """
-    log_tool_history(ctx, "find_urls", host_query=host_query, limit=limit)
+    await log_tool_history(ctx, "find_urls", host_query=host_query, limit=limit)
     assert limit > 0
     chroma_client: chromadb.PersistentClient = ctx.request_context.lifespan_context.get_chroma_client()
     collection: chromadb.Collection = chroma_client.get_collection("network")
     result = set()
     host_query, port = _query_to_netloc(host_query)
-    for metadata in collection.get(include=["metadatas"]).get("metadatas", []):
+    get_results = await asyncio.to_thread(collection.get, include=["metadatas"])
+    for metadata in await get_results.get("metadatas", []):
         if "host" in metadata and "url" in metadata:
             hostname = metadata['host'].lower()
             if not host_query or hostname.endswith(host_query):
