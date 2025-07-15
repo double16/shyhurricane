@@ -65,8 +65,8 @@ def main():
     )
     ap.add_argument("--verbose", "-v", action="store_true", help="Verbose mode")
     add_generator_args(ap)
-    ap.add_argument("--mcp-url", required=False, help="URL for the MCP server, i.e. http://127.0.0.1:8000/mcp/")
-    ap.add_argument("--stream", action="store_true")
+    ap.add_argument("--mcp-url", nargs="+", required=False, help="URL for the MCP server, i.e. http://127.0.0.1:8000/mcp/")
+    ap.add_argument("--stream", action="store_true", help="Stream messages, always on for agent mode")
     ap.add_argument("--history", default="chat_history.md")
     args = ap.parse_args()
 
@@ -126,7 +126,7 @@ This is a penetration test assistant in {args.mode} mode using {generator_config
 """))
                 continue
 
-            console.print("🧠 ", end="")
+            console.print("🤖 ", end="")
 
             # Build the pipeline input
             user_in_message = ChatMessage.from_user(user_in)
@@ -158,6 +158,7 @@ This is a penetration test assistant in {args.mode} mode using {generator_config
                 replies = []
 
             ans_md = "\n".join(replies[-1].texts)
+            console.print("")
             console.print("")
             if not args.stream:
                 console.print(Markdown(ans_md))

@@ -21,6 +21,7 @@ from haystack.tools import Toolset
 from haystack_experimental.chat_message_stores import InMemoryChatMessageStore
 from haystack_experimental.components.retrievers import ChatMessageRetriever
 from haystack_experimental.components.writers import ChatMessageWriter
+from mcp import Tool
 from more_itertools import first
 
 from doc_type_model_map import get_model_for_doc_type, doc_type_to_model, map_mime_to_type
@@ -247,14 +248,21 @@ Answer in concise Markdown with PoCs/examples. Include the URL for documents tha
     return pipe, generator
 
 
-# TODO: Handle multiple URLs
-def _create_shyhurriance_toolset(mcp_url: Optional[str] = None) -> MCPToolset:
-    if mcp_url is None:
-        mcp_url = "http://127.0.0.1:8000/mcp/"
-    return MCPToolset(
-        server_info=StreamableHttpServerInfo(url=mcp_url),
-        invocation_timeout=600.0
-    )
+def _create_tools(mcp_urls: Optional[List[str]] = None) -> Toolset:
+    if mcp_urls is None:
+        mcp_urls = ["http://127.0.0.1:8000/mcp/"]
+    if len(mcp_urls) == 1:
+        return MCPToolset(
+            server_info=StreamableHttpServerInfo(url=mcp_urls[0]),
+            invocation_timeout=600.0
+        )
+    tools = []
+    for mcp_url in mcp_urls:
+        tools.extend(list(MCPToolset(
+            server_info=StreamableHttpServerInfo(url=mcp_url),
+            invocation_timeout=600.0
+        )))
+    return Toolset(tools=tools)
 
 
 user_chat_message_template = """Given the conversation history, complete the task requested.
@@ -268,14 +276,14 @@ user_chat_message_template = """Given the conversation history, complete the tas
 """
 
 
-def build_chat_pipeline(generator_config: GeneratorConfig, mcp_url: Optional[str] = None) -> Tuple[
-    Pipeline, Component, Toolset]:
+def build_chat_pipeline(generator_config: GeneratorConfig, mcp_urls: Optional[List[str]] = None) -> Tuple[
+    Pipeline, Component, List[Tool]]:
     """
     Builds a pipeline for a cyber-security chat.
     :return: Pipeline, generator component
     """
 
-    tools = _create_shyhurriance_toolset(mcp_url)
+    tools = _create_tools(mcp_urls)
     prompt_builder = ChatPromptBuilder(
         template=[ChatMessage.from_system(pentester_chat_system_prompt), ChatMessage.from_user(user_chat_message_template)],
         variables=["query", "memories"],
@@ -323,14 +331,14 @@ class ChatMessageToListAdapter:
         return {"values": [value]}
 
 
-def build_agent_pipeline(generator_config: GeneratorConfig, mcp_url: Optional[str] = None) -> Tuple[
-    Pipeline, Component, Toolset]:
+def build_agent_pipeline(generator_config: GeneratorConfig, mcp_urls: Optional[List[str]] = None) -> Tuple[
+    Pipeline, Component, List[Tool]]:
     """
     Builds a pipeline for a cyber-security agent.
     :return: Pipeline
     """
 
-    tools = _create_shyhurriance_toolset(mcp_url)
+    tools = _create_tools(mcp_urls)
     prompt_builder = ChatPromptBuilder(
         template=[ChatMessage.from_user(user_chat_message_template)],
         variables=["query", "memories"],
