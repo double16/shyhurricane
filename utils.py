@@ -4,7 +4,7 @@ import logging
 import os
 from pathlib import Path
 from urllib.parse import ParseResult, urlparse
-from typing import Optional, Generator, Dict, Any, Union, List, Sequence, Tuple
+from typing import Optional, Generator, Dict, Any, Union, List, Sequence, Tuple, Literal
 
 import aiofiles
 from haystack.components.generators import OpenAIGenerator
@@ -260,3 +260,21 @@ def parse_http_response(response_text) -> Tuple[
 
     body = "\n".join(body_lines)
     return status_code, headers, body
+
+
+class PortScanResult(BaseModel):
+    hostname: Optional[str] = Field(description="Hostname")
+    ip_address: Optional[str] = Field(description="IP address")
+    port: int = Field(description="Port number")
+    state: str = Field(description="Port state: open, closed, or filtered")
+    service_name: Optional[str] = Field(description="Service name")
+    service_notes: Optional[str] = Field(description="Notes on the service")
+
+
+class PortScanResults(BaseModel):
+    results: List[PortScanResult] = Field(description="List of individual port scan results")
+    targets: List[str] = Field(description="List of targets")
+    ports: List[str] = Field(description="List of ports: individual ports or ranges")
+    runtime_ts: float = Field(description="When the scan was run")
+    nmap_xml: str = Field(description="NMAP XML output")
+    has_more: bool = Field(False, description="Whether there are more results")

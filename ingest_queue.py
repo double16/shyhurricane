@@ -24,6 +24,7 @@ def _ingest_worker(db: str, generator_config: GeneratorConfig, queue: Queue):
     while True:
         item = queue.get()
         if item is None:
+            logger.info("Exiting the ingest queue")
             break  # Sentinel to stop
         try:
             pipeline.run({"input_router": {"text": str(item)}})

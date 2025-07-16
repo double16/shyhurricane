@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import atexit
 import hashlib
 import ipaddress
 import json
@@ -19,6 +20,7 @@ from typing import List, AsyncIterator, Optional, Tuple, Dict, Any
 from urllib.parse import urlparse
 
 import chromadb
+import httpx
 from chromadb.errors import NotFoundError
 from chromadb.api.models.AsyncCollection import AsyncCollection
 import mcp
@@ -37,17 +39,18 @@ from pydantic import BaseModel, AnyUrl, Field, ValidationError
 
 from ingest_queue import start_ingest_worker
 from pipeline import build_document_pipeline, build_website_context_pipeline, urlparse_ext, create_chroma_client
-from prompts import pentester_agent_system_prompt, pentester_chat_system_prompt
+from port_scan_queue import PortScanQueueItem, start_port_scan_worker, get_stored_port_scan_results
+from prompts import pentester_chat_system_prompt
 from spider_queue import start_spider_worker, SpiderQueueItem
-from utils import HttpResource, add_generator_args, GeneratorConfig, extract_domain, read_last_text_bytes
+from utils import HttpResource, add_generator_args, GeneratorConfig, extract_domain, read_last_text_bytes, \
+    PortScanResults
 
 logger = logging.getLogger(__name__)
 
 generator_config: Optional[GeneratorConfig] = GeneratorConfig.from_env()
 
-
 @dataclass
-class AppContext:
+class ServerContext:
     db: str
     cache_path: str
     document_pipeline: Pipeline
@@ -57,10 +60,88 @@ class AppContext:
     spider_queue: Queue
     spider_result_queue: Queue
     spider_process: Process
+    port_scan_queue: Queue
+    port_scan_result_queue: Queue
+    port_scan_process: Process
     stores: Dict[str, ChromaDocumentStore]
     chroma_client: chromadb.AsyncClientAPI
-    last_mtime: float = None
     disable_elicitation: bool = False
+
+    def close(self):
+        for process in [self.ingest_process, self.spider_process, self.port_scan_process]:
+            try:
+                logger.info("Terminating process %s", process.pid)
+                process.terminate()
+                process.join()
+                process.close()
+            except Exception:
+                pass
+        logger.info("Closing queues ...")
+        for q in [self.ingest_queue, self.spider_queue, self.spider_result_queue, self.port_scan_process,
+                  self.port_scan_result_queue, self.port_scan_process]:
+            try:
+                q.put_nowait(None)
+                q.close()
+            except Exception:
+                pass
+        logger.info("ServerContext closed")
+
+
+_server_context: Optional[ServerContext] = None
+
+
+async def get_server_context() -> ServerContext:
+    global _server_context
+    if _server_context is None:
+        db = os.environ.get('CHROMA', '127.0.0.1:8200')
+        logger.info("Using chroma database at %s", db)
+        cache_path: str = os.path.join(os.environ.get('TOOL_CACHE', os.environ.get('TMPDIR', '/tmp')), 'tool_cache')
+        os.makedirs(cache_path, exist_ok=True)
+        disable_elicitation = bool(os.environ.get('DISABLE_ELICITATION', 'False'))
+        chroma_client = await create_chroma_client(db=db)
+        document_pipeline, retrievers, stores = await build_document_pipeline(
+            db=db,
+            generator_config=generator_config,
+        )
+        website_context_pipeline = build_website_context_pipeline(
+            generator_config=generator_config,
+        )
+        ingest_queue, ingest_process = start_ingest_worker(db=db, generator_config=generator_config)
+        spider_queue, spider_result_queue, spider_process = start_spider_worker(db=db)
+        port_scan_queue, port_scan_result_queue, port_scan_process = start_port_scan_worker(db=db)
+        _server_context = ServerContext(
+            db=db,
+            cache_path=cache_path,
+            document_pipeline=document_pipeline,
+            website_context_pipeline=website_context_pipeline,
+            ingest_queue=ingest_queue,
+            ingest_process=ingest_process,
+            spider_queue=spider_queue,
+            spider_result_queue=spider_result_queue,
+            spider_process=spider_process,
+            port_scan_queue=port_scan_queue,
+            port_scan_result_queue=port_scan_result_queue,
+            port_scan_process=port_scan_process,
+            stores=stores,
+            chroma_client=chroma_client,
+            disable_elicitation=disable_elicitation,
+        )
+
+    return _server_context
+
+
+@atexit.register
+def close_server_context() -> None:
+    global _server_context
+    if _server_context is not None:
+        _server_context.close()
+        _server_context = None
+
+
+@dataclass
+class AppContext:
+    # TODO: add scope?
+    cache_path: str
 
     def get_cache_path_for_tool(self, tool_id_str: str, additional_hosts: Dict[str, str]) -> str:
         digest = hashlib.sha512()
@@ -72,15 +153,9 @@ class AppContext:
         os.makedirs(path, exist_ok=True)
         return path
 
-    def get_document_pipeline(self) -> Pipeline:
-        return self.document_pipeline
 
-    def get_chroma_client(self) -> chromadb.AsyncClientAPI:
-        return self.chroma_client
-
-
-def assert_elicitation(ctx: Context):
-    if ctx.request_context.lifespan_context.disable_elicitation:
+def assert_elicitation(ctx: ServerContext):
+    if ctx.disable_elicitation:
         raise McpError(ErrorData(code=INVALID_REQUEST, message="elicitation disabled"))
 
 
@@ -88,37 +163,12 @@ def assert_elicitation(ctx: Context):
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     """Manage application lifecycle with type-safe context"""
     # Initialize on startup
-    db = os.environ.get('CHROMA', '127.0.0.1:8200')
-    disable_elicitation = bool(os.environ.get('DISABLE_ELICITATION', 'False'))
-    logger.info("Using chroma database at %s", db)
-    chroma_client = await create_chroma_client(db=db)
-    cache_path = os.path.join(os.environ.get('TOOL_CACHE', os.environ.get('TMPDIR', '/tmp')), 'tool_cache')
-    os.makedirs(cache_path, exist_ok=True)
-    document_pipeline, retrievers, stores = await build_document_pipeline(
-        db=db,
-        generator_config=generator_config,
-    )
-    website_context_pipeline = build_website_context_pipeline(
-        generator_config=generator_config,
-    )
-    ingest_queue, ingest_process = start_ingest_worker(db=db, generator_config=generator_config)
-    spider_queue, spider_result_queue, spider_process = start_spider_worker(db=db)
+    # TODO: make this per AppContext
+    cache_path = (await get_server_context()).cache_path
 
     try:
         yield AppContext(
-            db=db,
             cache_path=cache_path,
-            document_pipeline=document_pipeline,
-            website_context_pipeline=website_context_pipeline,
-            ingest_queue=ingest_queue,
-            ingest_process=ingest_process,
-            spider_queue=spider_queue,
-            spider_result_queue=spider_result_queue,
-            spider_process=spider_process,
-            stores=stores,
-            chroma_client=chroma_client,
-            last_mtime=time.time(),
-            disable_elicitation=disable_elicitation,
         )
     finally:
         # Cleanup on shutdown
@@ -230,12 +280,13 @@ s
     The limit parameter is used to limit how many results are returned. The default is 100. The value must range between 10 and 1000.
     """
     asyncio.create_task(log_tool_history(ctx, "find_web_resources", query=query, limit=limit))
+    server_ctx = await get_server_context()
     query = query.strip()
     limit = min(1000, max(10, limit or 100))
     logger.info("finding web resources for %s up to %d results", query, limit)
 
-    document_pipeline: Pipeline = ctx.request_context.lifespan_context.get_document_pipeline()
-    website_context_pipeline: Pipeline = ctx.request_context.lifespan_context.website_context_pipeline
+    document_pipeline: Pipeline = server_ctx.document_pipeline
+    website_context_pipeline: Pipeline = server_ctx.website_context_pipeline
 
     # handle a case where a query is only URL
     try:
@@ -256,7 +307,7 @@ s
             if not url_prefix:
                 url_prefix = query_url + '/'
 
-        store = ctx.request_context.lifespan_context.stores["content"]
+        store = server_ctx.stores["content"]
         docs = []
 
         # Make sure the requested URL is returned
@@ -300,7 +351,7 @@ s
     if not urls:
         try:
             logger.info("Asking user for URL(s)")
-            assert_elicitation(ctx)
+            assert_elicitation(server_ctx)
             target_elicit_result = await ctx.elicit(
                 message=f"What URL(s) should we look for?", schema=RequestTargetUrl
             )
@@ -341,7 +392,7 @@ s
     if missing_urls:
         logger.info(f"Asking user to spider {', '.join(missing_urls)}")
         try:
-            assert_elicitation(ctx)
+            assert_elicitation(server_ctx)
             spider_elicit_result = await ctx.elicit(
                 message=f"There is no data for {', '.join(missing_urls)}. Would you like to start a scan?",
                 schema=RequestTargetUrl
@@ -387,7 +438,7 @@ s
 
 
 async def _find_document_by_type_and_id(ctx: Context, doc_type: str, doc_id: str) -> Optional[Document]:
-    store = ctx.request_context.lifespan_context.stores.get(doc_type, None)
+    store = (await get_server_context()).stores.get(doc_type, None)
     if not store:
         logger.info("Not Found document type %s", doc_type)
         return None
@@ -434,7 +485,7 @@ async def fetch_web_resource_content(ctx: Context, uri: str) -> Optional[TextRes
 
     if try_http_url:
         filters = {"field": "meta.url", "operator": "==", "value": uri}
-        store = ctx.request_context.lifespan_context.stores["content"]
+        store = (await get_server_context()).stores["content"]
         docs = store.filter_documents(filters=filters)
         if docs:
             logger.info("Found indexed web resource %s", uri)
@@ -471,7 +522,7 @@ async def web_resource(doc_type: str, doc_id: str) -> Optional[TextResourceConte
 cached_get_additional_hosts: Dict[str, str] = {}
 
 
-def get_additional_hosts(additional_hosts: Dict[str, str]) -> Dict[str, str]:
+def get_additional_hosts(additional_hosts: Dict[str, str] = None) -> Dict[str, str]:
     if not additional_hosts:
         return cached_get_additional_hosts
     validated: Dict[str, str] = {}
@@ -483,6 +534,19 @@ def get_additional_hosts(additional_hosts: Dict[str, str]) -> Dict[str, str]:
         except (ValueError, ValidationError):
             pass
     return cached_get_additional_hosts | validated
+
+
+def filter_hosts_and_addresses(input: Optional[List[str]] = None) -> List[str]:
+    if not input:
+        return []
+    result = []
+    for e in input:
+        try:
+            if validators.domain(e) == True or ipaddress.ip_address(e):
+                result.append(e)
+        except (ValueError, ValidationError):
+            pass
+    return result
 
 
 @mcp.tool(
@@ -574,6 +638,7 @@ async def _run_unix_command(ctx: Context, command: str, additional_hosts: Option
     RunUnixCommand]:
     logger.info(f"run_unix_command {command}")
 
+    server_ctx = await get_server_context()
     cache_path: str = ctx.request_context.lifespan_context.get_cache_path_for_tool(command, additional_hosts)
     meta_path = os.path.join(cache_path, 'meta.json')
     stdout_path = os.path.join(cache_path, 'stdout.txt')
@@ -617,7 +682,7 @@ async def _run_unix_command(ctx: Context, command: str, additional_hosts: Option
         cached = True
     else:
         try:
-            assert_elicitation(ctx)
+            assert_elicitation(server_ctx)
             confirm_result = await ctx.elicit(
                 message=f"{command}\nShould I run this command?",
                 schema=RunCommandConfirmation)
@@ -700,6 +765,130 @@ async def _write_stream_to_file(stream, path):
 
 @mcp.tool(
     annotations=ToolAnnotations(
+        title="Perform port scan and service identification on target(s)",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True),
+)
+async def port_scan(
+        ctx: Context,
+        hostnames: Optional[List[str]] = None,
+        ip_addresses: Optional[List[str]] = None,
+        ip_subnets: Optional[str] = None,
+        ports: Optional[List[int]] = None,
+        port_range: Optional[Tuple[int, int]] = None,
+        additional_hosts: Optional[Dict[str, str]] = None
+) -> str:
+    """
+    Performs a port scan and service identification on the target(s). The results are indexed to allow later
+    retrieval. The output format is that of nmap.
+
+    Invoke this tool when the user needs to identify which services are running on the targets in-scope.
+    Use this tool instead of nmap or rustscan unless the user wants to run specific nmap NSE scripts, then
+    use the run_unix_command tool.
+
+    One of hostnames, ip_address, or ip_subnets must be specified.
+
+    One of ports or port_range must be specified. It is preferred to specify port_range if the list of
+    ports will be long.
+
+    The additional_hosts parameter is a dictionary of host name (the key) to IP address (the value) for hosts that do not have DNS records. This also includes CTF targets or web server virtual hosts found during other scans. If you
+    know the IP address for a host, be sure to include these in the additional_hosts parameter for
+    commands to run properly in a containerized environment.
+
+    The port scan may take a long time and this tool may return before the scan is finished.
+    The port_scan_query tool may be used to query for results.
+    """
+    asyncio.create_task(
+        log_tool_history(ctx, "port_scan", hostnames=hostnames, ip_addresses=ip_addresses, ip_subnets=ip_subnets,
+                         ports=ports, port_range=port_range, additional_hosts=additional_hosts))
+
+    server_ctx = await get_server_context()
+    port_scan_queue: Queue = server_ctx.port_scan_queue
+    port_scan_result_queue: Queue = server_ctx.port_scan_result_queue
+
+    hostnames = filter_hosts_and_addresses(hostnames)
+    ip_addresses = filter_hosts_and_addresses(ip_addresses)
+    # TODO: validate subnets
+
+    ports_list = list(map(str, ports or []))
+    if port_range:
+        ports_list.append(f"{port_range[0]}-{port_range[1]}")
+    port_scan_queue_item = PortScanQueueItem(
+        targets=(hostnames or []) + (ip_addresses or []) + (ip_subnets or []),
+        ports=ports_list,
+        additional_hosts=get_additional_hosts(additional_hosts),
+    )
+
+    if stored_results := get_stored_port_scan_results(
+            port_scan_queue_item,
+            server_ctx.stores["nmap"],
+            server_ctx.stores["portscan"],
+    ):
+        logger.info("Returning stored port scan results for %s", port_scan_queue_item.targets)
+        return stored_results.nmap_xml
+
+    await asyncio.to_thread(port_scan_queue.put, port_scan_queue_item)
+    results: Optional[PortScanResults] = None
+    time_limit = time.time() + 300
+    while time.time() < time_limit:
+        try:
+            results_from_queue: PortScanResults = await asyncio.to_thread(
+                port_scan_result_queue.get,
+                timeout=(max(1.0, time_limit - time.time())))
+        except queue.Empty:
+            break
+        if results_from_queue is None:
+            break
+        logger.info(f"{results_from_queue.targets}, {results_from_queue.ports} has been retrieved")
+        if results_from_queue.targets == port_scan_queue_item.targets:
+            results = results_from_queue
+            if not results.has_more:
+                break
+    if results:
+        return results.nmap_xml
+    return "The port scan is still running, query for results later."
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Query a target for port and service information",
+        readOnlyHint=True,
+        openWorldHint=False),
+)
+async def port_scan_query(
+        ctx: Context,
+        targets: List[str],
+) -> str:
+    """
+    Search for port scan results on target(s) in the indexed port scans. Targets may be IP addresses or
+    hostnames.
+
+    Invoke this when the user wants to identify which services are running on the targets in-scope and
+    wants to use existing port scans and not initiate a new port scan. For initiating a new port scan, use
+    the port_scan tool.
+    """
+    asyncio.create_task(log_tool_history(ctx, "port_scan_query", targets=targets))
+    server_ctx = await get_server_context()
+    targets = filter_hosts_and_addresses(targets)
+    port_scan_queue_item = PortScanQueueItem(
+        targets=targets,
+        ports=["0"],
+        additional_hosts=get_additional_hosts(),
+    )
+    if stored_results := get_stored_port_scan_results(
+            port_scan_queue_item,
+            server_ctx.stores["nmap"],
+            server_ctx.stores["portscan"],
+    ):
+        return stored_results.nmap_xml
+
+    return f"Nothing found. Try running a port scan on {', '.join(targets)}."
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
         title="Index HTTP Request/Response",
         readOnlyHint=False,
         destructiveHint=False,
@@ -714,7 +903,7 @@ async def index_http_request_response(ctx: Context, data: str):
     Example data argument in katana format:
     {"request": {"headers": {"sec_fetch_mode": "navigate", "priority": "u=0, i", "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "sec_fetch_dest": "document", "host": "example.com", "accept_language": "en-US,en;q=0.5", "connection": "keep-alive", "sec_fetch_site": "none", "upgrade_insecure_requests": "1", "sec_fetch_user": "?1", "user_agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"}, "method": "GET", "source": "katana", "body": "", "endpoint": "https://example.com/", "tag": "katana", "attribute": "http"}, "response": {"headers": {"date": "Sun, 29 Jun 2025 03:44:52 GMT", "content_type": "text/html", "connection": "keep-alive", "location": "https://www.example.com/", "content_length": "169"}, "status_code": 301, "body": "<html>\r\n<head><title>301 Moved Permanently</title></head>\r\n<body>\r\n<center><h1>301 Moved Permanently</h1></center>\r\n<hr><center>nginx/1.20.1</center>\r\n</body>\r\n</html>\r\n"}, "timestamp": "2025-06-28T22:44:52.798000"}
     """
-    ingest_queue: Queue = ctx.request_context.lifespan_context.ingest_queue
+    ingest_queue: Queue = (await get_server_context()).ingest_queue
     asyncio.create_task(log_tool_history(ctx, "index_http_request_response", data=data[0:64]))
     asyncio.to_thread(ingest_queue.put, data)
     return None
@@ -753,7 +942,8 @@ async def index_http_url(
         the_headers['User-Agent'] = user_agent
     try:
         parsed_url = urlparse_ext(url)
-        response = requests.get(url, headers=the_headers)
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=the_headers)
         status_code = response.status_code
         response_headers = dict(response.headers)
         body = response.text
@@ -794,7 +984,7 @@ async def index_http_url(
 async def is_spider_time_recent(ctx: Context, url: str) -> Optional[float]:
     # TODO: consider the user_agent and headers, they may make a difference in the result
     try:
-        chroma_client: chromadb.AsyncClientAPI = ctx.request_context.lifespan_context.get_chroma_client()
+        chroma_client: chromadb.AsyncClientAPI = (await get_server_context()).chroma_client
         collection: AsyncCollection = await chroma_client.get_collection("network")
         url_parsed = urlparse_ext(url)
         netloc = url_parsed.netloc
@@ -868,8 +1058,8 @@ async def spider_website(ctx: Context,
             has_more=False,
         )
 
-    spider_queue: Queue = ctx.request_context.lifespan_context.spider_queue
-    spider_result_queue: Queue = ctx.request_context.lifespan_context.spider_result_queue
+    spider_queue: Queue = (await get_server_context()).spider_queue
+    spider_result_queue: Queue = (await get_server_context()).spider_result_queue
     url_parsed = urlparse_ext(url)
     spider_queue_item = SpiderQueueItem(
         uri=url,
@@ -906,10 +1096,6 @@ async def spider_website(ctx: Context,
         has_more=has_more,
     )
 
-
-# TODO: add port scanning tool that controls options for nmap for our use case and store in document
-
-# TODO: add tool to fetch port scan results
 
 @mcp.tool(
     annotations=ToolAnnotations(
@@ -974,7 +1160,7 @@ async def find_domains(ctx: Context, query: Optional[str] = None) -> List[str]:
     query parameter is optional and will limit the results using a "contains" operator.
     """
     asyncio.create_task(log_tool_history(ctx, "find_domains", query=query))
-    chroma_client: chromadb.AsyncClientAPI = ctx.request_context.lifespan_context.get_chroma_client()
+    chroma_client: chromadb.AsyncClientAPI = (await get_server_context()).chroma_client
     collection: AsyncCollection = await chroma_client.get_collection("network")
     result = set()
     query, port = _query_to_netloc(query)
@@ -1003,7 +1189,7 @@ async def find_hosts(ctx: Context, domain_query: str) -> List[str]:
     """
     asyncio.create_task(log_tool_history(ctx, "find_hosts", domain_query=domain_query))
     try:
-        chroma_client: chromadb.AsyncClientAPI = ctx.request_context.lifespan_context.get_chroma_client()
+        chroma_client: chromadb.AsyncClientAPI = (await get_server_context()).chroma_client
         collection: AsyncCollection = await chroma_client.get_collection("network")
         result = set()
         domain_query, port = _query_to_netloc(domain_query)
@@ -1035,7 +1221,7 @@ async def find_netloc(ctx: Context, domain_query: str) -> List[str]:
     The domain_query parameter will limit the results using the "ends with" operator on the host name.
     """
     asyncio.create_task(log_tool_history(ctx, "find_netloc", domain_query=domain_query))
-    chroma_client: chromadb.AsyncClientAPI = ctx.request_context.lifespan_context.get_chroma_client()
+    chroma_client: chromadb.AsyncClientAPI = (await get_server_context()).chroma_client
     collection: AsyncCollection = await chroma_client.get_collection("network")
     result = set()
     domain_query, port = _query_to_netloc(domain_query)
@@ -1070,7 +1256,7 @@ async def find_urls(ctx: Context, host_query: str, limit: int = 100) -> List[str
     """
     asyncio.create_task(log_tool_history(ctx, "find_urls", host_query=host_query, limit=limit))
     assert limit > 0
-    chroma_client: chromadb.AsyncClientAPI = ctx.request_context.lifespan_context.get_chroma_client()
+    chroma_client: chromadb.AsyncClientAPI = (await get_server_context()).chroma_client
     collection: AsyncCollection = await chroma_client.get_collection("network")
     result = set()
     host_query, port = _query_to_netloc(host_query)

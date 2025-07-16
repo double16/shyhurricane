@@ -1,8 +1,6 @@
 import json
 import logging
-import os
 import subprocess
-import time
 from multiprocessing import Queue, Process
 from typing import Optional, Dict, Tuple
 
@@ -34,6 +32,7 @@ def _spider_worker(spider_queue: Queue, ingest_queue: Queue, spider_result_queue
     while True:
         item: SpiderQueueItem = spider_queue.get()
         if item is None:
+            logger.info("Exiting the spider queue")
             break  # Sentinel to stop
         _katana_ingest(
             ingest_queue=ingest_queue,

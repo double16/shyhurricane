@@ -51,7 +51,8 @@ services:
       DOCKER_HOST: "tcp://dind:2375"
       CHROMA: "chroma:8200"
       TOOL_CACHE: "/tool_cache"
-      #DISABLE_ELICITATION: "True"
+      # no model seems to support this yet
+      DISABLE_ELICITATION: "True"
       OLLAMA_MODEL: "${OLLAMA_MODEL:-qwen2.5:7b-instruct}"
       OLLAMA_URL: "${OLLAMA_URL:-http://127.0.0.1:11434}"
       GEMINI_API_KEY: "${GEMINI_API_KEY}"

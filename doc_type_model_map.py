@@ -1,4 +1,5 @@
 # doc_type_model_map.py
+DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 
 # Mapping of document types (collections) to embedding model names
 doc_type_to_model = {
@@ -9,13 +10,15 @@ doc_type_to_model = {
     "css": "microsoft/codebert-base",
     "network": "sentence-transformers/paraphrase-mpnet-base-v2",
     "forms": "microsoft/codebert-base",
-    "default": "sentence-transformers/all-MiniLM-L6-v2",
-    "content": "sentence-transformers/all-MiniLM-L6-v2",  # stores response content verbatim
+    "nmap": "intfloat/e5-base-v2",  # store raw nmap xml
+    "portscan": "microsoft/codebert-base",  # store json port scan model
+    "default": DEFAULT_EMBEDDING_MODEL,
+    "content": DEFAULT_EMBEDDING_MODEL,  # stores response content verbatim
 }
 
 
 def get_model_for_doc_type(doc_type: str) -> str:
-    return doc_type_to_model.get(doc_type, "sentence-transformers/all-MiniLM-L6-v2")
+    return doc_type_to_model.get(doc_type, DEFAULT_EMBEDDING_MODEL)
 
 
 def get_all_required_models(collections: list[str]) -> set[str]:
