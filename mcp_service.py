@@ -15,7 +15,7 @@ import aiofiles
 from datetime import datetime, timezone
 from json import JSONDecodeError
 from multiprocessing import Queue, Process
-from typing import List, AsyncIterator, Optional, Tuple, Dict, Any, Union
+from typing import List, AsyncIterator, Optional, Tuple, Dict, Any
 from urllib.parse import urlparse
 
 import chromadb
@@ -32,12 +32,12 @@ from mcp.server.fastmcp import FastMCP, Context
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
 
-from mcp.types import ToolAnnotations, Resource, TextResourceContents, ErrorData
+from mcp.types import ToolAnnotations, Resource, TextResourceContents, ErrorData, INVALID_REQUEST
 from pydantic import BaseModel, AnyUrl, Field, ValidationError
 
 from ingest_queue import start_ingest_worker
 from pipeline import build_document_pipeline, build_website_context_pipeline, urlparse_ext, create_chroma_client
-from prompts import pentester_agent_system_prompt
+from prompts import pentester_agent_system_prompt, pentester_chat_system_prompt
 from spider_queue import start_spider_worker, SpiderQueueItem
 from utils import HttpResource, add_generator_args, GeneratorConfig, extract_domain, read_last_text_bytes
 
@@ -81,7 +81,7 @@ class AppContext:
 
 def assert_elicitation(ctx: Context):
     if ctx.request_context.lifespan_context.disable_elicitation:
-        raise McpError(ErrorData(code=200, message="elicitation disabled"))
+        raise McpError(ErrorData(code=INVALID_REQUEST, message="elicitation disabled"))
 
 
 @asynccontextmanager
@@ -201,7 +201,7 @@ async def log_tool_history(ctx: Context, title: str, **kwargs):
         readOnlyHint=True,
         openWorldHint=False),
 )
-async def find_web_resources(query: str, limit: int = 100) -> List[HttpResource]:
+async def find_web_resources(ctx: Context, query: str, limit: int = 100) -> List[HttpResource]:
     """Query indexed resources about a website using natural language and return the request and response bodies, URL, HTTP method, MIME type, HTTP status code, technologies found. This tool will search using several parameters including response body matching, URL matching, MIME type matching of the response, HTTP request method matching, and HTTP response body matching.
 
     Invoke this tool when the user asks about vulnerabilities,
@@ -229,8 +229,7 @@ async def find_web_resources(query: str, limit: int = 100) -> List[HttpResource]
 s
     The limit parameter is used to limit how many results are returned. The default is 100. The value must range between 10 and 1000.
     """
-    ctx = mcp.get_context()
-    await log_tool_history(ctx, "find_web_resources", query=query, limit=limit)
+    asyncio.create_task(log_tool_history(ctx, "find_web_resources", query=query, limit=limit))
     query = query.strip()
     limit = min(1000, max(10, limit or 100))
     logger.info("finding web resources for %s up to %d results", query, limit)
@@ -318,15 +317,17 @@ s
                 case CancelledElicitation():
                     return []
         except McpError as e:
-            asyncio.create_task(ctx.info("Specify a target URL for searching."))
-            logger.warning("elicit not supported, exiting", exc_info=e)
-            return []
+            logger.info("elicit not supported, returning", exc_info=e)
+        finally:
+            if not urls:
+                raise McpError(ErrorData(code=INVALID_REQUEST,
+                                         message="Specify a target URL, IP address or host name for searching"))
 
     filter_netloc = [parsed.netloc for parsed in map(lambda u: urlparse_ext(u), urls)]
 
     # check if we have data
     missing_netloc = set(filter_netloc.copy())
-    for known_netloc in find_netloc(ctx, ""):
+    for known_netloc in await find_netloc(ctx, ""):
         try:
             missing_netloc.remove(known_netloc)
         except KeyError:
@@ -355,8 +356,10 @@ s
                 case CancelledElicitation():
                     return []
         except McpError as e:
-            asyncio.create_task(ctx.info(f"Ask to spider {', '.join(missing_urls)}."))
-            logger.warning("elicit not supported, continuing")
+            asyncio.create_task(ctx.info(f"Spidering {', '.join(missing_urls)}"))
+            logger.warning("elicit not supported, starting spider")
+            for url in missing_urls:
+                await spider_website(url)
 
     conditions = []
     _append_in_filter(conditions, "meta.netloc", filter_netloc)
@@ -383,8 +386,7 @@ s
     return _documents_to_http_resources(documents)
 
 
-async def _find_document_by_type_and_id(doc_type: str, doc_id: str) -> Optional[Document]:
-    ctx = mcp.get_context()
+async def _find_document_by_type_and_id(ctx: Context, doc_type: str, doc_id: str) -> Optional[Document]:
     store = ctx.request_context.lifespan_context.stores.get(doc_type, None)
     if not store:
         logger.info("Not Found document type %s", doc_type)
@@ -426,7 +428,7 @@ async def fetch_web_resource_content(ctx: Context, uri: str) -> Optional[TextRes
             uri = doc_id
             try_http_url = True
         else:
-            doc = await _find_document_by_type_and_id(doc_type, doc_id)
+            doc = await _find_document_by_type_and_id(ctx, doc_type, doc_id)
     else:
         try_http_url = True
 
@@ -454,7 +456,8 @@ async def web_resource(doc_type: str, doc_id: str) -> Optional[TextResourceConte
     """
     Fetch a document using the type and document ID.
     """
-    doc: Document = await _find_document_by_type_and_id(doc_type, doc_id)
+    ctx = mcp.get_context()
+    doc: Document = await _find_document_by_type_and_id(ctx, doc_type, doc_id)
     if doc is None:
         return None
     return TextResourceContents(
@@ -462,13 +465,6 @@ async def web_resource(doc_type: str, doc_id: str) -> Optional[TextResourceConte
         mimeType=doc.meta.get('content_type', 'text/plain'),
         text=doc.content,
     )
-
-
-@mcp.prompt(title="Penetration Tester")
-def web_vuln(prompt: str) -> str:
-    return pentester_agent_system_prompt + f"""
-Task: "{prompt}"
-"""
 
 
 # TODO: persist this? expire entries?
@@ -710,7 +706,7 @@ async def _write_stream_to_file(stream, path):
         idempotentHint=False,
         openWorldHint=False),
 )
-async def index_http_request_response(data: str):
+async def index_http_request_response(ctx: Context, data: str):
     """
     Indexes HTTP one request/response to allow for further analysis. The input can take several
     forms. The preferred input format matches the output of the "katana" command for spidering.
@@ -718,51 +714,10 @@ async def index_http_request_response(data: str):
     Example data argument in katana format:
     {"request": {"headers": {"sec_fetch_mode": "navigate", "priority": "u=0, i", "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "sec_fetch_dest": "document", "host": "example.com", "accept_language": "en-US,en;q=0.5", "connection": "keep-alive", "sec_fetch_site": "none", "upgrade_insecure_requests": "1", "sec_fetch_user": "?1", "user_agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"}, "method": "GET", "source": "katana", "body": "", "endpoint": "https://example.com/", "tag": "katana", "attribute": "http"}, "response": {"headers": {"date": "Sun, 29 Jun 2025 03:44:52 GMT", "content_type": "text/html", "connection": "keep-alive", "location": "https://www.example.com/", "content_length": "169"}, "status_code": 301, "body": "<html>\r\n<head><title>301 Moved Permanently</title></head>\r\n<body>\r\n<center><h1>301 Moved Permanently</h1></center>\r\n<hr><center>nginx/1.20.1</center>\r\n</body>\r\n</html>\r\n"}, "timestamp": "2025-06-28T22:44:52.798000"}
     """
-    ctx = mcp.get_context()
-    await log_tool_history(ctx, "index_http_request_response", data=data[0:64])
     ingest_queue: Queue = ctx.request_context.lifespan_context.ingest_queue
-    await asyncio.to_thread(ingest_queue.put, data)
+    asyncio.create_task(log_tool_history(ctx, "index_http_request_response", data=data[0:64]))
+    asyncio.to_thread(ingest_queue.put, data)
     return None
-
-
-def parse_http_response(response_text) -> Tuple[
-    Optional[int],
-    Dict[str, Union[str, list[str]]],
-    str]:
-    lines = response_text.splitlines()
-    headers = {}
-    body_lines = []
-    in_headers = True
-    status_code = None
-
-    for i, line in enumerate(lines):
-        if in_headers:
-            if line.strip() == "":
-                in_headers = False
-                continue
-            if line.startswith("HTTP/"):
-                try:
-                    status_code = int(line.split()[1])
-                except (IndexError, ValueError):
-                    status_code = None
-            else:
-                key, sep, value = line.partition(":")
-                if sep:
-                    key = key.strip().title()
-                    value = value.strip()
-                    # handle multiple headers like set-cookie
-                    if key in headers:
-                        if isinstance(headers[key], list):
-                            headers[key].append(value)
-                        else:
-                            headers[key] = [headers[key], value]
-                    else:
-                        headers[key] = value
-        else:
-            body_lines.append(line)
-
-    body = "\n".join(body_lines)
-    return status_code, headers, body
 
 
 @mcp.tool(
@@ -791,8 +746,8 @@ async def index_http_url(
     Invoke this tool when the user needs the content of one specific URL.
     """
     method = "GET"
-    await log_tool_history(ctx, "index_http_url", url=url, method=method, user_agent=user_agent,
-                     request_headers=request_headers)
+    asyncio.create_task(log_tool_history(ctx, "index_http_url", url=url, method=method, user_agent=user_agent,
+                                         request_headers=request_headers))
     the_headers = request_headers or {}
     if user_agent:
         the_headers['User-Agent'] = user_agent
@@ -802,7 +757,7 @@ async def index_http_url(
         status_code = response.status_code
         response_headers = dict(response.headers)
         body = response.text
-        await index_http_request_response(json.dumps({
+        asyncio.create_task(index_http_request_response(ctx, json.dumps({
             "timestamp": datetime.now().isoformat(),
             "request": {
                 "endpoint": url,
@@ -814,7 +769,7 @@ async def index_http_url(
                 "headers": response_headers,
                 "body": body,
             }
-        }))
+        })))
         resource = TextResourceContents(
             uri=AnyUrl(url),
             mimeType=response.headers.get("Content-Type", "text/plain"),
@@ -836,10 +791,9 @@ async def index_http_url(
         return None
 
 
-async def is_spider_time_recent(url: str) -> Optional[float]:
+async def is_spider_time_recent(ctx: Context, url: str) -> Optional[float]:
     # TODO: consider the user_agent and headers, they may make a difference in the result
     try:
-        ctx = mcp.get_context()
         chroma_client: chromadb.AsyncClientAPI = ctx.request_context.lifespan_context.get_chroma_client()
         collection: AsyncCollection = await chroma_client.get_collection("network")
         url_parsed = urlparse_ext(url)
@@ -903,12 +857,14 @@ async def spider_website(ctx: Context,
 
     Returns a list of resources found, including URL, response code, content type, and content length. Indexes each URL that can be queried using the find_web_resources tool. URL content can be returned using the fetch_web_resource_content tool.
     """
-    await log_tool_history(ctx, "spider_website", url=url, additional_hosts=additional_hosts, user_agent=user_agent, request_headers=request_headers)
+    asyncio.create_task(
+        log_tool_history(ctx, "spider_website", url=url, additional_hosts=additional_hosts, user_agent=user_agent,
+                         request_headers=request_headers))
     url = url.strip()
-    if await is_spider_time_recent(url):
+    if await is_spider_time_recent(ctx, url):
         logger.info(f"{url} has been recently spidered, returning saved results")
         return SpiderResults(
-            resources=await find_web_resources(url),
+            resources=await find_web_resources(ctx, url),
             has_more=False,
         )
 
@@ -970,7 +926,7 @@ async def find_wordlists(ctx: Context, query: str) -> List[str]:
 
     The query is a substring search of the path. Examples: Web, DNS, LFI, etc.
     """
-    await log_tool_history(ctx, "find_wordlists")
+    asyncio.create_task(log_tool_history(ctx, "find_wordlists"))
     command = "find /usr/share/seclists -type f -not -path '*/.*'"
     if query and query.strip():
         query_clean = re.sub(r'[^\w\-_]', '', query)
@@ -1017,7 +973,7 @@ async def find_domains(ctx: Context, query: Optional[str] = None) -> List[str]:
     Invoke this tool when the user asks about websites that have been scanned, spidered or indexed. The
     query parameter is optional and will limit the results using a "contains" operator.
     """
-    await log_tool_history(ctx, "find_domains", query=query)
+    asyncio.create_task(log_tool_history(ctx, "find_domains", query=query))
     chroma_client: chromadb.AsyncClientAPI = ctx.request_context.lifespan_context.get_chroma_client()
     collection: AsyncCollection = await chroma_client.get_collection("network")
     result = set()
@@ -1045,7 +1001,7 @@ async def find_hosts(ctx: Context, domain_query: str) -> List[str]:
 
     The domain_query parameter will limit the results using the "ends with" operator.
     """
-    await log_tool_history(ctx, "find_hosts", domain_query=domain_query)
+    asyncio.create_task(log_tool_history(ctx, "find_hosts", domain_query=domain_query))
     try:
         chroma_client: chromadb.AsyncClientAPI = ctx.request_context.lifespan_context.get_chroma_client()
         collection: AsyncCollection = await chroma_client.get_collection("network")
@@ -1078,7 +1034,7 @@ async def find_netloc(ctx: Context, domain_query: str) -> List[str]:
 
     The domain_query parameter will limit the results using the "ends with" operator on the host name.
     """
-    await log_tool_history(ctx, "find_netloc", domain_query=domain_query)
+    asyncio.create_task(log_tool_history(ctx, "find_netloc", domain_query=domain_query))
     chroma_client: chromadb.AsyncClientAPI = ctx.request_context.lifespan_context.get_chroma_client()
     collection: AsyncCollection = await chroma_client.get_collection("network")
     result = set()
@@ -1112,7 +1068,7 @@ async def find_urls(ctx: Context, host_query: str, limit: int = 100) -> List[str
 
     The limit parameter limits the number of results. The default limit is 100.
     """
-    await log_tool_history(ctx, "find_urls", host_query=host_query, limit=limit)
+    asyncio.create_task(log_tool_history(ctx, "find_urls", host_query=host_query, limit=limit))
     assert limit > 0
     chroma_client: chromadb.AsyncClientAPI = ctx.request_context.lifespan_context.get_chroma_client()
     collection: AsyncCollection = await chroma_client.get_collection("network")
@@ -1129,6 +1085,12 @@ async def find_urls(ctx: Context, host_query: str, limit: int = 100) -> List[str
                         break
     return sorted(list(result))
 
+
+@mcp.prompt(title="Penetration Tester")
+def web_vuln(prompt: str) -> str:
+    return pentester_chat_system_prompt + f"""
+Your task: "{prompt}"
+"""
 
 # TODO: add prompt for CTF agent
 

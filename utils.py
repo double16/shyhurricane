@@ -4,7 +4,7 @@ import logging
 import os
 from pathlib import Path
 from urllib.parse import ParseResult, urlparse
-from typing import Optional, Generator, Dict, Any, Union, List, Sequence
+from typing import Optional, Generator, Dict, Any, Union, List, Sequence, Tuple
 
 import aiofiles
 from haystack.components.generators import OpenAIGenerator
@@ -220,3 +220,43 @@ class GeneratorConfig(BaseModel):
                 )
         else:
             raise NotImplementedError
+
+
+def parse_http_response(response_text) -> Tuple[
+    Optional[int],
+    Dict[str, Union[str, list[str]]],
+    str]:
+    lines = response_text.splitlines()
+    headers = {}
+    body_lines = []
+    in_headers = True
+    status_code = None
+
+    for i, line in enumerate(lines):
+        if in_headers:
+            if line.strip() == "":
+                in_headers = False
+                continue
+            if line.startswith("HTTP/"):
+                try:
+                    status_code = int(line.split()[1])
+                except (IndexError, ValueError):
+                    status_code = None
+            else:
+                key, sep, value = line.partition(":")
+                if sep:
+                    key = key.strip().title()
+                    value = value.strip()
+                    # handle multiple headers like set-cookie
+                    if key in headers:
+                        if isinstance(headers[key], list):
+                            headers[key].append(value)
+                        else:
+                            headers[key] = [headers[key], value]
+                    else:
+                        headers[key] = value
+        else:
+            body_lines.append(line)
+
+    body = "\n".join(body_lines)
+    return status_code, headers, body

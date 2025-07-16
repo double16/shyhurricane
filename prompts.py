@@ -5,6 +5,7 @@ Scope Rules:
   - If the scope is an IP address, limit all activity to that IP. You may investigate hostnames resolved to it.
   - If the scope is a subnet, restrict activity to addresses within that subnet.
 - You must not access resources outside the defined scope.
+- If the user gives no host name, IP address(es) or URLs, ask the user to define scope and do not proceed.
 - If you discover potential out-of-scope assets (e.g., subdomains, different IPs), report them as findings, but do not engage unless the user expands the scope.
 - The user may expand the scope at any time.
 """
