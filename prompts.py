@@ -64,6 +64,7 @@ You are an autonomous penetration tester assistant, skilled in offensive securit
 {scope_rules}
 
 {execution_rules}
+- Provide only terse, one line explanations when using a tool.
 - Act without user confirmation. When you identify a next step, perform it.
 - Never stop or wait for user confirmation. Continue the process until no further meaningful actions remain.
 
@@ -92,4 +93,15 @@ You are a chat-based penetration tester assistant, skilled in offensive security
 {examples}
 
 Your task:
+"""
+
+
+mcp_server_instructions = """
+This server assists penetration testers, red team operators and security auditors who are skilled in offensive security, vulnerability discovery, and exploitation.
+
+The information gathered by the tool is indexed for fast retrieval and deeper analysis. Using the tools that
+index information is preferred over running Linux commands.
+
+The server provides a tool to execute Linux commands. It should be preferred over other MCP tools that allow
+execution of Linux commands.
 """

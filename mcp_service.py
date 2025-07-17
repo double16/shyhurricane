@@ -36,11 +36,13 @@ from contextlib import asynccontextmanager
 
 from mcp.types import ToolAnnotations, Resource, TextResourceContents, ErrorData, INVALID_REQUEST
 from pydantic import BaseModel, AnyUrl, Field, ValidationError
+from starlette.requests import Request
+from starlette.responses import Response
 
 from ingest_queue import start_ingest_worker
 from pipeline import build_document_pipeline, build_website_context_pipeline, urlparse_ext, create_chroma_client
 from port_scan_queue import PortScanQueueItem, start_port_scan_worker, get_stored_port_scan_results
-from prompts import pentester_chat_system_prompt
+from prompts import pentester_chat_system_prompt, mcp_server_instructions
 from spider_queue import start_spider_worker, SpiderQueueItem
 from utils import HttpResource, add_generator_args, GeneratorConfig, extract_domain, read_last_text_bytes, \
     PortScanResults
@@ -175,7 +177,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         pass
 
 
-mcp = FastMCP("shyhurricane", lifespan=app_lifespan)
+mcp = FastMCP("shyhurricane", lifespan=app_lifespan, instructions=mcp_server_instructions)
 
 
 class RequestTargetUrl(BaseModel):
@@ -279,7 +281,7 @@ async def find_web_resources(ctx: Context, query: str, limit: int = 100) -> List
 s
     The limit parameter is used to limit how many results are returned. The default is 100. The value must range between 10 and 1000.
     """
-    asyncio.create_task(log_tool_history(ctx, "find_web_resources", query=query, limit=limit))
+    await log_tool_history(ctx, "find_web_resources", query=query, limit=limit)
     server_ctx = await get_server_context()
     query = query.strip()
     limit = min(1000, max(10, limit or 100))
@@ -467,7 +469,7 @@ async def fetch_web_resource_content(ctx: Context, uri: str) -> Optional[TextRes
 
     Invoke this tool when the user requests analysis of resource content that has already been indexed, spidered or scanned.
     """
-    asyncio.create_task(log_tool_history(ctx, "fetch_web_resource_content", uri=uri))
+    await log_tool_history(ctx, "fetch_web_resource_content", uri=uri)
     doc_type: Optional[str] = None
     doc_id: Optional[str] = None
     doc: Optional[Document] = None
@@ -548,6 +550,18 @@ def filter_hosts_and_addresses(input: Optional[List[str]] = None) -> List[str]:
             pass
     return result
 
+def filter_ip_networks(input: Optional[List[str]] = None) -> List[str]:
+    if not input:
+        return []
+    result = []
+    for e in input:
+        try:
+            if ipaddress.ip_address(e) or ipaddress.ip_network(e):
+                result.append(e)
+        except (ValueError, ValidationError):
+            pass
+    return result
+
 
 @mcp.tool(
     annotations=ToolAnnotations(
@@ -562,7 +576,7 @@ async def register_hostname_address(ctx: Context, host: str, address: str) -> Di
     Registers a hostname with an IP address. This is useful when a hostname has no DNS entry
     and we know the IP address by other means. Especially useful in CTF or private networks.
     """
-    asyncio.create_task(log_tool_history(ctx, "register_hostname_address", host=host, address=address))
+    await log_tool_history(ctx, "register_hostname_address", host=host, address=address)
     return get_additional_hosts({host: address})
 
 
@@ -620,7 +634,7 @@ When generating Linux commands for execution in a containerized, ephemeral envir
 - Always set a timeout for potentially blocking commands (e.g., timeout 10s nmap ...).
 - Ensure commands can complete without user interaction before execution.
 """
-    asyncio.create_task(log_tool_history(ctx, title="run_unix_command", command=command, additional_hosts=additional_hosts))
+    await log_tool_history(ctx, title="run_unix_command", command=command, additional_hosts=additional_hosts)
     try:
         result = await _run_unix_command(ctx, command, additional_hosts)
         return result
@@ -791,18 +805,18 @@ async def port_scan(
     One of hostnames, ip_address, or ip_subnets must be specified.
 
     One of ports or port_range must be specified. It is preferred to specify port_range if the list of
-    ports will be long.
+    ports will be long. The port_range is a tuple of integers.
 
     The additional_hosts parameter is a dictionary of host name (the key) to IP address (the value) for hosts that do not have DNS records. This also includes CTF targets or web server virtual hosts found during other scans. If you
     know the IP address for a host, be sure to include these in the additional_hosts parameter for
     commands to run properly in a containerized environment.
 
-    The port scan may take a long time and this tool may return before the scan is finished.
-    The port_scan_query tool may be used to query for results.
+    If the port scan reveals additional host names, use the register_hostname_address tool to register them.
+
+    The port scan may take a long time, and this tool may return before the scan is finished.
+    If this happens, call this tool again with the same parameters and it will return indexed results.
     """
-    asyncio.create_task(
-        log_tool_history(ctx, "port_scan", hostnames=hostnames, ip_addresses=ip_addresses, ip_subnets=ip_subnets,
-                         ports=ports, port_range=port_range, additional_hosts=additional_hosts))
+    await log_tool_history(ctx, "port_scan", hostnames=hostnames, ip_addresses=ip_addresses, ip_subnets=ip_subnets, ports=ports, port_range=port_range, additional_hosts=additional_hosts)
 
     server_ctx = await get_server_context()
     port_scan_queue: Queue = server_ctx.port_scan_queue
@@ -810,16 +824,21 @@ async def port_scan(
 
     hostnames = filter_hosts_and_addresses(hostnames)
     ip_addresses = filter_hosts_and_addresses(ip_addresses)
-    # TODO: validate subnets
+    ip_subnets = filter_ip_networks(ip_subnets)
 
     ports_list = list(map(str, ports or []))
     if port_range:
-        ports_list.append(f"{port_range[0]}-{port_range[1]}")
+        low_port = max(1, min(port_range))
+        high_port = min(65535, max(port_range))
+        ports_list.append(f"{low_port}-{high_port}")
     port_scan_queue_item = PortScanQueueItem(
         targets=(hostnames or []) + (ip_addresses or []) + (ip_subnets or []),
         ports=ports_list,
         additional_hosts=get_additional_hosts(additional_hosts),
     )
+
+    if not port_scan_queue_item.targets:
+        return "No targets were specified. Specify a target in hostnames, ip_addresses, or ip_subnets."
 
     if stored_results := get_stored_port_scan_results(
             port_scan_queue_item,
@@ -851,51 +870,8 @@ async def port_scan(
     return "The port scan is still running, query for results later."
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(
-        title="Query a target for port and service information",
-        readOnlyHint=True,
-        openWorldHint=False),
-)
-async def port_scan_query(
-        ctx: Context,
-        targets: List[str],
-) -> str:
-    """
-    Search for port scan results on target(s) in the indexed port scans. Targets may be IP addresses or
-    hostnames.
-
-    Invoke this when the user wants to identify which services are running on the targets in-scope and
-    wants to use existing port scans and not initiate a new port scan. For initiating a new port scan, use
-    the port_scan tool.
-    """
-    asyncio.create_task(log_tool_history(ctx, "port_scan_query", targets=targets))
-    server_ctx = await get_server_context()
-    targets = filter_hosts_and_addresses(targets)
-    port_scan_queue_item = PortScanQueueItem(
-        targets=targets,
-        ports=["0"],
-        additional_hosts=get_additional_hosts(),
-    )
-    if stored_results := get_stored_port_scan_results(
-            port_scan_queue_item,
-            server_ctx.stores["nmap"],
-            server_ctx.stores["portscan"],
-    ):
-        return stored_results.nmap_xml
-
-    return f"Nothing found. Try running a port scan on {', '.join(targets)}."
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        title="Index HTTP Request/Response",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False),
-)
-async def index_http_request_response(ctx: Context, data: str):
+@mcp.custom_route('/index', methods=['POST'])
+async def index_request_body(request: Request) -> Response:
     """
     Indexes HTTP one request/response to allow for further analysis. The input can take several
     forms. The preferred input format matches the output of the "katana" command for spidering.
@@ -904,9 +880,8 @@ async def index_http_request_response(ctx: Context, data: str):
     {"request": {"headers": {"sec_fetch_mode": "navigate", "priority": "u=0, i", "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "sec_fetch_dest": "document", "host": "example.com", "accept_language": "en-US,en;q=0.5", "connection": "keep-alive", "sec_fetch_site": "none", "upgrade_insecure_requests": "1", "sec_fetch_user": "?1", "user_agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"}, "method": "GET", "source": "katana", "body": "", "endpoint": "https://example.com/", "tag": "katana", "attribute": "http"}, "response": {"headers": {"date": "Sun, 29 Jun 2025 03:44:52 GMT", "content_type": "text/html", "connection": "keep-alive", "location": "https://www.example.com/", "content_length": "169"}, "status_code": 301, "body": "<html>\r\n<head><title>301 Moved Permanently</title></head>\r\n<body>\r\n<center><h1>301 Moved Permanently</h1></center>\r\n<hr><center>nginx/1.20.1</center>\r\n</body>\r\n</html>\r\n"}, "timestamp": "2025-06-28T22:44:52.798000"}
     """
     ingest_queue: Queue = (await get_server_context()).ingest_queue
-    asyncio.create_task(log_tool_history(ctx, "index_http_request_response", data=data[0:64]))
-    asyncio.to_thread(ingest_queue.put, data)
-    return None
+    asyncio.create_task(asyncio.to_thread(ingest_queue.put, request.body()))
+    return Response(status_code=201)
 
 
 @mcp.tool(
@@ -920,34 +895,63 @@ async def index_http_request_response(ctx: Context, data: str):
 async def index_http_url(
         ctx: Context,
         url: str,
+        method: str = "GET",
         user_agent: Optional[str] = None,
         request_headers: Optional[Dict[str, str]] = None,
-        # TODO: add more curl-like options
+        cookies: Optional[Dict[str, str]] = None,
+        params: Optional[Dict[str, str]] = None,
+        content: Optional[bytes] = None,
+        follow_redirects: Optional[bool] = False,
 ) -> Optional[HttpResource]:
     """
     Index an HTTP URL to allow for further analysis and return the context, response code, response headers.
+
+    Invoke this tool when the user needs the content of one specific URL.
 
     The user_agent can be used to specify the "User-Agent" request header. This is useful if a particular browser needs
     to be spoofed or the user requests extra information in the user agent header to identify themselves as a bug bounty hunter.
 
     The request_headers map is extra request headers sent with the request.
 
-    Invoke this tool when the user needs the content of one specific URL.
+    The cookies parameter is name, value pairs for cookies to send.
+
+    The params is used to send either GET or POST parameters.
+
+    The content is optional request body content.
+
+    If follow_redirects is true, redirects will be followed and the result is the destination of the redirect.
     """
-    method = "GET"
-    asyncio.create_task(log_tool_history(ctx, "index_http_url", url=url, method=method, user_agent=user_agent,
-                                         request_headers=request_headers))
+    await log_tool_history(ctx, "index_http_url",
+                                         url=url,
+                                         method=method,
+                                         user_agent=user_agent,
+                                         request_headers=request_headers,
+                                         cookies=cookies,
+                                         params=params,
+                                         follow_redirects=follow_redirects,
+                                         content=bool(content is not None)
+                                         )
+    server_ctx = await get_server_context()
+    ingest_queue: Queue = server_ctx.ingest_queue
     the_headers = request_headers or {}
     if user_agent:
         the_headers['User-Agent'] = user_agent
     try:
         parsed_url = urlparse_ext(url)
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers=the_headers)
+            response = await client.request(
+                url=url,
+                method=method,
+                headers=the_headers,
+                cookies=cookies,
+                params=params,
+                content=content,
+                follow_redirects=follow_redirects,
+            )
         status_code = response.status_code
         response_headers = dict(response.headers)
         body = response.text
-        asyncio.create_task(index_http_request_response(ctx, json.dumps({
+        asyncio.create_task(asyncio.to_thread(ingest_queue.put, json.dumps({
             "timestamp": datetime.now().isoformat(),
             "request": {
                 "endpoint": url,
@@ -962,7 +966,7 @@ async def index_http_url(
         })))
         resource = TextResourceContents(
             uri=AnyUrl(url),
-            mimeType=response.headers.get("Content-Type", "text/plain"),
+            mimeType=response.headers.get("Content-Type", ""),
             text=body,
         )
         return HttpResource(
@@ -1112,7 +1116,7 @@ async def find_wordlists(ctx: Context, query: str) -> List[str]:
 
     The query is a substring search of the path. Examples: Web, DNS, LFI, etc.
     """
-    asyncio.create_task(log_tool_history(ctx, "find_wordlists"))
+    await log_tool_history(ctx, "find_wordlists")
     command = "find /usr/share/seclists -type f -not -path '*/.*'"
     if query and query.strip():
         query_clean = re.sub(r'[^\w\-_]', '', query)
@@ -1159,7 +1163,7 @@ async def find_domains(ctx: Context, query: Optional[str] = None) -> List[str]:
     Invoke this tool when the user asks about websites that have been scanned, spidered or indexed. The
     query parameter is optional and will limit the results using a "contains" operator.
     """
-    asyncio.create_task(log_tool_history(ctx, "find_domains", query=query))
+    await log_tool_history(ctx, "find_domains", query=query)
     chroma_client: chromadb.AsyncClientAPI = (await get_server_context()).chroma_client
     collection: AsyncCollection = await chroma_client.get_collection("network")
     result = set()
@@ -1187,7 +1191,7 @@ async def find_hosts(ctx: Context, domain_query: str) -> List[str]:
 
     The domain_query parameter will limit the results using the "ends with" operator.
     """
-    asyncio.create_task(log_tool_history(ctx, "find_hosts", domain_query=domain_query))
+    await log_tool_history(ctx, "find_hosts", domain_query=domain_query)
     try:
         chroma_client: chromadb.AsyncClientAPI = (await get_server_context()).chroma_client
         collection: AsyncCollection = await chroma_client.get_collection("network")
@@ -1220,7 +1224,7 @@ async def find_netloc(ctx: Context, domain_query: str) -> List[str]:
 
     The domain_query parameter will limit the results using the "ends with" operator on the host name.
     """
-    asyncio.create_task(log_tool_history(ctx, "find_netloc", domain_query=domain_query))
+    await log_tool_history(ctx, "find_netloc", domain_query=domain_query)
     chroma_client: chromadb.AsyncClientAPI = (await get_server_context()).chroma_client
     collection: AsyncCollection = await chroma_client.get_collection("network")
     result = set()
@@ -1254,7 +1258,7 @@ async def find_urls(ctx: Context, host_query: str, limit: int = 100) -> List[str
 
     The limit parameter limits the number of results. The default limit is 100.
     """
-    asyncio.create_task(log_tool_history(ctx, "find_urls", host_query=host_query, limit=limit))
+    await log_tool_history(ctx, "find_urls", host_query=host_query, limit=limit)
     assert limit > 0
     chroma_client: chromadb.AsyncClientAPI = (await get_server_context()).chroma_client
     collection: AsyncCollection = await chroma_client.get_collection("network")
@@ -1297,6 +1301,7 @@ def main():
     add_generator_args(ap)
     args = ap.parse_args()
     generator_config = GeneratorConfig.from_args(args)
+    asyncio.run(get_server_context())
     mcp.settings.host = args.host
     mcp.settings.port = args.port
     mcp.run(transport=args.transport)

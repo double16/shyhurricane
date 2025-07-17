@@ -104,7 +104,7 @@ def get_stored_port_scan_results(
         ]
     }
     nmap_existing = nmap_store.filter_documents(filters=filters)
-    runtime_expired_ts = time.time() - 60 * 60 * 24 * 1
+    runtime_expired_ts = time.time() - 60 * 60 * 24 * 7
     existing_results = []
     wanted_ports = parse_ports_spec(item.ports)
 
@@ -117,6 +117,8 @@ def get_stored_port_scan_results(
             continue
         covered_ports = parse_ports_spec([doc.meta.get("ports", "")])
         if not is_subset(wanted_ports, covered_ports):
+            continue
+        if "ERROR: Script execution failed" in doc.content:
             continue
         return PortScanResults(
             runtime_ts=doc.meta.get("runtime_ts", 0),
