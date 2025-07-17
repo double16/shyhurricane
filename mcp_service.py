@@ -34,15 +34,17 @@ from mcp.server.fastmcp import FastMCP, Context
 from dataclasses import dataclass
 from contextlib import asynccontextmanager
 
+from mcp.server.fastmcp.prompts.base import Message, AssistantMessage, UserMessage
 from mcp.types import ToolAnnotations, Resource, TextResourceContents, ErrorData, INVALID_REQUEST
 from pydantic import BaseModel, AnyUrl, Field, ValidationError
 from starlette.requests import Request
 from starlette.responses import Response
 
 from ingest_queue import start_ingest_worker
-from pipeline import build_document_pipeline, build_website_context_pipeline, urlparse_ext, create_chroma_client
+from pipeline import build_document_pipeline, build_website_context_pipeline, urlparse_ext, create_chroma_client, \
+    WEB_RESOURCE_VERSION
 from port_scan_queue import PortScanQueueItem, start_port_scan_worker, get_stored_port_scan_results
-from prompts import pentester_chat_system_prompt, mcp_server_instructions
+from prompts import pentester_chat_system_prompt, mcp_server_instructions, pentester_agent_system_prompt
 from spider_queue import start_spider_worker, SpiderQueueItem
 from utils import HttpResource, add_generator_args, GeneratorConfig, extract_domain, read_last_text_bytes, \
     PortScanResults
@@ -214,7 +216,7 @@ def _documents_to_http_resources(documents: List[Document]) -> List[HttpResource
         except json.decoder.JSONDecodeError:
             response_headers = None
         https_resources.append(HttpResource(
-            score=doc.score,
+            score=doc.score or 100,
             url=doc.meta['url'],
             host=doc.meta.get('host', ''),
             port=doc.meta.get('port', 0),
@@ -314,11 +316,21 @@ s
 
         # Make sure the requested URL is returned
         logger.info("Searching for web resources at or below %s", url_prefix)
-        filters = {"field": "meta.url", "operator": "in", "value": urls_munged}
+        filters = {
+            "operator": "AND",
+            "conditions": [
+                {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
+                {"field": "meta.url", "operator": "in", "value": urls_munged}
+            ]}
         docs.extend(store.filter_documents(filters=filters))
 
         # Find resources below the URL
-        filters = {"field": "meta.netloc", "operator": "==", "value": url_parsed.netloc}
+        filters = {
+            "operator": "AND",
+            "conditions": [
+                {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
+                {"field": "meta.netloc", "operator": "==", "value": url_parsed.netloc}
+            ]}
         for doc in store.filter_documents(filters=filters):
             if doc.meta.get("url", "").startswith(url_prefix) and doc.meta.get("url") not in urls_munged:
                 docs.append(doc)
@@ -414,9 +426,11 @@ s
             for url in missing_urls:
                 await spider_website(url)
 
-    conditions = []
+    conditions = [
+        {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION}
+    ]
     _append_in_filter(conditions, "meta.netloc", filter_netloc)
-    _append_in_filter(conditions, "meta.type", doc_types)
+    #_append_in_filter(conditions, "meta.type", doc_types)
     _append_in_filter(conditions, "meta.http_method", methods)
     _append_in_filter(conditions, "meta.status_code", response_codes)
     if len(conditions) == 0:
@@ -486,7 +500,11 @@ async def fetch_web_resource_content(ctx: Context, uri: str) -> Optional[TextRes
         try_http_url = True
 
     if try_http_url:
-        filters = {"field": "meta.url", "operator": "==", "value": uri}
+        filters = {"operator": "AND",
+                   "conditions": [
+                       {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
+                       {"field": "meta.url", "operator": "==", "value": uri},
+                   ]}
         store = (await get_server_context()).stores["content"]
         docs = store.filter_documents(filters=filters)
         if docs:
@@ -575,6 +593,10 @@ async def register_hostname_address(ctx: Context, host: str, address: str) -> Di
     """
     Registers a hostname with an IP address. This is useful when a hostname has no DNS entry
     and we know the IP address by other means. Especially useful in CTF or private networks.
+
+    Invoke this tool when another tool has found an additional host name for a target in-scope.
+
+    Invoke this tool when the user asks to register a hostname with an IP address.
     """
     await log_tool_history(ctx, "register_hostname_address", host=host, address=address)
     return get_additional_hosts({host: address})
@@ -635,6 +657,8 @@ When generating Linux commands for execution in a containerized, ephemeral envir
 - Ensure commands can complete without user interaction before execution.
 """
     await log_tool_history(ctx, title="run_unix_command", command=command, additional_hosts=additional_hosts)
+    # TODO: check for nmap command and see if we can redirect to port_scan
+    # TODO: check for curl command and see if we can redirect to index_http_url
     try:
         result = await _run_unix_command(ctx, command, additional_hosts)
         return result
@@ -895,6 +919,7 @@ async def index_request_body(request: Request) -> Response:
 async def index_http_url(
         ctx: Context,
         url: str,
+        additional_hosts: Optional[Dict[str, str]] = None,
         method: str = "GET",
         user_agent: Optional[str] = None,
         request_headers: Optional[Dict[str, str]] = None,
@@ -902,11 +927,16 @@ async def index_http_url(
         params: Optional[Dict[str, str]] = None,
         content: Optional[bytes] = None,
         follow_redirects: Optional[bool] = False,
+
 ) -> Optional[HttpResource]:
     """
     Index an HTTP URL to allow for further analysis and return the context, response code, response headers.
 
     Invoke this tool when the user needs the content of one specific URL.
+
+    The additional_hosts parameter is a dictionary of host name (the key) to IP address (the value) for hosts that do not have DNS records. This also includes CTF targets or web server virtual hosts found during other scans. If you
+    know the IP address for a host, be sure to include these in the additional_hosts parameter for
+    commands to run properly in a containerized environment.
 
     The user_agent can be used to specify the "User-Agent" request header. This is useful if a particular browser needs
     to be spoofed or the user requests extra information in the user agent header to identify themselves as a bug bounty hunter.
@@ -933,14 +963,20 @@ async def index_http_url(
                                          )
     server_ctx = await get_server_context()
     ingest_queue: Queue = server_ctx.ingest_queue
+    additional_hosts = get_additional_hosts(additional_hosts)
     the_headers = request_headers or {}
     if user_agent:
         the_headers['User-Agent'] = user_agent
     try:
         parsed_url = urlparse_ext(url)
+        if parsed_url.hostname in additional_hosts:
+            the_headers['Host'] = parsed_url.hostname
+            munged_url = url.replace(f"://{parsed_url.hostname}", f"://{additional_hosts[parsed_url.hostname]}", 1)
+        else:
+            munged_url = url
         async with httpx.AsyncClient() as client:
             response = await client.request(
-                url=url,
+                url=munged_url,
                 method=method,
                 headers=the_headers,
                 cookies=cookies,
@@ -993,7 +1029,7 @@ async def is_spider_time_recent(ctx: Context, url: str) -> Optional[float]:
         url_parsed = urlparse_ext(url)
         netloc = url_parsed.netloc
         now = datetime.now(timezone.utc)
-        get_result = await collection.get(where={"netloc": netloc}, include=["metadatas"])
+        get_result = await collection.get(where={"$and": [{"version": WEB_RESOURCE_VERSION}, {"netloc": netloc}]}, include=["metadatas"])
         for metadata in get_result.get("metadatas", []):
             try:
                 timestamp = datetime.fromisoformat(metadata["timestamp"])
@@ -1168,7 +1204,7 @@ async def find_domains(ctx: Context, query: Optional[str] = None) -> List[str]:
     collection: AsyncCollection = await chroma_client.get_collection("network")
     result = set()
     query, port = _query_to_netloc(query)
-    get_result = await collection.get(include=["metadatas"])
+    get_result = await collection.get(where={"version": WEB_RESOURCE_VERSION}, include=["metadatas"])
     for metadata in get_result.get("metadatas", []):
         if "domain" in metadata:
             domain = metadata['domain'].lower()
@@ -1197,7 +1233,7 @@ async def find_hosts(ctx: Context, domain_query: str) -> List[str]:
         collection: AsyncCollection = await chroma_client.get_collection("network")
         result = set()
         domain_query, port = _query_to_netloc(domain_query)
-        get_result = await collection.get(include=["metadatas"])
+        get_result = await collection.get(where={"version": WEB_RESOURCE_VERSION}, include=["metadatas"])
         for metadata in get_result.get("metadatas", []):
             if "host" in metadata:
                 hostname = metadata['host'].lower()
@@ -1229,7 +1265,7 @@ async def find_netloc(ctx: Context, domain_query: str) -> List[str]:
     collection: AsyncCollection = await chroma_client.get_collection("network")
     result = set()
     domain_query, port = _query_to_netloc(domain_query)
-    get_result = await collection.get(include=["metadatas"])
+    get_result = await collection.get(where={"version": WEB_RESOURCE_VERSION}, include=["metadatas"])
     for metadata in get_result.get("metadatas", []):
         if "host" in metadata:
             hostname = metadata['host'].lower()
@@ -1264,7 +1300,7 @@ async def find_urls(ctx: Context, host_query: str, limit: int = 100) -> List[str
     collection: AsyncCollection = await chroma_client.get_collection("network")
     result = set()
     host_query, port = _query_to_netloc(host_query)
-    get_results = await collection.get(include=["metadatas"])
+    get_results = await collection.get(where={"version": WEB_RESOURCE_VERSION}, include=["metadatas"])
     for metadata in get_results.get("metadatas", []):
         if "host" in metadata and "url" in metadata:
             hostname = metadata['host'].lower()
@@ -1276,11 +1312,19 @@ async def find_urls(ctx: Context, host_query: str, limit: int = 100) -> List[str
     return sorted(list(result))
 
 
-@mcp.prompt(title="Penetration Tester")
-def web_vuln(prompt: str) -> str:
-    return pentester_chat_system_prompt + f"""
-Your task: "{prompt}"
-"""
+@mcp.prompt(title="Automated Penetration Tester")
+def pentest_agent_prompt(target: str) -> List[Message]:
+    return [
+        AssistantMessage(pentester_agent_system_prompt),
+        UserMessage(f"Conduct a penetration test on {target}"),
+    ]
+
+@mcp.prompt(title="Penetration Tester Assistant")
+def pentest_agent_prompt(target: str) -> List[Message]:
+    return [
+        AssistantMessage(pentester_chat_system_prompt),
+        UserMessage(f"Conduct a penetration test on {target}"),
+    ]
 
 # TODO: add prompt for CTF agent
 
