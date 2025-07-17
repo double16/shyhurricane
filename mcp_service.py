@@ -653,9 +653,9 @@ When generating Linux commands for execution in a containerized, ephemeral envir
 - Output must go to standard output only; do not write to files.
 - Use one-liner reverse shells or web shells for shell payloads.
 - Pipe input into commands as needed; do not rely on TTY or prompts.
-- Always set a timeout for potentially blocking commands (e.g., timeout 10s nmap ...).
 - Ensure commands can complete without user interaction before execution.
 """
+#- Always set a timeout for potentially blocking commands (e.g., timeout 10s nmap ...).
     await log_tool_history(ctx, title="run_unix_command", command=command, additional_hosts=additional_hosts)
     # TODO: check for nmap command and see if we can redirect to port_scan
     # TODO: check for curl command and see if we can redirect to index_http_url
@@ -815,7 +815,8 @@ async def port_scan(
         ip_addresses: Optional[List[str]] = None,
         ip_subnets: Optional[str] = None,
         ports: Optional[List[int]] = None,
-        port_range: Optional[Tuple[int, int]] = None,
+        port_range_low: Optional[int] = None,
+        port_range_high: Optional[int] = None,
         additional_hosts: Optional[Dict[str, str]] = None
 ) -> str:
     """
@@ -828,8 +829,9 @@ async def port_scan(
 
     One of hostnames, ip_address, or ip_subnets must be specified.
 
-    One of ports or port_range must be specified. It is preferred to specify port_range if the list of
-    ports will be long. The port_range is a tuple of integers.
+    The ports parameter lists individual ports to scan.
+
+    The port_range_low and port_range_high allow specifying a range of ports to scan.
 
     The additional_hosts parameter is a dictionary of host name (the key) to IP address (the value) for hosts that do not have DNS records. This also includes CTF targets or web server virtual hosts found during other scans. If you
     know the IP address for a host, be sure to include these in the additional_hosts parameter for
@@ -840,7 +842,7 @@ async def port_scan(
     The port scan may take a long time, and this tool may return before the scan is finished.
     If this happens, call this tool again with the same parameters and it will return indexed results.
     """
-    await log_tool_history(ctx, "port_scan", hostnames=hostnames, ip_addresses=ip_addresses, ip_subnets=ip_subnets, ports=ports, port_range=port_range, additional_hosts=additional_hosts)
+    await log_tool_history(ctx, "port_scan", hostnames=hostnames, ip_addresses=ip_addresses, ip_subnets=ip_subnets, ports=ports, port_range_low=port_range_low, port_range_high=port_range_high, additional_hosts=additional_hosts)
 
     server_ctx = await get_server_context()
     port_scan_queue: Queue = server_ctx.port_scan_queue
@@ -851,9 +853,9 @@ async def port_scan(
     ip_subnets = filter_ip_networks(ip_subnets)
 
     ports_list = list(map(str, ports or []))
-    if port_range:
-        low_port = max(1, min(port_range))
-        high_port = min(65535, max(port_range))
+    if port_range_low or port_range_high:
+        low_port = max(1, min(port_range_low or 1, port_range_high or 65535))
+        high_port = min(65535, max(port_range_low or 1, port_range_high or 65535))
         ports_list.append(f"{low_port}-{high_port}")
     port_scan_queue_item = PortScanQueueItem(
         targets=(hostnames or []) + (ip_addresses or []) + (ip_subnets or []),
@@ -925,9 +927,8 @@ async def index_http_url(
         request_headers: Optional[Dict[str, str]] = None,
         cookies: Optional[Dict[str, str]] = None,
         params: Optional[Dict[str, str]] = None,
-        content: Optional[bytes] = None,
-        follow_redirects: Optional[bool] = False,
-
+        content: Optional[str] = None,
+        follow_redirects: Optional[bool] = None,
 ) -> Optional[HttpResource]:
     """
     Index an HTTP URL to allow for further analysis and return the context, response code, response headers.
@@ -964,6 +965,8 @@ async def index_http_url(
     server_ctx = await get_server_context()
     ingest_queue: Queue = server_ctx.ingest_queue
     additional_hosts = get_additional_hosts(additional_hosts)
+    if follow_redirects is None:
+        follow_redirects = False
     the_headers = request_headers or {}
     if user_agent:
         the_headers['User-Agent'] = user_agent
@@ -1163,7 +1166,7 @@ async def find_wordlists(ctx: Context, query: str) -> List[str]:
     return result.output.splitlines()
 
 
-# TODO: add busting tool (using feroxbuster), and prompt
+# TODO: add busting tool (using feroxbuster)
 
 
 def _query_to_netloc(query: str) -> Tuple[str | None, int | None]:
