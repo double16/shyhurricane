@@ -39,7 +39,7 @@ from haystack import Pipeline, component, Document
 from haystack_integrations.tools.mcp import StreamableHttpServerInfo, MCPToolset
 
 from prompts import pentester_agent_system_prompt, pentester_chat_system_prompt
-from utils import urlparse_ext, GeneratorConfig, extract_domain
+from utils import urlparse_ext, GeneratorConfig, extract_domain, IngestableRequestResponse
 
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 os.environ['ANONYMIZED_TELEMETRY'] = "False"
@@ -628,12 +628,10 @@ def _deobfuscate_javascript(content: str) -> str:
 
 @component
 class KatanaDocument:
-    def __init__(self, embedders: Dict[str, Any], doc_cleaner: DocumentCleaner):
-        self.embedders = embedders
-        self.doc_cleaner = doc_cleaner
-        self._title_soup_strainer = SoupStrainer(['title', 'meta'])
+    def __init__(self):
+        self._empty_response = {"request_responses": []}
 
-    @component.output_types(documents=List[Document])
+    @component.output_types(request_responses=List[IngestableRequestResponse])
     def run(self, text: str | dict):
         if isinstance(text, dict):
             entry = text
@@ -641,15 +639,92 @@ class KatanaDocument:
             entry = json.loads(str(text))
         if "request" not in entry:
             logger.warning("Missing request")
-            return {"documents": []}
+            return self._empty_response
         if "response" not in entry:
             logger.warning("Missing response")
-            return {"documents": []}
+            return self._empty_response
         if "status_code" not in entry["response"]:
             logger.info("No status_code, usually indicates out of scope")
-            return {"documents": []}
+            return self._empty_response
 
         url = entry["request"]["endpoint"]
+        try:
+            urlparse_ext(url)
+        except Exception:
+            logger.warning(f"Malformed URL: {url}")
+            return self._empty_response
+
+        timestamp = entry["timestamp"]  # 2025-06-28T22:52:07.882000
+        response_body: Optional[str] = entry.get("response", {}).get("body", None)
+        status_code = entry["response"].get("status_code", 200)
+        http_method = entry["request"].get("method", "").upper()
+        request_headers = self._title_case_header(entry["request"].get("headers", {}))
+        request_headers.pop("raw", None)
+        response_headers = self._title_case_header(entry["response"].get("headers", {}))
+        response_headers.pop("raw", None)
+        technologies = entry["response"].get("technologies", [])
+        if not isinstance(technologies, list):
+            technologies = [str(technologies)]
+        forms = entry.get("response", {}).get("forms", None)
+
+        request_response = IngestableRequestResponse(
+            url=url,
+            timestamp=timestamp,
+            method=http_method,
+            request_headers=request_headers,
+            request_body=response_body,
+            response_code=status_code,
+            response_headers=response_headers,
+            response_body=response_body,
+            technologies=technologies,
+            forms=forms,
+        )
+        return {"request_responses": [request_response]}
+
+    def _title_case_header(self, katana_headers: Dict[str, str]) -> Dict[str, str]:
+        result = dict()
+        for k, v in katana_headers.items():
+            result[k.replace('_', '-').title()] = v
+            pass
+        return result
+
+
+@component
+class HttpRawDocument:
+    def __init__(self):
+        self._empty_response = {"request_responses": []}
+
+    @component.output_types(request_responses=List[IngestableRequestResponse])
+    def run(self, text: str):
+        return self._empty_response
+
+
+@component
+class HarDocument:
+    def __init__(self):
+        self._empty_response = {"request_responses": []}
+
+    @component.output_types(request_responses=List[IngestableRequestResponse])
+    def run(self, text: str):
+        return self._empty_response
+
+
+@component
+class RequestResponseToDocument:
+    def __init__(self, embedders: Dict[str, Any], doc_cleaner: DocumentCleaner):
+        self.embedders = embedders
+        self.doc_cleaner = doc_cleaner
+        self._title_soup_strainer = SoupStrainer(['title', 'meta'])
+
+    @component.output_types(documents=List[Document])
+    def run(self, request_responses: List[IngestableRequestResponse]):
+        docs = []
+        for rr in (request_responses or []):
+            docs.extend(self._to_documents(rr))
+        return {"documents": docs}
+
+    def _to_documents(self, request_response: IngestableRequestResponse) -> List[Document]:
+        url = request_response.url
         try:
             url_parsed = urlparse_ext(url)
             host = url_parsed.hostname.lower()
@@ -658,24 +733,16 @@ class KatanaDocument:
             domain = extract_domain(host)
         except Exception:
             logger.warning(f"Malformed URL: {url}")
-            return {"documents": []}
+            return []
 
+        timestamp = request_response.timestamp
         # quantize timestamp to avoid too many duplicate results
-        timestamp = entry["timestamp"]  # 2025-06-28T22:52:07.882000
-        timestamp_for_id = timestamp[0:11]  # one document per URL per day
-        response_body: Optional[str] = entry.get("response", {}).get("body", None)
-        status_code = entry["response"].get("status_code", 200)
-        http_method = entry["request"].get("method", "").upper()
-        request_headers = entry["request"].get("headers", {})
-        request_headers.pop("raw", None)
-        response_headers = entry["response"].get("headers", {})
-        response_headers.pop("raw", None)
-        raw_mime = response_headers.get("content-type", response_headers.get("content_type", "")).lower().split(";")[
-            0].strip()
-        technologies = entry["response"].get("technologies", [])
-        if not isinstance(technologies, list):
-            technologies = [str(technologies)]
-        technologies_str = json.dumps(technologies, indent=None, separators=(',', ':'), sort_keys=True)
+        timestamp_for_id = request_response.timestamp[0:11]  # one document per URL per day
+        request_headers = request_response.request_headers
+        response_body = request_response.response_body
+        response_headers = request_response.response_headers
+        raw_mime = response_headers.get("Content-Type", "").lower().split(";")[0].strip()
+        technologies_str = json.dumps(request_response.technologies or [], indent=None, separators=(',', ':'), sort_keys=True)
 
         title: Optional[str] = None
         description: Optional[str] = None
@@ -685,7 +752,7 @@ class KatanaDocument:
             if soup.title and soup.title.string:
                 title = soup.title.string.strip()
             else:
-                # Try fallback meta tags in priority order
+                # Try fallback meta-tags in priority order
                 title_fallbacks = [
                     ('property', 'og:title'),
                     ('name', 'twitter:title'),
@@ -722,8 +789,8 @@ class KatanaDocument:
             "domain": domain,
             "timestamp": timestamp,
             "content_type": raw_mime,
-            "status_code": status_code,
-            "http_method": http_method,
+            "status_code": request_response.response_code,
+            "http_method": request_response.method,
             "technologies": technologies_str,
         }
         if title:
@@ -739,7 +806,7 @@ class KatanaDocument:
         run_cleaner = True
         if doc_type == "javascript" and response_body:
             response_body = _deobfuscate_javascript(response_body)
-            response_headers["content_length"] = str(len(response_body))
+            response_headers["Content-Length"] = str(len(response_body))
             run_cleaner = False
 
         content = response_body
@@ -778,10 +845,10 @@ class KatanaDocument:
 
         # ─ Network Document (always)
         sorted_request_headers = "\n".join(
-            f"{k.replace('_', '-').title()}: {v}" for k, v in sorted(request_headers.items())
+            f"{k}: {v}" for k, v in sorted(request_headers.items())
         )
         sorted_response_headers = "\n".join(
-            f"{k.replace('_', '-').title()}: {v}" for k, v in sorted(response_headers.items())
+            f"{k}: {v}" for k, v in sorted(response_headers.items())
         )
         net_text = (
                 "--- HTTP Request Headers ---\n" +
@@ -803,9 +870,8 @@ class KatanaDocument:
         documents.extend(net_embedder.run(documents=[net_doc])["documents"])
 
         # ─ HTML forms
-        if "forms" in entry["response"]:
-            forms = entry["response"]["forms"]
-            sorted_forms = sorted(forms, key=lambda f: f.get("method", "GET") + "." + f.get("action", ""))
+        if request_response.forms:
+            sorted_forms = sorted(request_response.forms, key=lambda f: f.get("method", "GET") + "." + f.get("action", ""))
             forms_doc = Document(
                 content=json.dumps(sorted_forms, indent=None, separators=(',', ':'), sort_keys=True),
                 meta=base_meta | {
@@ -818,29 +884,7 @@ class KatanaDocument:
             forms_embedder = self.embedders["forms"]
             documents.extend(forms_embedder.run(documents=[forms_doc])["documents"])
 
-        return {"documents": documents}
-
-
-@component
-class HttpRawDocument:
-    def __init__(self, embedders: Dict[str, Any], doc_cleaner: DocumentCleaner):
-        self.embedders = embedders
-        self.doc_cleaner = doc_cleaner
-
-    @component.output_types(documents=List[Document])
-    def run(self, text: str):
-        return {"documents": []}
-
-
-@component
-class HarDocument:
-    def __init__(self, embedders: Dict[str, Any], doc_cleaner: DocumentCleaner):
-        self.embedders = embedders
-        self.doc_cleaner = doc_cleaner
-
-    @component.output_types(documents=List[Document])
-    def run(self, text: str):
-        return {"documents": []}
+        return documents
 
 
 @component
@@ -913,16 +957,22 @@ class GenerateTitleAndDescription:
 
 
 def is_katana_jsonl(value: str):
+    logger.debug("is_katana_jsonl: %s", value[0:128])
     try:
         data = json.loads(value)
         if "request" not in data or "response" not in data or "timestamp" not in data:
             return False
-        return "endpoint" in data["request"]
-    except Exception:
+        if "endpoint" in data["request"]:
+            logger.debug("is_katana_jsonl: found")
+            return True
+        return False
+    except Exception as e:
+        logger.debug("is_katana_jsonl: parsing %s", e)
         return False
 
 
 def is_har_json(value: str):
+    logger.debug("is_har_json: %s", value[0:128])
     try:
         data = json.loads(value)
         if "log" not in data:
@@ -944,6 +994,7 @@ http_response_re = re.compile(
 
 
 def is_http_raw(value: str):
+    logger.debug("is_http_raw: %s", value[0:128])
     try:
         return bool(http_request_re.search(value) and http_response_re.search(value))
     except Exception:
@@ -1013,26 +1064,26 @@ def build_ingest_pipeline(db: str, generator_config: GeneratorConfig) -> Pipelin
     }
 
     pipe.add_component("input_router", ConditionalRouter(routes=routes, custom_filters=custom_filters))
-    pipe.add_component("katana_document", KatanaDocument(embedders=embedders, doc_cleaner=doc_cleaner))
-    pipe.add_component("raw_document", HttpRawDocument(embedders=embedders, doc_cleaner=doc_cleaner))
-    pipe.add_component("har_document", HarDocument(embedders=embedders, doc_cleaner=doc_cleaner))
-    pipe.add_component("katana_store", IngestMultiStore(stores))
-    pipe.add_component("raw_store", IngestMultiStore(stores))
-    pipe.add_component("har_store", IngestMultiStore(stores))
-    pipe.add_component("katana_gen_title", GenerateTitleAndDescription(generator_config))
-    pipe.add_component("raw_gen_title", GenerateTitleAndDescription(generator_config))
-    pipe.add_component("har_gen_title", GenerateTitleAndDescription(generator_config))
+    pipe.add_component("katana_document", KatanaDocument())
+    pipe.add_component("raw_document", HttpRawDocument())
+    pipe.add_component("har_document", HarDocument())
+
+    pipe.add_component("rr_joiner", ListJoiner(List[IngestableRequestResponse]))
+    pipe.add_component("request_response_to_document", RequestResponseToDocument(embedders=embedders, doc_cleaner=doc_cleaner))
+
+    pipe.add_component("gen_title", GenerateTitleAndDescription(generator_config))
+    pipe.add_component("store", IngestMultiStore(stores))
 
     pipe.connect("input_router.katana_jsonl", "katana_document.text")
     pipe.connect("input_router.http_raw_text", "raw_document.text")
     pipe.connect("input_router.har_json", "har_document.text")
 
-    pipe.connect("katana_document", "katana_gen_title")
-    pipe.connect("raw_document", "raw_gen_title")
-    pipe.connect("har_document", "har_gen_title")
+    pipe.connect("katana_document", "rr_joiner")
+    pipe.connect("raw_document", "rr_joiner")
+    pipe.connect("har_document", "rr_joiner")
 
-    pipe.connect("katana_gen_title", "katana_store")
-    pipe.connect("raw_gen_title", "raw_store")
-    pipe.connect("har_gen_title", "har_store")
+    pipe.connect("rr_joiner", "request_response_to_document")
+    pipe.connect("request_response_to_document", "gen_title")
+    pipe.connect("gen_title", "store")
 
     return pipe

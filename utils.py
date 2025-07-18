@@ -278,3 +278,16 @@ class PortScanResults(BaseModel):
     runtime_ts: float = Field(description="When the scan was run")
     nmap_xml: str = Field(description="NMAP XML output")
     has_more: bool = Field(False, description="Whether there are more results")
+
+
+class IngestableRequestResponse(BaseModel):
+    url: str = Field(description="URL")
+    timestamp: str = Field(description="Timestamp")
+    method: str = Field(description="HTTP method")
+    request_headers: Dict[str, str] = Field(description="Request headers")
+    request_body: Optional[str] = Field(description="Request body")
+    response_code: int = Field(description="HTTP response code")
+    response_headers: Dict[str, str] = Field(description="Response headers")
+    response_body: str = Field(description="HTTP response body")
+    technologies: Optional[List[str]] = Field(description="Technologies")
+    forms: Optional[Dict[str, Any]] = Field(description="Forms")  # see katana response.forms "schema"
