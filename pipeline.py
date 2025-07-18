@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-import asyncio
 import hashlib
 import json
 import logging
@@ -35,7 +34,7 @@ import chromadb
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 from haystack_integrations.components.retrievers.chroma import ChromaEmbeddingRetriever
 from haystack.components.embedders import SentenceTransformersTextEmbedder, SentenceTransformersDocumentEmbedder
-from haystack.components.builders import PromptBuilder, AnswerBuilder, ChatPromptBuilder
+from haystack.components.builders import PromptBuilder, ChatPromptBuilder
 from haystack import Pipeline, component, Document
 from haystack_integrations.tools.mcp import StreamableHttpServerInfo, MCPToolset
 
@@ -598,10 +597,9 @@ def _deobfuscate_javascript(content: str) -> str:
     if not content:
         return content
 
-    docker_command = ["docker", "run", "--rm", "-i", "shyhurricane_unix_command:latest", '/usr/share/wakaru/wakaru.cjs']
+    docker_command = ["docker", "run", "--rm", "-i", "shyhurricane_unix_command:latest", 'timeout', '90s', '/usr/share/wakaru/wakaru.cjs']
     logger.info(f"Deobfuscating javascript with command {' '.join(docker_command)}")
-    proc = subprocess.Popen(docker_command, universal_newlines=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen(docker_command, universal_newlines=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     result = ""
     try:
         proc.stdin.write(content)

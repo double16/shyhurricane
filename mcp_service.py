@@ -1181,7 +1181,7 @@ async def deobfuscate_javascript(ctx: Context, content: str) -> str:
     await log_tool_history(ctx, "deobfuscate_javascript", content=content[0:128])
     if content is None or not content.strip():
         return ""
-    result = await _run_unix_command(ctx, "/usr/share/wakaru/wakaru.cjs", None, content)
+    result = await _run_unix_command(ctx, "timeout 90s /usr/share/wakaru/wakaru.cjs", None, content)
     if result is None or result.return_code != 0:
         return content
     return result.output
