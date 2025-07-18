@@ -1,0 +1,7 @@
+{
+  "dependencies": {
+    "@wakaru/unminify": "^0.2.2",
+    "@wakaru/unpacker": "^0.1.2",
+    "unpacker": "^1.0.1"
+  }
+}

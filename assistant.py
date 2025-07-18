@@ -41,19 +41,26 @@ def configure_logging(level=logging.CRITICAL):
         logging.getLogger(name).setLevel(level)
 
 
-def streaming_chunk_callback(chunk: StreamingChunk):
-    console.print(chunk.content, end="")
-    if chunk.tool_calls:
-        for tool_call in chunk.tool_calls:
-            if tool_call.tool_name:
-                console.print(f"{tool_call.tool_name}({tool_call.arguments or ""})")
-        if chunk.tool_call_result:
-            if chunk.tool_call_result.origin:
-                console.print(
-                    f"{chunk.tool_call_result.origin.tool_name}({chunk.tool_call_result.origin.arguments or ""})")
-            console.print(f"{chunk.tool_call_result.result}")
-    if chunk.finish_reason:
-        console.print(f"\n🛑 {chunk.finish_reason}")
+def streaming_chunk_callback(verbose: bool = False):
+    def callback(chunk: StreamingChunk):
+        console.print(chunk.content, end="")
+        if verbose:
+            if chunk.tool_calls:
+                for tool_call in chunk.tool_calls:
+                    if tool_call.tool_name:
+                        console.print(f"{tool_call.tool_name}({tool_call.arguments or ""})")
+                if chunk.tool_call_result:
+                    if chunk.tool_call_result.origin:
+                        console.print(
+                            f"{chunk.tool_call_result.origin.tool_name}({chunk.tool_call_result.origin.arguments or ""})")
+                    console.print(f"{chunk.tool_call_result.result}")
+            if chunk.finish_reason:
+                console.print(f"\n🛑 {chunk.finish_reason}")
+        else:
+            if chunk.finish_reason:
+                console.print("\n")
+
+    return callback
 
 
 def main():
@@ -85,7 +92,7 @@ def main():
         pipe, generator, tools = build_chat_pipeline(generator_config, args.mcp_url)
 
     if args.stream and generator is not None:
-        generator.streaming_callback = streaming_chunk_callback
+        generator.streaming_callback = streaming_chunk_callback(verbose=bool(args.verbose))
 
     prompt_history_path = Path(Path.home(), ".local", "state", "web_rag", "prompt_history")
     os.makedirs(prompt_history_path.parent, mode=0o755, exist_ok=True)

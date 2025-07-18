@@ -24,10 +24,12 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_CACHE_DIR=/usr/local/share/pip-cache
 
 RUN apt-get update &&\
-    apt-get install -y --install-recommends ruby nmap sqlmap curl wget dirb ffuf wfuzz hydra netcat-openbsd git pipx iputils-ping &&\
+    apt-get install -y --install-recommends ruby nmap sqlmap curl wget dirb ffuf wfuzz hydra netcat-openbsd git pipx iputils-ping nodejs npm &&\
     apt-get clean
 RUN pipx install impacket
 RUN gem install evil-winrm
+COPY package.json package-lock.json wakaru.cjs /usr/share/wakaru/
+RUN cd /usr/share/wakaru/ && npm install && chmod +x /usr/share/wakaru/wakaru.cjs
 
 COPY --from=gobuild /usr/local/bin/* /usr/local/bin/
 COPY --from=cargobuild /usr/local/bin/* /usr/local/bin/

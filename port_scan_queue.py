@@ -11,6 +11,7 @@ import xml.etree.ElementTree as ET
 
 from haystack import Document
 from haystack.components.embedders import SentenceTransformersDocumentEmbedder
+from haystack.document_stores.types import DuplicatePolicy
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 
 from doc_type_model_map import doc_type_to_model
@@ -199,7 +200,7 @@ def _do_port_scan(
             # "technologies": technologies_str,
         }
     )
-    nmap_store.write_documents(nmap_embedder.run(documents=[nmap_doc])["documents"])
+    nmap_store.write_documents(nmap_embedder.run(documents=[nmap_doc])["documents"], policy=DuplicatePolicy.OVERWRITE)
 
     results = []
     for host_el in tree.findall('.//host'):
@@ -227,7 +228,8 @@ def _do_port_scan(
                     # "technologies": technologies_str,
                 }
             )
-            nmap_store.write_documents(nmap_embedder.run(documents=[host_nmap_doc])["documents"])
+            nmap_store.write_documents(nmap_embedder.run(documents=[host_nmap_doc])["documents"],
+                                       policy=DuplicatePolicy.OVERWRITE)
 
         for el in host_el:
             if el.tag == 'ports':
@@ -270,7 +272,8 @@ def _do_port_scan(
                                 # "technologies": technologies_str,
                             }
                         )
-                        portscan_store.write_documents(portscan_embedder.run(documents=[portscan_doc])["documents"])
+                        portscan_store.write_documents(portscan_embedder.run(documents=[portscan_doc])["documents"],
+                                                       policy=DuplicatePolicy.OVERWRITE)
 
     result_queue.put(PortScanResults(
         runtime_ts=runtime_ts,

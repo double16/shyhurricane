@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import sys
 from json import JSONDecodeError
 from typing import Dict, List, Optional, Any, Tuple
@@ -18,6 +19,7 @@ from haystack.components.routers import ConditionalRouter
 from haystack.components.tools import ToolInvoker
 from haystack.core.component import Component
 from haystack.dataclasses import ChatMessage
+from haystack.document_stores.types import DuplicatePolicy
 from haystack.tools import Toolset
 from haystack_experimental.chat_message_stores import InMemoryChatMessageStore
 from haystack_experimental.components.retrievers import ChatMessageRetriever
@@ -231,9 +233,10 @@ Example Expanded Queries:
 
 @component
 class QueryExpander:
-    def __init__(self, generator_config: GeneratorConfig, prompt: Optional[str] = None):
+    def __init__(self, generator_config: GeneratorConfig, prompt: Optional[str] = None, number: int = 5):
 
         self.query_expansion_prompt = prompt
+        self.number = number
         if prompt is None:
             self.query_expansion_prompt = query_expander_natural_language
         builder = PromptBuilder(self.query_expansion_prompt, required_variables=["number", "query"])
@@ -244,15 +247,16 @@ class QueryExpander:
         self.pipeline.connect("builder", "llm")
 
     @component.output_types(queries=List[str])
-    def run(self, query: str, number: int = 5):
-        if number <= 1:
+    def run(self, query: str):
+        if self.number <= 1:
             return {"queries": [query]}
         try:
             ctx = mcp.get_context()
             ctx.info(f"Expanding query")
         except Exception:
             pass
-        result = self.pipeline.run({'builder': {'query': query, 'number': number}}).get('llm', {}).get('replies', [""])[
+        result = \
+            self.pipeline.run({'builder': {'query': query, 'number': self.number}}).get('llm', {}).get('replies', [""])[
             0]
         logger.info(f"Expanded query result:\n{result}")
         if not result:
@@ -457,9 +461,7 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
     stores: Dict[str, ChromaDocumentStore] = {}
 
     for col in collections:
-        # Components per collection
         model_name = get_model_for_doc_type(col)
-        ret_name = f"ret_{col}"
 
         store = create_chrome_document_store(db=db, collection_name=col)
         stores[col] = store
@@ -468,19 +470,20 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
         multiquery_retriever = MultiQueryChromaRetriever(embedder, retriever)
         retrievers[col] = multiquery_retriever
 
+        ret_name = f"ret_{col}"
         pipe.add_component(ret_name, multiquery_retriever)
 
         custom_query_expander = None
         if col == "javascript":
-            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_javascript)
+            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_javascript, number=10)
         elif col == "css":
-            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_css)
+            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_css, number=5)
         elif col == "html":
-            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_html)
+            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_html, number=10)
         elif col == "xml":
-            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_xml)
+            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_xml, number=5)
         elif col == "network":
-            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_network)
+            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_network, number=5)
 
         # wiring: Query → embedder → retriever → combiner
         pipe.connect("query.max_results", ret_name + ".top_k")
@@ -591,6 +594,40 @@ def is_binary(content: str, mime_type: str) -> bool:
         return False
 
 
+def _deobfuscate_javascript(content: str) -> str:
+    if not content:
+        return content
+
+    docker_command = ["docker", "run", "--rm", "-i", "shyhurricane_unix_command:latest", '/usr/share/wakaru/wakaru.cjs']
+    logger.info(f"Deobfuscating javascript with command {' '.join(docker_command)}")
+    proc = subprocess.Popen(docker_command, universal_newlines=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL)
+    result = ""
+    try:
+        proc.stdin.write(content)
+        proc.stdin.close()
+        while proc.poll() is None:
+            line_out = proc.stdout.readline()
+            if line_out:
+                result += line_out
+        # read any buffered output
+        while True:
+            line_out = proc.stdout.readline()
+            if not line_out:
+                break
+            result += line_out
+    except EOFError:
+        pass
+
+    return_code = proc.wait()
+    if return_code != 0 or not result.strip():
+        logger.error("Deobfuscating javascript failed with exit code %d", return_code)
+        return content
+    else:
+        logger.info("Deobfuscating javascript completed, from %d bytes to %d bytes", len(content), len(result))
+        return result
+
+
 @component
 class KatanaDocument:
     def __init__(self, embedders: Dict[str, Any], doc_cleaner: DocumentCleaner):
@@ -629,7 +666,6 @@ class KatanaDocument:
         timestamp = entry["timestamp"]  # 2025-06-28T22:52:07.882000
         timestamp_for_id = timestamp[0:11]  # one document per URL per day
         response_body: Optional[str] = entry.get("response", {}).get("body", None)
-        content = response_body
         status_code = entry["response"].get("status_code", 200)
         http_method = entry["request"].get("method", "").upper()
         request_headers = entry["request"].get("headers", {})
@@ -666,18 +702,18 @@ class KatanaDocument:
             # extract description
             for meta in soup.find_all('meta'):
                 attrs = meta.attrs
-                content = attrs.get('content', '')
-                if not content:
+                meta_content = attrs.get('content', '')
+                if not meta_content:
                     continue
 
                 if attrs.get('name') == 'description':
-                    description = content.strip()
+                    description = meta_content.strip()
                 elif attrs.get('property') == 'og:description':
-                    description = content.strip()
+                    description = meta_content.strip()
                 elif attrs.get('name') == 'twitter:description':
-                    description = content.strip()
+                    description = meta_content.strip()
                 elif attrs.get('itemprop') == 'description':
-                    description = content.strip()
+                    description = meta_content.strip()
 
         base_meta = {
             "version": WEB_RESOURCE_VERSION,
@@ -701,6 +737,14 @@ class KatanaDocument:
 
         # Map MIME to a logical doc type
         doc_type = map_mime_to_type(raw_mime)
+
+        run_cleaner = True
+        if doc_type == "javascript" and response_body:
+            response_body = _deobfuscate_javascript(response_body)
+            response_headers["content_length"] = str(len(response_body))
+            run_cleaner = False
+
+        content = response_body
 
         # ─ Content Document (if body is present)
         if response_body and not is_binary(response_body, raw_mime):
@@ -726,9 +770,9 @@ class KatanaDocument:
                     meta=base_meta | {"type": doc_type},
                     id=hashlib.sha256(f"{url}:{doc_type}:{timestamp_for_id}".encode()).hexdigest()
                 )
-                # TODO: de-obfuscate javascript
                 try:
-                    doc = self.doc_cleaner.run(documents=[doc])["documents"][0]
+                    if run_cleaner:
+                        doc = self.doc_cleaner.run(documents=[doc])["documents"][0]
                 except Exception:
                     logger.warning(f"[-] Content cleaning failed, continuing with original content")
                 embedder = self.embedders.get(doc_type, self.embedders["default"])
@@ -809,7 +853,7 @@ class IngestMultiStore:
     @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]):
         for doc in documents:
-            self.stores.get(doc.meta.get('type')).write_documents([doc])
+            self.stores.get(doc.meta.get('type')).write_documents([doc], policy=DuplicatePolicy.OVERWRITE)
         return {"documents": documents}
 
 

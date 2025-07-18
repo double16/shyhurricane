@@ -40,6 +40,7 @@ from pydantic import BaseModel, AnyUrl, Field, ValidationError
 from starlette.requests import Request
 from starlette.responses import Response
 
+from doc_type_model_map import map_mime_to_type
 from ingest_queue import start_ingest_worker
 from pipeline import build_document_pipeline, build_website_context_pipeline, urlparse_ext, create_chroma_client, \
     WEB_RESOURCE_VERSION
@@ -538,7 +539,7 @@ async def web_resource(doc_type: str, doc_id: str) -> Optional[TextResourceConte
     )
 
 
-# TODO: persist this? expire entries?
+# TODO: move to AppContext?
 cached_get_additional_hosts: Dict[str, str] = {}
 
 
@@ -653,9 +654,10 @@ When generating Linux commands for execution in a containerized, ephemeral envir
 - Output must go to standard output only; do not write to files.
 - Use one-liner reverse shells or web shells for shell payloads.
 - Pipe input into commands as needed; do not rely on TTY or prompts.
-- Ensure commands can complete without user interaction before execution.
+- Always set a timeout for potentially blocking commands (e.g., timeout 10s nmap ...). Use a timeout value appropriate for the command. For example, directory busting with a large word list may take 10 minutes, whereas a short wordlist may be 2 minutes.
+- Ensure commands can be complete without user interaction before execution.
+- The directly accessible filesystem is part of the containerized environment, not the target. Commands such as find, cat, etc. are not enumerating the target unless they are part of a command that connects to the target, such as ssh.
 """
-#- Always set a timeout for potentially blocking commands (e.g., timeout 10s nmap ...).
     await log_tool_history(ctx, title="run_unix_command", command=command, additional_hosts=additional_hosts)
     # TODO: check for nmap command and see if we can redirect to port_scan
     # TODO: check for curl command and see if we can redirect to index_http_url
@@ -672,12 +674,21 @@ When generating Linux commands for execution in a containerized, ephemeral envir
         )
 
 
-async def _run_unix_command(ctx: Context, command: str, additional_hosts: Optional[Dict[str, str]]) -> Optional[
+async def _run_unix_command(ctx: Context, command: str, additional_hosts: Optional[Dict[str, str]],
+                            stdin: Optional[str] = None) -> Optional[
     RunUnixCommand]:
     logger.info(f"run_unix_command {command}")
 
+    stdin_bytes = stdin.encode("utf-8") if stdin else None
+    if stdin_bytes:
+        stdin_sha512 = hashlib.sha512(stdin_bytes).hexdigest()
+    else:
+        stdin_sha512 = None
+
     server_ctx = await get_server_context()
-    cache_path: str = ctx.request_context.lifespan_context.get_cache_path_for_tool(command, additional_hosts)
+    cache_path: str = ctx.request_context.lifespan_context.get_cache_path_for_tool(
+        command + stdin_sha512 if stdin_sha512 else command,
+        additional_hosts)
     meta_path = os.path.join(cache_path, 'meta.json')
     stdout_path = os.path.join(cache_path, 'stdout.txt')
     stderr_path = os.path.join(cache_path, 'stderr.txt')
@@ -741,17 +752,27 @@ async def _run_unix_command(ctx: Context, command: str, additional_hosts: Option
                           "--cap-add", "NET_RAW",
                           # "-v", f"{cache_path}:/work",
                           ]
+        if stdin:
+            docker_command.append("-i")
+
         additional_hosts = get_additional_hosts(additional_hosts)
         for host, ip in additional_hosts.items():
             docker_command.extend(["--add-host", f"{host}:{ip}"])
         docker_command.extend(["shyhurricane_unix_command:latest", "/bin/bash", "-c", command])
         logger.info(f"Executing command {docker_command}")
 
+        # TODO: add a timeout
+
         proc = await asyncio.create_subprocess_exec(
             *docker_command,
+            stdin=asyncio.subprocess.PIPE if stdin_bytes else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=cwd)
+
+        if stdin_bytes:
+            proc.stdin.write(stdin_bytes)
+            proc.stdin.close()
 
         await asyncio.gather(
             _write_stream_to_file(proc.stdout, stdout_path),
@@ -975,6 +996,7 @@ async def index_http_url(
         if parsed_url.hostname in additional_hosts:
             the_headers['Host'] = parsed_url.hostname
             munged_url = url.replace(f"://{parsed_url.hostname}", f"://{additional_hosts[parsed_url.hostname]}", 1)
+            logger.info("Munged URL with additional hosts: %s", munged_url)
         else:
             munged_url = url
         async with httpx.AsyncClient() as client:
@@ -990,6 +1012,7 @@ async def index_http_url(
         status_code = response.status_code
         response_headers = dict(response.headers)
         body = response.text
+
         asyncio.create_task(asyncio.to_thread(ingest_queue.put, json.dumps({
             "timestamp": datetime.now().isoformat(),
             "request": {
@@ -1003,6 +1026,10 @@ async def index_http_url(
                 "body": body,
             }
         })))
+
+        if map_mime_to_type(response.headers.get("Content-Type")) == "javascript":
+            body = await deobfuscate_javascript(ctx, body)
+
         resource = TextResourceContents(
             uri=AnyUrl(url),
             mimeType=response.headers.get("Content-Type", ""),
@@ -1029,10 +1056,9 @@ async def is_spider_time_recent(ctx: Context, url: str) -> Optional[float]:
     try:
         chroma_client: chromadb.AsyncClientAPI = (await get_server_context()).chroma_client
         collection: AsyncCollection = await chroma_client.get_collection("network")
-        url_parsed = urlparse_ext(url)
-        netloc = url_parsed.netloc
         now = datetime.now(timezone.utc)
-        get_result = await collection.get(where={"$and": [{"version": WEB_RESOURCE_VERSION}, {"netloc": netloc}]}, include=["metadatas"])
+        get_result = await collection.get(where={"$and": [{"version": WEB_RESOURCE_VERSION}, {"url": url}]},
+                                          include=["metadatas"])
         for metadata in get_result.get("metadatas", []):
             try:
                 timestamp = datetime.fromisoformat(metadata["timestamp"])
@@ -1138,6 +1164,27 @@ async def spider_website(ctx: Context,
         resources=results,
         has_more=has_more,
     )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="De-obfuscate Javascript",
+        readOnlyHint=True,
+        openWorldHint=False),
+)
+async def deobfuscate_javascript(ctx: Context, content: str) -> str:
+    """
+    De-obfuscate a JavaScript file to be closer to the original source.
+
+    Invoke this tool when the user needs to unpack and/or un-minify JavaScript to aid in understanding.
+    """
+    await log_tool_history(ctx, "deobfuscate_javascript", content=content[0:128])
+    if content is None or not content.strip():
+        return ""
+    result = await _run_unix_command(ctx, "/usr/share/wakaru/wakaru.cjs", None, content)
+    if result is None or result.return_code != 0:
+        return content
+    return result.output
 
 
 @mcp.tool(
@@ -1319,14 +1366,14 @@ async def find_urls(ctx: Context, host_query: str, limit: int = 100) -> List[str
 def pentest_agent_prompt(target: str) -> List[Message]:
     return [
         AssistantMessage(pentester_agent_system_prompt),
-        UserMessage(f"Conduct a penetration test on {target}"),
+        UserMessage(f"Conduct a penetration test on {target}."),
     ]
 
 @mcp.prompt(title="Penetration Tester Assistant")
-def pentest_agent_prompt(target: str) -> List[Message]:
+def pentest_assistant_prompt(target: str) -> List[Message]:
     return [
         AssistantMessage(pentester_chat_system_prompt),
-        UserMessage(f"Conduct a penetration test on {target}"),
+        UserMessage(f"Examine {target} for vulnerabilities."),
     ]
 
 # TODO: add prompt for CTF agent
