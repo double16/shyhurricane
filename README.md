@@ -117,3 +117,31 @@ model with `--ollama-model`.
 
 Disable user elicitation:
 `DISABLE_ELICITATION=True`
+
+## Indexing Data
+
+The ingest queue is based on the EXACT string of the Chroma database. i.e., `localhost` and `127.0.0.1` are different!
+
+### katana
+
+```shell
+cat katana.jsonl | python3 ingest.py --db 127.0.0.1:8200 --katana
+
+# live ingestion:
+tail -f katana.jsonl | python3 ingest.py --db 127.0.0.1:8200 --katana
+```
+
+... or send to a running MCP server:
+
+```shell
+curl -X POST -H 'Transfer-Encoding: chunked' -H 'Content-Type: application/json' http://127.0.0.1:8000/index --data-binary @katana.jsonl
+```
+
+### Burp Logger++ CSV
+
+```shell
+cat LoggerPlusPlus.csv | python3 ingest.py --db 127.0.0.1:8200 --csv
+
+# live ingestion using the auto-export feature of Logger++:
+tail -f LoggerPlusPlus.csv | python3 ingest.py --db 127.0.0.1:8200 --csv
+```

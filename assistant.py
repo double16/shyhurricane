@@ -94,7 +94,7 @@ def main():
     if args.stream and generator is not None:
         generator.streaming_callback = streaming_chunk_callback(verbose=bool(args.verbose))
 
-    prompt_history_path = Path(Path.home(), ".local", "state", "web_rag", "prompt_history")
+    prompt_history_path = Path(Path.home(), ".local", "state", "shyhurricane", "prompt_history")
     os.makedirs(prompt_history_path.parent, mode=0o755, exist_ok=True)
     sess = PromptSession(history=FileHistory(os.fspath(prompt_history_path)),
                          # completer=WordCompleter(["/set","/show","/reload","/exit","/quit"], ignore_case=True)

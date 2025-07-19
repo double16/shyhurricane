@@ -1,12 +1,15 @@
 import argparse
 import ipaddress
+import json
 import logging
 import os
+import re
 from pathlib import Path
 from urllib.parse import ParseResult, urlparse
-from typing import Optional, Generator, Dict, Any, Union, List, Sequence, Tuple, Literal
+from typing import Optional, Dict, Any, Union, List, Tuple
 
 import aiofiles
+from bs4 import SoupStrainer, BeautifulSoup
 from haystack.components.generators import OpenAIGenerator
 from haystack.components.generators.chat import OpenAIChatGenerator
 from haystack.tools import Toolset
@@ -222,6 +225,44 @@ class GeneratorConfig(BaseModel):
             raise NotImplementedError
 
 
+def parse_http_request(request_text):
+    lines = request_text.splitlines()
+    headers = {}
+    body_lines = []
+    in_headers = True
+    method, path, http_version = None, None, None
+
+    for i, line in enumerate(lines):
+        if i == 0:
+            # Request line
+            try:
+                method, path, http_version = line.strip().split()
+            except ValueError:
+                pass  # Malformed request line
+            continue
+
+        if in_headers:
+            if line.strip() == "":
+                in_headers = False
+                continue
+            key, sep, value = line.partition(":")
+            if sep:
+                key = key.strip().lower()
+                value = value.strip()
+                if key in headers:
+                    if isinstance(headers[key], list):
+                        headers[key].append(value)
+                    else:
+                        headers[key] = ', '.join([headers[key], value])
+                else:
+                    headers[key] = value
+        else:
+            body_lines.append(line)
+
+    body = "\n".join(body_lines)
+    return method, path, http_version, headers, body
+
+
 def parse_http_response(response_text) -> Tuple[
     Optional[int],
     Dict[str, Union[str, list[str]]],
@@ -252,7 +293,7 @@ def parse_http_response(response_text) -> Tuple[
                         if isinstance(headers[key], list):
                             headers[key].append(value)
                         else:
-                            headers[key] = [headers[key], value]
+                            headers[key] = ', '.join([headers[key], value])
                     else:
                         headers[key] = value
         else:
@@ -288,6 +329,100 @@ class IngestableRequestResponse(BaseModel):
     request_body: Optional[str] = Field(description="Request body")
     response_code: int = Field(description="HTTP response code")
     response_headers: Dict[str, str] = Field(description="Response headers")
-    response_body: str = Field(description="HTTP response body")
+    response_body: Optional[str] = Field(description="HTTP response body")
+    response_rtt: Optional[float] = Field(description="Response RTT in milliseconds")
     technologies: Optional[List[str]] = Field(description="Technologies")
-    forms: Optional[Dict[str, Any]] = Field(description="Forms")  # see katana response.forms "schema"
+    forms: Optional[List[Dict[str, Any]]] = Field(description="Forms")  # see katana response.forms "schema"
+
+
+def is_katana_jsonl(value: str):
+    logger.debug("is_katana_jsonl: %s ... %s", value[0:64], value[-64:])
+    try:
+        data = json.loads(value)
+        if "request" not in data or "response" not in data or "timestamp" not in data:
+            return False
+        if "endpoint" in data["request"]:
+            logger.debug("is_katana_jsonl: found")
+            return True
+        return False
+    except Exception as e:
+        logger.debug("is_katana_jsonl: parsing %s", e)
+        return False
+
+
+def is_har_json(value: str):
+    logger.debug("is_har_json: %s", value[0:128])
+    try:
+        data = json.loads(value)
+        if "log" not in data:
+            return False
+        return "entries" in data["log"]
+    except Exception:
+        return False
+
+
+http_request_re = re.compile(
+    r"^[A-Z][A-Z]+ [^\r\n]+ HTTP/[0-9][0-9.]*$",
+    re.MULTILINE
+)
+
+http_response_re = re.compile(
+    r"^HTTP/[0-9][0-9.]* \d{3} .+",
+    re.MULTILINE
+)
+
+
+def is_http_raw(value: str):
+    logger.debug("is_http_raw: %s", value[0:128])
+    try:
+        return bool(http_request_re.search(value) and http_response_re.search(value))
+    except Exception:
+        return False
+
+
+def is_http_csv_header(value: str):
+    return False
+
+
+class BeautifulSoupExtractor:
+    def __init__(self):
+        self._soup_strainer = SoupStrainer(['title', 'meta'])
+
+    def extract(self, html: str) -> Tuple[Optional[str], Optional[str]]:
+        soup = BeautifulSoup(html, 'html.parser', parse_only=self._soup_strainer)
+
+        title = None
+        description = None
+
+        if soup.title and soup.title.string:
+            title = soup.title.string.strip()
+        else:
+            # Try fallback meta-tags in priority order
+            title_fallbacks = [
+                ('property', 'og:title'),
+                ('name', 'twitter:title'),
+                ('itemprop', 'name'),
+            ]
+            for attr, value in title_fallbacks:
+                tag = soup.find('meta', attrs={attr: value})
+                if tag and tag.get('content', ''):
+                    title = tag['content'].strip()
+                    break
+
+            # extract description
+        for meta in soup.find_all('meta'):
+            attrs = meta.attrs
+            meta_content = attrs.get('content', '')
+            if not meta_content:
+                continue
+
+            if attrs.get('name') == 'description':
+                description = meta_content.strip()
+            elif attrs.get('property') == 'og:description':
+                description = meta_content.strip()
+            elif attrs.get('name') == 'twitter:description':
+                description = meta_content.strip()
+            elif attrs.get('itemprop') == 'description':
+                description = meta_content.strip()
+
+        return title, description

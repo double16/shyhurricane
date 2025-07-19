@@ -39,7 +39,8 @@ from haystack import Pipeline, component, Document
 from haystack_integrations.tools.mcp import StreamableHttpServerInfo, MCPToolset
 
 from prompts import pentester_agent_system_prompt, pentester_chat_system_prompt
-from utils import urlparse_ext, GeneratorConfig, extract_domain, IngestableRequestResponse
+from utils import urlparse_ext, GeneratorConfig, extract_domain, IngestableRequestResponse, is_katana_jsonl, \
+    is_har_json, is_http_raw, BeautifulSoupExtractor
 
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 os.environ['ANONYMIZED_TELEMETRY'] = "False"
@@ -662,6 +663,7 @@ class KatanaDocument:
         request_headers.pop("raw", None)
         response_headers = self._title_case_header(entry["response"].get("headers", {}))
         response_headers.pop("raw", None)
+        response_rtt: Optional[float] = entry.get("response", {}).get("rtt", None)
         technologies = entry["response"].get("technologies", [])
         if not isinstance(technologies, list):
             technologies = [str(technologies)]
@@ -676,6 +678,7 @@ class KatanaDocument:
             response_code=status_code,
             response_headers=response_headers,
             response_body=response_body,
+            response_rtt=response_rtt,
             technologies=technologies,
             forms=forms,
         )
@@ -714,6 +717,7 @@ class RequestResponseToDocument:
     def __init__(self, embedders: Dict[str, Any], doc_cleaner: DocumentCleaner):
         self.embedders = embedders
         self.doc_cleaner = doc_cleaner
+        self._soup_extractor = BeautifulSoupExtractor()
         self._title_soup_strainer = SoupStrainer(['title', 'meta'])
 
     @component.output_types(documents=List[Document])
@@ -747,38 +751,7 @@ class RequestResponseToDocument:
         title: Optional[str] = None
         description: Optional[str] = None
         if response_body and raw_mime == "text/html":
-            soup = BeautifulSoup(response_body, 'html.parser', parse_only=self._title_soup_strainer)
-
-            if soup.title and soup.title.string:
-                title = soup.title.string.strip()
-            else:
-                # Try fallback meta-tags in priority order
-                title_fallbacks = [
-                    ('property', 'og:title'),
-                    ('name', 'twitter:title'),
-                    ('itemprop', 'name'),
-                ]
-                for attr, value in title_fallbacks:
-                    tag = soup.find('meta', attrs={attr: value})
-                    if tag and tag.get('content', ''):
-                        title = tag['content'].strip()
-                        break
-
-            # extract description
-            for meta in soup.find_all('meta'):
-                attrs = meta.attrs
-                meta_content = attrs.get('content', '')
-                if not meta_content:
-                    continue
-
-                if attrs.get('name') == 'description':
-                    description = meta_content.strip()
-                elif attrs.get('property') == 'og:description':
-                    description = meta_content.strip()
-                elif attrs.get('name') == 'twitter:description':
-                    description = meta_content.strip()
-                elif attrs.get('itemprop') == 'description':
-                    description = meta_content.strip()
+            title, description = self._soup_extractor.extract(response_body)
 
         base_meta = {
             "version": WEB_RESOURCE_VERSION,
@@ -797,6 +770,8 @@ class RequestResponseToDocument:
             base_meta["title"] = title
         if description:
             base_meta["description"] = description
+        if request_response.response_rtt is not None:
+            base_meta["response_rtt"] = request_response.response_rtt
 
         documents = []
 
@@ -954,51 +929,6 @@ class GenerateTitleAndDescription:
                     pass
 
         return {"documents": documents}
-
-
-def is_katana_jsonl(value: str):
-    logger.debug("is_katana_jsonl: %s", value[0:128])
-    try:
-        data = json.loads(value)
-        if "request" not in data or "response" not in data or "timestamp" not in data:
-            return False
-        if "endpoint" in data["request"]:
-            logger.debug("is_katana_jsonl: found")
-            return True
-        return False
-    except Exception as e:
-        logger.debug("is_katana_jsonl: parsing %s", e)
-        return False
-
-
-def is_har_json(value: str):
-    logger.debug("is_har_json: %s", value[0:128])
-    try:
-        data = json.loads(value)
-        if "log" not in data:
-            return False
-        return "entries" in data["log"]
-    except Exception:
-        return False
-
-
-http_request_re = re.compile(
-    r"^[A-Z][A-Z]+ [^\r\n]+ HTTP/[0-9][0-9.]*$",
-    re.MULTILINE
-)
-
-http_response_re = re.compile(
-    r"^HTTP/[0-9][0-9.]* \d{3} .+",
-    re.MULTILINE
-)
-
-
-def is_http_raw(value: str):
-    logger.debug("is_http_raw: %s", value[0:128])
-    try:
-        return bool(http_request_re.search(value) and http_response_re.search(value))
-    except Exception:
-        return False
 
 
 def build_ingest_pipeline(db: str, generator_config: GeneratorConfig) -> Pipeline:
