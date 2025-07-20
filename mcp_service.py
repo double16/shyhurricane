@@ -62,7 +62,7 @@ generator_config: Optional[GeneratorConfig] = GeneratorConfig.from_env()
 @dataclass
 class ServerConfig:
     task_pool_size: int = 3
-    ingest_pool_size: int = 2
+    ingest_pool_size: int = 1
 
 
 @dataclass
@@ -103,7 +103,7 @@ _server_context: Optional[ServerContext] = None
 
 def set_server_config(config: ServerConfig):
     global _server_config
-    server_config = config
+    _server_config = config
 
 
 async def get_server_context() -> ServerContext:
@@ -1274,6 +1274,9 @@ async def directory_buster(ctx: Context,
                            url: str,
                            depth: int = 3,
                            wordlist: Optional[str] = None,
+                           # TODO: method
+                           # TODO: cookies: Optional[Dict[str, str]] = None,
+                           # TODO: params: Optional[Dict[str, str]] = None,
                            extensions: Optional[List[str]] = None,
                            ignored_response_codes: Optional[List[int]] = None,
                            additional_hosts: Optional[Dict[str, str]] = None,
