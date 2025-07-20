@@ -647,6 +647,9 @@ class KatanaDocument:
         if "status_code" not in entry["response"]:
             logger.info("No status_code, usually indicates out of scope")
             return self._empty_response
+        if "endpoint" not in entry["request"]:
+            logger.info("No endpoint")
+            return self._empty_response
 
         url = entry["request"]["endpoint"]
         try:
@@ -803,7 +806,7 @@ class RequestResponseToDocument:
         # ─ Type specific Document (if body is present)
         if content:
             if is_binary(content, raw_mime):
-                logger.info(f"[-] Skipping {url} ({raw_mime}) binary content")
+                logger.info(f"Skipping {url} ({raw_mime}) binary content")
             else:
                 doc = Document(
                     content=content,
@@ -814,7 +817,7 @@ class RequestResponseToDocument:
                     if run_cleaner:
                         doc = self.doc_cleaner.run(documents=[doc])["documents"][0]
                 except Exception:
-                    logger.warning(f"[-] Content cleaning failed, continuing with original content")
+                    logger.warning(f"Content cleaning failed, continuing with original content")
                 embedder = self.embedders.get(doc_type, self.embedders["default"])
                 documents.extend(embedder.run(documents=[doc])["documents"])
 

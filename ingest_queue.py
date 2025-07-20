@@ -10,37 +10,36 @@ import persistqueue
 from haystack import Pipeline
 
 from pipeline import build_ingest_pipeline
+from shyhurricane.task_queue import TaskPool
 from utils import GeneratorConfig
-
-_ingest_queues: Dict[str, persistqueue.SQLiteQueue] = {}
 
 logger = logging.getLogger(__name__)
 
 
 def get_ingest_queue(db: str) -> persistqueue.SQLiteQueue:
-    if db not in _ingest_queues:
-        path = Path(Path.home(), ".local", "state", "shyhurricane", re.sub(r'[^A-Za-z0-9_.-]', '_', db), "ingest_queue")
-        os.makedirs(path.parent, mode=0o755, exist_ok=True)
-        _ingest_queues[db] = persistqueue.SQLiteQueue(path=str(path), auto_commit=True)
-    return _ingest_queues[db]
+    path = Path(Path.home(), ".local", "state", "shyhurricane", re.sub(r'[^A-Za-z0-9_.-]', '_', db), "ingest_queue")
+    os.makedirs(path.parent, mode=0o755, exist_ok=True)
+    return persistqueue.SQLiteQueue(path=str(path), auto_commit=True)
 
 
-def _ingest_worker(db: str, generator_config: GeneratorConfig, queue_path: str):
-    queue = persistqueue.SQLiteQueue(path=queue_path, auto_commit=True)
+def _ingest_worker(db: str, generator_config: GeneratorConfig):
+    queue = get_ingest_queue(db)
     pipeline: Pipeline = build_ingest_pipeline(db=db, generator_config=generator_config)
     while True:
         item = queue.get()
-        if item is None:
-            logger.info("Exiting the ingest queue")
-            break  # Sentinel to stop
         try:
             pipeline.run({"input_router": {"text": str(item)}})
         except Exception as e:
             logger.error("Error in ingestion pipeline", exc_info=e)
 
 
-def start_ingest_worker(db: str, generator_config: GeneratorConfig) -> Tuple[persistqueue.SQLiteQueue, Process]:
+def start_ingest_worker(db: str, generator_config: GeneratorConfig, pool_size: int = 1) -> Tuple[
+    persistqueue.SQLiteQueue, TaskPool]:
+    assert pool_size > 0
     queue = get_ingest_queue(db)
-    process = multiprocessing.Process(target=_ingest_worker, args=(db, generator_config, queue.path))
-    process.start()
-    return queue, process
+    processes = []
+    for idx in range(pool_size):
+        process = multiprocessing.Process(target=_ingest_worker, args=(db, generator_config))
+        process.start()
+        processes.append(process)
+    return queue, TaskPool(processes)

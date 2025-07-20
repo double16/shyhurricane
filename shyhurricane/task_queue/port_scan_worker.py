@@ -1,13 +1,12 @@
 import copy
 import logging
-import multiprocessing
 import subprocess
 import tempfile
 import time
 from datetime import datetime
-from multiprocessing import Queue, Process
-from typing import List, Dict, Tuple, Optional
-import xml.etree.ElementTree as ET
+from multiprocessing import Queue
+from typing import Optional
+from xml.etree import ElementTree as ET
 
 from haystack import Document
 from haystack.components.embedders import SentenceTransformersDocumentEmbedder
@@ -16,120 +15,54 @@ from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 
 from doc_type_model_map import doc_type_to_model
 from pipeline import create_chrome_document_store
-from ports import parse_ports_spec, is_subset, bitfield_to_ports
-from utils import PortScanResults, PortScanResult
-
-logger = logging.getLogger(__name__)
+from ports import parse_ports_spec, bitfield_to_ports, is_subset
+from shyhurricane.task_queue.types import PortScanQueueItem
+from utils import PortScanResult, PortScanResults
 
 NMAP_DOCUMENT_VERSION = 2
 
-
-class PortScanQueueItem:
-    def __init__(self, targets: List[str], ports: List[str], additional_hosts: Dict[str, str]) -> None:
-        self.targets = targets
-        self.ports = ports or []
-        self.additional_hosts = additional_hosts
-
-    def __eq__(self, other):
-        return isinstance(other, PortScanQueueItem) and self.targets == other.targets and self.ports == other.ports
-
-    def __copy__(self):
-        return PortScanQueueItem(self.targets, self.ports, self.additional_hosts)
+logger = logging.getLogger(__name__)
 
 
-_port_scan_queues: Dict[str, Tuple[Queue, Queue]] = {}
+class PortScanContext:
+    def __init__(self, db: str):
+        self.nmap_store = create_chrome_document_store(db=db, collection_name="nmap")
+        self.nmap_embedder = SentenceTransformersDocumentEmbedder(
+            model=doc_type_to_model.get("nmap"),
+            progress_bar=False)
+        self.portscan_store = create_chrome_document_store(db=db, collection_name="portscan")
+        self.portscan_embedder = SentenceTransformersDocumentEmbedder(
+            model=doc_type_to_model.get("portscan"),
+            progress_bar=False)
+
+    def warm_up(self):
+        self.nmap_embedder.warm_up()
+        self.portscan_embedder.warm_up()
 
 
-def get_port_scan_queues(db: str) -> Tuple[Queue, Queue]:
-    if db not in _port_scan_queues:
-        _port_scan_queues[db] = (multiprocessing.Queue(), multiprocessing.Queue())
-    return _port_scan_queues[db]
+def port_scan_worker(ctx: PortScanContext, item: PortScanQueueItem, result_queue: Queue):
+    nmap_store = ctx.nmap_store
+    nmap_embedder = ctx.nmap_embedder
+    portscan_store = ctx.portscan_store
+    portscan_embedder = ctx.portscan_embedder
 
-
-def _port_scan_worker(db: str, queue: Queue, result_queue: Queue):
-    nmap_store = create_chrome_document_store(db=db, collection_name="nmap")
-    nmap_embedder = SentenceTransformersDocumentEmbedder(
-        model=doc_type_to_model.get("nmap"),
-        progress_bar=False)
-    nmap_embedder.warm_up()
-    portscan_store = create_chrome_document_store(db=db, collection_name="portscan")
-    portscan_embedder = SentenceTransformersDocumentEmbedder(
-        model=doc_type_to_model.get("portscan"),
-        progress_bar=False)
-    portscan_embedder.warm_up()
-
-    while True:
-        item = queue.get()
-        if item is None:
-            logger.info("Exiting the port scan queue")
-            break  # Sentinel to stop
-        try:
-            wanted_ports = parse_ports_spec(item.ports)
-            if wanted_ports.count() > 1000:
-                # we want the top 100 ports, but we should not scan ports other than what the user asked for
-                top_ports_100 = parse_ports_spec(
-                    "7,9,13,21-23,25-26,37,53,79-81,88,106,110-111,113,119,135,139,143-144,179,199,389,427,443-445,465,513-515,543-544,548,554,587,631,646,873,990,993,995,1025-1029,1110,1433,1720,1723,1755,1900,2000-2001,2049,2121,2717,3000,3128,3306,3389,3986,4899,5000,5009,5051,5060,5101,5190,5357,5432,5631,5666,5800,5900,6000-6001,6646,7070,8000,8008-8009,8080-8081,8443,8888,9100,9999-10000,32768,49152-49157".split(
-                        ','))
-                top_ports_100 &= wanted_ports
-                if top_ports_100.count() > 20:
-                    item_100 = copy.copy(item)
-                    item_100.ports = list(map(str, bitfield_to_ports(top_ports_100)))
-                    logger.info("Performing an initial port scan with %d ports", top_ports_100.count())
-                    _do_port_scan(result_queue, item_100, nmap_store, nmap_embedder, portscan_store, portscan_embedder,
-                                  True)
-
-            _do_port_scan(result_queue, item, nmap_store, nmap_embedder, portscan_store, portscan_embedder, False)
-
-            result_queue.put(None)  # mark end of scan
-        except Exception as e:
-            logger.error("Error running port scan", exc_info=e)
-
-
-def start_port_scan_worker(db: str) -> Tuple[Queue, Queue, Process]:
-    queues = get_port_scan_queues(db)
-    process = multiprocessing.Process(target=_port_scan_worker, args=(db, queues[0], queues[1]))
-    process.start()
-    return queues[0], queues[1], process
-
-
-def get_stored_port_scan_results(
-        item: PortScanQueueItem,
-        nmap_store: ChromaDocumentStore,
-        portscan_store: ChromaDocumentStore
-) -> Optional[PortScanResults]:
-    filters = {
-        "operator": "AND",
-        "conditions": [
-            {"field": "meta.version", "operator": "==", "value": NMAP_DOCUMENT_VERSION},
-            {"field": "meta.targets", "operator": "==", "value": ','.join(item.targets)},
-        ]
-    }
-    nmap_existing = nmap_store.filter_documents(filters=filters)
-    runtime_expired_ts = time.time() - 60 * 60 * 24 * 7
-    existing_results = []
     wanted_ports = parse_ports_spec(item.ports)
+    if wanted_ports.count() > 1000:
+        # we want the top 100 ports, but we should not scan ports other than what the user asked for
+        top_ports_100 = parse_ports_spec(
+            "7,9,13,21-23,25-26,37,53,79-81,88,106,110-111,113,119,135,139,143-144,179,199,389,427,443-445,465,513-515,543-544,548,554,587,631,646,873,990,993,995,1025-1029,1110,1433,1720,1723,1755,1900,2000-2001,2049,2121,2717,3000,3128,3306,3389,3986,4899,5000,5009,5051,5060,5101,5190,5357,5432,5631,5666,5800,5900,6000-6001,6646,7070,8000,8008-8009,8080-8081,8443,8888,9100,9999-10000,32768,49152-49157".split(
+                ','))
+        top_ports_100 &= wanted_ports
+        if top_ports_100.count() > 20:
+            item_100 = copy.copy(item)
+            item_100.ports = list(map(str, bitfield_to_ports(top_ports_100)))
+            logger.info("Performing an initial port scan with %d ports", top_ports_100.count())
+            _do_port_scan(result_queue, item_100, nmap_store, nmap_embedder, portscan_store, portscan_embedder,
+                          True)
 
-    # 0 is a special case of "don't care"
-    if wanted_ports.count() == 1 and wanted_ports[0]:
-        wanted_ports.setall(False)
+    _do_port_scan(result_queue, item, nmap_store, nmap_embedder, portscan_store, portscan_embedder, False)
 
-    for doc in nmap_existing:
-        if doc.meta.get("runtime_ts", 0) < runtime_expired_ts:
-            continue
-        covered_ports = parse_ports_spec([doc.meta.get("ports", "")])
-        if not is_subset(wanted_ports, covered_ports):
-            continue
-        if "ERROR: Script execution failed" in doc.content:
-            continue
-        return PortScanResults(
-            runtime_ts=doc.meta.get("runtime_ts", 0),
-            results=existing_results,  # TODO:
-            targets=item.targets,
-            ports=item.ports,
-            nmap_xml=doc.content,
-            has_more=False,
-        )
-    return None
+    result_queue.put(None)  # mark end of scan
 
 
 def _do_port_scan(
@@ -284,4 +217,44 @@ def _do_port_scan(
         has_more=has_more,
     ))
 
+    return None
+
+
+def get_stored_port_scan_results(
+        item: PortScanQueueItem,
+        nmap_store: ChromaDocumentStore,
+        portscan_store: ChromaDocumentStore
+) -> Optional[PortScanResults]:
+    filters = {
+        "operator": "AND",
+        "conditions": [
+            {"field": "meta.version", "operator": "==", "value": NMAP_DOCUMENT_VERSION},
+            {"field": "meta.targets", "operator": "==", "value": ','.join(item.targets)},
+        ]
+    }
+    nmap_existing = nmap_store.filter_documents(filters=filters)
+    runtime_expired_ts = time.time() - 60 * 60 * 24 * 7
+    existing_results = []
+    wanted_ports = parse_ports_spec(item.ports)
+
+    # 0 is a special case of "don't care"
+    if wanted_ports.count() == 1 and wanted_ports[0]:
+        wanted_ports.setall(False)
+
+    for doc in nmap_existing:
+        if doc.meta.get("runtime_ts", 0) < runtime_expired_ts:
+            continue
+        covered_ports = parse_ports_spec([doc.meta.get("ports", "")])
+        if not is_subset(wanted_ports, covered_ports):
+            continue
+        if "ERROR: Script execution failed" in doc.content:
+            continue
+        return PortScanResults(
+            runtime_ts=doc.meta.get("runtime_ts", 0),
+            results=existing_results,  # TODO:
+            targets=item.targets,
+            ports=item.ports,
+            nmap_xml=doc.content,
+            has_more=False,
+        )
     return None

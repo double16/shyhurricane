@@ -24,12 +24,19 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_CACHE_DIR=/usr/local/share/pip-cache
 
 RUN apt-get update &&\
-    apt-get install -y --install-recommends ruby nmap sqlmap curl wget dirb ffuf wfuzz hydra netcat-openbsd git pipx iputils-ping nodejs npm &&\
+    apt-get install -y --install-recommends ruby nmap sqlmap curl wget dirb ffuf wfuzz hydra netcat-openbsd git pipx iputils-ping nodejs npm mitmproxy python3-pip python3-virtualenv &&\
     apt-get clean
 RUN pipx install impacket
 RUN gem install evil-winrm
-COPY package.json package-lock.json wakaru.cjs /usr/share/wakaru/
+COPY --chown=0:0 --chmod=644 package.json package-lock.json /usr/share/wakaru/
+COPY --chown=0:0 --chmod=755 wakaru.cjs /usr/share/wakaru/
 RUN cd /usr/share/wakaru/ && npm install && chmod +x /usr/share/wakaru/wakaru.cjs
+
+COPY --chown=0:0 --chmod=644 requirements.txt mitm_to_katana.py /usr/share/mitm_to_katana/
+RUN virtualenv /usr/share/mitm_to_katana/.venv &&\
+    . /usr/share/mitm_to_katana/.venv/bin/activate &&\
+    pip install -r /usr/share/mitm_to_katana/requirements.txt
+COPY --chown=0:0 --chmod=755 mitmdump_virtualenv.sh /usr/local/bin/
 
 COPY --from=gobuild /usr/local/bin/* /usr/local/bin/
 COPY --from=cargobuild /usr/local/bin/* /usr/local/bin/

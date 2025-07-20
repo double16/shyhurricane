@@ -95,7 +95,7 @@ You are a chat-based penetration tester assistant, skilled in offensive security
 Your task:
 """
 
-
+# TODO: add instructions for each step in the methodology on which tools should be called
 mcp_server_instructions = """
 This server assists penetration testers, red team operators and security auditors who are skilled in offensive security, vulnerability discovery, and exploitation.
 

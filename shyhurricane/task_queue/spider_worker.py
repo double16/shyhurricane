@@ -1,60 +1,30 @@
 import json
 import logging
 import subprocess
-from multiprocessing import Queue, Process
-from typing import Optional, Dict, Tuple, List
+from multiprocessing import Queue
+from typing import Optional, Dict, List
 
 import persistqueue
 from mcp import Resource
 from pydantic import AnyUrl
 
-from ingest_queue import get_ingest_queue
 from pipeline import KatanaDocument
-from utils import urlparse_ext, HttpResource, extract_domain, IngestableRequestResponse, BeautifulSoupExtractor
+from shyhurricane.task_queue.types import SpiderQueueItem
+from utils import BeautifulSoupExtractor, IngestableRequestResponse, urlparse_ext, HttpResource, extract_domain
 
 logger = logging.getLogger(__name__)
 
 
-class SpiderQueueItem:
-    def __init__(self,
-                 uri: str,
-                 depth: int = 3,
-                 user_agent: Optional[str] = None,
-                 request_headers: Optional[Dict[str, str]] = None,
-                 additional_hosts: Dict[str, str] = None,
-                 ):
-        self.uri = uri
-        self.depth = depth
-        self.user_agent = user_agent
-        self.request_headers = request_headers
-        self.additional_hosts = additional_hosts
-
-
-def _spider_worker(spider_queue: Queue, ingest_queue_path: str, spider_result_queue: Queue):
-    ingest_queue = persistqueue.SQLiteQueue(path=ingest_queue_path, auto_commit=True)
-    while True:
-        item: SpiderQueueItem = spider_queue.get()
-        if item is None:
-            logger.info("Exiting the spider queue")
-            break  # Sentinel to stop
-        _katana_ingest(
-            ingest_queue=ingest_queue,
-            uri=item.uri,
-            depth=item.depth,
-            user_agent=item.user_agent,
-            request_headers=item.request_headers,
-            result_queue=spider_result_queue,
-            additional_hosts=item.additional_hosts,
-        )
-
-
-def start_spider_worker(db: str) -> Tuple[Queue, Queue, Process]:
-    ingest_queue = get_ingest_queue(db)
-    spider_queue = Queue()
-    spider_result_queue = Queue()
-    process = Process(target=_spider_worker, args=(spider_queue, ingest_queue.path, spider_result_queue))
-    process.start()
-    return spider_queue, spider_result_queue, process
+def spider_worker(item: SpiderQueueItem, ingest_queue: persistqueue.SQLiteQueue, spider_result_queue: Queue):
+    _katana_ingest(
+        ingest_queue=ingest_queue,
+        uri=item.uri,
+        depth=item.depth,
+        user_agent=item.user_agent,
+        request_headers=item.request_headers,
+        result_queue=spider_result_queue,
+        additional_hosts=item.additional_hosts,
+    )
 
 
 def _katana_ingest(

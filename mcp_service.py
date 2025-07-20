@@ -17,7 +17,7 @@ from collections.abc import AsyncGenerator
 import aiofiles
 from datetime import datetime, timezone
 from json import JSONDecodeError
-from multiprocessing import Queue, Process
+from multiprocessing import Queue, Process, Pool
 from typing import List, AsyncIterator, Optional, Tuple, Dict, Any
 from urllib.parse import urlparse
 
@@ -47,15 +47,23 @@ from doc_type_model_map import map_mime_to_type
 from ingest_queue import start_ingest_worker
 from pipeline import build_document_pipeline, build_website_context_pipeline, urlparse_ext, create_chroma_client, \
     WEB_RESOURCE_VERSION
-from port_scan_queue import PortScanQueueItem, start_port_scan_worker, get_stored_port_scan_results
+from shyhurricane.task_queue import start_task_worker
+from shyhurricane.task_queue.port_scan_worker import get_stored_port_scan_results
+from shyhurricane.task_queue.types import PortScanQueueItem, SpiderQueueItem, DirBustingQueueItem, TaskPool
 from prompts import pentester_chat_system_prompt, mcp_server_instructions, pentester_agent_system_prompt
-from spider_queue import start_spider_worker, SpiderQueueItem
 from utils import HttpResource, add_generator_args, GeneratorConfig, extract_domain, read_last_text_bytes, \
     PortScanResults, is_katana_jsonl, is_http_csv_header
 
 logger = logging.getLogger(__name__)
 
 generator_config: Optional[GeneratorConfig] = GeneratorConfig.from_env()
+
+
+@dataclass
+class ServerConfig:
+    task_pool_size: int = 3
+    ingest_pool_size: int = 2
+
 
 @dataclass
 class ServerContext:
@@ -64,29 +72,23 @@ class ServerContext:
     document_pipeline: Pipeline
     website_context_pipeline: Pipeline
     ingest_queue: persistqueue.SQLiteQueue
-    ingest_process: Process
-    spider_queue: Queue
+    ingest_pool: TaskPool
+    task_queue: Queue
+    task_pool: TaskPool
     spider_result_queue: Queue
-    spider_process: Process
-    port_scan_queue: Queue
     port_scan_result_queue: Queue
-    port_scan_process: Process
+    dir_busting_result_queue: Queue
     stores: Dict[str, ChromaDocumentStore]
     chroma_client: chromadb.AsyncClientAPI
     disable_elicitation: bool = False
 
     def close(self):
-        for process in [self.ingest_process, self.spider_process, self.port_scan_process]:
-            try:
-                logger.info("Terminating process %s", process.pid)
-                process.terminate()
-                process.join()
-                process.close()
-            except Exception:
-                pass
+        logger.info("Terminating task pool")
+        self.task_pool.close()
+        logger.info("Terminating ingest pool")
+        self.ingest_pool.close()
         logger.info("Closing queues ...")
-        for q in [self.ingest_queue, self.spider_queue, self.spider_result_queue, self.port_scan_process,
-                  self.port_scan_result_queue, self.port_scan_process]:
+        for q in [self.ingest_queue, self.task_queue, self.spider_result_queue, self.port_scan_result_queue]:
             try:
                 q.put(None)
                 q.close()
@@ -95,11 +97,17 @@ class ServerContext:
         logger.info("ServerContext closed")
 
 
+_server_config: ServerConfig = ServerConfig()
 _server_context: Optional[ServerContext] = None
 
 
+def set_server_config(config: ServerConfig):
+    global _server_config
+    server_config = config
+
+
 async def get_server_context() -> ServerContext:
-    global _server_context
+    global _server_context, _server_config
     if _server_context is None:
         db = os.environ.get('CHROMA', '127.0.0.1:8200')
         logger.info("Using chroma database at %s", db)
@@ -114,22 +122,21 @@ async def get_server_context() -> ServerContext:
         website_context_pipeline = build_website_context_pipeline(
             generator_config=generator_config,
         )
-        ingest_queue, ingest_process = start_ingest_worker(db=db, generator_config=generator_config)
-        spider_queue, spider_result_queue, spider_process = start_spider_worker(db=db)
-        port_scan_queue, port_scan_result_queue, port_scan_process = start_port_scan_worker(db=db)
+        ingest_queue, ingest_pool = start_ingest_worker(db=db, generator_config=generator_config,
+                                                        pool_size=_server_config.ingest_pool_size)
+        task_worker_ipc = start_task_worker(db, ingest_queue.path, _server_config.task_pool_size)
         _server_context = ServerContext(
             db=db,
             cache_path=cache_path,
             document_pipeline=document_pipeline,
             website_context_pipeline=website_context_pipeline,
             ingest_queue=ingest_queue,
-            ingest_process=ingest_process,
-            spider_queue=spider_queue,
-            spider_result_queue=spider_result_queue,
-            spider_process=spider_process,
-            port_scan_queue=port_scan_queue,
-            port_scan_result_queue=port_scan_result_queue,
-            port_scan_process=port_scan_process,
+            ingest_pool=ingest_pool,
+            task_queue=task_worker_ipc.task_queue,
+            task_pool=task_worker_ipc.task_pool,
+            spider_result_queue=task_worker_ipc.spider_result_queue,
+            port_scan_result_queue=task_worker_ipc.port_scan_result_queue,
+            dir_busting_result_queue=task_worker_ipc.dir_busting_result_queue,
             stores=stores,
             chroma_client=chroma_client,
             disable_elicitation=disable_elicitation,
@@ -172,8 +179,8 @@ def assert_elicitation(ctx: ServerContext):
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     """Manage application lifecycle with type-safe context"""
     # Initialize on startup
-    # TODO: make this per AppContext
     server_ctx = await get_server_context()
+    # TODO: make cache_path this per AppContext
     cache_path = server_ctx.cache_path
 
     try:
@@ -871,7 +878,7 @@ async def port_scan(
     await log_tool_history(ctx, "port_scan", hostnames=hostnames, ip_addresses=ip_addresses, ip_subnets=ip_subnets, ports=ports, port_range_low=port_range_low, port_range_high=port_range_high, additional_hosts=additional_hosts)
 
     server_ctx = await get_server_context()
-    port_scan_queue: Queue = server_ctx.port_scan_queue
+    port_scan_queue: Queue = server_ctx.task_queue
     port_scan_result_queue: Queue = server_ctx.port_scan_result_queue
 
     hostnames = filter_hosts_and_addresses(hostnames)
@@ -1163,7 +1170,7 @@ async def spider_website(ctx: Context,
             has_more=False,
         )
 
-    spider_queue: Queue = server_ctx.spider_queue
+    spider_queue: Queue = server_ctx.task_queue
     spider_result_queue: Queue = server_ctx.spider_result_queue
     url_parsed = urlparse_ext(url)
     spider_queue_item = SpiderQueueItem(
@@ -1249,7 +1256,94 @@ async def find_wordlists(ctx: Context, query: str) -> List[str]:
     return result.output.splitlines()
 
 
-# TODO: add busting tool (using feroxbuster)
+class DirBusterResults(BaseModel):
+    urls: List[str] = Field(description="The urls found by the directory buster")
+    has_more: bool = Field(
+        description="Whether the directory buster has more resources available that can be retrieved using the find_web_resources tool or listed by the find_urls tool")
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Directory Buster",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True),
+)
+async def directory_buster(ctx: Context,
+                           url: str,
+                           depth: int = 3,
+                           wordlist: Optional[str] = None,
+                           extensions: Optional[List[str]] = None,
+                           ignored_response_codes: Optional[List[int]] = None,
+                           additional_hosts: Optional[Dict[str, str]] = None,
+                           user_agent: Optional[str] = None,
+                           request_headers: Optional[Dict[str, str]] = None) -> DirBusterResults:
+    """
+    Search a website for hidden directories and files. This tool uses a wordlist to append each word to a URL and see if
+    it responds.
+
+    Invoke this tool when the user wants to run a brute-forcing tool. The results are indexed and available in the
+    find_web_resources, find_urls and other tools that use indexed content.
+
+    The additional_hosts parameter is a dictionary of host name (the key) to IP address (the value) for hosts that do not have DNS records. This also includes CTF targets or web server virtual hosts found during other scans. If you
+    know the IP address for a host, be sure to include these in the additional_hosts parameter for
+    commands to run properly in a containerized environment.
+
+    The user_agent can be used to specify the "User-Agent" request header. This is useful if a particular browser needs
+    to be spoofed or the user requests extra information in the user agent header to identify themselves as a bug bounty hunter.
+
+    The request_headers map is extra request headers sent with the request.
+
+    The extensions parameter specifies file extensions to search for such as pdf, php, etc.
+
+    Returns a list of URLs found. Indexes each URL that can be queried using the find_web_resources and find_urls tools. URL content can be returned using the fetch_web_resource_content tool.
+    """
+    await log_tool_history(ctx, "directory_buster", url=url, depth=depth, wordlist=wordlist, extensions=extensions,
+                           ignored_response_codes=ignored_response_codes, additional_hosts=additional_hosts,
+                           user_agent=user_agent, request_headers=request_headers)
+    server_ctx = await get_server_context()
+    url = url.strip()
+
+    task_queue: Queue = server_ctx.task_queue
+    dir_busting_result_queue: Queue = server_ctx.dir_busting_result_queue
+    queue_item = DirBustingQueueItem(
+        uri=url,
+        depth=3,
+        wordlist=wordlist,
+        extensions=extensions,
+        ignored_response_codes=ignored_response_codes,
+        user_agent=user_agent,
+        request_headers=request_headers,
+        additional_hosts=get_additional_hosts(ctx, additional_hosts),
+    )
+    await asyncio.to_thread(task_queue.put, queue_item)
+    results: List[str] = []
+    has_more = True
+    time_limit = time.time() + 90
+    while time.time() < time_limit:
+        try:
+            found_url: str = await asyncio.to_thread(
+                dir_busting_result_queue.get,
+                timeout=(max(1.0, time_limit - time.time())))
+        except queue.Empty:
+            has_more = False
+            break
+        if found_url is None:
+            has_more = False
+            break
+        logger.debug(f"{found_url} has been retrieved")
+        if not found_url.startswith(url):
+            logger.debug(
+                f"Dir buster queued {found_url}, expecting {url}*")
+            continue
+        results.append(found_url)
+        await ctx.info(f"Found: {found_url}")
+
+    return DirBusterResults(
+        urls=results,
+        has_more=has_more,
+    )
 
 
 def _query_to_netloc(query: str) -> Tuple[str | None, int | None]:
@@ -1371,7 +1465,7 @@ async def find_netloc(ctx: Context, domain_query: str) -> List[str]:
         readOnlyHint=True,
         openWorldHint=False),
 )
-async def find_urls(ctx: Context, host_query: str, limit: int = 100) -> List[str]:
+async def find_urls(ctx: Context, host_query: str, path_query: Optional[str] = None, limit: int = 100) -> List[str]:
     """
     Query indexed resources for a list of URLs for the given host or domain.
 
@@ -1381,7 +1475,9 @@ async def find_urls(ctx: Context, host_query: str, limit: int = 100) -> List[str
 
     The host_query parameter will limit the results using the "ends with" operator.
 
-    The limit parameter limits the number of results. The default limit is 100.
+    The path_query parameter, if specified, will match URLs using a "contains" operator.
+
+    The limit parameter limits the number of results. The default limit is 100. Valid limit values are 100-1000.
     """
     await log_tool_history(ctx, "find_urls", host_query=host_query, limit=limit)
     server_ctx = await get_server_context()
@@ -1396,9 +1492,11 @@ async def find_urls(ctx: Context, host_query: str, limit: int = 100) -> List[str
             hostname = metadata['host'].lower()
             if not host_query or hostname.endswith(host_query):
                 if port is None or port <= 0 or (metadata.get('port', None) == port):
-                    result.add(metadata["url"])
-                    if len(result) >= limit:
-                        break
+                    url = metadata['url']
+                    if not path_query or path_query in url:
+                        result.add(url)
+                        if len(result) >= limit:
+                            break
     return sorted(list(result))
 
 
@@ -1432,9 +1530,15 @@ def main():
     )
     ap.add_argument("--host", default="127.0.0.1", help="Host to listen on")
     ap.add_argument("--port", type=int, default=8000, help="Port to listen on")
+    ap.add_argument("--task-pool-size", type=int, default=3, help="The number of processes in the task pool")
+    ap.add_argument("--index-pool-size", type=int, default=2, help="The number of processes in the indexing pool")
     add_generator_args(ap)
     args = ap.parse_args()
     generator_config = GeneratorConfig.from_args(args)
+    set_server_config(ServerConfig(
+        task_pool_size=args.task_pool_size,
+        ingest_pool_size=args.index_pool_size,
+    ))
     asyncio.run(get_server_context())
     mcp.settings.host = args.host
     mcp.settings.port = args.port
