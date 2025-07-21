@@ -16,7 +16,7 @@ from haystack.tools import Toolset
 from haystack_integrations.components.generators.google_genai.chat.chat_generator import GoogleGenAIChatGenerator
 from haystack_integrations.components.generators.ollama import OllamaChatGenerator, OllamaGenerator
 from mcp import Resource, Tool
-from mcp.types import ResourceContents
+from mcp.types import ResourceContents, TextResourceContents
 from pydantic import BaseModel, Field
 from tldextract import tldextract
 
@@ -39,7 +39,7 @@ class HttpResource(BaseModel):
     status_code: int = Field(description="The HTTP status code for the response")
     method: str = Field(description="The HTTP method that was used to request the resource")
     resource: Optional[Resource] = Field(description="A link to the resource content")
-    contents: Optional[ResourceContents] = Field(description="The resource content")
+    contents: Optional[TextResourceContents] = Field(description="The resource content")
     response_headers: Optional[Dict[str, str]] = Field(description="The HTTP response headers")
 
 

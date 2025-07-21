@@ -50,8 +50,8 @@ def _do_busting(
     mitmdump_command = ["timeout", "--preserve-status", "--kill-after=1m", "35m",
                         "/usr/local/bin/mitmdump_virtualenv.sh", "-q", "-p", "8080", "-s",
                         "/usr/share/mitm_to_katana/mitm_to_katana.py"]
-    # always ignore 404 Not Found and 301 Redirect, very common for URLs that do not exist
-    mitmdump_command.extend(["--", "--ignore", ",".join(map(str, (item.ignored_response_codes or []) + [404, 301]))])
+    # always ignore 404 Not Found
+    mitmdump_command.extend(["--", "--ignore", ",".join(map(str, (item.ignored_response_codes or []) + [404]))])
 
     container_name = "dir_busting_" + uuid.uuid4().hex
 

@@ -263,50 +263,8 @@ async def log_tool_history(ctx: Context, title: str, **kwargs):
     logger.info(f"{title}: {json.dumps(data)}")
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(
-        title="Find Web Resources",
-        readOnlyHint=True,
-        openWorldHint=False),
-)
-async def find_web_resources(ctx: Context, query: str, limit: int = 100) -> List[HttpResource]:
-    """Query indexed resources about a website using natural language and return the request and response bodies, URL, HTTP method, MIME type, HTTP status code, technologies found. This tool will search using several parameters including response body matching, URL matching, MIME type matching of the response, HTTP request method matching, and HTTP response body matching.
-
-    Invoke this tool when the user asks about vulnerabilities,
-    misconfigurations or exploit techniques **specific to a target website**
-    (e.g. XSS, CSP issues, IDOR paths, outdated JS libs). Including the user's query will improve
-    the results.
-
-    Invoke this tool when the user asks for summary information about a website, such as technology in use, and type of responses.
-
-    Do NOT use it for generic cyber-security theory.
-
-    If there is content available for the results, there will be a resource_link object containing
-    a URI. The URI can use the fetch_web_resource_content tool to get the content.
-
-    Example queries (replace http://target.local with your target URL(s)):
-        1. Find pages with HTML forms on http://target.local
-        2. Find Javascript libraries on http://target.local
-        3. What pages on http://target.local have potential XSS vulnerabilities?
-        4. Find Javascript with eval() calls on http://target.local
-        5. Find URLs with possible IDOR vulnerabilities on http://target.local
-        6. http://target.local/
-        7. http://target.local/account/dashboard?page=account
-
-    A target URL or hostname is required. Always include your target URLs. http://target.local is only an example, do not use it as a URL.
-s
-    The limit parameter is used to limit how many results are returned. The default is 100. The value must range between 10 and 1000.
-    """
-    await log_tool_history(ctx, "find_web_resources", query=query, limit=limit)
+async def _find_web_resources_by_url(ctx: Context, query: str, limit: int = 100) -> Optional[List[HttpResource]]:
     server_ctx = await get_server_context()
-    query = query.strip()
-    limit = min(1000, max(10, limit or 100))
-    logger.info("finding web resources for %s up to %d results", query, limit)
-
-    document_pipeline: Pipeline = server_ctx.document_pipeline
-    website_context_pipeline: Pipeline = server_ctx.website_context_pipeline
-
-    # handle a case where a query is only URL
     try:
         url_parsed = urlparse_ext(query)
         query_url = query
@@ -356,6 +314,117 @@ s
     except Exception:
         pass
 
+    return None
+
+
+async def _find_web_resources_by_netloc(ctx: Context, query: str, limit: int = 100) -> Optional[List[HttpResource]]:
+    server_ctx = await get_server_context()
+    try:
+        hostname, port = _query_to_netloc(query)
+        if hostname is None or port is None:
+            return None
+        store = server_ctx.stores["content"]
+        docs = []
+
+        # Make sure the requested URL is returned
+        logger.info("Searching for web resources for %s", query)
+        filters = {
+            "operator": "AND",
+            "conditions": [
+                {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
+                {"field": "meta.netloc", "operator": "==", "value": query}
+            ]}
+        docs.extend(store.filter_documents(filters=filters))
+        if len(docs) >= limit:
+            docs = docs[:limit]
+
+        if docs:
+            return _documents_to_http_resources(docs)
+    except Exception:
+        pass
+
+    return None
+
+
+async def _find_web_resources_by_hostname(ctx: Context, query: str, limit: int = 100) -> Optional[List[HttpResource]]:
+    server_ctx = await get_server_context()
+    try:
+        hostname, port = _query_to_netloc(query)
+        if hostname is None or port is not None:
+            return None
+        store = server_ctx.stores["content"]
+        docs = []
+
+        # Make sure the requested URL is returned
+        logger.info("Searching for web resources for %s", query)
+        filters = {
+            "operator": "AND",
+            "conditions": [
+                {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
+                {"field": "meta.host", "operator": "==", "value": hostname}
+            ]}
+        docs.extend(store.filter_documents(filters=filters))
+        if len(docs) >= limit:
+            docs = docs[:limit]
+
+        if docs:
+            return _documents_to_http_resources(docs)
+    except Exception:
+        pass
+
+    return None
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Find Web Resources",
+        readOnlyHint=True,
+        openWorldHint=False),
+)
+async def find_web_resources(ctx: Context, query: str, limit: int = 100) -> List[HttpResource]:
+    """Query indexed resources about a website using natural language and return the request and response bodies, URL, HTTP method, MIME type, HTTP status code, technologies found. This tool will search using several parameters including response body matching, URL matching, MIME type matching of the response, HTTP request method matching, and HTTP response body matching.
+
+    Invoke this tool when the user asks about vulnerabilities,
+    misconfigurations or exploit techniques **specific to a target website**
+    (e.g. XSS, CSP issues, IDOR paths, outdated JS libs). Including the user's query will improve
+    the results.
+
+    Invoke this tool when the user asks for summary information about a website, such as technology in use, and type of responses.
+
+    Do NOT use it for generic cyber-security theory.
+
+    If there is content available for the results, there will be a resource_link object containing
+    a URI. The URI can use the fetch_web_resource_content tool to get the content.
+
+    Example queries (replace http://target.local with your target URL(s)):
+        1. Find pages with HTML forms on http://target.local
+        2. Find Javascript libraries on http://target.local
+        3. What pages on http://target.local have potential XSS vulnerabilities?
+        4. Find Javascript with eval() calls on http://target.local
+        5. Find URLs with possible IDOR vulnerabilities on http://target.local
+        6. http://target.local/
+        7. http://target.local/account/dashboard?page=account
+
+    A target URL or hostname is required. Always include your target URLs. http://target.local is only an example, do not use it as a URL.
+s
+    The limit parameter is used to limit how many results are returned. The default is 100. The value must range between 10 and 1000.
+    """
+    await log_tool_history(ctx, "find_web_resources", query=query, limit=limit)
+    server_ctx = await get_server_context()
+    query = query.strip()
+    limit = min(1000, max(10, limit or 100))
+    logger.info("finding web resources for %s up to %d results", query, limit)
+
+    document_pipeline: Pipeline = server_ctx.document_pipeline
+    website_context_pipeline: Pipeline = server_ctx.website_context_pipeline
+
+    if resources_by_url := await _find_web_resources_by_url(ctx, query, limit):
+        return resources_by_url
+    if resources_by_netloc := await _find_web_resources_by_netloc(ctx, query, limit):
+        return resources_by_netloc
+    if resources_by_hostname := await _find_web_resources_by_hostname(ctx, query, limit):
+        return resources_by_hostname
+
     doc_types: list[str] = []
     urls: list[str] = []
     methods: list[str] = []
@@ -396,7 +465,7 @@ s
                 case CancelledElicitation():
                     return []
         except McpError as e:
-            logger.info("elicit not supported, returning", exc_info=e)
+            logger.info("elicit not supported, returning")
         finally:
             if not urls:
                 raise McpError(ErrorData(code=INVALID_REQUEST,
@@ -428,7 +497,7 @@ s
             match spider_elicit_result:
                 case AcceptedElicitation():
                     for url in missing_urls:
-                        await spider_website(url)
+                        await spider_website(ctx, url)
                     return []
                 case DeclinedElicitation():
                     return []
@@ -438,7 +507,7 @@ s
             await ctx.info(f"Spidering {', '.join(missing_urls)}")
             logger.warning("elicit not supported, starting spider")
             for url in missing_urls:
-                await spider_website(url)
+                await spider_website(ctx, url)
 
     conditions = [
         {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION}
@@ -1391,6 +1460,12 @@ def _query_to_netloc(query: str) -> Tuple[str | None, int | None]:
         elif ":" in query:
             try:
                 query, _, port_str = query.partition(":")
+                try:
+                    if validators.domain(query) == False and not ipaddress.ip_address(query):
+                        query = None
+                except (ValueError, ValidationError):
+                    query = None
+
                 port = int(port_str)
             except Exception:
                 pass
