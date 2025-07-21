@@ -2,6 +2,7 @@ volumes:
   data:
   tool_cache:
   dind-storage:
+  mcp_cache:
 
 services:
   chroma:
@@ -64,3 +65,4 @@ services:
     volumes:
       - "data:/data"
       - "tool_cache:/tool_cache"
+      - "mcp_cache:/home/runner/.cache"

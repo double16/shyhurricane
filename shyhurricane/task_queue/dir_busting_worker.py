@@ -4,7 +4,8 @@ import subprocess
 import time
 import uuid
 from multiprocessing import Queue
-from typing import Optional, Dict, List, Set
+from typing import Optional, List, Set
+from urllib.parse import urlencode
 
 import persistqueue
 
@@ -17,86 +18,60 @@ logger = logging.getLogger(__name__)
 
 def dir_busting_worker(item: DirBustingQueueItem, ingest_queue: persistqueue.SQLiteQueue, result_queue: Queue):
     logger.info(f"Starting dir busting worker {item.uri}")
-    _feroxbuster(
+    _do_busting(
         ingest_queue=ingest_queue,
         result_queue=result_queue,
-        uri=item.uri,
-        depth=item.depth,
-        wordlist=item.wordlist,
-        extensions=item.extensions,
-        ignored_response_codes=item.ignored_response_codes,
-        user_agent=item.user_agent,
-        request_headers=item.request_headers,
-        additional_hosts=item.additional_hosts,
+        item=item,
     )
 
 
-def _feroxbuster(
+def _do_busting(
         ingest_queue: persistqueue.SQLiteQueue,
         result_queue: Queue,
-        uri: str,
-        depth: int = 3,
-        wordlist: Optional[str] = None,
-        extensions: Optional[List[str]] = None,
-        ignored_response_codes: Optional[List[int]] = None,
-        user_agent: Optional[str] = None,
-        request_headers: Optional[Dict[str, str]] = None,
-        additional_hosts: Dict[str, str] = None,
+        item: DirBustingQueueItem,
 ) -> None:
-    # TODO: should we enforce a hard timeout?
-
     # replay_codes = {200, 201, 302, 400, 401, 402, 403, 405, 500}
     replay_codes = set()  # default all codes
-    if ignored_response_codes:
-        replay_codes.intersection_update(ignored_response_codes)
+    if item.ignored_response_codes:
+        replay_codes.intersection_update(item.ignored_response_codes)
 
-    if "FUZZ" in uri or (user_agent and "FUZZ" in user_agent) or (
-            request_headers and "FUZZ" in json.dumps(request_headers)):
+    if "FUZZ" in item.uri or (item.user_agent and "FUZZ" in item.user_agent) or (
+            item.request_headers and "FUZZ" in json.dumps(item.request_headers)):
         buster_command = _build_ffuf_command(
-            depth=depth,
-            ignored_response_codes=ignored_response_codes,
-            request_headers=request_headers,
+            item=item,
             replay_codes=replay_codes,
-            uri=uri,
-            user_agent=user_agent,
-            wordlist=wordlist,
         )
     else:
         buster_command = _build_feroxbuster_command(
-            depth=depth,
-            extensions=extensions,
-            ignored_response_codes=ignored_response_codes,
-            request_headers=request_headers,
+            item=item,
             replay_codes=replay_codes,
-            uri=uri,
-            user_agent=user_agent,
-            wordlist=wordlist,
         )
 
-    mitmdump_command = ["/usr/local/bin/mitmdump_virtualenv.sh", "-q", "-p", "8080", "-s",
+    mitmdump_command = ["timeout", "--preserve-status", "--kill-after=1m", "35m",
+                        "/usr/local/bin/mitmdump_virtualenv.sh", "-q", "-p", "8080", "-s",
                         "/usr/share/mitm_to_katana/mitm_to_katana.py"]
     # always ignore 404 Not Found and 301 Redirect, very common for URLs that do not exist
-    mitmdump_command.extend(["--", "--ignore", ",".join(map(str, (ignored_response_codes or []) + [404, 301]))])
+    mitmdump_command.extend(["--", "--ignore", ",".join(map(str, (item.ignored_response_codes or []) + [404, 301]))])
 
     container_name = "dir_busting_" + uuid.uuid4().hex
 
     mitmdump_docker_command = ["docker", "run", "--rm", "--name", container_name]
-    for host, ip in (additional_hosts or {}).items():
+    for host, ip in (item.additional_hosts or {}).items():
         mitmdump_docker_command.extend(["--add-host", f"{host}:{ip}"])
     mitmdump_docker_command.extend(["shyhurricane_unix_command:latest"])
     mitmdump_docker_command.extend(mitmdump_command)
 
-    feroxbuster_docker_command = ["docker", "exec", container_name]
-    feroxbuster_docker_command.extend(buster_command)
+    buster_docker_command = ["docker", "exec", container_name, "timeout", "--preserve-status", "--kill-after=1m", "30m"]
+    buster_docker_command.extend(buster_command)
 
-    logger.info(f"Dir busting with command {' '.join(feroxbuster_docker_command)}")
+    logger.info(f"Dir busting with command {' '.join(buster_docker_command)}")
     mitmdump_proc = subprocess.Popen(mitmdump_docker_command, universal_newlines=True, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL)
 
     buster_proc_succeed = False
     for _ in range(5):
         time.sleep(2)
-        buster_proc = subprocess.Popen(feroxbuster_docker_command, universal_newlines=True,
+        buster_proc = subprocess.Popen(buster_docker_command, universal_newlines=True,
                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             if buster_proc.wait(2) != 125:  # 125 is returned when the named container isn't running
@@ -146,10 +121,10 @@ def _feroxbuster(
 
     return_code = buster_proc.wait()
     mitmdump_proc.terminate()
-    if return_code != 0:
-        logger.error("Dir busting for %s returned exit code %d", uri, return_code)
+    if return_code in [0, 125]:  # 125 can mean the container was stopped
+        logger.info("Dir busting for %s completed", item.uri)
     else:
-        logger.info("Dir busting for %s completed", uri)
+        logger.error("Dir busting for %s returned exit code %d", item.uri, return_code)
 
     if result_queue:
         result_queue.put_nowait(None)
@@ -158,59 +133,95 @@ def _feroxbuster(
 
 
 def _build_feroxbuster_command(
-        uri: str,
-        depth: int,
-        wordlist: Optional[str] = None,
-        extensions: Optional[List[str]] = None,
-        ignored_response_codes: Optional[List[int]] = None,
+        item: DirBustingQueueItem,
         replay_codes: Optional[Set[str]] = None,
-        user_agent: Optional[str] = None,
-        request_headers: Optional[Dict[str, str]] = None,
 ) -> List[str]:
-    feroxbuster_command = ["/usr/local/bin/feroxbuster", "-u", uri,
-                           "--extract-links", "--threads", "5", "--scan-limit", "1", "--rate-limit", "5"]
-    if depth > 1:
-        feroxbuster_command.extend(["--depth", str(depth)])
+    command = ["/usr/local/bin/feroxbuster", "-u", item.uri, "--extract-links", "--threads", "5"]
+
+    if item.rate_limit_requests_per_second:
+        command.extend(["--scan-limit", "1", "--rate-limit", str(item.rate_limit_requests_per_second)])
     else:
-        feroxbuster_command.extend(["--no-recursion"])
-    if wordlist:
-        feroxbuster_command.extend(["--wordlist", wordlist])
-    if ignored_response_codes:
-        feroxbuster_command.extend(["--filter-status", ",".join(map(str, ignored_response_codes))])
-    if extensions:
-        feroxbuster_command.append("--extensions")
-        feroxbuster_command.extend(extensions)
+        command.extend(["--auto-tune"])
+
+    if item.depth > 1:
+        command.extend(["--depth", str(item.depth)])
+    else:
+        command.extend(["--no-recursion"])
+
+    if item.wordlist:
+        command.extend(["--wordlist", item.wordlist])
+
+    if item.ignored_response_codes:
+        command.extend(["--filter-status", ",".join(map(str, item.ignored_response_codes))])
+
+    if item.extensions:
+        command.append("--extensions")
+        command.extend(item.extensions)
     # TODO: try to guess if we should include `--collection-extensions`
-    if user_agent:
-        feroxbuster_command.extend(["--user-agent", user_agent])
-    if request_headers:
-        for k, v in request_headers.items():
-            feroxbuster_command.extend(["-H", f"{k}: {v}"])
-    feroxbuster_command.extend(["--replay-proxy", "http://127.0.0.1:8080", "--insecure"])
+
+    if item.user_agent:
+        command.extend(["--user-agent", item.user_agent])
+    if item.request_headers:
+        for k, v in item.request_headers.items():
+            command.extend(["-H", f"{k}: {v}"])
+
+    if item.method:
+        command.extend(["--methods", item.method])
+
+    if item.cookies:
+        for k, v in item.cookies.items():
+            command.extend(["--cookies", f"{k}={v}"])
+
+    if item.params:
+        if item.method == "GET":
+            for k, v in item.params.items():
+                command.extend(["--query", f"{k}={v}"])
+        else:
+            post_data = urlencode(item.params, doseq=True)
+            command.extend(["--data", post_data])
+
+    command.extend(["--replay-proxy", "http://127.0.0.1:8080", "--insecure"])
     if replay_codes:
-        feroxbuster_command.extend(["--replay-codes", ",".join(map(str, replay_codes))])
-    return feroxbuster_command
+        command.extend(["--replay-codes", ",".join(map(str, replay_codes))])
+
+    return command
 
 
 def _build_ffuf_command(
-        uri: str,
-        depth: int,
-        wordlist: Optional[str] = None,
-        ignored_response_codes: Optional[List[int]] = None,
+        item: DirBustingQueueItem,
         replay_codes: Optional[Set[str]] = None,
-        user_agent: Optional[str] = None,
-        request_headers: Optional[Dict[str, str]] = None,
 ) -> List[str]:
-    command = ["/usr/bin/ffuf", "-u", uri, "-ac", "-s", "-sf", "-rate", "5"]
-    if uri.endswith("FUZZ") and depth > 1:
-        command.extend(["-recursion", "-recursion-depth", str(depth)])
-    command.extend(["-w", wordlist or "/usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt"])
-    if ignored_response_codes:
-        command.extend(["-fc", ",".join(map(str, ignored_response_codes))])
-    if user_agent:
-        command.extend(["-H", f"User-Agent: {user_agent}"])
-    if request_headers:
-        for k, v in request_headers.items():
+    command = ["/usr/bin/ffuf", "-u", item.uri, "-ac", "-s", "-sf"]
+
+    if item.rate_limit_requests_per_second:
+        command.extend(["-rate", str(item.rate_limit_requests_per_second)])
+
+    if item.uri.endswith("FUZZ") and item.depth > 1:
+        command.extend(["-recursion", "-recursion-depth", str(item.depth)])
+
+    command.extend(["-w", item.wordlist or "/usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt"])
+
+    if item.ignored_response_codes:
+        command.extend(["-fc", ",".join(map(str, item.ignored_response_codes))])
+
+    if item.user_agent:
+        command.extend(["-H", f"User-Agent: {item.user_agent}"])
+
+    if item.request_headers:
+        for k, v in item.request_headers.items():
             command.extend(["-H", f"{k}: {v}"])
+
+    if item.method:
+        command.extend(["-X", item.method])
+
+    if item.cookies:
+        cookie_data = "; ".join(map(lambda e: f"{e[0]}={e[1]}", item.cookies.items()))
+        command.extend(["-b", cookie_data])
+
+    if item.params:
+        post_data = urlencode(item.params, doseq=True)
+        command.extend(["-d", post_data])
+
     command.extend(["-replay-proxy", "http://127.0.0.1:8080"])
+
     return command

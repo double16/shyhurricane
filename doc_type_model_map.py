@@ -1,17 +1,20 @@
 # doc_type_model_map.py
-DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L12-v2"
+# CODE_EMBEDDING_MODEL = "microsoft/codebert-base" # 512 tokens
+# CODE_EMBEDDING_MODEL = "nomic-ai/nomic-embed-code" # 7B, very large
+CODE_EMBEDDING_MODEL = "jinaai/jina-embeddings-v2-base-code"
 
 # Mapping of document types (collections) to embedding model names
 doc_type_to_model = {
-    "html": "intfloat/e5-base-v2",
-    "xml": "intfloat/e5-base-v2",
-    "javascript": "microsoft/codebert-base",
-    "json": "microsoft/codebert-base",
-    "css": "microsoft/codebert-base",
-    "network": "sentence-transformers/paraphrase-mpnet-base-v2",
-    "forms": "microsoft/codebert-base",
-    "nmap": "intfloat/e5-base-v2",  # store raw nmap xml
-    "portscan": "microsoft/codebert-base",  # store json port scan model
+    "html": CODE_EMBEDDING_MODEL,
+    "xml": CODE_EMBEDDING_MODEL,
+    "javascript": CODE_EMBEDDING_MODEL,
+    "json": CODE_EMBEDDING_MODEL,
+    "css": CODE_EMBEDDING_MODEL,
+    "network": DEFAULT_EMBEDDING_MODEL,
+    "forms": CODE_EMBEDDING_MODEL,
+    "nmap": CODE_EMBEDDING_MODEL,  # store raw nmap xml
+    "portscan": CODE_EMBEDDING_MODEL,  # store json port scan model
     "default": DEFAULT_EMBEDDING_MODEL,
     "content": DEFAULT_EMBEDDING_MODEL,  # stores response content verbatim
 }

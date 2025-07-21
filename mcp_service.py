@@ -17,7 +17,7 @@ from collections.abc import AsyncGenerator
 import aiofiles
 from datetime import datetime, timezone
 from json import JSONDecodeError
-from multiprocessing import Queue, Process, Pool
+from multiprocessing import Queue
 from typing import List, AsyncIterator, Optional, Tuple, Dict, Any
 from urllib.parse import urlparse
 
@@ -444,8 +444,8 @@ s
         {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION}
     ]
     _append_in_filter(conditions, "meta.netloc", filter_netloc)
-    #_append_in_filter(conditions, "meta.type", doc_types)
-    _append_in_filter(conditions, "meta.http_method", methods)
+    # _append_in_filter(conditions, "meta.type", doc_types) # tends to be too limiting
+    # _append_in_filter(conditions, "meta.http_method", methods) # tends to be too limiting
     _append_in_filter(conditions, "meta.status_code", response_codes)
     if len(conditions) == 0:
         filters = None
@@ -1136,11 +1136,15 @@ class SpiderResults(BaseModel):
         idempotentHint=False,
         openWorldHint=True),
 )
-async def spider_website(ctx: Context,
-                         url: str,
-                         additional_hosts: Optional[Dict[str, str]] = None,
-                         user_agent: Optional[str] = None,
-                         request_headers: Optional[Dict[str, str]] = None) -> SpiderResults:
+async def spider_website(
+        ctx: Context,
+        url: str,
+        additional_hosts: Optional[Dict[str, str]] = None,
+        user_agent: Optional[str] = None,
+        request_headers: Optional[Dict[str, str]] = None,
+        cookies: Optional[Dict[str, str]] = None,
+        timeout_seconds: Optional[int] = None,
+) -> SpiderResults:
     """
     Spider the website at the url and index the results for further analysis. The find_web_resources
     tool can be used to continue the analysis. The find_hosts tool can be used to determine if
@@ -1156,6 +1160,11 @@ async def spider_website(ctx: Context,
     to be spoofed or the user requests extra information in the user agent header to identify themselves as a bug bounty hunter.
 
     The request_headers map is extra request headers sent with the request.
+
+    The cookies parameter is name, value pairs for cookies to send with each request.
+
+    The timeout_seconds parameter specifies how long to wait for responses before returning. Spidering will
+    continue after returning.
 
     Returns a list of resources found, including URL, response code, content type, and content length. Indexes each URL that can be queried using the find_web_resources tool. URL content can be returned using the fetch_web_resource_content tool.
     """
@@ -1178,12 +1187,13 @@ async def spider_website(ctx: Context,
         depth=3,
         user_agent=user_agent,
         request_headers=request_headers,
+        cookies=cookies,
         additional_hosts=get_additional_hosts(ctx, additional_hosts),
     )
     await asyncio.to_thread(spider_queue.put, spider_queue_item)
     results: List[HttpResource] = []
     has_more = True
-    time_limit = time.time() + 90
+    time_limit = time.time() + min(600, max(30, timeout_seconds or 120))
     while time.time() < time_limit:
         try:
             http_resource: HttpResource = await asyncio.to_thread(
@@ -1224,7 +1234,8 @@ async def deobfuscate_javascript(ctx: Context, content: str) -> str:
     await log_tool_history(ctx, "deobfuscate_javascript", content=content[0:128])
     if content is None or not content.strip():
         return ""
-    result = await _run_unix_command(ctx, "timeout 90s /usr/share/wakaru/wakaru.cjs", None, content)
+    result = await _run_unix_command(ctx, "timeout --preserve-status --kill-after=1m 90s /usr/share/wakaru/wakaru.cjs",
+                                     None, content)
     if result is None or result.return_code != 0:
         return content
     return result.output
@@ -1270,18 +1281,21 @@ class DirBusterResults(BaseModel):
         idempotentHint=False,
         openWorldHint=True),
 )
-async def directory_buster(ctx: Context,
-                           url: str,
-                           depth: int = 3,
-                           wordlist: Optional[str] = None,
-                           # TODO: method
-                           # TODO: cookies: Optional[Dict[str, str]] = None,
-                           # TODO: params: Optional[Dict[str, str]] = None,
-                           extensions: Optional[List[str]] = None,
-                           ignored_response_codes: Optional[List[int]] = None,
-                           additional_hosts: Optional[Dict[str, str]] = None,
-                           user_agent: Optional[str] = None,
-                           request_headers: Optional[Dict[str, str]] = None) -> DirBusterResults:
+async def directory_buster(
+        ctx: Context,
+        url: str,
+        depth: int = 3,
+        method: str = "GET",
+        wordlist: Optional[str] = None,
+        cookies: Optional[Dict[str, str]] = None,
+        params: Optional[Dict[str, str]] = None,
+        extensions: Optional[List[str]] = None,
+        ignored_response_codes: Optional[List[int]] = None,
+        additional_hosts: Optional[Dict[str, str]] = None,
+        user_agent: Optional[str] = None,
+        request_headers: Optional[Dict[str, str]] = None,
+        timeout_seconds: Optional[int] = None,
+) -> DirBusterResults:
     """
     Search a website for hidden directories and files. This tool uses a wordlist to append each word to a URL and see if
     it responds.
@@ -1298,32 +1312,46 @@ async def directory_buster(ctx: Context,
 
     The request_headers map is extra request headers sent with the request.
 
-    The extensions parameter specifies file extensions to search for such as pdf, php, etc.
+    The extensions parameter specifies file extensions to search for such as pdf, php, etc. Do not include a leading
+    period.
+
+    The cookies parameter is name, value pairs for cookies to send with each request.
+
+    The params is used to send either GET or POST parameters.
+
+    The timeout_seconds parameter specifies how long to wait for responses before returning. Directory busting will
+    continue after returning.
 
     Returns a list of URLs found. Indexes each URL that can be queried using the find_web_resources and find_urls tools. URL content can be returned using the fetch_web_resource_content tool.
     """
-    await log_tool_history(ctx, "directory_buster", url=url, depth=depth, wordlist=wordlist, extensions=extensions,
+    await log_tool_history(ctx, "directory_buster", url=url, depth=depth, method=method, wordlist=wordlist,
+                           extensions=extensions,
                            ignored_response_codes=ignored_response_codes, additional_hosts=additional_hosts,
-                           user_agent=user_agent, request_headers=request_headers)
+                           user_agent=user_agent, request_headers=request_headers, cookies=cookies, params=params,
+                           timeout_seconds=timeout_seconds)
     server_ctx = await get_server_context()
     url = url.strip()
+    depth = min(5, max(1, depth))
 
     task_queue: Queue = server_ctx.task_queue
     dir_busting_result_queue: Queue = server_ctx.dir_busting_result_queue
     queue_item = DirBustingQueueItem(
         uri=url,
-        depth=3,
+        depth=depth,
+        method=method,
         wordlist=wordlist,
         extensions=extensions,
         ignored_response_codes=ignored_response_codes,
         user_agent=user_agent,
         request_headers=request_headers,
+        cookies=cookies,
+        params=params,
         additional_hosts=get_additional_hosts(ctx, additional_hosts),
     )
     await asyncio.to_thread(task_queue.put, queue_item)
     results: List[str] = []
     has_more = True
-    time_limit = time.time() + 90
+    time_limit = time.time() + min(600, max(30, timeout_seconds or 120))
     while time.time() < time_limit:
         try:
             found_url: str = await asyncio.to_thread(
@@ -1534,7 +1562,7 @@ def main():
     ap.add_argument("--host", default="127.0.0.1", help="Host to listen on")
     ap.add_argument("--port", type=int, default=8000, help="Port to listen on")
     ap.add_argument("--task-pool-size", type=int, default=3, help="The number of processes in the task pool")
-    ap.add_argument("--index-pool-size", type=int, default=2, help="The number of processes in the indexing pool")
+    ap.add_argument("--index-pool-size", type=int, default=1, help="The number of processes in the indexing pool")
     add_generator_args(ap)
     args = ap.parse_args()
     generator_config = GeneratorConfig.from_args(args)

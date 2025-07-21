@@ -2,7 +2,7 @@ import json
 import logging
 import subprocess
 from multiprocessing import Queue
-from typing import Optional, Dict, List
+from typing import Optional, List
 
 import persistqueue
 from mcp import Resource
@@ -17,40 +17,38 @@ logger = logging.getLogger(__name__)
 
 def spider_worker(item: SpiderQueueItem, ingest_queue: persistqueue.SQLiteQueue, spider_result_queue: Queue):
     _katana_ingest(
+        item=item,
         ingest_queue=ingest_queue,
-        uri=item.uri,
-        depth=item.depth,
-        user_agent=item.user_agent,
-        request_headers=item.request_headers,
         result_queue=spider_result_queue,
-        additional_hosts=item.additional_hosts,
     )
 
 
 def _katana_ingest(
+        item: SpiderQueueItem,
         ingest_queue: persistqueue.SQLiteQueue,
-        uri: str,
-        depth: int = 3,
-        user_agent: Optional[str] = None,
-        request_headers: Optional[Dict[str, str]] = None,
         result_queue: Queue = None,
-        additional_hosts: Dict[str, str] = None,
 ) -> None:
-    katana_command = ["katana", "-u", uri, "-js-crawl", "-jsluice", "-known-files", "all", "-field-scope", "fqdn",
+    katana_command = ["katana", "-u", item.uri, "-js-crawl", "-jsluice", "-known-files", "all", "-field-scope", "fqdn",
                       "-form-extraction", "-tech-detect", "-ignore-query-params", "-strategy", "breadth-first",
-                      "-jsonl", "-rate-limit", "5", "-omit-raw", "-depth", str(depth), "-retry", "3", "-no-color",
+                      "-jsonl", "-omit-raw", "-depth", str(item.depth), "-retry", "3", "-no-color",
                       "-silent"]
 
-    if user_agent:
-        katana_command.extend(["-H", f"User-Agent: {user_agent}"])
-    if request_headers:
-        for k, v in request_headers.items():
+    if item.rate_limit_requests_per_second:
+        katana_command.extend(["-rate-limit", str(item.rate_limit_requests_per_second)])
+    if item.user_agent:
+        katana_command.extend(["-H", f"User-Agent: {item.user_agent}"])
+    if item.request_headers:
+        for k, v in item.request_headers.items():
             katana_command.extend(["-H", f"{k}: {v}"])
+    if item.cookies:
+        cookie_data = "; ".join(map(lambda e: f"{e[0]}={e[1]}", item.cookies.items()))
+        katana_command.extend(["-H", f"Cookie: {cookie_data}"])
 
     docker_command = ["docker", "run", "--rm"]
-    for host, ip in (additional_hosts or {}).items():
+    for host, ip in (item.additional_hosts or {}).items():
         docker_command.extend(["--add-host", f"{host}:{ip}"])
-    docker_command.extend(["shyhurricane_unix_command:latest"])
+    docker_command.extend(
+        ["shyhurricane_unix_command:latest", "timeout", "--preserve-status", "--kill-after=1m", "30m"])
     docker_command.extend(katana_command)
 
     logger.info(f"Spidering with command {' '.join(docker_command)}")
@@ -124,10 +122,10 @@ def _katana_ingest(
         pass
 
     return_code = proc.wait()
-    if return_code != 0:
-        logger.error("Spider for %s returned exit code %d", uri, return_code)
+    if return_code in [0, 125]:  # 125 can mean the container was stopped
+        logger.info("Spider for %s completed", item.uri)
     else:
-        logger.info("Spider for %s completed", uri)
+        logger.error("Spider for %s returned exit code %d", item.uri, return_code)
 
     if result_queue:
         result_queue.put_nowait(None)

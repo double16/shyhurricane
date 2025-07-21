@@ -52,30 +52,42 @@ class SpiderQueueItem:
                  user_agent: Optional[str] = None,
                  request_headers: Optional[Dict[str, str]] = None,
                  additional_hosts: Dict[str, str] = None,
+                 cookies: Optional[Dict[str, str]] = None,
+                 rate_limit_requests_per_second: Optional[int] = None,
                  ):
         self.uri = uri
         self.depth = depth
         self.user_agent = user_agent
         self.request_headers = request_headers
         self.additional_hosts = additional_hosts
+        self.cookies = cookies
+        self.rate_limit_requests_per_second = rate_limit_requests_per_second
 
 
 class DirBustingQueueItem:
     def __init__(self,
                  uri: str,
                  depth: int = 3,
+                 method: str = "GET",
                  wordlist: Optional[str] = None,
                  extensions: Optional[List[str]] = None,
                  ignored_response_codes: Optional[List[int]] = None,
                  user_agent: Optional[str] = None,
                  request_headers: Optional[Dict[str, str]] = None,
                  additional_hosts: Dict[str, str] = None,
+                 cookies: Optional[Dict[str, str]] = None,
+                 params: Optional[Dict[str, str]] = None,
+                 rate_limit_requests_per_second: Optional[int] = None,
                  ):
         self.uri = uri
         self.depth = depth
+        self.method = method
         self.wordlist = wordlist
         self.extensions = extensions
         self.user_agent = user_agent
         self.request_headers = request_headers
         self.ignored_response_codes = ignored_response_codes
         self.additional_hosts = additional_hosts
+        self.cookies = cookies
+        self.params = params
+        self.rate_limit_requests_per_second = rate_limit_requests_per_second

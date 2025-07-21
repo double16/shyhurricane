@@ -139,6 +139,14 @@ curl -X POST -H 'Transfer-Encoding: chunked' -H 'Content-Type: application/json'
 
 ### Burp Logger++ CSV
 
+Minimum fields to export:
+
+- Request.AsBase64
+- Request.Time
+- Request.URL
+- Response.AsBase64
+- Response.RTT
+
 ```shell
 cat LoggerPlusPlus.csv | python3 ingest.py --db 127.0.0.1:8200 --csv
 

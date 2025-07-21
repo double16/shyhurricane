@@ -7,13 +7,14 @@ import re
 import subprocess
 import sys
 from json import JSONDecodeError
+from math import floor
 from typing import Dict, List, Optional, Any, Tuple
 
-from bs4 import BeautifulSoup, SoupStrainer
+from bs4 import SoupStrainer
 from chromadb import AsyncClientAPI
 from haystack.components.agents import Agent
 from haystack.components.joiners import ListJoiner
-from haystack.components.preprocessors import DocumentCleaner
+from haystack.components.preprocessors import DocumentCleaner, DocumentSplitter
 from haystack.components.routers import ConditionalRouter
 from haystack.components.tools import ToolInvoker
 from haystack.core.component import Component
@@ -40,7 +41,7 @@ from haystack_integrations.tools.mcp import StreamableHttpServerInfo, MCPToolset
 
 from prompts import pentester_agent_system_prompt, pentester_chat_system_prompt
 from utils import urlparse_ext, GeneratorConfig, extract_domain, IngestableRequestResponse, is_katana_jsonl, \
-    is_har_json, is_http_raw, BeautifulSoupExtractor
+    is_har_json, is_http_raw, BeautifulSoupExtractor, remove_unencodable
 
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 os.environ['ANONYMIZED_TELEMETRY'] = "False"
@@ -128,7 +129,8 @@ class Query:
 
 query_expander_natural_language = """
 You are a cybersecurity search assistant that processes users queries.
-You expand a given query into at most {{ number }} queries that are similar in meaning. The expanded query should not be less specific. All URLs or IP addresses that appear in the original query must be included in the expanded query.
+You expand a given query into at most {{ number }} queries that are similar in meaning. The expanded query should not be less specific.
+Never include the URL, hostname or IP address in the expanded queries.
 
 Structure:
 Output the expanded queries as a valid JSON list of strings. Only output the list. Do not include any other text except the JSON list of expanded queries.
@@ -138,15 +140,17 @@ Examples:
 
 2. Example Query 2: "SQL injection exploitation"  
    Example Expanded Queries: ["union-based SQL injection", "blind SQLi attack", "SQLMap usage examples", "database extraction via SQLi"]          
+
 Your Task:
 Query: "{{query}}"
-Example Expanded Queries:
+Never include the URL, hostname or IP address in the expanded queries.
+Expanded Queries:
 """
 
 query_expander_javascript = """
 You are a cybersecurity search assistant that processes users queries. You are specialized in JavaScript
 programming, securing coding in JavaScript, and obfuscation techniques.
-You expand a given query into at most {{ number }} queries that are example JavaScript snippets that are an interpretation of the given query. Never include console.log(). Do not include the target hostname or IP address.
+You expand a given query into at most {{ number }} queries that are example JavaScript snippets that are an interpretation of the given query. Never include console.log(). Never include the URL, hostname or IP address in the expanded queries.
 
 Structure:
 Output the expanded queries as a valid JSON list of strings. Only output the list. The values must only be JavaScript code. Do not include any other text except the JSON list of expanded queries. Exclude expanded queries that are only whitespace.
@@ -154,18 +158,19 @@ Output the expanded queries as a valid JSON list of strings. Only output the lis
 Examples:
 1. Example Query 1: "What javascript libraries call eval()"
    Example Expanded Queries: ["Object.prototype.eval = function() {\n return eval(this);\n};", "window.eval = function(code) {\n return eval(code);\n};", "Function.prototype.customEval = function(code) {\n return eval(code);\n}"]
-1. Example Query 1: "Find Javascript libraries on http://2million.htb"
+1. Example Query 1: "Find Javascript libraries on http://example.com"
    Example Expanded Queries: ["fetch('/libraries').then(res => res.json()).then(data => data.map(lib => lib.name))","axios.get('/libraries').then(response => response.data.map(lib => lib.name))","new XMLHttpRequest().open('GET', '/libraries', true).send(), new Promise((resolve) => { resolve(xhr.responseXML.getElementsByTagName('library').textContent.split(', ')); })","$.ajax({url: '/libraries', success: function(data){ $.each($(data).find('.library'), function(index, lib){ console.log($(lib).text()); }); }})","fetch('/libraries').then(res => res.text()).then(html => Array.from(new DOMParser().parseFromString(html, 'text/html').getElementsByTagName('a')).map(a => a.textContent))"]
 
 Your Task:
 Query: "{{query}}"
-Example Expanded Queries:
+Never include the URL, hostname or IP address in the expanded queries.
+Expanded Queries:
 """
 
 query_expander_css = """
 You are a cybersecurity search assistant that processes users queries. You are specialized in style sheet
 development and securing CSS.
-You expand a given query into at most {{ number }} queries that are example CSS snippets that are an interpretation of the given query. Do not include the target hostname or IP address.
+You expand a given query into at most {{ number }} queries that are example CSS snippets that are an interpretation of the given query. Never include the URL, hostname or IP address in the expanded queries.
 
 Structure:
 Output the expanded queries as a valid JSON list of strings. Only output the list. The values must only be CSS code. Do not include any other text except the JSON list of expanded queries. Exclude expanded queries that are only whitespace.
@@ -176,13 +181,14 @@ Examples:
 
 Your Task:
 Query: "{{query}}"
-Example Expanded Queries:
+Never include the URL, hostname or IP address in the expanded queries.
+Expanded Queries:
 """
 
 query_expander_html = """
 You are a cybersecurity search assistant that processes users queries. You are specialized in HTML
 development and securing HTML.
-You expand a given query into at most {{ number }} queries that are example HTML snippets that are an interpretation of the given query. Do not include the target hostname or IP address.
+You expand a given query into at most {{ number }} queries that are example HTML snippets that are an interpretation of the given query. Never include the URL, hostname or IP address in the expanded queries.
 
 Structure:
 Output the expanded queries as a valid JSON list of strings. Only output the list. The values must only be HTML code. Do not include any other text except the JSON list of expanded queries. Exclude expanded queries that are only whitespace.
@@ -193,13 +199,15 @@ Examples:
 
 Your Task:
 Query: "{{query}}"
-Example Expanded Queries:
+Never include the URL, hostname or IP address in the expanded queries.
+Expanded Queries:
 """
 
 query_expander_xml = """
 You are a cybersecurity search assistant that processes users queries. You are specialized in XML
 development and securing XML.
 You expand a given query into at most {{ number }} queries that are example XML snippets that are an interpretation of the given query.
+Never include the URL, hostname or IP address in the expanded queries.
 
 Structure:
 Output the expanded queries as a valid JSON list of strings. Only output the list. The values must only be XML code. Do not include any other text except the JSON list of expanded queries. Exclude expanded queries that are only whitespace.
@@ -210,7 +218,8 @@ Examples:
 
 Your Task:
 Query: "{{query}}"
-Example Expanded Queries:
+Never include the URL, hostname or IP address in the expanded queries.
+Expanded Queries:
 """
 
 query_expander_network = """
@@ -228,7 +237,8 @@ Examples:
 
 Your Task:
 Query: "{{query}}"
-Example Expanded Queries:
+Never include the URL, hostname or IP address in the expanded queries.
+Expanded Queries:
 """
 
 @component
@@ -307,7 +317,17 @@ class MultiQueryChromaRetriever:
             except Exception as e:
                 logger.error(f"Exception querying chroma database: {str(e)}", exc_info=e)
         results.sort(key=lambda x: x.score, reverse=True)
-        return {"documents": results}
+
+        # unique per (URL, method, status code)
+        unique_keys = set()
+        unique_docs = []
+        for doc in results:
+            key = (doc.meta["url"], doc.meta.get("http_method", "GET"), doc.meta.get("status_code", 200))
+            if key not in unique_keys:
+                unique_keys.add(key)
+                unique_docs.append(doc)
+
+        return {"documents": unique_docs}
 
 
 def _create_tools(mcp_urls: Optional[List[str]] = None) -> Toolset:
@@ -460,12 +480,19 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
     retrievers: Dict[str, MultiQueryChromaRetriever] = {}
     stores: Dict[str, ChromaDocumentStore] = {}
 
+    embedder_cache = dict()
     for col in collections:
         model_name = get_model_for_doc_type(col)
 
+        if model_name in embedder_cache:
+            embedder = embedder_cache[model_name]
+        else:
+            embedder = SentenceTransformersTextEmbedder(model=model_name, batch_size=1, progress_bar=False)
+            embedder.warm_up()
+            embedder_cache[model_name] = embedder
+
         store = create_chrome_document_store(db=db, collection_name=col)
         stores[col] = store
-        embedder = SentenceTransformersTextEmbedder(model=model_name, progress_bar=False)
         retriever = ChromaEmbeddingRetriever(document_store=store)
         multiquery_retriever = MultiQueryChromaRetriever(embedder, retriever)
         retrievers[col] = multiquery_retriever
@@ -511,8 +538,8 @@ def build_website_context_pipeline(generator_config: GeneratorConfig) -> Pipelin
       also determine optional types of content the user is interested in from the following list:
       "html", "forms", "xml", "javascript", "css", "json", "network". If the query includes things that would be in the HTTP headers such as cookies or the content security policy include the content type "network".
       You also determine technology stacks the user references, if any.
-      You also determine if anything in the query implies a specific set of HTTP response codes, if any. Be cautious about providing methods so to not be too limiting.
-      You also determine if anything in the query implies a specific set of HTTP methods such as "GET", "POST", "PUT", if any. Usually the user will intended HTTP methods that are in the RFC, but may ask for specific non-standard methods.
+      You also determine if anything in the query implies a specific set of HTTP response codes, if any. Be cautious about providing response codes so to not be too limiting.
+      You also determine if anything in the query implies the request was made using a specific set of HTTP methods such as "GET", "POST", "PUT", if any. Only include methods if the user is asking for how the request was made. Usually the user will intend HTTP methods that are in the RFC, but may ask for specific non-standard methods. Be cautious about providing methods so to not be too limiting.
       
       Structure:
       Output the information as a valid JSON object. Only output the JSON. Do not include any other text except the JSON.
@@ -562,25 +589,31 @@ def is_binary(content: str, mime_type: str) -> bool:
     Detect if the content is binary based on the raw MIME type and content.
     """
     mime_category = mime_type.split("/")[0]
+    if mime_category == "text":
+        return False
     if mime_category in [
         "video",
         "audio",
         "font",
+        "binary",
     ]:
         return True
+    if mime_category == "image":
+        return mime_type not in ["image/svg+xml", "image/svg"]
     if mime_type in [
         "application/octet-stream",
-        "image/gif",
-        "image/jpeg",
-        "image/png",
-        "image/jpg",
-        "image/webp",
         "application/pdf",
         "application/x-pdf",
         "application/zip",
         "application/x-zip-compressed",
+        "application/x-protobuf",
+        "application/font-woff",
+        "application/font-woff2",
+        "application/vnd.ms-fontobject",
     ]:
         return True
+    if mime_type.endswith("+json") or mime_type.endswith("+xml"):
+        return False
     if not content.strip():
         return False
     try:
@@ -598,7 +631,8 @@ def _deobfuscate_javascript(content: str) -> str:
     if not content:
         return content
 
-    docker_command = ["docker", "run", "--rm", "-i", "shyhurricane_unix_command:latest", 'timeout', '90s', '/usr/share/wakaru/wakaru.cjs']
+    docker_command = ["docker", "run", "--rm", "-i", "shyhurricane_unix_command:latest", 'timeout', '--preserve-status',
+                      '--kill-after=1m', '90s', '/usr/share/wakaru/wakaru.cjs']
     logger.info(f"Deobfuscating javascript with command {' '.join(docker_command)}")
     proc = subprocess.Popen(docker_command, universal_newlines=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     result = ""
@@ -715,6 +749,21 @@ class HarDocument:
         return self._empty_response
 
 
+class SuffixIdSplitter(DocumentSplitter):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+    def _split_document(self, doc) -> List[Document]:
+        parts = super()._split_document(doc)
+        for i, p in enumerate(parts):
+            p.id = f"{doc.id}_{i}"
+            if "_split_overlap" in p.meta:
+                split_overlap = p.meta["_split_overlap"]
+                if not isinstance(split_overlap, str) and not isinstance(split_overlap, int):
+                    p.meta["_split_overlap"] = json.dumps(split_overlap)
+        return parts
+
+
 @component
 class RequestResponseToDocument:
     def __init__(self, embedders: Dict[str, Any], doc_cleaner: DocumentCleaner):
@@ -722,6 +771,26 @@ class RequestResponseToDocument:
         self.doc_cleaner = doc_cleaner
         self._soup_extractor = BeautifulSoupExtractor()
         self._title_soup_strainer = SoupStrainer(['title', 'meta'])
+        self.splitters: Dict[str, SuffixIdSplitter] = dict()
+
+    def warm_up(self):
+        if self.splitters:
+            return
+        for doc_type, embedder in self.embedders.items():
+            max_model_length = embedder.embedding_backend.model.max_seq_length
+            # treat "infinite" as 512
+            if max_model_length > 1_000_000:
+                max_model_length = 512
+            split_len = int(floor(max_model_length * 0.93) / 2)
+            overlap = int(floor(max_model_length * 0.03))
+            logger.info(f"Splitting document {doc_type} by {split_len} words, overlap {overlap}")
+            splitter = SuffixIdSplitter(
+                split_by="word",
+                split_length=split_len,
+                split_overlap=overlap,
+            )
+            splitter.warm_up()
+            self.splitters[doc_type] = splitter
 
     @component.output_types(documents=List[Document])
     def run(self, request_responses: List[IngestableRequestResponse]):
@@ -729,6 +798,15 @@ class RequestResponseToDocument:
         for rr in (request_responses or []):
             docs.extend(self._to_documents(rr))
         return {"documents": docs}
+
+    def _embed_single(self, doc: Document) -> Document:
+        doc_type = doc.meta["type"]
+        embedder = self.embedders.get(doc_type, self.embedders["default"])
+        split_docs = self.splitters[doc_type].run(documents=[doc])["documents"]
+        embedded_docs = embedder.run(documents=[split_docs[0]])["documents"]
+        embedded_docs[0].content = doc.content
+        embedded_docs[0].id = doc.id
+        return embedded_docs[0]
 
     def _to_documents(self, request_response: IngestableRequestResponse) -> List[Document]:
         url = request_response.url
@@ -746,7 +824,7 @@ class RequestResponseToDocument:
         # quantize timestamp to avoid too many duplicate results
         timestamp_for_id = request_response.timestamp[0:11]  # one document per URL per day
         request_headers = request_response.request_headers
-        response_body = request_response.response_body
+        response_body = remove_unencodable(request_response.response_body)
         response_headers = request_response.response_headers
         raw_mime = response_headers.get("Content-Type", "").lower().split(";")[0].strip()
         technologies_str = json.dumps(request_response.technologies or [], indent=None, separators=(',', ':'), sort_keys=True)
@@ -800,8 +878,7 @@ class RequestResponseToDocument:
                 },
                 id=hashlib.sha256(f"{url}:content:{timestamp_for_id}".encode()).hexdigest()
             )
-            embedder = self.embedders.get("content", self.embedders["default"])
-            documents.extend(embedder.run(documents=[doc])["documents"])
+            documents.append(self._embed_single(doc))
 
         # ─ Type specific Document (if body is present)
         if content:
@@ -818,8 +895,9 @@ class RequestResponseToDocument:
                         doc = self.doc_cleaner.run(documents=[doc])["documents"][0]
                 except Exception:
                     logger.warning(f"Content cleaning failed, continuing with original content")
+                split_docs = self.splitters[doc_type].run(documents=[doc])["documents"]
                 embedder = self.embedders.get(doc_type, self.embedders["default"])
-                documents.extend(embedder.run(documents=[doc])["documents"])
+                documents.extend(embedder.run(documents=split_docs)["documents"])
 
         # ─ Network Document (always)
         sorted_request_headers = "\n".join(
@@ -844,8 +922,7 @@ class RequestResponseToDocument:
             },
             id=hashlib.sha256(f"{url}:network:{timestamp_for_id}".encode()).hexdigest()
         )
-        net_embedder = self.embedders["network"]
-        documents.extend(net_embedder.run(documents=[net_doc])["documents"])
+        documents.append(self._embed_single(net_doc))
 
         # ─ HTML forms
         if request_response.forms:
@@ -859,8 +936,7 @@ class RequestResponseToDocument:
                 },
                 id=hashlib.sha256(f"{url}:forms:{timestamp_for_id}".encode()).hexdigest()
             )
-            forms_embedder = self.embedders["forms"]
-            documents.extend(forms_embedder.run(documents=[forms_doc])["documents"])
+            documents.append(self._embed_single(forms_doc))
 
         return documents
 
@@ -935,16 +1011,21 @@ class GenerateTitleAndDescription:
 
 
 def build_ingest_pipeline(db: str, generator_config: GeneratorConfig) -> Pipeline:
-    if ":" not in db:
-        os.makedirs(db, exist_ok=True)
-
     stores = {}
     embedders = {}
+    embedder_cache = {}
     for dtype, model_name in doc_type_to_model.items():
-        embedder = SentenceTransformersDocumentEmbedder(
-            model=model_name,
-            progress_bar=False)
-        embedder.warm_up()
+        if model_name in embedder_cache:
+            embedder = embedder_cache[model_name]
+        else:
+            embedder = SentenceTransformersDocumentEmbedder(
+                model=model_name,
+                batch_size=1,
+                progress_bar=False
+            )
+            embedder.warm_up()
+            embedder_cache[model_name] = embedder
+
         document_store = create_chrome_document_store(
             db=db,
             collection_name=dtype,
@@ -963,7 +1044,7 @@ def build_ingest_pipeline(db: str, generator_config: GeneratorConfig) -> Pipelin
 
     pipe = Pipeline()
 
-    routes = [
+    input_format_routes = [
         {
             "condition": "{{ text|is_katana_jsonl }}",
             "output": ["{{ text }}"],
@@ -996,7 +1077,7 @@ def build_ingest_pipeline(db: str, generator_config: GeneratorConfig) -> Pipelin
         "is_http_raw": is_http_raw,
     }
 
-    pipe.add_component("input_router", ConditionalRouter(routes=routes, custom_filters=custom_filters))
+    pipe.add_component("input_router", ConditionalRouter(routes=input_format_routes, custom_filters=custom_filters))
     pipe.add_component("katana_document", KatanaDocument())
     pipe.add_component("raw_document", HttpRawDocument())
     pipe.add_component("har_document", HarDocument())

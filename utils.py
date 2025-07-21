@@ -159,20 +159,22 @@ class GeneratorConfig(BaseModel):
         else:
             return f"Ollama {self.ollama_model} at {self.ollama_url}"
 
-    def create_chat_generator(self, generation_kwargs: Optional[Dict[str, Any]] = None,
+    def create_chat_generator(self,
+                              temperature: Optional[float] = None,
+                              generation_kwargs: Optional[Dict[str, Any]] = None,
                               tools: Optional[Union[List[Tool], Toolset]] = None):
         if self.openai_model:
             logger.info("Using OpenAI chat with model %s", self.openai_model)
             return OpenAIChatGenerator(
                 model=self.openai_model,
-                generation_kwargs={"temperature": self.temperature} | (generation_kwargs or {}),
+                generation_kwargs={"temperature": temperature or self.temperature} | (generation_kwargs or {}),
                 tools=tools
             )
         elif self.gemini_model:
             logger.info("Using Google Gemini chat with model %s", self.gemini_model)
             return GoogleGenAIChatGenerator(
                 model=self.gemini_model,
-                generation_kwargs={"temperature": self.temperature} | (generation_kwargs or {}),
+                generation_kwargs={"temperature": temperature or self.temperature} | (generation_kwargs or {}),
                 tools=tools
             )
         elif self.ollama_model:
@@ -181,31 +183,33 @@ class GeneratorConfig(BaseModel):
                 return OllamaChatGenerator(
                     url=self.ollama_url,
                     model=self.ollama_model,
-                    generation_kwargs={"temperature": self.temperature} | (generation_kwargs or {}),
+                    generation_kwargs={"temperature": temperature or self.temperature} | (generation_kwargs or {}),
                     tools=tools
                 )
             else:
                 logger.info("Using Ollama chat with model %s", self.ollama_model)
                 return OllamaChatGenerator(
                     model=self.ollama_model,
-                    generation_kwargs={"temperature": self.temperature} | (generation_kwargs or {}),
+                    generation_kwargs={"temperature": temperature or self.temperature} | (generation_kwargs or {}),
                     tools=tools
                 )
         else:
             raise NotImplementedError
 
-    def create_generator(self, generation_kwargs: Optional[Dict[str, Any]] = None):
+    def create_generator(self,
+                         temperature: Optional[float] = None,
+                         generation_kwargs: Optional[Dict[str, Any]] = None):
         if self.openai_model:
             logger.info("Using OpenAI generator with model %s", self.openai_model)
             return OpenAIGenerator(
                 model=self.openai_model,
-                generation_kwargs={"temperature": self.temperature} | (generation_kwargs or {}),
+                generation_kwargs={"temperature": temperature or self.temperature} | (generation_kwargs or {}),
             )
         elif self.gemini_model:
             logger.info("Using Google Gemini chat with model %s", self.gemini_model)
             return GoogleGenAIChatGenerator(
                 model=self.gemini_model,
-                generation_kwargs={"temperature": self.temperature} | (generation_kwargs or {}),
+                generation_kwargs={"temperature": temperature or self.temperature} | (generation_kwargs or {}),
             )
         elif self.ollama_model:
             if self.ollama_url:
@@ -213,13 +217,13 @@ class GeneratorConfig(BaseModel):
                 return OllamaGenerator(
                     url=self.ollama_url,
                     model=self.ollama_model,
-                    generation_kwargs={"temperature": self.temperature} | (generation_kwargs or {}),
+                    generation_kwargs={"temperature": temperature or self.temperature} | (generation_kwargs or {}),
                 )
             else:
                 logger.info("Using Ollama generator with model %s", self.ollama_model)
                 return OllamaGenerator(
                     model=self.ollama_model,
-                    generation_kwargs={"temperature": self.temperature} | (generation_kwargs or {}),
+                    generation_kwargs={"temperature": temperature or self.temperature} | (generation_kwargs or {}),
                 )
         else:
             raise NotImplementedError
@@ -426,3 +430,9 @@ class BeautifulSoupExtractor:
                 description = meta_content.strip()
 
         return title, description
+
+
+def remove_unencodable(text, encoding="utf-8"):
+    if text is None:
+        return None
+    return text.encode(encoding, errors="ignore").decode(encoding)
