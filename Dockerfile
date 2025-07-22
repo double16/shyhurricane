@@ -4,13 +4,14 @@ RUN apt-get update &&\
     apt-get install -y --install-recommends docker.io curl nmap &&\
     apt-get clean
 
-COPY requirements.txt /app/
 WORKDIR /app
-RUN pip install -r requirements.txt
+RUN --mount=type=bind,source=requirements.txt,target=/tmp/requirements.txt \
+    pip install --requirement /tmp/requirements.txt
 COPY *.py /app/
+COPY shyhurricane /app/shyhurricane/
 
 RUN useradd -u 2000 -m --shell /usr/bin/rbash runner
-RUN mkdir -p /data /tool_cache && chown 2000:2000 /data /tool_cache
+RUN mkdir -p /data /tool_cache /home/runner/.cache && chown 2000:2000 /data /tool_cache /home/runner/.cache
 USER 2000
 
 ENV CHROMA=/data

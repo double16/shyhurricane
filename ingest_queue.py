@@ -30,8 +30,17 @@ def get_ingest_queue(db: str) -> persistqueue.SQLiteQueue:
 def _ingest_worker(db: str, generator_config: GeneratorConfig):
     queue = get_ingest_queue(db)
     pipeline: Pipeline = build_ingest_pipeline(db=db, generator_config=generator_config)
+    count = 0
     while True:
+        if count % 100 == 99:
+            logger.info("Shrinking index queue")
+            try:
+                queue.shrink_disk_usage()
+            except Exception as e:
+                logger.debug("Shrinking index queue failed: %s", e)
+
         item = queue.get()
+        count += 1
         try:
             pipeline.run({"input_router": {"text": str(item)}})
         except Exception as e:

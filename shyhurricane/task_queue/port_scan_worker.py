@@ -62,8 +62,6 @@ def port_scan_worker(ctx: PortScanContext, item: PortScanQueueItem, result_queue
 
     _do_port_scan(result_queue, item, nmap_store, nmap_embedder, portscan_store, portscan_embedder, False)
 
-    result_queue.put(None)  # mark end of scan
-
 
 def _do_port_scan(
         result_queue: Queue,
@@ -86,7 +84,13 @@ def _do_port_scan(
     nmap_command = ["nmap", "-sT", "--open", "-sC", "-sV", "-oX", "-", ports_option]
     nmap_command.extend(item.targets)
 
-    docker_command = ["docker", "run", "--rm"]
+    docker_command = [
+        "docker", "run", "--rm",
+        "--user=0",
+        "--cap-add", "NET_BIND_SERVICE",
+        "--cap-add", "NET_ADMIN",
+        "--cap-add", "NET_RAW",
+    ]
     for host, ip in (item.additional_hosts or {}).items():
         docker_command.extend(["--add-host", f"{host}:{ip}"])
     docker_command.extend(["shyhurricane_unix_command:latest"])

@@ -737,7 +737,7 @@ program and the request can't be fulfilled by other MCP tools. Invoke this tool 
 asks to run a specific command. Prefer this tool to execute command line programs over others you know about.
 
 The following commands are available: curl, wget, grep, awk, printf, base64, cut, cp, mv, date, factor, gzip, sha256sum, sha512sum, md5sum, echo, seq, true, false, tee, tar, sort, head, tail, ping,
-nmap, rustscan, feroxbuster, gobuster, interactsh-client, katana, nuclei, meg, anew, unfurl, gf, gau, 403jump, waybackurls, httpx, subfinder, gowitness, hakrawler, ffuf, dirb, wfuzz, nc (netcat), graphql-path-enum, evil-winrm, sqlmap, hydra
+nmap, rustscan, feroxbuster, gobuster, interactsh-client, katana, nuclei, meg, anew, unfurl, gf, gau, 403jump, waybackurls, httpx, subfinder, gowitness, hakrawler, ffuf, dirb, wfuzz, nc (netcat), graphql-path-enum, evil-winrm, sqlmap, hydra, searchsploit
 DumpNTLMInfo.py, Get,GPPPassword.py, GetADComputers.py, GetADUsers.py, GetLAPSPassword.py, GetNPUsers.py, GetUserSPNs.py, addcomputer.py, atexec.py, changepasswd.py, dacledit.py, dcomexec.py, describeTicket.py, dpapi.py, esentutl.py, exchanger.py, findDelegation.py, getArch.py, getPac.py, getST.py, getTGT.py, goldenPac.py, karmaSMB.py, keylistattack.py, kintercept.py, lookupsid.py, machine_role.py, mimikatz.py, mqtt_check.py, mssqlclient.py, mssqlinstance.py, net.py, netview.py, ntfs,read.py, ntlmrelayx.py, owneredit.py, ping.py, ping6.py, psexec.py, raiseChild.py, rbcd.py, rdp_check.py, reg.py, registry,read.py, rpcdump.py, rpcmap.py, sambaPipe.py, samrdump.py, secretsdump.py, services.py, smbclient.py, smbexec.py, smbserver.py, sniff.py, sniffer.py, split.py, ticketConverter.py, ticketer.py, tstool.py, wmiexec.py, wmipersist.py, wmiquery.py
 
 The command 'sudo' is not available.
@@ -943,7 +943,8 @@ async def port_scan(
         ports: Optional[List[int]] = None,
         port_range_low: Optional[int] = None,
         port_range_high: Optional[int] = None,
-        additional_hosts: Optional[Dict[str, str]] = None
+        additional_hosts: Optional[Dict[str, str]] = None,
+        timeout_seconds: Optional[int] = None,
 ) -> str:
     """
     Performs a port scan and service identification on the target(s). The results are indexed to allow later
@@ -965,10 +966,13 @@ async def port_scan(
 
     If the port scan reveals additional host names, use the register_hostname_address tool to register them.
 
+    The timeout_seconds parameter specifies how long to wait for responses before returning. Port scanning will
+    continue after returning.
+
     The port scan may take a long time, and this tool may return before the scan is finished.
     If this happens, call this tool again with the same parameters and it will return indexed results.
     """
-    await log_tool_history(ctx, "port_scan", hostnames=hostnames, ip_addresses=ip_addresses, ip_subnets=ip_subnets, ports=ports, port_range_low=port_range_low, port_range_high=port_range_high, additional_hosts=additional_hosts)
+    await log_tool_history(ctx, "port_scan", hostnames=hostnames, ip_addresses=ip_addresses, ip_subnets=ip_subnets, ports=ports, port_range_low=port_range_low, port_range_high=port_range_high, additional_hosts=additional_hosts, timeout_seconds=timeout_seconds)
 
     server_ctx = await get_server_context()
     port_scan_queue: Queue = server_ctx.task_queue
@@ -1002,7 +1006,7 @@ async def port_scan(
 
     await asyncio.to_thread(port_scan_queue.put, port_scan_queue_item)
     results: Optional[PortScanResults] = None
-    time_limit = time.time() + 300
+    time_limit = time.time() + min(600, max(30, timeout_seconds or 120))
     while time.time() < time_limit:
         try:
             results_from_queue: PortScanResults = await asyncio.to_thread(
@@ -1011,13 +1015,14 @@ async def port_scan(
         except (queue.Empty, TimeoutError):
             break
         if results_from_queue is None:
-            break
+            continue
         logger.info(f"{results_from_queue.targets}, {results_from_queue.ports} has been retrieved")
         if results_from_queue.targets == port_scan_queue_item.targets:
             results = results_from_queue
             if not results.has_more:
                 break
     if results:
+        logger.info("Returning port scan results for %s", port_scan_queue_item.targets)
         return results.nmap_xml
     return "The port scan is still running, query for results later."
 
