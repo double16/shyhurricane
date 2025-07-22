@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import datetime
 import hashlib
 import json
 import logging
@@ -41,7 +42,7 @@ from haystack_integrations.tools.mcp import StreamableHttpServerInfo, MCPToolset
 
 from prompts import pentester_agent_system_prompt, pentester_chat_system_prompt
 from utils import urlparse_ext, GeneratorConfig, extract_domain, IngestableRequestResponse, is_katana_jsonl, \
-    is_har_json, is_http_raw, BeautifulSoupExtractor, remove_unencodable
+    is_har_json, is_http_raw, BeautifulSoupExtractor, remove_unencodable, parse_to_iso8601, documents_sort_unique
 
 os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
 os.environ['ANONYMIZED_TELEMETRY'] = "False"
@@ -89,7 +90,7 @@ class CombineDocs:
         merged = []
         for docs in kwargs.values():
             merged.extend(docs)
-        merged.sort(key=lambda d: d.score or 0, reverse=True)
+        merged.sort(key=lambda d: (d.score or 0, d.meta.get("timestamp_float", 0)), reverse=True)
         return {"documents": merged}
 
 
@@ -316,16 +317,8 @@ class MultiQueryChromaRetriever:
                         ids.add(doc.id)
             except Exception as e:
                 logger.error(f"Exception querying chroma database: {str(e)}", exc_info=e)
-        results.sort(key=lambda x: x.score, reverse=True)
 
-        # unique per (URL, method, status code)
-        unique_keys = set()
-        unique_docs = []
-        for doc in results:
-            key = (doc.meta["url"], doc.meta.get("http_method", "GET"), doc.meta.get("status_code", 200))
-            if key not in unique_keys:
-                unique_keys.add(key)
-                unique_docs.append(doc)
+        unique_docs = documents_sort_unique(results)
 
         return {"documents": unique_docs}
 
@@ -820,9 +813,14 @@ class RequestResponseToDocument:
             logger.warning(f"Malformed URL: {url}")
             return []
 
-        timestamp = request_response.timestamp
+        try:
+            timestamp, timestamp_float = parse_to_iso8601(request_response.timestamp)
+        except ValueError:
+            timestamp_float = datetime.datetime.now().timestamp()
+            timestamp = datetime.datetime.now().isoformat()
+
         # quantize timestamp to avoid too many duplicate results
-        timestamp_for_id = request_response.timestamp[0:11]  # one document per URL per day
+        timestamp_for_id = timestamp[0:11]  # one document per URL per day
         request_headers = request_response.request_headers
         response_body = remove_unencodable(request_response.response_body)
         response_headers = request_response.response_headers
@@ -842,6 +840,7 @@ class RequestResponseToDocument:
             "port": port,
             "domain": domain,
             "timestamp": timestamp,
+            "timestamp_float": timestamp_float,
             "content_type": raw_mime,
             "status_code": request_response.response_code,
             "http_method": request_response.method,

@@ -52,7 +52,7 @@ from shyhurricane.task_queue.port_scan_worker import get_stored_port_scan_result
 from shyhurricane.task_queue.types import PortScanQueueItem, SpiderQueueItem, DirBustingQueueItem, TaskPool
 from prompts import pentester_chat_system_prompt, mcp_server_instructions, pentester_agent_system_prompt
 from utils import HttpResource, add_generator_args, GeneratorConfig, extract_domain, read_last_text_bytes, \
-    PortScanResults, is_katana_jsonl, is_http_csv_header
+    PortScanResults, is_katana_jsonl, is_http_csv_header, documents_sort_unique
 
 logger = logging.getLogger(__name__)
 
@@ -306,8 +306,8 @@ async def _find_web_resources_by_url(ctx: Context, query: str, limit: int = 100)
         for doc in store.filter_documents(filters=filters):
             if doc.meta.get("url", "").startswith(url_prefix) and doc.meta.get("url") not in urls_munged:
                 docs.append(doc)
-            if len(docs) >= limit:
-                break
+
+        docs = documents_sort_unique(docs, limit)
 
         if docs:
             return _documents_to_http_resources(docs)
@@ -335,8 +335,8 @@ async def _find_web_resources_by_netloc(ctx: Context, query: str, limit: int = 1
                 {"field": "meta.netloc", "operator": "==", "value": query}
             ]}
         docs.extend(store.filter_documents(filters=filters))
-        if len(docs) >= limit:
-            docs = docs[:limit]
+
+        docs = documents_sort_unique(docs, limit)
 
         if docs:
             return _documents_to_http_resources(docs)
@@ -364,8 +364,8 @@ async def _find_web_resources_by_hostname(ctx: Context, query: str, limit: int =
                 {"field": "meta.host", "operator": "==", "value": hostname}
             ]}
         docs.extend(store.filter_documents(filters=filters))
-        if len(docs) >= limit:
-            docs = docs[:limit]
+
+        docs = documents_sort_unique(docs, limit)
 
         if docs:
             return _documents_to_http_resources(docs)
@@ -373,6 +373,24 @@ async def _find_web_resources_by_hostname(ctx: Context, query: str, limit: int =
         pass
 
     return None
+
+
+async def _find_recommended_urls(ctx: Context) -> Optional[List[str]]:
+    netlocs = find_netloc(ctx, "")
+    if not netlocs:
+        return None
+    domains = set(map(lambda n: extract_domain(n.split(':')[0]), netlocs))
+    if len(domains) != 1:
+        return None
+    results = []
+    for netloc in netlocs:
+        hostname, port = _query_to_netloc(netloc)
+        if port%1000 == 443:
+            results.append(f"https://{hostname}:{port}")
+        else:
+            results.append(f"http://{hostname}:{port}")
+
+    return results
 
 
 @mcp.tool(
@@ -406,7 +424,7 @@ async def find_web_resources(ctx: Context, query: str, limit: int = 100) -> List
         7. http://target.local/account/dashboard?page=account
 
     A target URL or hostname is required. Always include your target URLs. http://target.local is only an example, do not use it as a URL.
-s
+
     The limit parameter is used to limit how many results are returned. The default is 100. The value must range between 10 and 1000.
     """
     await log_tool_history(ctx, "find_web_resources", query=query, limit=limit)
@@ -445,6 +463,11 @@ s
                 pass
 
     await determine_targets(query)
+
+    if not urls:
+        if recommended_urls := await _find_recommended_urls(ctx):
+            urls.extend(recommended_urls)
+
     if not urls:
         try:
             logger.info("Asking user for URL(s)")
@@ -531,7 +554,8 @@ s
 
     res = document_pipeline.run(data={"query": {"text": query, "filters": filters, "max_results": limit}},
                                 include_outputs_from={"combine"})
-    documents: List[Document] = res.get("combine", {}).get("documents", [])[0:limit]
+
+    documents = documents_sort_unique(res.get("combine", {}).get("documents", []), limit)
 
     return _documents_to_http_resources(documents)
 
@@ -984,7 +1008,7 @@ async def port_scan(
             results_from_queue: PortScanResults = await asyncio.to_thread(
                 port_scan_result_queue.get,
                 timeout=(max(1.0, time_limit - time.time())))
-        except queue.Empty:
+        except (queue.Empty, TimeoutError):
             break
         if results_from_queue is None:
             break
@@ -1268,8 +1292,7 @@ async def spider_website(
             http_resource: HttpResource = await asyncio.to_thread(
                 spider_result_queue.get,
                 timeout=(max(1.0, time_limit - time.time())))
-        except queue.Empty:
-            has_more = False
+        except (queue.Empty, TimeoutError):
             break
         if http_resource is None:
             has_more = False
@@ -1426,8 +1449,7 @@ async def directory_buster(
             found_url: str = await asyncio.to_thread(
                 dir_busting_result_queue.get,
                 timeout=(max(1.0, time_limit - time.time())))
-        except queue.Empty:
-            has_more = False
+        except (queue.Empty, TimeoutError):
             break
         if found_url is None:
             has_more = False
@@ -1623,6 +1645,66 @@ def pentest_assistant_prompt(target: str) -> List[Message]:
 # TODO: add prompt for CTF agent
 
 # TODO: add prompt for bug bounty agent
+
+@mcp.prompt(title="Penetration Test Auditor")
+def pentest_audit_prompt(target: str) -> List[Message]:
+    return [
+        AssistantMessage("""
+You are **Pentest Audit Bot**, an independent security auditor.  
+Your job is to grade how thoroughly the test team examined the target **using only the documents stored in the retrieval system.**  
+You **must not** collect new data from the internet or from the live target.
+
+────────────────────────────────────────────────────────
+Allowed actions
+────────────────────────────────────────────────────────
+| Action           | Tool              | Purpose                                         |
+| ---------------- | ----------------- | ----------------------------------------------- |
+| Retrieve services covered | `find_netloc`     | Pull indexed hostname and ports in the form of hostname:port |
+| Retrieve resources | `find_web_resources`     | Pull chunks that match a query (HTML, headers, scripts, logs). |
+
+────────────────────────────────────────────────────────
+Audit checklist
+────────────────────────────────────────────────────────
+Evaluate whether each phase below is present in the indexed evidence.  
+Mark “✅ covered” or “❌ missing”.
+
+1. **Recon / Enumeration** – ports, directories, tech stack, users  
+2. **Vulnerability Analysis** – CVEs, OWASP Top-10, misconfigurations  
+3. **Exploitation** – working PoCs, screenshots, shell output  
+4. **Privilege Escalation** – local-root attempts, token theft  
+5. **Post-Exploitation Loot** – DB dumps, secrets, sensitive files  
+
+────────────────────────────────────────────────────────
+Execution rules
+────────────────────────────────────────────────────────
+* Speak in concise **Markdown**.  
+* Log progress in one-line notes such as  
+  `🔍 website_rag("open ports") → 12 hits`  
+* Iterate queries until all evidence is reviewed.  
+* End the loop with **DONE** followed by the final report.
+
+────────────────────────────────────────────────────────
+Report template (Markdown to return after DONE)
+────────────────────────────────────────────────────────
+# Test-Coverage Report  (YYYY-MM-DD)
+
+## Coverage Summary
+| Phase | Status | Key Evidence |
+|-------|--------|--------------|
+| Recon | ✅ | [nmap.txt](…) |
+| Exploitation | ❌ | – |
+
+## Gaps & Recommended Tests
+### {Short title}
+- **Phase**: {e.g. Exploitation}
+- **Why Needed**: {one-sentence rationale}
+- **Suggested Technique**: {e.g. SQLi union-based test}
+- **Reference**: [CVE-2023-1234](…), [OWASP A03](…)
+
+DONE
+"""),
+        UserMessage(f"Examine {target} for test coverage."),
+    ]
 
 
 def main():

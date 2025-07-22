@@ -1,4 +1,5 @@
 import argparse
+import datetime
 import ipaddress
 import json
 import logging
@@ -7,9 +8,11 @@ import re
 from pathlib import Path
 from urllib.parse import ParseResult, urlparse
 from typing import Optional, Dict, Any, Union, List, Tuple
+from zoneinfo import ZoneInfo
 
 import aiofiles
 from bs4 import SoupStrainer, BeautifulSoup
+from haystack import Document
 from haystack.components.generators import OpenAIGenerator
 from haystack.components.generators.chat import OpenAIChatGenerator
 from haystack.tools import Toolset
@@ -436,3 +439,55 @@ def remove_unencodable(text, encoding="utf-8"):
     if text is None:
         return None
     return text.encode(encoding, errors="ignore").decode(encoding)
+
+
+def parse_to_iso8601(timestr: str) -> Tuple[str, float]:
+    # Maps timezone abbreviations to IANA timezone names
+    tz_abbrev_to_iana = {
+        "CDT": "America/Chicago",
+        "CST": "America/Chicago",
+        "EDT": "America/New_York",
+        "EST": "America/New_York",
+        "MDT": "America/Denver",
+        "MST": "America/Denver",
+        "PDT": "America/Los_Angeles",
+        "PST": "America/Los_Angeles",
+        "GMT": "UTC",
+        "UTC": "UTC",
+    }
+
+    # Try format 1: "Sat Jul 19 08:23:11 CDT 2025"
+    m1 = re.match(r"^(\w{3}) (\w{3}) (\d{1,2}) (\d{2}:\d{2}:\d{2}) (\w{3}) (\d{4})$", timestr)
+    if m1:
+        _, month, day, time_str, tz_abbrev, year = m1.groups()
+        tz = ZoneInfo(tz_abbrev_to_iana[tz_abbrev])
+        dt = datetime.datetime.strptime(f"{month} {day} {year} {time_str}", "%b %d %Y %H:%M:%S")
+        return dt.replace(tzinfo=tz).isoformat(), dt.timestamp()
+
+    # Try format 2: "Sat, 19 Jul 2025 13:23:10 GMT"
+    m2 = re.match(r"^\w{3}, (\d{1,2}) (\w{3}) (\d{4}) (\d{2}:\d{2}:\d{2}) (\w{3})$", timestr)
+    if m2:
+        day, month, year, time_str, tz_abbrev = m2.groups()
+        tz = ZoneInfo(tz_abbrev_to_iana[tz_abbrev])
+        dt = datetime.datetime.strptime(f"{day} {month} {year} {time_str}", "%d %b %Y %H:%M:%S")
+        return dt.replace(tzinfo=tz).isoformat(), dt.timestamp()
+
+    raise ValueError(f"Unrecognized time format: {timestr}")
+
+
+def documents_sort_unique(documents: List[Document], limit: Optional[int] = None) -> List[Document]:
+    documents.sort(key=lambda x: (x.score or 0, x.meta.get("timestamp_float", 0)), reverse=True)
+
+    # unique per (URL, method, status code)
+    unique_keys = set()
+    unique_docs = []
+    for doc in documents:
+        key = (doc.meta["url"], doc.meta.get("http_method", "GET"), doc.meta.get("status_code", 200))
+        if key not in unique_keys:
+            unique_keys.add(key)
+            unique_docs.append(doc)
+
+    if limit is not None:
+        unique_docs = unique_docs[:limit]
+
+    return unique_docs

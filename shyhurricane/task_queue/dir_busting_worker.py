@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import subprocess
 import time
 import uuid
@@ -67,76 +68,82 @@ def _do_busting(
     logger.info(f"Dir busting with command {' '.join(buster_docker_command)}")
     mitmdump_proc = subprocess.Popen(mitmdump_docker_command, universal_newlines=True, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL)
-
-    buster_proc_succeed = False
-    for _ in range(5):
-        time.sleep(2)
-        buster_proc = subprocess.Popen(buster_docker_command, universal_newlines=True,
-                                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        try:
-            if buster_proc.wait(2) != 125:  # 125 is returned when the named container isn't running
+    try:
+        buster_proc_succeed = False
+        for _ in range(5):
+            time.sleep(2)
+            buster_proc = subprocess.Popen(buster_docker_command, universal_newlines=True,
+                                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                if buster_proc.wait(2) != 125:  # 125 is returned when the named container isn't running
+                    buster_proc_succeed = True
+                    break
+            except subprocess.TimeoutExpired:
+                # assume the process is good because it didn't exit immediately
                 buster_proc_succeed = True
                 break
-        except subprocess.TimeoutExpired:
-            # assume the process is good because it didn't exit immediately
-            buster_proc_succeed = True
-            break
-    if not buster_proc_succeed:
-        logger.error("Dir busting failed to start")
+        if not buster_proc_succeed:
+            logger.error("Dir busting for %s failed to start", item.uri)
+            if result_queue:
+                result_queue.put_nowait(None)
+            return None
+
+        logger.info("Dir busting for %s started", item.uri)
+
+        katana_component = KatanaDocument()
+
+        def process_stdout(data: str):
+            ingest_queue.put_nowait(data)
+            if result_queue is not None:
+                try:
+                    katana_results: List[IngestableRequestResponse] = katana_component.run(data).get("request_responses",
+                                                                                                     [])
+                    if not katana_results:
+                        return
+                    parsed = katana_results[0]
+                    url = parsed.url
+                    result_queue.put_nowait(url)
+                except Exception as e:
+                    logger.warning(f"Queueing dir busting results: {e}", exc_info=e)
+                    pass
+
+        try:
+            os.set_blocking(mitmdump_proc.stdout.fileno(), False)
+            while buster_proc.poll() is None:
+                line_out = mitmdump_proc.stdout.readline()
+                if line_out:
+                    if '"request"' in line_out:
+                        process_stdout(line_out)
+                else:
+                    time.sleep(0.2)
+            # read any buffered output
+            while True:
+                line_out = mitmdump_proc.stdout.readline()
+                if not line_out:
+                    break
+                if '"request"' in line_out:
+                    process_stdout(line_out)
+        except EOFError:
+            pass
+
+        return_code = buster_proc.wait()
+
+        if return_code in [0, 125]:  # 125 can mean the container was stopped
+            logger.info("Dir busting for %s completed", item.uri)
+        else:
+            logger.error("Dir busting for %s returned exit code %d", item.uri, return_code)
+        return None
+    finally:
+        mitmdump_proc.terminate()
         if result_queue:
             result_queue.put_nowait(None)
-        return None
-
-    katana_component = KatanaDocument()
-
-    def process_stdout(data: str):
-        ingest_queue.put_nowait(data)
-        if result_queue is not None:
-            try:
-                katana_results: List[IngestableRequestResponse] = katana_component.run(data).get("request_responses",
-                                                                                                 [])
-                if not katana_results:
-                    return
-                parsed = katana_results[0]
-                url = parsed.url
-                result_queue.put_nowait(url)
-            except Exception as e:
-                logger.warning(f"Queueing dir busting results: {e}", exc_info=e)
-                pass
-
-    try:
-        while buster_proc.poll() is None:
-            line_out = mitmdump_proc.stdout.readline()
-            if line_out and '"request"' in line_out:
-                process_stdout(line_out)
-        # read any buffered output
-        while True:
-            line_out = mitmdump_proc.stdout.readline()
-            if not line_out:
-                break
-            if '"request"' in line_out:
-                process_stdout(line_out)
-    except EOFError:
-        pass
-
-    return_code = buster_proc.wait()
-    mitmdump_proc.terminate()
-    if return_code in [0, 125]:  # 125 can mean the container was stopped
-        logger.info("Dir busting for %s completed", item.uri)
-    else:
-        logger.error("Dir busting for %s returned exit code %d", item.uri, return_code)
-
-    if result_queue:
-        result_queue.put_nowait(None)
-
-    return None
 
 
 def _build_feroxbuster_command(
         item: DirBustingQueueItem,
         replay_codes: Optional[Set[str]] = None,
 ) -> List[str]:
-    command = ["/usr/local/bin/feroxbuster", "-u", item.uri, "--extract-links", "--threads", "5"]
+    command = ["/usr/local/bin/feroxbuster", "-u", item.uri, "--insecure", "--extract-links", "--threads", "5"]
 
     if item.rate_limit_requests_per_second:
         command.extend(["--scan-limit", "1", "--rate-limit", str(item.rate_limit_requests_per_second)])
@@ -180,7 +187,7 @@ def _build_feroxbuster_command(
             post_data = urlencode(item.params, doseq=True)
             command.extend(["--data", post_data])
 
-    command.extend(["--replay-proxy", "http://127.0.0.1:8080", "--insecure"])
+    command.extend(["--replay-proxy", "http://127.0.0.1:8080"])
     if replay_codes:
         command.extend(["--replay-codes", ",".join(map(str, replay_codes))])
 

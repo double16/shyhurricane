@@ -2,20 +2,19 @@
 import argparse
 import base64
 import csv
-import datetime
 import json
 import re
 import sys
 from urllib.parse import urlparse
 from typing import Optional
-from zoneinfo import ZoneInfo
 
-from ingest_queue import get_ingest_queue
-from utils import parse_http_request, parse_http_response
+import requests
+
+from utils import parse_http_request, parse_http_response, parse_to_iso8601
 
 # ─── Argument Parser ───────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Queue request-responses for indexing.")
-parser.add_argument("--db", "-d", default="127.0.0.1:8200", help="Chroma location, host:port")
+parser.add_argument("--mcp-url", default="http://127.0.0.1:8000/", required=True, help="URL for the MCP server, i.e. http://127.0.0.1:8000/")
 parser.add_argument("--katana", action="store_true", help="Read katana jsonl")
 parser.add_argument("--csv", action="store_true", help="Read Burp Logger++ CSV")
 args = parser.parse_args()
@@ -24,7 +23,6 @@ if not args.katana and not args.csv:
     sys.exit("You need to specify either --katana or --csv")
 
 # ─── Process stdin line-by-line ───────────────────────────────────────
-ingest_queue = get_ingest_queue(db=args.db)
 
 _http_header_key_re = re.compile(r"^[!#$%&'*+\-.^_`|~0-9a-zA-Z]+$")
 
@@ -46,39 +44,17 @@ def parse_headers(header_str: str) -> dict:
     return headers
 
 
-def parse_to_iso8601(timestr: str) -> str:
-    # Maps timezone abbreviations to IANA timezone names
-    tz_abbrev_to_iana = {
-        "CDT": "America/Chicago",
-        "CST": "America/Chicago",
-        "EDT": "America/New_York",
-        "EST": "America/New_York",
-        "MDT": "America/Denver",
-        "MST": "America/Denver",
-        "PDT": "America/Los_Angeles",
-        "PST": "America/Los_Angeles",
-        "GMT": "UTC",
-        "UTC": "UTC",
-    }
+if args.mcp_url.endswith("/"):
+    index_url = args.mcp_url + "index"
+else:
+    index_url = args.mcp_url + "/index"
 
-    # Try format 1: "Sat Jul 19 08:23:11 CDT 2025"
-    m1 = re.match(r"^(\w{3}) (\w{3}) (\d{1,2}) (\d{2}:\d{2}:\d{2}) (\w{3}) (\d{4})$", timestr)
-    if m1:
-        _, month, day, time_str, tz_abbrev, year = m1.groups()
-        tz = ZoneInfo(tz_abbrev_to_iana[tz_abbrev])
-        dt = datetime.datetime.strptime(f"{month} {day} {year} {time_str}", "%b %d %Y %H:%M:%S")
-        return dt.replace(tzinfo=tz).isoformat()
-
-    # Try format 2: "Sat, 19 Jul 2025 13:23:10 GMT"
-    m2 = re.match(r"^\w{3}, (\d{1,2}) (\w{3}) (\d{4}) (\d{2}:\d{2}:\d{2}) (\w{3})$", timestr)
-    if m2:
-        day, month, year, time_str, tz_abbrev = m2.groups()
-        tz = ZoneInfo(tz_abbrev_to_iana[tz_abbrev])
-        dt = datetime.datetime.strptime(f"{day} {month} {year} {time_str}", "%d %b %Y %H:%M:%S")
-        return dt.replace(tzinfo=tz).isoformat()
-
-    raise ValueError(f"Unrecognized time format: {timestr}")
-
+try:
+    requests.post(index_url, data="{}").raise_for_status()
+    print(f"[✔] {index_url} verified", file=sys.stderr)
+except Exception as e:
+    print(f"[✘] Error: {index_url}, {e}", file=sys.stderr)
+    sys.exit(1)
 
 if args.katana:
     for line in sys.stdin:
@@ -87,7 +63,7 @@ if args.katana:
         except Exception:
             continue
         try:
-            ingest_queue.put(line.strip())
+            requests.post(index_url, data=line.strip()).raise_for_status()
             print(f"[✔] Queued for indexing: {url}", file=sys.stderr)
         except Exception as e:
             print(f"[✘] Error: {url}, {e}", file=sys.stderr)
@@ -132,7 +108,7 @@ elif args.csv:
                     pass
             if time is None and len(column) < 40:
                 try:
-                    time = parse_to_iso8601(column)
+                    time, _ = parse_to_iso8601(column)
                     if time:
                         continue
                 except Exception:
@@ -180,7 +156,7 @@ elif args.csv:
                         status_code, response_headers, response_body = parse_results
                         if not time and "Date" in response_headers:
                             try:
-                                time = parse_to_iso8601(response_headers["Date"])
+                                time, _ = parse_to_iso8601(response_headers["Date"])
                             except Exception:
                                 pass
                         continue
@@ -204,7 +180,7 @@ elif args.csv:
                 }
             })
             try:
-                ingest_queue.put(json_payload)
+                requests.post(index_url, data=json_payload).raise_for_status()
                 print(f"[✔] Queued for indexing: {url}", file=sys.stderr)
             except Exception as e:
                 print(f"[✘] Error: {url}, {e}", file=sys.stderr)

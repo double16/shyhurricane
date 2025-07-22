@@ -41,4 +41,4 @@ def response(flow: http.HTTPFlow) -> None:
     if flow.response.timestamp_end and flow.response.timestamp_start:
         entry["response"]["rtt"] = (flow.response.timestamp_end - flow.response.timestamp_start) * 1000.0
 
-    print(json.dumps(entry))
+    print(json.dumps(entry), flush=True)

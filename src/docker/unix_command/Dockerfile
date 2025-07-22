@@ -17,14 +17,14 @@ RUN apt-get update &&\
 RUN git clone --depth=1 https://github.com/danielmiessler/SecLists.git /usr/share/seclists
 RUN rm -rf /usr/share/seclists/.git
 
-FROM ubuntu:24.04
+FROM kalilinux/kali-rolling
 ENV DEBIAN_FRONTEND=noninteractive \
     PIPX_BIN_DIR=/usr/local/bin \
     PIPX_HOME=/usr/local/share \
     PIP_CACHE_DIR=/usr/local/share/pip-cache
 
 RUN apt-get update &&\
-    apt-get install -y --install-recommends ruby nmap sqlmap curl wget dirb ffuf wfuzz hydra netcat-openbsd git pipx iputils-ping nodejs npm mitmproxy python3-pip python3-virtualenv jq &&\
+    apt-get install -y --install-recommends ruby nmap sqlmap curl wget dirb ffuf wfuzz hydra netcat-openbsd git pipx iputils-ping nodejs npm mitmproxy python3-pip python3-virtualenv jq exploitdb &&\
     apt-get clean
 RUN pipx install impacket
 RUN gem install evil-winrm
