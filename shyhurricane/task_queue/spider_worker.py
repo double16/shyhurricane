@@ -48,7 +48,7 @@ def _katana_ingest(
     for host, ip in (item.additional_hosts or {}).items():
         docker_command.extend(["--add-host", f"{host}:{ip}"])
     docker_command.extend(
-        ["shyhurricane_unix_command:latest", "timeout", "--preserve-status", "--kill-after=1m", "30m"])
+        ["shyhurricane_unix_command:latest", "timeout", "--kill-after=1m", "30m"])
     docker_command.extend(katana_command)
 
     logger.info(f"Spidering with command {' '.join(docker_command)}")
@@ -122,7 +122,7 @@ def _katana_ingest(
         pass
 
     return_code = proc.wait()
-    if return_code in [0, 125]:  # 125 can mean the container was stopped
+    if return_code in [0, 124, 125, 137]:
         logger.info("Spider for %s completed", item.uri)
     else:
         logger.error("Spider for %s returned exit code %d", item.uri, return_code)

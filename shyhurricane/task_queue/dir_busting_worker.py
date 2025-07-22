@@ -48,7 +48,7 @@ def _do_busting(
             replay_codes=replay_codes,
         )
 
-    mitmdump_command = ["timeout", "--preserve-status", "--kill-after=1m", "35m",
+    mitmdump_command = ["timeout", "--kill-after=1m", "35m",
                         "/usr/local/bin/mitmdump_virtualenv.sh", "-q", "-p", "8080", "-s",
                         "/usr/share/mitm_to_katana/mitm_to_katana.py"]
     # always ignore 404 Not Found
@@ -62,7 +62,7 @@ def _do_busting(
     mitmdump_docker_command.extend(["shyhurricane_unix_command:latest"])
     mitmdump_docker_command.extend(mitmdump_command)
 
-    buster_docker_command = ["docker", "exec", container_name, "timeout", "--preserve-status", "--kill-after=1m", "30m"]
+    buster_docker_command = ["docker", "exec", container_name, "timeout", "--kill-after=1m", "30m"]
     buster_docker_command.extend(buster_command)
 
     logger.info(f"Dir busting with command {' '.join(buster_docker_command)}")
@@ -128,7 +128,7 @@ def _do_busting(
 
         return_code = buster_proc.wait()
 
-        if return_code in [0, 125]:  # 125 can mean the container was stopped
+        if return_code in [0, 124, 125, 137]:
             logger.info("Dir busting for %s completed", item.uri)
         else:
             logger.error("Dir busting for %s returned exit code %d", item.uri, return_code)
