@@ -17,7 +17,7 @@ from utils import IngestableRequestResponse
 logger = logging.getLogger(__name__)
 
 
-def dir_busting_worker(item: DirBustingQueueItem, ingest_queue: persistqueue.SQLiteQueue, result_queue: Queue):
+def dir_busting_worker(item: DirBustingQueueItem, ingest_queue: persistqueue.SQLiteAckQueue, result_queue: Queue):
     logger.info(f"Starting dir busting worker {item.uri}")
     _do_busting(
         ingest_queue=ingest_queue,
@@ -27,7 +27,7 @@ def dir_busting_worker(item: DirBustingQueueItem, ingest_queue: persistqueue.SQL
 
 
 def _do_busting(
-        ingest_queue: persistqueue.SQLiteQueue,
+        ingest_queue: persistqueue.SQLiteAckQueue,
         result_queue: Queue,
         item: DirBustingQueueItem,
 ) -> None:
@@ -93,7 +93,7 @@ def _do_busting(
         katana_component = KatanaDocument()
 
         def process_stdout(data: str):
-            ingest_queue.put_nowait(data)
+            ingest_queue.put(data)
             if result_queue is not None:
                 try:
                     katana_results: List[IngestableRequestResponse] = katana_component.run(data).get("request_responses",
@@ -130,8 +130,12 @@ def _do_busting(
 
         if return_code in [0, 124, 125, 137]:
             logger.info("Dir busting for %s completed", item.uri)
+            # logger.error("Dir busting errors %s", mitmdump_proc.stderr.read())
+            # logger.error("Dir busting errors %s", buster_proc.stderr.read())
         else:
             logger.error("Dir busting for %s returned exit code %d", item.uri, return_code)
+            # logger.error("Dir busting errors %s", mitmdump_proc.stderr.read())
+            # logger.error("Dir busting errors %s", buster_proc.stderr.read())
         return None
     finally:
         mitmdump_proc.terminate()

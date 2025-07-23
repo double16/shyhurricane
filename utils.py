@@ -87,25 +87,12 @@ def extract_domain(hostname: str) -> Optional[str]:
     return domain
 
 
-async def read_last_text_bytes(path, max_bytes=1024, encoding='utf-8') -> str:
-    async with aiofiles.open(path, 'rb') as f:
-        await f.seek(0, 2)
-        size = await f.tell()
-        to_read = min(size, max_bytes)
-        await f.seek(-to_read, 2)
-        chunk = await f.read(to_read)
-
-    # Ensure we return valid UTF-8 characters only (trim partial character from start)
-    try:
-        return chunk.decode(encoding)
-    except UnicodeDecodeError:
-        # Strip partial character from the start until it decodes
-        for i in range(1, 5):  # UTF-8 characters are up to 4 bytes
-            try:
-                return chunk[i:].decode(encoding)
-            except UnicodeDecodeError:
-                continue
-        return ""
+async def read_last_text_bytes(file, max_bytes=1024, encoding='utf-8') -> str:
+    size = await file.tell()
+    to_read = min(size, max_bytes)
+    await file.seek(size - to_read, 0)
+    chunk = await file.read(to_read)
+    return chunk.decode(encoding, errors="ignore")
 
 
 TEMPERATURE_DEFAULT: float = 0.2

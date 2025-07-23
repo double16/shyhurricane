@@ -8,10 +8,12 @@ import logging
 import os
 import queue
 import re
+import subprocess
 import sys
 import time
 import traceback
 import asyncio
+import uuid
 from collections.abc import AsyncGenerator
 
 import aiofiles
@@ -71,7 +73,7 @@ class ServerContext:
     cache_path: str
     document_pipeline: Pipeline
     website_context_pipeline: Pipeline
-    ingest_queue: persistqueue.SQLiteQueue
+    ingest_queue: persistqueue.SQLiteAckQueue
     ingest_pool: TaskPool
     task_queue: Queue
     task_pool: TaskPool
@@ -80,6 +82,7 @@ class ServerContext:
     dir_busting_result_queue: Queue
     stores: Dict[str, ChromaDocumentStore]
     chroma_client: chromadb.AsyncClientAPI
+    mcp_session_volume: str
     disable_elicitation: bool = False
 
     def close(self):
@@ -125,6 +128,20 @@ async def get_server_context() -> ServerContext:
         ingest_queue, ingest_pool = start_ingest_worker(db=db, generator_config=generator_config,
                                                         pool_size=_server_config.ingest_pool_size)
         task_worker_ipc = start_task_worker(db, ingest_queue.path, _server_config.task_pool_size)
+
+        for retry in reversed(range(3)):
+            try:
+                subprocess.check_call(["docker", "volume", "inspect", "mcp_session"], stdout=subprocess.DEVNULL)
+            except subprocess.CalledProcessError:
+                try:
+                    subprocess.check_call(["docker", "volume", "create", "mcp_session"], stdout=subprocess.DEVNULL)
+                    break
+                except subprocess.CalledProcessError as e:
+                    if retry == 0:
+                        raise e
+                    else:
+                        time.sleep(5)
+
         _server_context = ServerContext(
             db=db,
             cache_path=cache_path,
@@ -139,6 +156,7 @@ async def get_server_context() -> ServerContext:
             dir_busting_result_queue=task_worker_ipc.dir_busting_result_queue,
             stores=stores,
             chroma_client=chroma_client,
+            mcp_session_volume="mcp_session",
             disable_elicitation=disable_elicitation,
         )
 
@@ -158,6 +176,8 @@ class AppContext:
     # TODO: add scope?
     cached_get_additional_hosts: Dict[str, str]
     cache_path: str
+    app_context_id: str
+    work_path: str
 
     def get_cache_path_for_tool(self, tool_id_str: str, additional_hosts: Dict[str, str]) -> str:
         digest = hashlib.sha512()
@@ -170,27 +190,41 @@ class AppContext:
         return path
 
 
-def assert_elicitation(ctx: ServerContext):
-    if ctx.disable_elicitation:
-        raise McpError(ErrorData(code=INVALID_REQUEST, message="elicitation disabled"))
-
-
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
-    """Manage application lifecycle with type-safe context"""
+    """Manage application lifecycle (per session) with type-safe context"""
     # Initialize on startup
     server_ctx = await get_server_context()
-    # TODO: make cache_path this per AppContext
     cache_path = server_ctx.cache_path
+
+    app_context_id = uuid.uuid4().hex
+    work_path = f"/work/{app_context_id}"
+    try:
+        subprocess.check_call([
+            "docker", "run", "--rm",
+            "-v", f"{server_ctx.mcp_session_volume}:/work",
+            "shyhurricane_unix_command:latest",
+            "mkdir", "-p", work_path
+        ])
+    except subprocess.CalledProcessError:
+        logger.exception("Failed to create MCP session work dir %s", work_path)
+        work_path = "/var/tmp"
 
     try:
         yield AppContext(
             cache_path=cache_path,
+            app_context_id=app_context_id,
+            work_path=work_path,
             cached_get_additional_hosts={},
         )
     finally:
         # Cleanup on shutdown
         pass
+
+
+def assert_elicitation(ctx: ServerContext):
+    if ctx.disable_elicitation:
+        raise McpError(ErrorData(code=INVALID_REQUEST, message="elicitation disabled"))
 
 
 mcp = FastMCP("shyhurricane", lifespan=app_lifespan, instructions=mcp_server_instructions)
@@ -387,8 +421,12 @@ async def _find_recommended_urls(ctx: Context) -> Optional[List[str]]:
         hostname, port = _query_to_netloc(netloc)
         if port%1000 == 443:
             results.append(f"https://{hostname}:{port}")
+        elif not port:
+            results.append(f"http://{hostname}")
         else:
             results.append(f"http://{hostname}:{port}")
+
+    logger.info("Recommended URLs: %s", results)
 
     return results
 
@@ -399,8 +437,16 @@ async def _find_recommended_urls(ctx: Context) -> Optional[List[str]]:
         readOnlyHint=True,
         openWorldHint=False),
 )
-async def find_web_resources(ctx: Context, query: str, limit: int = 100) -> List[HttpResource]:
-    """Query indexed resources about a website using natural language and return the request and response bodies, URL, HTTP method, MIME type, HTTP status code, technologies found. This tool will search using several parameters including response body matching, URL matching, MIME type matching of the response, HTTP request method matching, and HTTP response body matching.
+async def find_web_resources(
+        ctx: Context,
+        query: str,
+        limit: int = 100,
+        http_methods: Optional[List[str]] = None,
+) -> List[HttpResource]:
+    """Query indexed resources about a website using natural language and return the URL, request and response bodies,
+    request and response headers, HTTP method, MIME type, HTTP status code, technologies found. This tool will
+    search using several parameters including response body matching, URL matching, MIME type matching of the response,
+    and HTTP response body matching.
 
     Invoke this tool when the user asks about vulnerabilities,
     misconfigurations or exploit techniques **specific to a target website**
@@ -425,6 +471,9 @@ async def find_web_resources(ctx: Context, query: str, limit: int = 100) -> List
 
     A target URL or hostname is required. Always include your target URLs. http://target.local is only an example, do not use it as a URL.
 
+    The http_methods parameter can be used to limit results to requests made with the listed methods. If not specified
+    all methods will be considered.
+
     The limit parameter is used to limit how many results are returned. The default is 100. The value must range between 10 and 1000.
     """
     await log_tool_history(ctx, "find_web_resources", query=query, limit=limit)
@@ -445,7 +494,7 @@ async def find_web_resources(ctx: Context, query: str, limit: int = 100) -> List
 
     doc_types: list[str] = []
     urls: list[str] = []
-    methods: list[str] = []
+    methods: list[str] = http_methods or []
     response_codes: list[str] = []
 
     async def determine_targets(target_query: str):
@@ -453,11 +502,12 @@ async def find_web_resources(ctx: Context, query: str, limit: int = 100) -> List
         target_result = \
             website_context_pipeline.run({'builder': {'query': target_query}}).get('llm', {}).get('replies', [""])[0]
         if target_result:
+            logger.info("Target result: %s", json.dumps(target_result))
             try:
                 target_json = json.loads(target_result)
                 urls.extend(target_json.get('target', []))
                 doc_types.extend(target_json.get('content', []))
-                methods.extend(target_json.get('methods', []))
+                # methods.extend(target_json.get('methods', [])) # may be too limiting, or maybe ignore for certain doc types
                 response_codes.extend(target_json.get('response_codes', []))
             except json.decoder.JSONDecodeError:
                 pass
@@ -537,7 +587,7 @@ async def find_web_resources(ctx: Context, query: str, limit: int = 100) -> List
     ]
     _append_in_filter(conditions, "meta.netloc", filter_netloc)
     # _append_in_filter(conditions, "meta.type", doc_types) # tends to be too limiting
-    # _append_in_filter(conditions, "meta.http_method", methods) # tends to be too limiting
+    _append_in_filter(conditions, "meta.http_method", methods)
     _append_in_filter(conditions, "meta.status_code", response_codes)
     if len(conditions) == 0:
         filters = None
@@ -716,7 +766,6 @@ class RunUnixCommand(BaseModel):
     return_code: int = Field(description="Return code of command, 0 usually means successful")
     output: str = Field(description="Output of command as string")
     error: str = Field(description="Error messages from the command")
-    cached: bool = Field(description="Indicates if the results are from the cache", default=False)
     notes: Optional[str] = Field(description="Notes for understanding the command output or fixing failed commands")
 
 
@@ -730,7 +779,7 @@ async def run_unix_command(ctx: Context, command: str,
                            additional_hosts: Optional[Dict[str, str]] = None) -> RunUnixCommand:
     """
 Run a Linux or macOS command and return its output. The command is run in a containerized environment for safety.
-The containerized environment is ephemeral. The command is run using the bash shell.
+The command is run using the bash shell.
 
 Invoke this tool when the user request can be fulfilled by a known Linux or macOS command line
 program and the request can't be fulfilled by other MCP tools. Invoke this tool when the user
@@ -748,16 +797,15 @@ commands to run properly in a containerized environment.
 
 The SecLists word lists repository is installed at /usr/share/seclists
 
-Commands such as nmap can take a long time to run, so be patient.
+Commands may take a long time to run, so be patient.
 
-When generating Linux commands for execution in a containerized, ephemeral environment, follow these strict guidelines to ensure compatibility, safety, and non-interactivity:
+When generating Linux commands for execution in a containerized environment, follow these strict guidelines to ensure compatibility, safety, and non-interactivity:
 
-- Commands must be one-shot, non-interactive, and safe to run in a containerized, ephemeral Linux environment.
+- Commands must be one-shot, non-interactive, and safe to run in a containerized Linux environment.
 - Never use commands that prompt for user input (e.g., passwd, vi, mysql).
 - Prefer tools with non-interactive flags (e.g., --batch, --quiet) and avoid interactive ones (e.g., hash-identifier, ftp).
 - Use automated alternatives where available.
-- Output must go to standard output only; do not write to files.
-- Use one-liner reverse shells or web shells for shell payloads.
+- Do not use reverse shells or other command that opening a listening socket.
 - Pipe input into commands as needed; do not rely on TTY or prompts.
 - Always set a timeout for potentially blocking commands (e.g., timeout 10s nmap ...). Use a timeout value appropriate for the command. For example, directory busting with a large word list may take 10 minutes, whereas a short wordlist may be 2 minutes.
 - Ensure commands can be complete without user interaction before execution.
@@ -782,149 +830,107 @@ When generating Linux commands for execution in a containerized, ephemeral envir
 async def _run_unix_command(ctx: Context, command: str, additional_hosts: Optional[Dict[str, str]],
                             stdin: Optional[str] = None) -> Optional[
     RunUnixCommand]:
+    command = command.strip()
+    if not command:
+        raise McpError(ErrorData(code=INVALID_REQUEST, message="command required"))
+
     logger.info(f"run_unix_command {command}")
 
-    stdin_bytes = stdin.encode("utf-8") if stdin else None
-    if stdin_bytes:
-        stdin_sha512 = hashlib.sha512(stdin_bytes).hexdigest()
-    else:
-        stdin_sha512 = None
-
     server_ctx = await get_server_context()
-    cache_path: str = ctx.request_context.lifespan_context.get_cache_path_for_tool(
-        command + stdin_sha512 if stdin_sha512 else command,
-        additional_hosts)
-    meta_path = os.path.join(cache_path, 'meta.json')
-    stdout_path = os.path.join(cache_path, 'stdout.txt')
-    stderr_path = os.path.join(cache_path, 'stderr.txt')
-    # Use a common working directory for the session to chain together commands
-    cwd = cache_path
-    if ctx.client_id:
-        session_id = str(ctx.client_id)
-        logger.info(f"Using client_id {session_id} for command CWD")
-    else:
-        logger.info("No client_id available for command CWD")
-        session_id = None
-    if session_id:
-        cwd = os.path.join(
-            ctx.request_context.lifespan_context.cache_path,
-            "session",
-            hashlib.sha512(session_id.encode("utf-8")).hexdigest())
-        os.makedirs(cwd, exist_ok=True)
 
-    meta = {}
-    cached = False
-    if os.path.exists(meta_path):
-        logger.info("Checking cached command freshness in %s", cache_path)
-        try:
-            with open(meta_path) as meta_file:
-                meta = json.load(meta_file)
-            last_run_ts = meta.get("last_run_ts", 0)
-            if time.time() > (last_run_ts + 3600):
-                # TODO: prompt user to use cache
-                # clear cache
-                os.unlink(stdout_path)
-                os.unlink(stderr_path)
-        except JSONDecodeError:
-            os.unlink(meta_path)
-            os.unlink(stdout_path)
-            os.unlink(stderr_path)
+    stdin_bytes = stdin.encode("utf-8") if stdin else None
 
-    if os.path.exists(stdout_path) and 'return_code' in meta:
-        return_code = meta['return_code']
-        logger.info("Using cached results, exit code %d", return_code)
-        cached = True
-    else:
-        try:
-            assert_elicitation(server_ctx)
-            confirm_result = await ctx.elicit(
-                message=f"{command}\nShould I run this command?",
-                schema=RunCommandConfirmation)
-            match confirm_result:
-                case AcceptedElicitation(data=data):
-                    if not data.confirm:
-                        return None
-                case DeclinedElicitation():
+    try:
+        assert_elicitation(server_ctx)
+        confirm_result = await ctx.elicit(
+            message=f"{command}\nShould I run this command?",
+            schema=RunCommandConfirmation)
+        match confirm_result:
+            case AcceptedElicitation(data=data):
+                if not data.confirm:
                     return None
-                case CancelledElicitation():
-                    return None
-        except McpError as e:
-            logger.warning("elicit not supported, continuing")
+            case DeclinedElicitation():
+                return None
+            case CancelledElicitation():
+                return None
+    except McpError as e:
+        logger.warning("elicit not supported, continuing")
 
-        docker_command = ["docker", "run", "--rm",
-                          "--cap-add", "NET_BIND_SERVICE",
-                          "--cap-add", "NET_ADMIN",
-                          "--cap-add", "NET_RAW",
-                          # "-v", f"{cache_path}:/work",
-                          ]
-        if stdin:
-            docker_command.append("-i")
+    async with aiofiles.tempfile.TemporaryFile(mode="w+b") as stdout_file:
+        async with aiofiles.tempfile.TemporaryFile(mode="w+b") as stderr_file:
+            # Use a common working directory for the session to chain together commands
+            work_path = ctx.request_context.lifespan_context.work_path
+            docker_command = ["docker", "run", "--rm",
+                              "--cap-add", "NET_BIND_SERVICE",
+                              "--cap-add", "NET_ADMIN",
+                              "--cap-add", "NET_RAW",
+                              "-v", f"{server_ctx.mcp_session_volume}:/work",
+                              "--workdir", work_path,
+                              ]
+            if stdin:
+                docker_command.append("-i")
 
-        additional_hosts = get_additional_hosts(ctx, additional_hosts)
-        for host, ip in additional_hosts.items():
-            docker_command.extend(["--add-host", f"{host}:{ip}"])
-        docker_command.extend(["shyhurricane_unix_command:latest", "/bin/bash", "-c", command])
-        logger.info(f"Executing command {docker_command}")
+            additional_hosts = get_additional_hosts(ctx, additional_hosts)
+            for host, ip in additional_hosts.items():
+                docker_command.extend(["--add-host", f"{host}:{ip}"])
 
-        # TODO: add a timeout
+            docker_command.extend(["shyhurricane_unix_command:latest"])
+            if not command.startswith("timeout "):
+                docker_command.extend(["timeout", "--kill-after=1m", "--preserve-status", "10m"])
+            docker_command.extend(["/bin/bash", "-c", command])
+            logger.info(f"Executing command {docker_command}")
 
-        proc = await asyncio.create_subprocess_exec(
-            *docker_command,
-            stdin=asyncio.subprocess.PIPE if stdin_bytes else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=cwd)
-
-        if stdin_bytes:
-            proc.stdin.write(stdin_bytes)
-            proc.stdin.close()
-
-        await asyncio.gather(
-            _write_stream_to_file(proc.stdout, stdout_path),
-            _write_stream_to_file(proc.stderr, stderr_path),
-        )
-
-        return_code = await proc.wait()
-        logger.info("Command complete, exit code %d, output size %d, error size %d", return_code,
-                    os.stat(stdout_path).st_size, os.stat(stderr_path).st_size)
-        meta = {
-            "last_run_ts": time.time(),
-            "return_code": return_code,
-            "command": command,
-        }
-        with open(meta_path, "w") as meta_file:
-            json.dump(meta, meta_file)
-
-    await log_history(ctx, {
-        "command": command,
-        "return_code": return_code,
-        "additional_hosts": additional_hosts or {},
-        "stdout": stdout_path,
-        "stderr": stderr_path,
-    })
-
-    if return_code == 0:
-        async with aiofiles.open(stdout_path, "r", encoding="utf-8", errors='replace') as f:
-            return RunUnixCommand(return_code=return_code, output=await f.read(), error="", cached=cached, notes=None)
-    else:
-        error_tail = await read_last_text_bytes(stderr_path, max_bytes=1024)
-        async with aiofiles.open(stdout_path, "r", encoding="utf-8", errors='replace') as stdout_file:
-            return RunUnixCommand(
-                return_code=return_code,
-                output=await stdout_file.read(),
-                error=error_tail,
-                cached=cached,
-                notes=None,
+            proc = await asyncio.create_subprocess_exec(
+                *docker_command,
+                stdin=asyncio.subprocess.PIPE if stdin_bytes else asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
             )
 
+            if stdin_bytes:
+                proc.stdin.write(stdin_bytes)
+                proc.stdin.close()
 
-async def _write_stream_to_file(stream, path):
-    async with aiofiles.open(path, 'w', encoding='utf-8') as f:
-        while True:
-            line = await stream.readline()
-            if not line:
-                break
-            await f.write(line.decode('utf-8', errors='replace'))
+            await asyncio.gather(
+                _write_stream_to_file(proc.stdout, stdout_file),
+                _write_stream_to_file(proc.stderr, stderr_file),
+            )
+
+            return_code = await proc.wait()
+            output_size = await stdout_file.tell()
+            error_size = await stderr_file.tell()
+            logger.info("Command complete, exit code %d, output size %d, error size %d", return_code,
+                        output_size, error_size)
+
+            await log_history(ctx, {
+                "run_unix_command": command,
+                "return_code": return_code,
+                "additional_hosts": additional_hosts or {},
+                "stdout_size": output_size,
+                "stderr_size": error_size,
+            })
+
+            await stdout_file.seek(0)
+            output = (await stdout_file.read()).decode("utf-8", errors="ignore").strip()
+            if return_code == 0:
+                return RunUnixCommand(return_code=return_code, output=output, error="", notes=None)
+            else:
+                await stderr_file.flush()
+                error_tail = await read_last_text_bytes(stderr_file, max_bytes=1024)
+                return RunUnixCommand(
+                    return_code=return_code,
+                    output=output,
+                    error=error_tail,
+                    notes=None,
+                )
+
+
+async def _write_stream_to_file(stream, file: aiofiles.tempfile.TemporaryFile):
+    while True:
+        line = await stream.readline()
+        if not line:
+            break
+        await file.write(line)
 
 
 @mcp.tool(
@@ -1024,7 +1030,10 @@ async def port_scan(
     if results:
         logger.info("Returning port scan results for %s", port_scan_queue_item.targets)
         return results.nmap_xml
-    return "The port scan is still running, query for results later."
+
+    pending_message = "The port scan is still running, query for results later."
+    logger.info("%s for %s", pending_message, port_scan_queue_item.targets)
+    return pending_message
 
 
 async def stream_lines(byte_stream: AsyncGenerator[bytes, None]):
@@ -1048,7 +1057,7 @@ async def index_request_body(request: Request) -> Response:
     {"request": {"headers": {"sec_fetch_mode": "navigate", "priority": "u=0, i", "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "sec_fetch_dest": "document", "host": "example.com", "accept_language": "en-US,en;q=0.5", "connection": "keep-alive", "sec_fetch_site": "none", "upgrade_insecure_requests": "1", "sec_fetch_user": "?1", "user_agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"}, "method": "GET", "source": "katana", "body": "", "endpoint": "https://example.com/", "tag": "katana", "attribute": "http"}, "response": {"headers": {"date": "Sun, 29 Jun 2025 03:44:52 GMT", "content_type": "text/html", "connection": "keep-alive", "location": "https://www.example.com/", "content_length": "169"}, "status_code": 301, "body": "<html>\r\n<head><title>301 Moved Permanently</title></head>\r\n<body>\r\n<center><h1>301 Moved Permanently</h1></center>\r\n<hr><center>nginx/1.20.1</center>\r\n</body>\r\n</html>\r\n"}, "timestamp": "2025-06-28T22:44:52.798000"}
     """
     server_ctx = await get_server_context()
-    ingest_queue: persistqueue.SQLiteQueue = server_ctx.ingest_queue
+    ingest_queue: persistqueue.SQLiteAckQueue = server_ctx.ingest_queue
     line_generator = stream_lines(request.stream())
     first = await anext(line_generator)
     if is_katana_jsonl(first):
@@ -1125,7 +1134,7 @@ async def index_http_url(
                                          content=bool(content is not None)
                                          )
     server_ctx = await get_server_context()
-    ingest_queue: persistqueue.SQLiteQueue = server_ctx.ingest_queue
+    ingest_queue: persistqueue.SQLiteAckQueue = server_ctx.ingest_queue
     additional_hosts = get_additional_hosts(ctx, additional_hosts)
     if follow_redirects is None:
         follow_redirects = False
@@ -1189,28 +1198,48 @@ async def index_http_url(
             response_headers=response_headers,
         )
     except requests.exceptions.RequestException as e:
+        logger.info("Request exception: %s", e)
         return None
 
 
 async def is_spider_time_recent(server_ctx: ServerContext, url: str) -> Optional[float]:
     # TODO: consider the user_agent and headers, they may make a difference in the result
+    max_age_seconds = 24 * 3600
+    count_limit = 10
     try:
         chroma_client: chromadb.AsyncClientAPI = server_ctx.chroma_client
         collection: AsyncCollection = await chroma_client.get_collection("network")
-        now = datetime.now(timezone.utc)
-        get_result = await collection.get(where={"$and": [{"version": WEB_RESOURCE_VERSION}, {"url": url}]},
-                                          include=["metadatas"])
+        now = time.time()
+        url_parsed = urlparse_ext(url)
+        where_filter = {"$and": [{"version": WEB_RESOURCE_VERSION}, {"netloc": url_parsed.netloc}]}
+        logger.info("is_spider_time_recent using filters %s", json.dumps(where_filter))
+        get_result = await collection.get(
+            where=where_filter,
+            include=["metadatas"])
+        latest_time: float = 0.0
+        # count the number of urls to make sure it's not a one-off
+        count = 0
         for metadata in get_result.get("metadatas", []):
             try:
-                timestamp = datetime.fromisoformat(metadata["timestamp"])
-                if timestamp.tzinfo is None:
-                    timestamp = timestamp.replace(tzinfo=timezone.utc)
-                seconds_since_spider = (now - timestamp).total_seconds()
-                if seconds_since_spider < 24 * 3600:
-                    logger.info(f"Spider for {url} was done {seconds_since_spider} seconds ago")
-                    return True
+                ts = metadata.get("timestamp_float", 0.0)
+                if now - ts > max_age_seconds:
+                    continue
+
+                if metadata.get("url", "").startswith(url):
+                    if ts > latest_time:
+                        latest_time = ts
+                    count += 1
+                    if count > count_limit:
+                        # seems to be the results of a spider or busting
+                        break
             except (ValueError, TypeError):
                 pass
+        logger.info(f"Spider check {url} found latest time {latest_time} and count {count}")
+        seconds_since_spider = now - latest_time
+        if seconds_since_spider < max_age_seconds and count > count_limit:
+            logger.info(
+                f"Spider for {url} was done {seconds_since_spider} seconds ago and found >= {count_limit} results")
+            return True
         return False
     except NotFoundError:
         # new database

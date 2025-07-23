@@ -527,8 +527,9 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
 def build_website_context_pipeline(generator_config: GeneratorConfig) -> Pipeline:
     prompt = """
       You are a cybersecurity search assistant that processes users queries for websites.
-      You determine the site url(s) and/or ip address(es) and ports the user is interested in. You
-      also determine optional types of content the user is interested in from the following list:
+      You determine the site url(s) and/or ip address(es) and ports the user is interested in. If the user specifies
+      a scheme do not change it. If no scheme and port is given, only a domain or host name, provide both http and https.
+      You also determine optional types of content the user is interested in from the following list:
       "html", "forms", "xml", "javascript", "css", "json", "network". If the query includes things that would be in the HTTP headers such as cookies or the content security policy include the content type "network".
       You also determine technology stacks the user references, if any.
       You also determine if anything in the query implies a specific set of HTTP response codes, if any. Be cautious about providing response codes so to not be too limiting.
@@ -556,10 +557,10 @@ def build_website_context_pipeline(generator_config: GeneratorConfig) -> Pipelin
            Example Result: {"target": ["http://10.10.10.10:8000"], "content": ["javascript"], "tech": [], "methods": [], "response_codes": []}
 
         3. Example Query 3: "Examine nobody.net for vulnerable versions of WordPress"  
-           Example Result: {"target": ["https://nobody.net"], "content": [""], "tech": ["WordPress"], "methods": [], "response_codes": []}
+           Example Result: {"target": ["http://nobody.net", "https://nobody.net"], "content": [""], "tech": ["WordPress"], "methods": [], "response_codes": []}
 
         4. Example Query 4: "Examine authentication failures on schooldaze.edu for username disclosure"
-           Example Result: {"target": ["https://schooldaze.edu"], "content": [""], "tech": [""], "methods": [], "response_codes": [403]}
+           Example Result: {"target": ["http://schooldaze.edu", "https://schooldaze.edu"], "content": [""], "tech": [""], "methods": [], "response_codes": [403]}
 
         5. Example Query 5: "Examine posted forms on 192.168.1.1:8090 for XSS vulns."
            Example Result: {"target": ["http://192.168.1.1:8090"], "content": [""], "tech": [""], "methods": ["POST"], "response_codes": []}

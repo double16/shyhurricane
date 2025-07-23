@@ -35,10 +35,10 @@ services:
     depends_on:
       - dind
     volumes:
-      - .:/src
+      - .:/src:ro
     environment:
       DOCKER_HOST: "tcp://dind:2375"
-    entrypoint: [ "sh", "-c", "sleep 20 && cd /src && docker build -t shyhurricane_unix_command:latest src/docker/unix_command" ]
+    entrypoint: [ "sh", "-c", "sleep 20 && cd /src && (docker volume create mcp_session || true) && docker build -t shyhurricane_unix_command:latest src/docker/unix_command && docker system prune -f" ]
 
   mcp:
     build:
@@ -60,6 +60,15 @@ services:
       GEMINI_MODEL: "${GEMINI_MODEL}"
       OPENAI_MODEL: "${OPENAI_MODEL}"
       OPENAI_API_KEY: "${OPENAI_API_KEY}"
+      PYTORCH_ENABLE_MPS_FALLBACK: "1"
+      ANONYMIZED_TELEMETRY: "False"
+      HAYSTACK_TELEMETRY_ENABLED: "False"
+      HAYSTACK_TELEMETRY_DISABLED: "1"
+      TRANSFORMERS_NO_ADVISORY_WARNINGS: "1"
+      HF_HUB_DISABLE_PROGRESS_BARS: "1"
+      OMP_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+    shm_size: "2g"
     ports:
       - "8000:8000"
     volumes:

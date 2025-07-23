@@ -15,7 +15,7 @@ from utils import BeautifulSoupExtractor, IngestableRequestResponse, urlparse_ex
 logger = logging.getLogger(__name__)
 
 
-def spider_worker(item: SpiderQueueItem, ingest_queue: persistqueue.SQLiteQueue, spider_result_queue: Queue):
+def spider_worker(item: SpiderQueueItem, ingest_queue: persistqueue.SQLiteAckQueue, spider_result_queue: Queue):
     _katana_ingest(
         item=item,
         ingest_queue=ingest_queue,
@@ -25,7 +25,7 @@ def spider_worker(item: SpiderQueueItem, ingest_queue: persistqueue.SQLiteQueue,
 
 def _katana_ingest(
         item: SpiderQueueItem,
-        ingest_queue: persistqueue.SQLiteQueue,
+        ingest_queue: persistqueue.SQLiteAckQueue,
         result_queue: Queue = None,
 ) -> None:
     katana_command = ["katana", "-u", item.uri, "-js-crawl", "-jsluice", "-known-files", "all", "-field-scope", "fqdn",
@@ -57,7 +57,7 @@ def _katana_ingest(
     soup_extractor = BeautifulSoupExtractor()
 
     def process_stdout(data: str):
-        ingest_queue.put_nowait(data)
+        ingest_queue.put(data)
         if result_queue is not None:
             try:
                 katana_results: List[IngestableRequestResponse] = katana_component.run(data).get("request_responses",

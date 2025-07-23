@@ -29,11 +29,17 @@ class PortScanContext:
         self.nmap_store = create_chrome_document_store(db=db, collection_name="nmap")
         self.nmap_embedder = SentenceTransformersDocumentEmbedder(
             model=doc_type_to_model.get("nmap"),
+            batch_size=1,
             progress_bar=False)
+
         self.portscan_store = create_chrome_document_store(db=db, collection_name="portscan")
-        self.portscan_embedder = SentenceTransformersDocumentEmbedder(
-            model=doc_type_to_model.get("portscan"),
-            progress_bar=False)
+        if doc_type_to_model.get("portscan") == doc_type_to_model.get("nmap"):
+            self.portscan_embedder = self.nmap_embedder
+        else:
+            self.portscan_embedder = SentenceTransformersDocumentEmbedder(
+                model=doc_type_to_model.get("portscan"),
+                batch_size=1,
+                progress_bar=False)
 
     def warm_up(self):
         self.nmap_embedder.warm_up()
@@ -118,6 +124,7 @@ def _do_port_scan(
             return None
 
     # remove elements we don't care about to keep the content size reasonable
+    logger.info("Cleaning nmap XML of extraneous elements")
     for parent in tree.findall(".//*"):
         for child in list(parent):
             if child.tag == "extrareasons":
@@ -131,14 +138,20 @@ def _do_port_scan(
             "targets": ','.join(item.targets),
             "ports": ','.join(item.ports),
             "timestamp": timestamp,
+            "timestamp_float": runtime_ts,
             "runtime_ts": runtime_ts,
             "content_type": "text/xml",
             "status_code": 200,
             # "technologies": technologies_str,
         }
     )
-    nmap_store.write_documents(nmap_embedder.run(documents=[nmap_doc])["documents"], policy=DuplicatePolicy.OVERWRITE)
 
+    logger.info("Embedding nmap XML")
+    nmap_docs = nmap_embedder.run(documents=[nmap_doc])["documents"]
+    logger.info("Saving nmap XML")
+    nmap_store.write_documents(nmap_docs, policy=DuplicatePolicy.OVERWRITE)
+
+    logger.info("Parsing nmap XML")
     results = []
     for host_el in tree.findall('.//host'):
         addrs = []
@@ -159,6 +172,7 @@ def _do_port_scan(
                     "targets": addr,
                     "ports": ','.join(item.ports),
                     "timestamp": timestamp,
+                    "timestamp_float": runtime_ts,
                     "runtime_ts": runtime_ts,
                     "content_type": "text/xml",
                     "status_code": 200,
@@ -204,6 +218,8 @@ def _do_port_scan(
                                 "host": addr,
                                 "port": port,
                                 "timestamp": timestamp,
+                                "timestamp_float": runtime_ts,
+                                "runtime_ts": runtime_ts,
                                 "content_type": "text/json",
                                 "status_code": 200,
                                 # "technologies": technologies_str,
@@ -212,6 +228,7 @@ def _do_port_scan(
                         portscan_store.write_documents(portscan_embedder.run(documents=[portscan_doc])["documents"],
                                                        policy=DuplicatePolicy.OVERWRITE)
 
+    logger.info("Queuing results")
     result_queue.put(PortScanResults(
         runtime_ts=runtime_ts,
         results=results,
