@@ -66,7 +66,9 @@ services:
       HAYSTACK_TELEMETRY_DISABLED: "1"
       TRANSFORMERS_NO_ADVISORY_WARNINGS: "1"
       HF_HUB_DISABLE_PROGRESS_BARS: "1"
-      OMP_NUM_THREADS: "1"
+      # OMP_NUM_THREADS may need to be reduced, but choosing based on cores seems fine
+      #OMP_NUM_THREADS: "6"
+      # MKL_NUM_THREADS > 1 will cause the embedder to lock
       MKL_NUM_THREADS: "1"
     shm_size: "2g"
     ports:

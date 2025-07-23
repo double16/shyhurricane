@@ -18,6 +18,8 @@ Execution Rules:
   - Exploit discovered vulnerabilities.
   - Perform privilege escalation.
   - Search for sensitive data.
+- Do not attempt brute forcing of login services such as ssh, rdp, etc. If you have known users and passwords, attempting
+combinations of those is permitted.
 - Reverse shells will not work. If a reverse shell is required to complete a task, report the finding (see Output Format)
 and move on to the next task.
 """

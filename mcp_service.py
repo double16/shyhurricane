@@ -1426,17 +1426,22 @@ async def directory_buster(
     Search a website for hidden directories and files. This tool uses a wordlist to append each word to a URL and see if
     it responds.
 
-    Invoke this tool when the user wants to run a brute-forcing tool. The results are indexed and available in the
-    find_web_resources, find_urls and other tools that use indexed content.
+    Invoke this tool when the user wants to run a directory busting (i.e. brute-forcing) tool. The results are indexed and available in the
+    find_web_resources, find_urls and other tools that use indexed content. This tool is preferred over feroxbuster,
+    gobuster, ffuf, wfuzz, and other like commands.
 
     The additional_hosts parameter is a dictionary of host name (the key) to IP address (the value) for hosts that do not have DNS records. This also includes CTF targets or web server virtual hosts found during other scans. If you
     know the IP address for a host, be sure to include these in the additional_hosts parameter for
     commands to run properly in a containerized environment.
 
+    The url may contain the FUZZ keyword that will be replaced with values from the wordlist.
+
     The user_agent can be used to specify the "User-Agent" request header. This is useful if a particular browser needs
     to be spoofed or the user requests extra information in the user agent header to identify themselves as a bug bounty hunter.
+    The user_agent may contain the FUZZ keyword that will be replaced with values from the wordlist.
 
-    The request_headers map is extra request headers sent with the request.
+    The request_headers map is extra request headers sent with the request.The request_headers key and/or values may
+    contain the FUZZ keyword that will be replaced with values from the wordlist.
 
     The extensions parameter specifies file extensions to search for such as pdf, php, etc. Do not include a leading
     period.
