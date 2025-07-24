@@ -51,6 +51,7 @@ def _task_router(db: str,
                  dir_busting_result_queue: Queue,
                  ):
     faulthandler.register(signal.SIGUSR1)
+    logger.info(f"Starting task router in PID {os.getpid()}")
 
     ingest_queue = persistqueue.SQLiteAckQueue(path=ingest_queue_path, auto_commit=True)
     port_scan_ctx = PortScanContext(db=db)

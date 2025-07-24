@@ -23,7 +23,10 @@ Output example (one line):
 }
 """
 
-import json, datetime, java.io
+import datetime
+import json
+
+import java.io
 from org.parosproxy.paros.network import HttpMessage
 
 # ─── configure output file ─────────────────────────────

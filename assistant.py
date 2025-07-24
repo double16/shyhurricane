@@ -17,15 +17,13 @@ from prompt_toolkit.history import FileHistory
 from rich import get_console
 from rich.markdown import Markdown
 
-from pipeline import build_chat_pipeline, build_agent_pipeline
-from utils import add_generator_args, GeneratorConfig
-
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
-os.environ['ANONYMIZED_TELEMETRY'] = "False"
-os.environ['HAYSTACK_TELEMETRY_ENABLED'] = "False"
-os.environ['HAYSTACK_TELEMETRY_DISABLED'] = "1"
+from shyhurricane.config import configure
+from shyhurricane.generator_config import GeneratorConfig, add_generator_args
+from shyhurricane.retrieval_pipeline import build_chat_pipeline, build_agent_pipeline
 
 logger = logging.getLogger(__name__)
+
+configure()
 
 console = get_console()
 
@@ -73,7 +71,8 @@ def main():
     )
     ap.add_argument("--verbose", "-v", action="store_true", help="Verbose mode")
     add_generator_args(ap)
-    ap.add_argument("--mcp-url", nargs="+", required=False, help="URL for the MCP server, i.e. http://127.0.0.1:8000/mcp/")
+    ap.add_argument("--mcp-url", nargs="+", required=False,
+                    help="URL for the MCP server, i.e. http://127.0.0.1:8000/mcp/")
     ap.add_argument("--stream", action="store_true", help="Stream messages, always on for agent mode")
     ap.add_argument("--history", default="chat_history.md")
     args = ap.parse_args()
@@ -117,7 +116,6 @@ This is a penetration test assistant in {args.mode} mode using {generator_config
         while True:
             try:
                 user_in = sess.prompt("💬 ")
-                # TODO: clear tool cache
                 if not user_in.strip():
                     continue
                 if user_in.lower() in {"/exit", "/quit"}:

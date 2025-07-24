@@ -1,8 +1,9 @@
-from mitmproxy import http
-import json
-import datetime
 import argparse
+import datetime
+import json
 import sys
+
+from mitmproxy import http
 
 # Parse args early since mitmdump loads this as a module
 parser = argparse.ArgumentParser(description="Log HTTP request/response as JSON")

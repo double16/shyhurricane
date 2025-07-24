@@ -13,11 +13,11 @@ from haystack.components.embedders import SentenceTransformersDocumentEmbedder
 from haystack.document_stores.types import DuplicatePolicy
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 
-from doc_type_model_map import doc_type_to_model
-from pipeline import create_chrome_document_store
-from ports import parse_ports_spec, bitfield_to_ports, is_subset
+from shyhurricane.doc_type_model_map import doc_type_to_model
+from shyhurricane.ports import parse_ports_spec, bitfield_to_ports, is_subset
+from shyhurricane.retrieval_pipeline import create_chrome_document_store
 from shyhurricane.task_queue.types import PortScanQueueItem
-from utils import PortScanResult, PortScanResults
+from shyhurricane.utils import PortScanResult, PortScanResults
 
 NMAP_DOCUMENT_VERSION = 2
 
@@ -272,7 +272,7 @@ def get_stored_port_scan_results(
             continue
         return PortScanResults(
             runtime_ts=doc.meta.get("runtime_ts", 0),
-            results=existing_results,  # TODO:
+            results=existing_results,  # TODO: populate
             targets=item.targets,
             ports=item.ports,
             nmap_xml=doc.content,

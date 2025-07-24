@@ -10,9 +10,9 @@ from urllib.parse import urlencode
 
 import persistqueue
 
-from pipeline import KatanaDocument
+from shyhurricane.index.web_resources_pipeline import KatanaDocument
 from shyhurricane.task_queue.types import DirBustingQueueItem
-from utils import IngestableRequestResponse
+from shyhurricane.utils import IngestableRequestResponse
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ def _do_busting(
         for _ in range(5):
             time.sleep(2)
             buster_proc = subprocess.Popen(buster_docker_command, universal_newlines=True,
-                                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             try:
                 if buster_proc.wait(2) != 125:  # 125 is returned when the named container isn't running
                     buster_proc_succeed = True
@@ -96,8 +96,9 @@ def _do_busting(
             ingest_queue.put(data)
             if result_queue is not None:
                 try:
-                    katana_results: List[IngestableRequestResponse] = katana_component.run(data).get("request_responses",
-                                                                                                     [])
+                    katana_results: List[IngestableRequestResponse] = katana_component.run(data).get(
+                        "request_responses",
+                        [])
                     if not katana_results:
                         return
                     parsed = katana_results[0]

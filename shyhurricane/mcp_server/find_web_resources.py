@@ -1,0 +1,553 @@
+import asyncio
+import json
+import logging
+import queue
+import time
+from multiprocessing import Queue
+from typing import List, Dict, Any, Optional
+from urllib.parse import urlparse
+
+import chromadb
+from chromadb.api.models import AsyncCollection
+from chromadb.errors import NotFoundError
+from haystack import Document, Pipeline
+from mcp import Resource, McpError, ErrorData
+from mcp.server.elicitation import AcceptedElicitation, DeclinedElicitation, CancelledElicitation
+from mcp.server.fastmcp import Context
+from mcp.types import ToolAnnotations, INVALID_REQUEST
+from pydantic import BaseModel, Field, AnyUrl
+
+from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
+from shyhurricane.mcp_server import get_server_context, mcp_instance, log_tool_history, assert_elicitation, \
+    ServerContext, get_additional_hosts
+from shyhurricane.mcp_server.find_indexed_metadata import _query_to_netloc, find_netloc
+from shyhurricane.task_queue import SpiderQueueItem
+from shyhurricane.utils import HttpResource, urlparse_ext, documents_sort_unique, extract_domain
+
+logger = logging.getLogger(__name__)
+
+
+class RequestTargetUrl(BaseModel):
+    data: str = Field(default="", description="URL(s), content types, technology of interest")
+
+
+def _append_in_filter(conditions: List[Dict[str, Any]], field: str, values: List[str]):
+    if len(values) == 1:
+        conditions.append({"field": field, "operator": "==", "value": values[0]})
+    elif len(values) > 1:
+        conditions.append({"field": field, "operator": "in", "value": values})
+
+
+def _documents_to_http_resources(documents: List[Document]) -> List[HttpResource]:
+    https_resources = []
+    for doc in documents:
+        if doc.content:
+            resource = Resource(
+                name=doc.meta['url'],
+                title=doc.meta.get('title', None),
+                description=doc.meta.get('description', None),
+                uri=AnyUrl(f"web://{doc.meta['type']}/{doc.id}"),
+                mimeType=doc.meta.get('content_type', 'text/plain'),
+                size=len(doc.content),
+            )
+        else:
+            resource = None
+        try:
+            response_headers = json.loads(doc.meta.get("response_headers", "{}"))
+        except json.decoder.JSONDecodeError:
+            response_headers = None
+        https_resources.append(HttpResource(
+            score=doc.score or 100,
+            url=doc.meta['url'],
+            host=doc.meta.get('host', ''),
+            port=doc.meta.get('port', 0),
+            domain=doc.meta.get('domain', ''),
+            status_code=doc.meta.get('status_code', 200),
+            method=doc.meta.get('http_method', ''),
+            resource=resource,
+            contents=None,
+            response_headers=response_headers,
+        ))
+    return https_resources
+
+
+async def _find_web_resources_by_url(ctx: Context, query: str, limit: int = 100) -> Optional[List[HttpResource]]:
+    server_ctx = await get_server_context()
+    try:
+        url_parsed = urlparse_ext(query)
+        query_url = query
+        urls_munged = [query]
+        url_prefix = None
+        if '?' in query_url:
+            query_url = query_url.split('?')[0]
+            urls_munged.append(query_url)
+            url_prefix = query_url + "?"
+        if query_url.endswith('/'):
+            urls_munged.append(query_url[:-1])
+            if not url_prefix:
+                url_prefix = query_url
+        else:
+            urls_munged.append(query_url + '/')
+            if not url_prefix:
+                url_prefix = query_url + '/'
+
+        store = server_ctx.stores["content"]
+        docs = []
+
+        # Make sure the requested URL is returned
+        logger.info("Searching for web resources at or below %s", url_prefix)
+        filters = {
+            "operator": "AND",
+            "conditions": [
+                {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
+                {"field": "meta.url", "operator": "in", "value": urls_munged}
+            ]}
+        docs.extend(store.filter_documents(filters=filters))
+
+        # Find resources below the URL
+        filters = {
+            "operator": "AND",
+            "conditions": [
+                {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
+                {"field": "meta.netloc", "operator": "==", "value": url_parsed.netloc}
+            ]}
+        for doc in store.filter_documents(filters=filters):
+            if doc.meta.get("url", "").startswith(url_prefix) and doc.meta.get("url") not in urls_munged:
+                docs.append(doc)
+
+        docs = documents_sort_unique(docs, limit)
+
+        if docs:
+            return _documents_to_http_resources(docs)
+    except Exception:
+        pass
+
+    return None
+
+
+async def _find_web_resources_by_netloc(ctx: Context, query: str, limit: int = 100) -> Optional[List[HttpResource]]:
+    server_ctx = await get_server_context()
+    try:
+        hostname, port = _query_to_netloc(query)
+        if hostname is None or port is None:
+            return None
+        store = server_ctx.stores["content"]
+        docs = []
+
+        # Make sure the requested URL is returned
+        logger.info("Searching for web resources for %s", query)
+        filters = {
+            "operator": "AND",
+            "conditions": [
+                {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
+                {"field": "meta.netloc", "operator": "==", "value": query}
+            ]}
+        docs.extend(store.filter_documents(filters=filters))
+
+        docs = documents_sort_unique(docs, limit)
+
+        if docs:
+            return _documents_to_http_resources(docs)
+    except Exception:
+        pass
+
+    return None
+
+
+async def _find_web_resources_by_hostname(ctx: Context, query: str, limit: int = 100) -> Optional[List[HttpResource]]:
+    server_ctx = await get_server_context()
+    try:
+        hostname, port = _query_to_netloc(query)
+        if hostname is None or port is not None:
+            return None
+        store = server_ctx.stores["content"]
+        docs = []
+
+        # Make sure the requested URL is returned
+        logger.info("Searching for web resources for %s", query)
+        filters = {
+            "operator": "AND",
+            "conditions": [
+                {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
+                {"field": "meta.host", "operator": "==", "value": hostname}
+            ]}
+        docs.extend(store.filter_documents(filters=filters))
+
+        docs = documents_sort_unique(docs, limit)
+
+        if docs:
+            return _documents_to_http_resources(docs)
+    except Exception:
+        pass
+
+    return None
+
+
+async def _find_recommended_urls(ctx: Context) -> Optional[List[str]]:
+    netlocs = await find_netloc(ctx, "")
+    if not netlocs:
+        return None
+    domains = set(map(lambda n: extract_domain(n.split(':')[0]), netlocs))
+    if len(domains) != 1:
+        return None
+    results = []
+    for netloc in netlocs:
+        hostname, port = _query_to_netloc(netloc)
+        if port % 1000 == 443:
+            results.append(f"https://{hostname}:{port}")
+        elif not port:
+            results.append(f"http://{hostname}")
+        else:
+            results.append(f"http://{hostname}:{port}")
+
+    logger.info("Recommended URLs: %s", results)
+
+    return results
+
+
+@mcp_instance.tool(
+    annotations=ToolAnnotations(
+        title="Find Web Resources",
+        readOnlyHint=True,
+        openWorldHint=False),
+)
+async def find_web_resources(
+        ctx: Context,
+        query: str,
+        limit: int = 100,
+        http_methods: Optional[List[str]] = None,
+) -> List[HttpResource]:
+    """Query indexed resources about a website using natural language and return the URL, request and response bodies,
+    request and response headers, HTTP method, MIME type, HTTP status code, technologies found. This tool will
+    search using several parameters including response body matching, URL matching, MIME type matching of the response,
+    and HTTP response body matching.
+
+    Invoke this tool when the user asks about vulnerabilities,
+    misconfigurations or exploit techniques **specific to a target website**
+    (e.g. XSS, CSP issues, IDOR paths, outdated JS libs). Including the user's query will improve
+    the results.
+
+    Invoke this tool when the user asks for summary information about a website, such as technology in use, and type of responses.
+
+    Do NOT use it for generic cyber-security theory.
+
+    If there is content available for the results, there will be a resource_link object containing
+    a URI. The URI can use the fetch_web_resource_content tool to get the content.
+
+    Example queries (replace http://target.local with your target URL(s)):
+        1. Find pages with HTML forms on http://target.local
+        2. Find Javascript libraries on http://target.local
+        3. What pages on http://target.local have potential XSS vulnerabilities?
+        4. Find Javascript with eval() calls on http://target.local
+        5. Find URLs with possible IDOR vulnerabilities on http://target.local
+        6. http://target.local/
+        7. http://target.local/account/dashboard?page=account
+
+    A target URL or hostname is required. Always include your target URLs. http://target.local is only an example, do not use it as a URL.
+
+    The http_methods parameter can be used to limit results to requests made with the listed methods. If not specified
+    all methods will be considered.
+
+    The limit parameter is used to limit how many results are returned. The default is 100. The value must range between 10 and 1000.
+    """
+    await log_tool_history(ctx, "find_web_resources", query=query, limit=limit)
+    server_ctx = await get_server_context()
+    query = query.strip()
+    limit = min(1000, max(10, limit or 100))
+    logger.info("finding web resources for %s up to %d results", query, limit)
+
+    document_pipeline: Pipeline = server_ctx.document_pipeline
+    website_context_pipeline: Pipeline = server_ctx.website_context_pipeline
+
+    if resources_by_url := await _find_web_resources_by_url(ctx, query, limit):
+        return resources_by_url
+    if resources_by_netloc := await _find_web_resources_by_netloc(ctx, query, limit):
+        return resources_by_netloc
+    if resources_by_hostname := await _find_web_resources_by_hostname(ctx, query, limit):
+        return resources_by_hostname
+
+    doc_types: list[str] = []
+    urls: list[str] = []
+    methods: list[str] = http_methods or []
+    response_codes: list[str] = []
+
+    async def determine_targets(target_query: str):
+        await ctx.info("Determining target(s)")
+        target_result = \
+            website_context_pipeline.run({'builder': {'query': target_query}}).get('llm', {}).get('replies', [""])[0]
+        if target_result:
+            logger.info("Target result: %s", json.dumps(target_result))
+            try:
+                target_json = json.loads(target_result)
+                urls.extend(target_json.get('target', []))
+                doc_types.extend(target_json.get('content', []))
+                # methods.extend(target_json.get('methods', [])) # may be too limiting, or maybe ignore for certain doc types
+                response_codes.extend(target_json.get('response_codes', []))
+            except json.decoder.JSONDecodeError:
+                pass
+
+    await determine_targets(query)
+
+    if not urls:
+        if recommended_urls := await _find_recommended_urls(ctx):
+            urls.extend(recommended_urls)
+
+    if not urls:
+        try:
+            logger.info("Asking user for URL(s)")
+            assert_elicitation(server_ctx)
+            target_elicit_result = await ctx.elicit(
+                message=f"What URL(s) should we look for?", schema=RequestTargetUrl
+            )
+            match target_elicit_result:
+                case AcceptedElicitation(data=data):
+                    if data.data:
+                        logger.info("User provided answer for URL request")
+                        await determine_targets(data.data)
+                        if not urls:
+                            return []
+                    return []
+                case DeclinedElicitation():
+                    return []
+                case CancelledElicitation():
+                    return []
+        except McpError as e:
+            logger.info("elicit not supported, returning")
+        finally:
+            if not urls:
+                raise McpError(ErrorData(code=INVALID_REQUEST,
+                                         message="Specify a target URL, IP address or host name for searching"))
+
+    filter_netloc = [parsed.netloc for parsed in map(lambda u: urlparse_ext(u), urls)]
+
+    # check if we have data
+    missing_netloc = set(filter_netloc.copy())
+    for known_netloc in await find_netloc(ctx, ""):
+        try:
+            missing_netloc.remove(known_netloc)
+        except KeyError:
+            pass
+        if len(missing_netloc) == 0:
+            break
+    missing_urls = []
+    for url in urls:
+        if urlparse(url).netloc in missing_netloc:
+            missing_urls.append(url)
+    if missing_urls:
+        logger.info(f"Asking user to spider {', '.join(missing_urls)}")
+        try:
+            assert_elicitation(server_ctx)
+            spider_elicit_result = await ctx.elicit(
+                message=f"There is no data for {', '.join(missing_urls)}. Would you like to start a scan?",
+                schema=RequestTargetUrl
+            )
+            match spider_elicit_result:
+                case AcceptedElicitation():
+                    for url in missing_urls:
+                        await spider_website(ctx, url)
+                    return []
+                case DeclinedElicitation():
+                    return []
+                case CancelledElicitation():
+                    return []
+        except McpError as e:
+            await ctx.info(f"Spidering {', '.join(missing_urls)}")
+            logger.warning("elicit not supported, starting spider")
+            for url in missing_urls:
+                await spider_website(ctx, url)
+
+    conditions = [
+        {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION}
+    ]
+    _append_in_filter(conditions, "meta.netloc", filter_netloc)
+    # _append_in_filter(conditions, "meta.type", doc_types) # tends to be too limiting
+    _append_in_filter(conditions, "meta.http_method", methods)
+    _append_in_filter(conditions, "meta.status_code", response_codes)
+    if len(conditions) == 0:
+        filters = None
+    elif len(conditions) == 1:
+        filters = conditions[0]
+    else:
+        filters = {
+            "operator": "AND",
+            "conditions": conditions,
+        }
+
+    logger.info(f"Searching for {', '.join(urls)} with filter {json.dumps(filters)}")
+    await ctx.info(f"Searching for {', '.join(urls)}")
+
+    res = document_pipeline.run(data={"query": {"text": query, "filters": filters, "max_results": limit}},
+                                include_outputs_from={"combine"})
+
+    documents = documents_sort_unique(res.get("combine", {}).get("documents", []), limit)
+
+    return _documents_to_http_resources(documents)
+
+
+class SpiderConfirmation(BaseModel):
+    confirm: bool = Field(description="Confirm spider?", default=True)
+
+
+spider_results_instructions_found = """These resources were found by navigating a web server using links in the returned content."""
+spider_results_instructions_has_more = " This list isn't all of the results. Use the find_web_resources and find_urls tools to get more."
+spider_results_instructions_not_found = "No resources were found by spidering the site. It may be there is no web server at the requested address and port."
+
+
+def spider_instructions(results: List[HttpResource], has_more: bool) -> str:
+    if results:
+        instructions = spider_results_instructions_found
+        if has_more:
+            instructions += spider_results_instructions_has_more
+    else:
+        instructions = spider_results_instructions_not_found
+    return instructions
+
+
+class SpiderResults(BaseModel):
+    url: str = Field(description="The starting URL of the spider")
+    instructions: str = Field(default=spider_results_instructions_found)
+    resources: List[HttpResource] = Field(description="The resources found by the spider")
+    has_more: bool = Field(
+        description="Whether the spider has more resources available that can be retrieved using the find_web_resources tool or listed by the find_urls tool")
+
+
+async def is_spider_time_recent(server_ctx: ServerContext, url: str) -> Optional[float]:
+    # TODO: consider the user_agent and headers, they may make a difference in the result
+    max_age_seconds = 24 * 3600
+    count_limit = 10
+    try:
+        chroma_client: chromadb.AsyncClientAPI = server_ctx.chroma_client
+        collection: AsyncCollection = await chroma_client.get_collection("network")
+        now = time.time()
+        url_parsed = urlparse_ext(url)
+        where_filter = {"$and": [{"version": WEB_RESOURCE_VERSION}, {"netloc": url_parsed.netloc}]}
+        logger.info("is_spider_time_recent using filters %s", json.dumps(where_filter))
+        get_result = await collection.get(
+            where=where_filter,
+            include=["metadatas"])
+        latest_time: float = 0.0
+        # count the number of urls to make sure it's not a one-off
+        count = 0
+        for metadata in get_result.get("metadatas", []):
+            try:
+                ts = metadata.get("timestamp_float", 0.0)
+                if now - ts > max_age_seconds:
+                    continue
+
+                if metadata.get("url", "").startswith(url):
+                    if ts > latest_time:
+                        latest_time = ts
+                    count += 1
+                    if count > count_limit:
+                        # seems to be the results of a spider or busting
+                        break
+            except (ValueError, TypeError):
+                pass
+        logger.info(f"Spider check {url} found latest time {latest_time} and count {count}")
+        seconds_since_spider = now - latest_time
+        if seconds_since_spider < max_age_seconds and count > count_limit:
+            logger.info(
+                f"Spider for {url} was done {seconds_since_spider} seconds ago and found >= {count_limit} results")
+            return True
+        return False
+    except NotFoundError:
+        # new database
+        return False
+    except Exception as e:
+        logger.error("Failed checking for last spider time", exc_info=e)
+        return False
+
+
+@mcp_instance.tool(
+    annotations=ToolAnnotations(
+        title="Spider Website",
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True),
+)
+async def spider_website(
+        ctx: Context,
+        url: str,
+        additional_hosts: Optional[Dict[str, str]] = None,
+        user_agent: Optional[str] = None,
+        request_headers: Optional[Dict[str, str]] = None,
+        cookies: Optional[Dict[str, str]] = None,
+        timeout_seconds: Optional[int] = None,
+) -> SpiderResults:
+    """
+    Spider the website at the url and index the results for further analysis. The find_web_resources
+    tool can be used to continue the analysis. The find_hosts tool can be used to determine if
+    a website has already been spidered.
+
+    Invoke this tool when the user specifically asks to spider a URL or when the user wants to examine or analyze a site for which nothing has been indexed.
+
+    The additional_hosts parameter is a dictionary of host name (the key) to IP address (the value) for hosts that do not have DNS records. This also includes CTF targets or web server virtual hosts found during other scans. If you
+    know the IP address for a host, be sure to include these in the additional_hosts parameter for
+    commands to run properly in a containerized environment.
+
+    The user_agent can be used to specify the "User-Agent" request header. This is useful if a particular browser needs
+    to be spoofed or the user requests extra information in the user agent header to identify themselves as a bug bounty hunter.
+
+    The request_headers map is extra request headers sent with the request.
+
+    The cookies parameter is name, value pairs for cookies to send with each request.
+
+    The timeout_seconds parameter specifies how long to wait for responses before returning. Spidering will
+    continue after returning.
+
+    Returns a list of resources found, including URL, response code, content type, and content length. Indexes each URL that can be queried using the find_web_resources tool. URL content can be returned using the fetch_web_resource_content tool.
+    """
+    await log_tool_history(ctx, "spider_website", url=url, additional_hosts=additional_hosts, user_agent=user_agent,
+                           request_headers=request_headers)
+    server_ctx = await get_server_context()
+    url = url.strip()
+    if await is_spider_time_recent(server_ctx, url):
+        logger.info(f"{url} has been recently spidered, returning saved results")
+        resources = await find_web_resources(ctx, url, 100)
+        return SpiderResults(
+            url=url,
+            instructions=spider_instructions(resources, len(resources) >= 100),
+            resources=resources,
+            has_more=False,
+        )
+
+    spider_queue: Queue = server_ctx.task_queue
+    spider_result_queue: Queue = server_ctx.spider_result_queue
+    url_parsed = urlparse_ext(url)
+    spider_queue_item = SpiderQueueItem(
+        uri=url,
+        depth=3,
+        user_agent=user_agent,
+        request_headers=request_headers,
+        cookies=cookies,
+        additional_hosts=get_additional_hosts(ctx, additional_hosts),
+    )
+    await asyncio.to_thread(spider_queue.put, spider_queue_item)
+    results: List[HttpResource] = []
+    has_more = True
+    time_limit = time.time() + min(600, max(30, timeout_seconds or 120))
+    while time.time() < time_limit:
+        try:
+            http_resource: HttpResource = await asyncio.to_thread(
+                spider_result_queue.get,
+                timeout=(max(1.0, time_limit - time.time())))
+        except (queue.Empty, TimeoutError):
+            break
+        if http_resource is None:
+            has_more = False
+            break
+        logger.debug(f"{http_resource} has been retrieved")
+        if http_resource.host != url_parsed.hostname or http_resource.port != url_parsed.port:
+            logger.debug(
+                f"Spider queued {http_resource.host}:{http_resource.port}, expecting {url_parsed.hostname}:{url_parsed.port}")
+            continue
+        results.append(http_resource)
+        await ctx.info(f"Found: {http_resource.url}")
+
+    return SpiderResults(
+        url=url,
+        instructions=spider_instructions(results, has_more),
+        resources=results,
+        has_more=has_more,
+    )

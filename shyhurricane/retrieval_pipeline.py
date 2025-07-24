@@ -1,58 +1,38 @@
 #!/usr/bin/env python3
-import datetime
-import hashlib
 import json
 import logging
 import os
 import re
-import subprocess
-import sys
 from json import JSONDecodeError
-from math import floor
 from typing import Dict, List, Optional, Any, Tuple
 
-from bs4 import SoupStrainer
+import chromadb
 from chromadb import AsyncClientAPI
+from haystack import Pipeline, component, Document
 from haystack.components.agents import Agent
+from haystack.components.builders import PromptBuilder, ChatPromptBuilder
+from haystack.components.embedders import SentenceTransformersTextEmbedder
 from haystack.components.joiners import ListJoiner
-from haystack.components.preprocessors import DocumentCleaner, DocumentSplitter
-from haystack.components.routers import ConditionalRouter
 from haystack.components.tools import ToolInvoker
 from haystack.core.component import Component
 from haystack.dataclasses import ChatMessage
-from haystack.document_stores.types import DuplicatePolicy
 from haystack.tools import Toolset
 from haystack_experimental.chat_message_stores import InMemoryChatMessageStore
 from haystack_experimental.components.retrievers import ChatMessageRetriever
 from haystack_experimental.components.writers import ChatMessageWriter
+from haystack_integrations.components.retrievers.chroma import ChromaEmbeddingRetriever
+from haystack_integrations.document_stores.chroma import ChromaDocumentStore
+from haystack_integrations.tools.mcp import StreamableHttpServerInfo, MCPToolset
 from mcp import Tool
 from more_itertools import first
 
-from doc_type_model_map import get_model_for_doc_type, doc_type_to_model, map_mime_to_type
-
-import mcp
-
-import chromadb
-from haystack_integrations.document_stores.chroma import ChromaDocumentStore
-from haystack_integrations.components.retrievers.chroma import ChromaEmbeddingRetriever
-from haystack.components.embedders import SentenceTransformersTextEmbedder, SentenceTransformersDocumentEmbedder
-from haystack.components.builders import PromptBuilder, ChatPromptBuilder
-from haystack import Pipeline, component, Document
-from haystack_integrations.tools.mcp import StreamableHttpServerInfo, MCPToolset
-
-from prompts import pentester_agent_system_prompt, pentester_chat_system_prompt
-from utils import urlparse_ext, GeneratorConfig, extract_domain, IngestableRequestResponse, is_katana_jsonl, \
-    is_har_json, is_http_raw, BeautifulSoupExtractor, remove_unencodable, parse_to_iso8601, documents_sort_unique
-
-os.environ['PYTORCH_ENABLE_MPS_FALLBACK'] = '1'
-os.environ['ANONYMIZED_TELEMETRY'] = "False"
-os.environ['HAYSTACK_TELEMETRY_ENABLED'] = "False"
-os.environ['HAYSTACK_TELEMETRY_DISABLED'] = "1"
+from shyhurricane.doc_type_model_map import get_model_for_doc_type, doc_type_to_model
+from shyhurricane.generator_config import GeneratorConfig
+from shyhurricane.prompts import pentester_agent_system_prompt, pentester_chat_system_prompt
+from shyhurricane.utils import documents_sort_unique
 
 logger = logging.getLogger(__name__)
 
-# Change this when previously indexed data becomes obsolete
-WEB_RESOURCE_VERSION = 1
 
 async def create_chroma_client(db: str) -> AsyncClientAPI:
     if re.match(r'\S+:\d+$', db):
@@ -82,11 +62,6 @@ class CombineDocs:
 
     @component.output_types(documents=List[Document])
     def run(self, **kwargs):
-        try:
-            ctx = mcp.get_context()
-            ctx.info("Combining documents")
-        except Exception:
-            pass
         merged = []
         for docs in kwargs.values():
             merged.extend(docs)
@@ -242,6 +217,7 @@ Never include the URL, hostname or IP address in the expanded queries.
 Expanded Queries:
 """
 
+
 @component
 class QueryExpander:
     def __init__(self, generator_config: GeneratorConfig, prompt: Optional[str] = None, number: int = 5):
@@ -261,14 +237,9 @@ class QueryExpander:
     def run(self, query: str):
         if self.number <= 1:
             return {"queries": [query]}
-        try:
-            ctx = mcp.get_context()
-            ctx.info(f"Expanding query")
-        except Exception:
-            pass
         result = \
             self.pipeline.run({'builder': {'query': query, 'number': self.number}}).get('llm', {}).get('replies', [""])[
-            0]
+                0]
         logger.info(f"Expanded query result:\n{result}")
         if not result:
             return {"queries": [query]}
@@ -296,11 +267,6 @@ class MultiQueryChromaRetriever:
 
     @component.output_types(documents=List[Document])
     def run(self, queries: List[str], top_k: int, filters: Optional[Dict[str, Any]] = None):
-        try:
-            ctx = mcp.get_context()
-            ctx.info("Retrieving documents")
-        except Exception:
-            pass
         top_k = min(1000, max(1, top_k))
         results = []
         ids = set()
@@ -342,13 +308,25 @@ def _create_tools(mcp_urls: Optional[List[str]] = None) -> Toolset:
 
 user_chat_message_template = """Given the conversation history, complete the task requested.
 
-    Conversation history:
-    {% for memory in memories %}
-        {{ memory.text }}
-    {% endfor %}
+    Conversation history: {% for memory in memories %}
+      From {{ memory.role.value }} : {% for text in memory.texts %} {{ text }}
+{% endfor %} {% endfor %}
 
-    Task: {{query}}
+    Task: {% for query_el in query %} {% for text in query_el.texts %}
+      {{ text }}
+{% endfor %} {% endfor %}
 """
+
+
+@component
+class ChatMessageLogger:
+    @component.output_types()
+    def run(self, messages: List[ChatMessage]):
+        if not messages:
+            logger.debug(f"No messages received")
+        for message in messages:
+            logger.debug(f"Message: {message.role}: {message.texts}")
+        return {}
 
 
 def build_chat_pipeline(generator_config: GeneratorConfig, mcp_urls: Optional[List[str]] = None) -> Tuple[
@@ -360,7 +338,8 @@ def build_chat_pipeline(generator_config: GeneratorConfig, mcp_urls: Optional[Li
 
     tools = _create_tools(mcp_urls)
     prompt_builder = ChatPromptBuilder(
-        template=[ChatMessage.from_system(pentester_chat_system_prompt), ChatMessage.from_user(user_chat_message_template)],
+        template=[ChatMessage.from_system(pentester_chat_system_prompt),
+                  ChatMessage.from_user(user_chat_message_template)],
         variables=["query", "memories"],
         required_variables=["query", "memories"]
     )
@@ -385,8 +364,10 @@ def build_chat_pipeline(generator_config: GeneratorConfig, mcp_urls: Optional[Li
     pipeline.add_component("memory_writer", memory_writer)
     pipeline.add_component("memory_joiner", ListJoiner(List[ChatMessage]))
     pipeline.add_component("response_llm", response_chat_generator)
+    pipeline.add_component("chat_message_logger", ChatMessageLogger())
 
     pipeline.connect("prompt_builder.prompt", "llm.messages")
+    pipeline.connect("prompt_builder.prompt", "chat_message_logger.messages")
     pipeline.connect("llm.replies", "tool_invoker.messages")
     pipeline.connect("llm.replies", "list_joiner")
     pipeline.connect("llm.replies", "memory_joiner")
@@ -443,8 +424,10 @@ def build_agent_pipeline(generator_config: GeneratorConfig, mcp_urls: Optional[L
     pipeline.add_component("memory_writer", memory_writer)
     pipeline.add_component("memory_joiner", ListJoiner(List[ChatMessage]))
     pipeline.add_component("str_to_list", ChatMessageToListAdapter())
+    pipeline.add_component("chat_message_logger", ChatMessageLogger())
 
     pipeline.connect("prompt_builder", "agent")
+    pipeline.connect("prompt_builder.prompt", "chat_message_logger.messages")
 
     pipeline.connect("agent.last_message", "str_to_list")
     pipeline.connect("str_to_list", "memory_joiner")
@@ -508,9 +491,9 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
         # wiring: Query → embedder → retriever → combiner
         pipe.connect("query.max_results", ret_name + ".top_k")
         if custom_query_expander is not None:
-            pipe.add_component("query_expander_"+col, custom_query_expander)
-            pipe.connect("query.text", "query_expander_"+col+".query")
-            pipe.connect("query_expander_"+col+".queries", ret_name + ".queries")
+            pipe.add_component("query_expander_" + col, custom_query_expander)
+            pipe.connect("query.text", "query_expander_" + col + ".query")
+            pipe.connect("query_expander_" + col + ".queries", ret_name + ".queries")
         else:
             pipe.connect("query_expander.queries", ret_name + ".queries")
         pipe.connect("query.filters", ret_name + ".filters")
@@ -576,528 +559,3 @@ def build_website_context_pipeline(generator_config: GeneratorConfig) -> Pipelin
     pipeline.add_component(name="llm", instance=llm)
     pipeline.connect("builder", "llm")
     return pipeline
-
-
-def is_binary(content: str, mime_type: str) -> bool:
-    """
-    Detect if the content is binary based on the raw MIME type and content.
-    """
-    mime_category = mime_type.split("/")[0]
-    if mime_category == "text":
-        return False
-    if mime_category in [
-        "video",
-        "audio",
-        "font",
-        "binary",
-    ]:
-        return True
-    if mime_category == "image":
-        return mime_type not in ["image/svg+xml", "image/svg"]
-    if mime_type in [
-        "application/octet-stream",
-        "application/pdf",
-        "application/x-pdf",
-        "application/zip",
-        "application/x-zip-compressed",
-        "application/x-protobuf",
-        "application/font-woff",
-        "application/font-woff2",
-        "application/vnd.ms-fontobject",
-    ]:
-        return True
-    if mime_type.endswith("+json") or mime_type.endswith("+xml"):
-        return False
-    if not content.strip():
-        return False
-    try:
-        sample = content.encode("utf-8", errors="ignore")[:1024]
-        if not sample:
-            return False
-        high = sum(b > 127 for b in sample)
-        low = sum(b <= 127 for b in sample)
-        return high > 0.15 * max(low, 1)
-    except Exception:
-        return False
-
-
-def _deobfuscate_javascript(content: str) -> str:
-    if not content:
-        return content
-
-    docker_command = ["docker", "run", "--rm", "-i", "shyhurricane_unix_command:latest", 'timeout', '--preserve-status',
-                      '--kill-after=1m', '90s', '/usr/share/wakaru/wakaru.cjs']
-    logger.info(f"Deobfuscating javascript with command {' '.join(docker_command)}")
-    proc = subprocess.Popen(docker_command, universal_newlines=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    result = ""
-    try:
-        proc.stdin.write(content)
-        proc.stdin.close()
-        while proc.poll() is None:
-            line_out = proc.stdout.readline()
-            if line_out:
-                result += line_out
-        # read any buffered output
-        while True:
-            line_out = proc.stdout.readline()
-            if not line_out:
-                break
-            result += line_out
-    except EOFError:
-        pass
-
-    return_code = proc.wait()
-    if return_code != 0 or not result.strip():
-        logger.error("Deobfuscating javascript failed with exit code %d", return_code)
-        return content
-    else:
-        logger.info("Deobfuscating javascript completed, from %d bytes to %d bytes", len(content), len(result))
-        return result
-
-
-@component
-class KatanaDocument:
-    def __init__(self):
-        self._empty_response = {"request_responses": []}
-
-    @component.output_types(request_responses=List[IngestableRequestResponse])
-    def run(self, text: str | dict):
-        if isinstance(text, dict):
-            entry = text
-        else:
-            entry = json.loads(str(text))
-        if "request" not in entry:
-            logger.warning("Missing request")
-            return self._empty_response
-        if "response" not in entry:
-            logger.warning("Missing response")
-            return self._empty_response
-        if "status_code" not in entry["response"]:
-            logger.info("No status_code, usually indicates out of scope")
-            return self._empty_response
-        if "endpoint" not in entry["request"]:
-            logger.info("No endpoint")
-            return self._empty_response
-
-        url = entry["request"]["endpoint"]
-        try:
-            urlparse_ext(url)
-        except Exception:
-            logger.warning(f"Malformed URL: {url}")
-            return self._empty_response
-
-        timestamp = entry["timestamp"]  # 2025-06-28T22:52:07.882000
-        response_body: Optional[str] = entry.get("response", {}).get("body", None)
-        status_code = entry["response"].get("status_code", 200)
-        http_method = entry["request"].get("method", "").upper()
-        request_headers = self._title_case_header(entry["request"].get("headers", {}))
-        request_headers.pop("raw", None)
-        response_headers = self._title_case_header(entry["response"].get("headers", {}))
-        response_headers.pop("raw", None)
-        response_rtt: Optional[float] = entry.get("response", {}).get("rtt", None)
-        technologies = entry["response"].get("technologies", [])
-        if not isinstance(technologies, list):
-            technologies = [str(technologies)]
-        forms = entry.get("response", {}).get("forms", None)
-
-        request_response = IngestableRequestResponse(
-            url=url,
-            timestamp=timestamp,
-            method=http_method,
-            request_headers=request_headers,
-            request_body=response_body,
-            response_code=status_code,
-            response_headers=response_headers,
-            response_body=response_body,
-            response_rtt=response_rtt,
-            technologies=technologies,
-            forms=forms,
-        )
-        return {"request_responses": [request_response]}
-
-    def _title_case_header(self, katana_headers: Dict[str, str]) -> Dict[str, str]:
-        result = dict()
-        for k, v in katana_headers.items():
-            result[k.replace('_', '-').title()] = v
-            pass
-        return result
-
-
-@component
-class HttpRawDocument:
-    def __init__(self):
-        self._empty_response = {"request_responses": []}
-
-    @component.output_types(request_responses=List[IngestableRequestResponse])
-    def run(self, text: str):
-        return self._empty_response
-
-
-@component
-class HarDocument:
-    def __init__(self):
-        self._empty_response = {"request_responses": []}
-
-    @component.output_types(request_responses=List[IngestableRequestResponse])
-    def run(self, text: str):
-        return self._empty_response
-
-
-class SuffixIdSplitter(DocumentSplitter):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-    def _split_document(self, doc) -> List[Document]:
-        parts = super()._split_document(doc)
-        for i, p in enumerate(parts):
-            p.id = f"{doc.id}_{i}"
-            if "_split_overlap" in p.meta:
-                split_overlap = p.meta["_split_overlap"]
-                if not isinstance(split_overlap, str) and not isinstance(split_overlap, int):
-                    p.meta["_split_overlap"] = json.dumps(split_overlap)
-        return parts
-
-
-@component
-class RequestResponseToDocument:
-    def __init__(self, embedders: Dict[str, Any], doc_cleaner: DocumentCleaner):
-        self.embedders = embedders
-        self.doc_cleaner = doc_cleaner
-        self._soup_extractor = BeautifulSoupExtractor()
-        self._title_soup_strainer = SoupStrainer(['title', 'meta'])
-        self.splitters: Dict[str, SuffixIdSplitter] = dict()
-
-    def warm_up(self):
-        if self.splitters:
-            return
-        for doc_type, embedder in self.embedders.items():
-            max_model_length = embedder.embedding_backend.model.max_seq_length
-            # treat "infinite" as 512
-            if max_model_length > 1_000_000:
-                max_model_length = 512
-            split_len = int(floor(max_model_length * 0.93) / 2)
-            overlap = int(floor(max_model_length * 0.03))
-            logger.info(f"Splitting document {doc_type} by {split_len} words, overlap {overlap}")
-            splitter = SuffixIdSplitter(
-                split_by="word",
-                split_length=split_len,
-                split_overlap=overlap,
-            )
-            splitter.warm_up()
-            self.splitters[doc_type] = splitter
-
-    @component.output_types(documents=List[Document])
-    def run(self, request_responses: List[IngestableRequestResponse]):
-        docs = []
-        for rr in (request_responses or []):
-            docs.extend(self._to_documents(rr))
-        return {"documents": docs}
-
-    def _embed_single(self, doc: Document) -> Document:
-        doc_type = doc.meta["type"]
-        embedder = self.embedders.get(doc_type, self.embedders["default"])
-        split_docs = self.splitters[doc_type].run(documents=[doc])["documents"]
-        embedded_docs = embedder.run(documents=[split_docs[0]])["documents"]
-        embedded_docs[0].content = doc.content
-        embedded_docs[0].id = doc.id
-        return embedded_docs[0]
-
-    def _to_documents(self, request_response: IngestableRequestResponse) -> List[Document]:
-        url = request_response.url
-        try:
-            url_parsed = urlparse_ext(url)
-            host = url_parsed.hostname.lower()
-            port = url_parsed.port
-            netloc = f"{host}:{port}"
-            domain = extract_domain(host)
-        except Exception:
-            logger.warning(f"Malformed URL: {url}")
-            return []
-
-        try:
-            timestamp, timestamp_float = parse_to_iso8601(request_response.timestamp)
-        except ValueError:
-            timestamp_float = datetime.datetime.now().timestamp()
-            timestamp = datetime.datetime.now().isoformat()
-
-        # quantize timestamp to avoid too many duplicate results
-        timestamp_for_id = timestamp[0:11]  # one document per URL per day
-        request_headers = request_response.request_headers
-        response_body = remove_unencodable(request_response.response_body)
-        response_headers = request_response.response_headers
-        raw_mime = response_headers.get("Content-Type", "").lower().split(";")[0].strip()
-        technologies_str = json.dumps(request_response.technologies or [], indent=None, separators=(',', ':'), sort_keys=True)
-
-        title: Optional[str] = None
-        description: Optional[str] = None
-        if response_body and raw_mime == "text/html":
-            title, description = self._soup_extractor.extract(response_body)
-
-        base_meta = {
-            "version": WEB_RESOURCE_VERSION,
-            "url": url,
-            "netloc": netloc,
-            "host": host,
-            "port": port,
-            "domain": domain,
-            "timestamp": timestamp,
-            "timestamp_float": timestamp_float,
-            "content_type": raw_mime,
-            "status_code": request_response.response_code,
-            "http_method": request_response.method,
-            "technologies": technologies_str,
-        }
-        if title:
-            base_meta["title"] = title
-        if description:
-            base_meta["description"] = description
-        if request_response.response_rtt is not None:
-            base_meta["response_rtt"] = request_response.response_rtt
-
-        documents = []
-
-        # Map MIME to a logical doc type
-        doc_type = map_mime_to_type(raw_mime)
-
-        run_cleaner = True
-        if doc_type == "javascript" and response_body:
-            response_body = _deobfuscate_javascript(response_body)
-            response_headers["Content-Length"] = str(len(response_body))
-            run_cleaner = False
-
-        content = response_body
-
-        # ─ Content Document (if body is present)
-        if response_body and not is_binary(response_body, raw_mime):
-            doc = Document(
-                content=response_body,
-                meta=base_meta | {
-                    "type": "content",
-                    "request_headers": json.dumps(request_headers),
-                    "response_headers": json.dumps(response_headers),
-                },
-                id=hashlib.sha256(f"{url}:content:{timestamp_for_id}".encode()).hexdigest()
-            )
-            documents.append(self._embed_single(doc))
-
-        # ─ Type specific Document (if body is present)
-        if content:
-            if is_binary(content, raw_mime):
-                logger.info(f"Skipping {url} ({raw_mime}) binary content")
-            else:
-                doc = Document(
-                    content=content,
-                    meta=base_meta | {"type": doc_type},
-                    id=hashlib.sha256(f"{url}:{doc_type}:{timestamp_for_id}".encode()).hexdigest()
-                )
-                try:
-                    if run_cleaner:
-                        doc = self.doc_cleaner.run(documents=[doc])["documents"][0]
-                except Exception:
-                    logger.warning(f"Content cleaning failed, continuing with original content")
-                split_docs = self.splitters[doc_type].run(documents=[doc])["documents"]
-                embedder = self.embedders.get(doc_type, self.embedders["default"])
-                documents.extend(embedder.run(documents=split_docs)["documents"])
-
-        # ─ Network Document (always)
-        sorted_request_headers = "\n".join(
-            f"{k}: {v}" for k, v in sorted(request_headers.items())
-        )
-        sorted_response_headers = "\n".join(
-            f"{k}: {v}" for k, v in sorted(response_headers.items())
-        )
-        net_text = (
-                "--- HTTP Request Headers ---\n" +
-                sorted_request_headers +
-                "\n--- HTTP Response Headers ---\n" +
-                sorted_response_headers
-        )
-
-        net_doc = Document(
-            content=net_text,
-            meta=base_meta | {
-                "type": "network",
-                "description": "HTTP request and response headers",
-                "content_type": "text/plain"
-            },
-            id=hashlib.sha256(f"{url}:network:{timestamp_for_id}".encode()).hexdigest()
-        )
-        documents.append(self._embed_single(net_doc))
-
-        # ─ HTML forms
-        if request_response.forms:
-            sorted_forms = sorted(request_response.forms, key=lambda f: f.get("method", "GET") + "." + f.get("action", ""))
-            forms_doc = Document(
-                content=json.dumps(sorted_forms, indent=None, separators=(',', ':'), sort_keys=True),
-                meta=base_meta | {
-                    "type": "forms",
-                    "description": "HTTP form information in JSON format",
-                    "content_type": "text/json"
-                },
-                id=hashlib.sha256(f"{url}:forms:{timestamp_for_id}".encode()).hexdigest()
-            )
-            documents.append(self._embed_single(forms_doc))
-
-        return documents
-
-
-@component
-class IngestMultiStore:
-    def __init__(self, stores: Dict[str, ChromaDocumentStore]):
-        self.stores = stores
-
-    @component.output_types(documents=List[Document])
-    def run(self, documents: List[Document]):
-        for doc in documents:
-            self.stores.get(doc.meta.get('type')).write_documents([doc], policy=DuplicatePolicy.OVERWRITE)
-        return {"documents": documents}
-
-
-@component
-class GenerateTitleAndDescription:
-    prompt: str = """
-      You are a web site content analyst. You are good at summarizing the content of a web resource, whether it be
-      HTML, text, javascript or css, into a short title and 2-3 sentence description. The consumer of the title and
-      description is another LLM such as yourself.
-      
-      Structure:
-      Output the title and description information as a valid JSON object. Only output the JSON. Do not include any other text except the JSON.
-      
-      The title uses the key "title" and the value is a string. It should be between 5 and 30 words long.
-      
-      The description uses the key "description" and the value is a string. It should be about 2 or 3 sentences.
-
-      Your Task:
-      Query: "%s"
-      JSON title and description:
-"""
-
-    def __init__(self, generator_config: GeneratorConfig):
-        self.generator = generator_config.create_generator()
-
-    @component.output_types(documents=List[Document])
-    def run(self, documents: List[Document]):
-        cached_title = {}
-        cached_description = {}
-        for doc in documents:
-            if doc.meta.get("status_code", 0) != 200:
-                continue
-            if doc.meta.get("type") in ["network"]:
-                continue
-            url = None
-            if 'url' in doc.meta:
-                url = doc.meta["url"]
-                if url in cached_title and "title" not in doc.meta:
-                    doc.meta["title"] = cached_title[url]
-                if url in cached_description and "description" not in doc.meta:
-                    doc.meta["description"] = cached_description[url]
-            if doc.content and "title" not in doc.meta or "description" not in doc.meta:
-                try:
-                    result = self.generator.run(prompt=self.prompt % (doc.content[0:2048])).get("replies", ["{}"])[-1]
-                    parsed = json.loads(result)
-                    print(f"title_and_desc: {doc.meta.get('type', '')} {result}", file=sys.stderr)
-                    if "title" in parsed and "title" not in doc.meta:
-                        doc.meta["title"] = str(parsed["title"])
-                        if url:
-                            cached_title[url] = doc.meta["title"]
-                    if "description" in parsed and "description" not in doc.meta:
-                        doc.meta["description"] = str(parsed["description"])
-                        if url:
-                            cached_description[url] = doc.meta["description"]
-                except Exception:
-                    pass
-
-        return {"documents": documents}
-
-
-def build_ingest_pipeline(db: str, generator_config: GeneratorConfig) -> Pipeline:
-    stores = {}
-    embedders = {}
-    embedder_cache = {}
-    for dtype, model_name in doc_type_to_model.items():
-        if model_name in embedder_cache:
-            embedder = embedder_cache[model_name]
-        else:
-            embedder = SentenceTransformersDocumentEmbedder(
-                model=model_name,
-                batch_size=1,
-                progress_bar=False
-            )
-            embedder.warm_up()
-            embedder_cache[model_name] = embedder
-
-        document_store = create_chrome_document_store(
-            db=db,
-            collection_name=dtype,
-        )
-        document_store.count_documents()  # ensure the collection exists
-        stores[dtype] = document_store
-        embedders[dtype] = embedder
-
-    doc_cleaner = DocumentCleaner(
-        keep_id=True,
-        remove_empty_lines=True,
-        remove_extra_whitespaces=True,
-        unicode_normalization='NFKC',
-        # ascii_only=True,
-    )
-
-    pipe = Pipeline()
-
-    input_format_routes = [
-        {
-            "condition": "{{ text|is_katana_jsonl }}",
-            "output": ["{{ text }}"],
-            "output_name": ["katana_jsonl"],
-            "output_type": [str],
-        },
-        {
-            "condition": "{{ text|is_har_json }}",
-            "output": ["{{ text }}"],
-            "output_name": ["har_json"],
-            "output_type": [str],
-        },
-        {
-            "condition": "{{ text|is_http_raw }}",
-            "output": ["{{ text }}"],
-            "output_name": ["http_raw_text"],
-            "output_type": [str],
-        },
-        # ConditionalRouter will fail if a path isn't taken
-        {
-            "condition": "{{ True }}",
-            "output": ["{{ text }}"],
-            "output_name": ["input_failure"],
-            "output_type": [str],
-        },
-    ]
-    custom_filters = {
-        "is_katana_jsonl": is_katana_jsonl,
-        "is_har_json": is_har_json,
-        "is_http_raw": is_http_raw,
-    }
-
-    pipe.add_component("input_router", ConditionalRouter(routes=input_format_routes, custom_filters=custom_filters))
-    pipe.add_component("katana_document", KatanaDocument())
-    pipe.add_component("raw_document", HttpRawDocument())
-    pipe.add_component("har_document", HarDocument())
-
-    pipe.add_component("rr_joiner", ListJoiner(List[IngestableRequestResponse]))
-    pipe.add_component("request_response_to_document", RequestResponseToDocument(embedders=embedders, doc_cleaner=doc_cleaner))
-
-    pipe.add_component("gen_title", GenerateTitleAndDescription(generator_config))
-    pipe.add_component("store", IngestMultiStore(stores))
-
-    pipe.connect("input_router.katana_jsonl", "katana_document.text")
-    pipe.connect("input_router.http_raw_text", "raw_document.text")
-    pipe.connect("input_router.har_json", "har_document.text")
-
-    pipe.connect("katana_document", "rr_joiner")
-    pipe.connect("raw_document", "rr_joiner")
-    pipe.connect("har_document", "rr_joiner")
-
-    pipe.connect("rr_joiner", "request_response_to_document")
-    pipe.connect("request_response_to_document", "gen_title")
-    pipe.connect("gen_title", "store")
-
-    return pipe

@@ -5,16 +5,17 @@ import csv
 import json
 import re
 import sys
-from urllib.parse import urlparse
 from typing import Optional
+from urllib.parse import urlparse
 
 import requests
 
-from utils import parse_http_request, parse_http_response, parse_to_iso8601
+from shyhurricane.utils import parse_http_request, parse_http_response, parse_to_iso8601
 
 # ─── Argument Parser ───────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Queue request-responses for indexing.")
-parser.add_argument("--mcp-url", default="http://127.0.0.1:8000/", required=True, help="URL for the MCP server, i.e. http://127.0.0.1:8000/")
+parser.add_argument("--mcp-url", default="http://127.0.0.1:8000/", required=True,
+                    help="URL for the MCP server, i.e. http://127.0.0.1:8000/")
 parser.add_argument("--katana", action="store_true", help="Read katana jsonl")
 parser.add_argument("--csv", action="store_true", help="Read Burp Logger++ CSV")
 args = parser.parse_args()
