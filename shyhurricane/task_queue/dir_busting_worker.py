@@ -12,7 +12,7 @@ import persistqueue
 
 from shyhurricane.index.web_resources_pipeline import KatanaDocument
 from shyhurricane.task_queue.types import DirBustingQueueItem
-from shyhurricane.utils import IngestableRequestResponse
+from shyhurricane.utils import IngestableRequestResponse, unix_command_image
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ def _do_busting(
     mitmdump_docker_command = ["docker", "run", "--rm", "--name", container_name]
     for host, ip in (item.additional_hosts or {}).items():
         mitmdump_docker_command.extend(["--add-host", f"{host}:{ip}"])
-    mitmdump_docker_command.extend(["shyhurricane_unix_command:latest"])
+    mitmdump_docker_command.append(unix_command_image())
     mitmdump_docker_command.extend(mitmdump_command)
 
     buster_docker_command = ["docker", "exec", container_name, "timeout", "--kill-after=1m", "30m"]

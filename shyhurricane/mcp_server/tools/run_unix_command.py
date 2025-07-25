@@ -13,7 +13,7 @@ from pydantic import BaseModel, Field
 
 from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context, assert_elicitation, \
     get_additional_hosts, log_history
-from shyhurricane.utils import read_last_text_bytes
+from shyhurricane.utils import read_last_text_bytes, unix_command_image
 
 logger = logging.getLogger(__name__)
 
@@ -136,7 +136,7 @@ async def _run_unix_command(ctx: Context, command: str, additional_hosts: Option
             for host, ip in additional_hosts.items():
                 docker_command.extend(["--add-host", f"{host}:{ip}"])
 
-            docker_command.extend(["shyhurricane_unix_command:latest"])
+            docker_command.append(unix_command_image())
             if not command.startswith("timeout "):
                 docker_command.extend(["timeout", "--kill-after=1m", "--preserve-status", "10m"])
             docker_command.extend(["/bin/bash", "-c", command])

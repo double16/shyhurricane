@@ -21,6 +21,7 @@ from pydantic import ValidationError
 import shyhurricane.mcp_server.server_context
 from shyhurricane.mcp_server.server_context import get_server_context, ServerContext
 from shyhurricane.prompts import mcp_server_instructions
+from shyhurricane.utils import unix_command_image
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     work_path = f"/work/{app_context_id}"
     proc = await asyncio.create_subprocess_exec("docker", "run", "--rm",
                                                 "-v", f"{server_ctx.mcp_session_volume}:/work",
-                                                "shyhurricane_unix_command:latest",
+                                                unix_command_image(),
                                                 "mkdir", "-p", work_path,
                                                 stdout=asyncio.subprocess.DEVNULL,
                                                 stderr=asyncio.subprocess.DEVNULL,

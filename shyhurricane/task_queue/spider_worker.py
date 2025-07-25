@@ -11,7 +11,7 @@ from pydantic import AnyUrl
 from shyhurricane.index.web_resources_pipeline import KatanaDocument
 from shyhurricane.task_queue.types import SpiderQueueItem
 from shyhurricane.utils import BeautifulSoupExtractor, IngestableRequestResponse, urlparse_ext, HttpResource, \
-    extract_domain
+    extract_domain, unix_command_image
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ def _katana_ingest(
     for host, ip in (item.additional_hosts or {}).items():
         docker_command.extend(["--add-host", f"{host}:{ip}"])
     docker_command.extend(
-        ["shyhurricane_unix_command:latest", "timeout", "--kill-after=1m", "30m"])
+        [unix_command_image(), "timeout", "--kill-after=1m", "30m"])
     docker_command.extend(katana_command)
 
     logger.info(f"Spidering with command {' '.join(docker_command)}")

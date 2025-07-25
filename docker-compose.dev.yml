@@ -30,8 +30,20 @@ services:
     volumes:
       - dind-storage:/var/lib/docker
 
+  unix_command_builder:
+    image: docker:cli
+    depends_on:
+      - dind
+    volumes:
+      - .:/src:ro
+    environment:
+      DOCKER_HOST: "tcp://dind:2375"
+    entrypoint: [ "sh", "-c", "sleep 20 && cd /src && (docker volume create mcp_session || true) && docker build -t ghcr.io/double16/shyhurricane:latest src/docker/unix_command && docker system prune -f" ]
+
   mcp:
-    image: ghcr.io/double16/shyhurricane:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
     depends_on:
       - dind
       - unix_command_builder

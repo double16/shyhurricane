@@ -447,3 +447,7 @@ def munge_urls(query) -> Tuple[Optional[str], Optional[List[int]]]:
         if not url_prefix:
             url_prefix = query_url + '/'
     return url_prefix, urls_munged
+
+
+def unix_command_image() -> str:
+    return "ghcr.io/double16/shyhurricane:latest"

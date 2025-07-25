@@ -17,7 +17,7 @@ from shyhurricane.doc_type_model_map import doc_type_to_model
 from shyhurricane.ports import parse_ports_spec, bitfield_to_ports, is_subset
 from shyhurricane.retrieval_pipeline import create_chrome_document_store
 from shyhurricane.task_queue.types import PortScanQueueItem
-from shyhurricane.utils import PortScanResult, PortScanResults
+from shyhurricane.utils import PortScanResult, PortScanResults, unix_command_image
 
 NMAP_DOCUMENT_VERSION = 2
 
@@ -99,7 +99,7 @@ def _do_port_scan(
     ]
     for host, ip in (item.additional_hosts or {}).items():
         docker_command.extend(["--add-host", f"{host}:{ip}"])
-    docker_command.extend(["shyhurricane_unix_command:latest"])
+    docker_command.append(unix_command_image())
     docker_command.extend(nmap_command)
 
     runtime_ts = time.time()

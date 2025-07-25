@@ -19,7 +19,7 @@ from shyhurricane.doc_type_model_map import map_mime_to_type, doc_type_to_model
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.retrieval_pipeline import create_chrome_document_store
 from shyhurricane.utils import IngestableRequestResponse, urlparse_ext, BeautifulSoupExtractor, extract_domain, \
-    parse_to_iso8601, remove_unencodable, is_katana_jsonl, is_har_json, is_http_raw
+    parse_to_iso8601, remove_unencodable, is_katana_jsonl, is_har_json, is_http_raw, unix_command_image
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,7 @@ def _deobfuscate_javascript(content: str) -> str:
     if not content:
         return content
 
-    docker_command = ["docker", "run", "--rm", "-i", "shyhurricane_unix_command:latest", 'timeout', '--preserve-status',
+    docker_command = ["docker", "run", "--rm", "-i", unix_command_image(), 'timeout', '--preserve-status',
                       '--kill-after=1m', '90s', '/usr/share/wakaru/wakaru.cjs']
     logger.info(f"Deobfuscating javascript with command {' '.join(docker_command)}")
     proc = subprocess.Popen(docker_command, universal_newlines=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
