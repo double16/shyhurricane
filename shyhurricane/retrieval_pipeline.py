@@ -134,7 +134,7 @@ Output the expanded queries as a valid JSON list of strings. Only output the lis
 Examples:
 1. Example Query 1: "What javascript libraries call eval()"
    Example Expanded Queries: ["Object.prototype.eval = function() {\n return eval(this);\n};", "window.eval = function(code) {\n return eval(code);\n};", "Function.prototype.customEval = function(code) {\n return eval(code);\n}"]
-1. Example Query 1: "Find Javascript libraries on http://example.com"
+1. Example Query 1: "Find Javascript libraries on http://target.local"
    Example Expanded Queries: ["fetch('/libraries').then(res => res.json()).then(data => data.map(lib => lib.name))","axios.get('/libraries').then(response => response.data.map(lib => lib.name))","new XMLHttpRequest().open('GET', '/libraries', true).send(), new Promise((resolve) => { resolve(xhr.responseXML.getElementsByTagName('library').textContent.split(', ')); })","$.ajax({url: '/libraries', success: function(data){ $.each($(data).find('.library'), function(index, lib){ console.log($(lib).text()); }); }})","fetch('/libraries').then(res => res.text()).then(html => Array.from(new DOMParser().parseFromString(html, 'text/html').getElementsByTagName('a')).map(a => a.textContent))"]
 
 Your Task:
@@ -330,7 +330,7 @@ class ChatMessageLogger:
 
 
 def build_chat_pipeline(generator_config: GeneratorConfig, mcp_urls: Optional[List[str]] = None) -> Tuple[
-    Pipeline, Component, List[Tool]]:
+    Pipeline, Component, Toolset]:
     """
     Builds a pipeline for a cyber-security chat.
     :return: Pipeline, generator component
@@ -388,7 +388,7 @@ class ChatMessageToListAdapter:
 
 
 def build_agent_pipeline(generator_config: GeneratorConfig, mcp_urls: Optional[List[str]] = None) -> Tuple[
-    Pipeline, Component, List[Tool]]:
+    Pipeline, Component, Toolset]:
     """
     Builds a pipeline for a cyber-security agent.
     :return: Pipeline
@@ -441,7 +441,6 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
     Pipeline, Dict[str, MultiQueryChromaRetriever], Dict[str, ChromaDocumentStore]]:
     """
     Builds a pipeline for retrieving documents from the store.
-    :param db: path to the database.
     :return: Pipeline
     """
     collections = doc_type_to_model.keys()
@@ -522,7 +521,7 @@ def build_website_context_pipeline(generator_config: GeneratorConfig) -> Pipelin
       Output the information as a valid JSON object. Only output the JSON. Do not include any other text except the JSON.
       
       The list of web sites uses key "target". The value of "target" is a valid JSON list. It is a list of site url(s) or ip address(es) and port numbers in the form of URLs. If no protocol is specified and the port contains "443", use "https". If no protocol is specified and the url host TLD is typically for a public site like .com, .net, .etc, use protocol "https". Otherwise use "http". 
-      Examples are: http://example.com, https://example.com, http://example.com:8080, http://10.10.10.10, http://10.10.10.11:8000, etc.
+      Examples are: http://target.local, https://target.local, http://target.local:8080, http://10.10.10.10, http://10.10.10.11:8000, etc.
 
       The list of content types uses key "content". The value of "content" is a valid JSON list. Only use the aforementioned list of content types.
 
@@ -533,8 +532,8 @@ def build_website_context_pipeline(generator_config: GeneratorConfig) -> Pipelin
       The list of HTTP response codes uses key "response_codes". The value of "response_codes" is a valid JSON list of integers.
 
       Examples:
-        1. Example Query 1: "Examine http://example.com for vulns"  
-           Example Result: {"target": ["http://example.com"], "content": [], "tech": [], "methods": [], "response_codes": []}
+        1. Example Query 1: "Examine http://target.local for vulns"  
+           Example Result: {"target": ["http://target.local"], "content": [], "tech": [], "methods": [], "response_codes": []}
 
         2. Example Query 2: "Examine 10.10.10.10:8000 for risky javascript functions"  
            Example Result: {"target": ["http://10.10.10.10:8000"], "content": ["javascript"], "tech": [], "methods": [], "response_codes": []}

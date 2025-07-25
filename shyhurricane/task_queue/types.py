@@ -91,3 +91,13 @@ class DirBustingQueueItem:
         self.cookies = cookies
         self.params = params
         self.rate_limit_requests_per_second = rate_limit_requests_per_second
+
+
+class SaveFindingQueueItem:
+    def __init__(self,
+                 target: str,
+                 markdown: str,
+                 title: str):
+        self.target = target
+        self.markdown = markdown
+        self.title = title

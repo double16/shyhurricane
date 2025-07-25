@@ -4,7 +4,7 @@ from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
 
 from shyhurricane.mcp_server import mcp_instance, log_tool_history
-from shyhurricane.mcp_server.run_unix_command import _run_unix_command
+from shyhurricane.mcp_server.tools.run_unix_command import _run_unix_command
 
 logger = logging.getLogger(__name__)
 

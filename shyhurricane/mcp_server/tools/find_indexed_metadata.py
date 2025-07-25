@@ -1,47 +1,18 @@
-import ipaddress
 import logging
-from typing import Tuple, Optional, List, Any
+from typing import Optional, List, Any
 
 import chromadb
-import validators
 from chromadb.api.models.AsyncCollection import AsyncCollection
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
 from openai import BaseModel
-from pydantic import ValidationError, Field
+from pydantic import Field
 
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context
-from shyhurricane.utils import urlparse_ext
+from shyhurricane.utils import query_to_netloc
 
 logger = logging.getLogger(__name__)
-
-
-def _query_to_netloc(query: str) -> Tuple[str | None, int | None]:
-    port = None
-    if query:
-        query = query.lower()
-        if "://" in query:
-            try:
-                parsed = urlparse_ext(query)
-                query = parsed.hostname
-                port = parsed.port
-            except Exception:
-                pass
-        elif ":" in query:
-            try:
-                query, _, port_str = query.partition(":")
-                try:
-                    if validators.domain(query) == False and not ipaddress.ip_address(query):
-                        query = None
-                except (ValueError, ValidationError):
-                    query = None
-
-                port = int(port_str)
-            except Exception:
-                pass
-    return query, port
-
 
 finder_instructions_found = "These are the {0} that have been indexed. find_web_resources can be used to search for resources on these {0}."
 finder_instructions_not_found = "No {0} matching the query have been indexed. Use the spider_website, directory_buster, or index_http_url tools to index resources."
@@ -79,7 +50,7 @@ async def find_domains(ctx: Context, query: Optional[str] = None) -> FindDomains
     collection: AsyncCollection = await chroma_client.get_collection("network")
     result = set()
     original_query = query
-    query, port = _query_to_netloc(query)
+    query, port = query_to_netloc(query)
     get_result = await collection.get(where={"version": WEB_RESOURCE_VERSION}, include=["metadatas"])
     for metadata in get_result.get("metadatas", []):
         if "domain" in metadata:
@@ -120,7 +91,7 @@ async def find_hosts(ctx: Context, domain_query: str) -> FindHostsResult:
         collection: AsyncCollection = await chroma_client.get_collection("network")
         result = set()
         original_query = domain_query
-        domain_query, port = _query_to_netloc(domain_query)
+        domain_query, port = query_to_netloc(domain_query)
         get_result = await collection.get(where={"version": WEB_RESOURCE_VERSION}, include=["metadatas"])
         for metadata in get_result.get("metadatas", []):
             if "host" in metadata:
@@ -164,7 +135,7 @@ async def find_netloc(ctx: Context, domain_query: str) -> FindNetworkLocationRes
     collection: AsyncCollection = await chroma_client.get_collection("network")
     result = set()
     original_query = domain_query
-    domain_query, port = _query_to_netloc(domain_query)
+    domain_query, port = query_to_netloc(domain_query)
     get_result = await collection.get(where={"version": WEB_RESOURCE_VERSION}, include=["metadatas"])
     for metadata in get_result.get("metadatas", []):
         if "host" in metadata:
@@ -216,7 +187,7 @@ async def find_urls(ctx: Context, host_query: str, path_query: Optional[str] = N
     collection: AsyncCollection = await chroma_client.get_collection("network")
     result = set()
     original_host_query = host_query
-    host_query, port = _query_to_netloc(host_query)
+    host_query, port = query_to_netloc(host_query)
     get_results = await collection.get(where={"version": WEB_RESOURCE_VERSION}, include=["metadatas"])
     for metadata in get_results.get("metadatas", []):
         if "host" in metadata and "url" in metadata:

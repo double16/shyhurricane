@@ -38,13 +38,13 @@ output_format = """
 Output Format:
 - Output results in concise Markdown.
 - For each finding, include:
-  - A short title
-  - Summary of the issue
-  - How it was discovered
-  - Steps to reproduce
-  - Proof of Concept (PoC) if available
-  - Remediation suggestions
-  - Links to references (CVEs, OWASP, etc.)
+    - Title – concise & descriptive
+    - Issue summary – what’s wrong and why it matters
+    - Discovery method – tool/technique used to spot it
+    - Reproduction steps – walk-through to trigger the bug
+    - PoC – code / request / screenshot (if applicable)
+    - Fix – remediation or mitigation guidance
+    - References – CVEs, OWASP docs, write-ups, etc.
 - Always respond in the same language the user initially used.
 """
 

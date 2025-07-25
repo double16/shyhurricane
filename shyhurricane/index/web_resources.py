@@ -1,3 +1,4 @@
+import atexit
 import faulthandler
 import json
 import logging
@@ -37,76 +38,90 @@ def _get_doc_type_queue(db: str) -> persistqueue.SQLiteAckQueue:
 
 
 def _ingest_worker(db: str):
-    faulthandler.register(signal.SIGUSR1)
-    logger.info(f"Index worker starting in PID {os.getpid()}")
-    queue = get_ingest_queue(db)
-    doc_type_queue = _get_doc_type_queue(db)
-    pipeline: Pipeline = build_ingest_pipeline(db=db)
-    count = 0
-    logger.info(f"Index worker ready in PID {os.getpid()}")
-    while True:
-        if count % 1000 == 999:
-            logger.info("Shrinking index queue")
+    try:
+        faulthandler.register(signal.SIGUSR1)
+        logger.info(f"Index worker starting in PID {os.getpid()}")
+
+        queue = get_ingest_queue(db)
+        atexit.register(queue.close)
+        doc_type_queue = _get_doc_type_queue(db)
+        atexit.register(doc_type_queue.close)
+
+        pipeline: Pipeline = build_ingest_pipeline(db=db)
+        count = 0
+        logger.info(f"Index worker ready in PID {os.getpid()}")
+        while True:
+            if count % 1000 == 999:
+                logger.info("Shrinking index queue")
+                try:
+                    queue.clear_acked_data(max_delete=1000, keep_latest=0)
+                    queue.shrink_disk_usage()
+                except Exception as e:
+                    logger.debug("Shrinking index queue failed: %s", e)
+
+            item = queue.get()
+            count += 1
+            if item is None:
+                queue.ack(item)
+                continue
+            logger.info(f"Processing {item[0:128]} in PID {os.getpid()}")
             try:
-                queue.clear_acked_data(max_delete=1000, keep_latest=0)
-                queue.shrink_disk_usage()
+                output = pipeline.run({"input_router": {"text": str(item)}})
+
+                for doc in output.get("output", {}).get("documents", []):
+                    if doc.meta.get("type") == "content":
+                        doc_type_queue.put(doc)
+
+                queue.ack(item)
             except Exception as e:
-                logger.debug("Shrinking index queue failed: %s", e)
-
-        item = queue.get()
-        count += 1
-        if item is None:
-            queue.ack(item)
-            continue
-        logger.info(f"Processing {item[0:128]} in PID {os.getpid()}")
-        try:
-            output = pipeline.run({"input_router": {"text": str(item)}})
-
-            for doc in output.get("output", {}).get("documents", []):
-                if doc.meta.get("type") == "content":
-                    doc_type_queue.put(doc)
-
-            queue.ack(item)
-        except Exception as e:
-            queue.ack_failed(item)
-            url = None
-            try:
-                url = json.loads(item).get("request", {}).get("endpoint", None)
-            except Exception as e:
-                pass
-            logger.error(f"Error in ingestion pipeline for {url} {len(item)} bytes, {e}:\n{item[0:1024]} ...",
-                         exc_info=e)
+                queue.ack_failed(item)
+                url = None
+                try:
+                    url = json.loads(item).get("request", {}).get("endpoint", None)
+                except Exception as e:
+                    pass
+                logger.error(f"Error in ingestion pipeline for {url} {len(item)} bytes, {e}:\n{item[0:1024]} ...",
+                             exc_info=e)
+    except KeyboardInterrupt:
+        return
 
 
 def _doc_type_worker(db: str, generator_config: GeneratorConfig):
-    faulthandler.register(signal.SIGUSR1)
-    logger.info(f"Document specific index worker starting in PID {os.getpid()}")
-    doc_type_queue = _get_doc_type_queue(db)
-    pipeline: Pipeline = build_doc_type_pipeline(db=db, generator_config=generator_config)
-    count = 0
-    logger.info(f"Document specific index worker ready in PID {os.getpid()}")
-    while True:
-        if count % 100 == 99:
-            logger.info("Shrinking doc_type queue")
-            try:
-                doc_type_queue.clear_acked_data(max_delete=1000, keep_latest=0)
-                doc_type_queue.shrink_disk_usage()
-            except Exception as e:
-                logger.debug("Shrinking doc_type queue failed: %s", e)
+    try:
+        faulthandler.register(signal.SIGUSR1)
+        logger.info(f"Document specific index worker starting in PID {os.getpid()}")
 
-        item: Document = doc_type_queue.get()
-        count += 1
-        if item is None:
-            doc_type_queue.ack(item)
-            continue
-        logger.info(f"Processing document {item.id} in PID {os.getpid()}")
-        try:
-            pipeline.run({"input": {"documents": [item]}})
-            doc_type_queue.ack(item)
-        except Exception as e:
-            doc_type_queue.ack_failed(item)
-            url = item.meta.get("url", "???")
-            logger.error(f"Error in document specific pipeline for {url}, {item.id}, {e}", exc_info=e)
+        doc_type_queue = _get_doc_type_queue(db)
+        atexit.register(doc_type_queue.close)
+
+        pipeline: Pipeline = build_doc_type_pipeline(db=db, generator_config=generator_config)
+
+        count = 0
+        logger.info(f"Document specific index worker ready in PID {os.getpid()}")
+        while True:
+            if count % 100 == 99:
+                logger.info("Shrinking doc_type queue")
+                try:
+                    doc_type_queue.clear_acked_data(max_delete=1000, keep_latest=0)
+                    doc_type_queue.shrink_disk_usage()
+                except Exception as e:
+                    logger.debug("Shrinking doc_type queue failed: %s", e)
+
+            item: Document = doc_type_queue.get()
+            count += 1
+            if item is None:
+                doc_type_queue.ack(item)
+                continue
+            logger.info(f"Processing document {item.id} in PID {os.getpid()}")
+            try:
+                pipeline.run({"input": {"documents": [item]}})
+                doc_type_queue.ack(item)
+            except Exception as e:
+                doc_type_queue.ack_failed(item)
+                url = item.meta.get("url", "???")
+                logger.error(f"Error in document specific pipeline for {url}, {item.id}, {e}", exc_info=e)
+    except KeyboardInterrupt:
+        return
 
 
 def start_ingest_worker(db: str, generator_config: GeneratorConfig, pool_size: int = 1) -> Tuple[

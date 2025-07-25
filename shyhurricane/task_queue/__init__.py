@@ -1,3 +1,4 @@
+import atexit
 import faulthandler
 import logging
 import multiprocessing
@@ -7,11 +8,14 @@ from multiprocessing import Queue, Process
 
 import persistqueue
 
+from shyhurricane.generator_config import GeneratorConfig
+from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.task_queue.dir_busting_worker import dir_busting_worker
+from shyhurricane.task_queue.finding_worker import save_finding_worker, FindingContext
 from shyhurricane.task_queue.port_scan_worker import port_scan_worker, PortScanContext
 from shyhurricane.task_queue.spider_worker import spider_worker
 from shyhurricane.task_queue.types import SpiderQueueItem, PortScanQueueItem, TaskWorkerIPC, DirBustingQueueItem, \
-    TaskPool
+    TaskPool, SaveFindingQueueItem
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +34,8 @@ def start_task_worker(db: str, ingest_queue_path: str, pool_size: int = 1) -> Ta
             "task_queue": task_queue,
             "spider_result_queue": spider_result_queue,
             "port_scan_result_queue": port_scan_result_queue,
-            "dir_busting_result_queue": dir_busting_result_queue
+            "dir_busting_result_queue": dir_busting_result_queue,
+            "generator_config": get_generator_config(),
         })
         proc.start()
         processes.append(proc)
@@ -49,29 +54,38 @@ def _task_router(db: str,
                  spider_result_queue: Queue,
                  port_scan_result_queue: Queue,
                  dir_busting_result_queue: Queue,
+                 generator_config: GeneratorConfig,
                  ):
-    faulthandler.register(signal.SIGUSR1)
-    logger.info(f"Starting task router in PID {os.getpid()}")
+    try:
+        faulthandler.register(signal.SIGUSR1)
+        logger.info(f"Starting task router in PID {os.getpid()}")
 
-    ingest_queue = persistqueue.SQLiteAckQueue(path=ingest_queue_path, auto_commit=True)
-    port_scan_ctx = PortScanContext(db=db)
-    port_scan_ctx.warm_up()
+        ingest_queue = persistqueue.SQLiteAckQueue(path=ingest_queue_path, auto_commit=True)
+        atexit.register(ingest_queue.close)
 
-    while True:
-        item = task_queue.get()
-        logger.info(f"Processing {item.__class__.__name__} in PID {os.getpid()}")
-        if isinstance(item, SpiderQueueItem):
+        port_scan_ctx = PortScanContext(db=db)
+        port_scan_ctx.warm_up()
+
+        finding_ctx = FindingContext(db=db, generator_config=generator_config)
+        finding_ctx.warm_up()
+
+        while True:
+            item = task_queue.get()
+            logger.info(f"Processing {item.__class__.__name__} in PID {os.getpid()}")
             try:
-                spider_worker(item, ingest_queue, spider_result_queue)
+                if isinstance(item, SpiderQueueItem):
+                    spider_worker(item, ingest_queue, spider_result_queue)
+                elif isinstance(item, PortScanQueueItem):
+                    port_scan_worker(port_scan_ctx, item, port_scan_result_queue)
+                elif isinstance(item, DirBustingQueueItem):
+                    dir_busting_worker(item, ingest_queue, dir_busting_result_queue)
+                elif isinstance(item, SaveFindingQueueItem):
+                    save_finding_worker(finding_ctx, item)
+
+            except KeyboardInterrupt:
+                break
             except BaseException as e:
-                logger.error("Error running spider", exc_info=e)
-        elif isinstance(item, PortScanQueueItem):
-            try:
-                port_scan_worker(port_scan_ctx, item, port_scan_result_queue)
-            except BaseException as e:
-                logger.error("Error running port scan", exc_info=e)
-        elif isinstance(item, DirBustingQueueItem):
-            try:
-                dir_busting_worker(item, ingest_queue, dir_busting_result_queue)
-            except BaseException as e:
-                logger.error("Error running dir busting", exc_info=e)
+                logger.error(f"Error running {item.__class__.__name__} in PID {os.getpid()}", exc_info=e)
+
+    except KeyboardInterrupt:
+        return

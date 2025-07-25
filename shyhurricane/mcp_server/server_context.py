@@ -12,8 +12,8 @@ import persistqueue
 from haystack import Pipeline
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 
-from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.index.web_resources import start_ingest_worker
+from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.retrieval_pipeline import create_chroma_client, build_document_pipeline, \
     build_website_context_pipeline
 from shyhurricane.task_queue import start_task_worker, TaskPool
@@ -71,14 +71,6 @@ def set_server_config(config: ServerConfig):
     _server_config = config
 
 
-_generator_config: Optional[GeneratorConfig] = GeneratorConfig.from_env()
-
-
-def set_generator_config(config: GeneratorConfig):
-    global _generator_config
-    _generator_config = config
-
-
 async def get_server_context() -> ServerContext:
     global _server_context
     if _server_context is None:
@@ -90,12 +82,12 @@ async def get_server_context() -> ServerContext:
         chroma_client = await create_chroma_client(db=db)
         document_pipeline, retrievers, stores = await build_document_pipeline(
             db=db,
-            generator_config=_generator_config,
+            generator_config=get_generator_config(),
         )
         website_context_pipeline = build_website_context_pipeline(
-            generator_config=_generator_config,
+            generator_config=get_generator_config(),
         )
-        ingest_queue, ingest_pool = start_ingest_worker(db=db, generator_config=_generator_config,
+        ingest_queue, ingest_pool = start_ingest_worker(db=db, generator_config=get_generator_config(),
                                                         pool_size=_server_config.ingest_pool_size)
         task_worker_ipc = start_task_worker(db, ingest_queue.path, _server_config.task_pool_size)
 

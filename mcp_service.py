@@ -2,23 +2,26 @@
 import argparse
 import asyncio
 import logging
+import sys
 
 from shyhurricane.config import configure
 from shyhurricane.generator_config import GeneratorConfig, add_generator_args
 from shyhurricane.mcp_server import mcp_instance, get_server_context
-from shyhurricane.mcp_server.server_context import set_server_config, ServerConfig, set_generator_config
+from shyhurricane.mcp_server.generator_config import set_generator_config
+from shyhurricane.mcp_server.server_context import set_server_config, ServerConfig
 
-import shyhurricane.mcp_server.deobfuscate_javascript
-import shyhurricane.mcp_server.directory_buster
-import shyhurricane.mcp_server.fetch_web_resource_content
-import shyhurricane.mcp_server.find_indexed_metadata
-import shyhurricane.mcp_server.find_web_resources
-import shyhurricane.mcp_server.find_wordlists
-import shyhurricane.mcp_server.indexers
-import shyhurricane.mcp_server.port_scan
 import shyhurricane.mcp_server.prompts
-import shyhurricane.mcp_server.register_hostname_address
-import shyhurricane.mcp_server.run_unix_command
+import shyhurricane.mcp_server.tools.deobfuscate_javascript
+import shyhurricane.mcp_server.tools.directory_buster
+import shyhurricane.mcp_server.tools.fetch_web_resource_content
+import shyhurricane.mcp_server.tools.find_indexed_metadata
+import shyhurricane.mcp_server.tools.find_web_resources
+import shyhurricane.mcp_server.tools.find_wordlists
+import shyhurricane.mcp_server.tools.findings
+import shyhurricane.mcp_server.tools.indexers
+import shyhurricane.mcp_server.tools.port_scan
+import shyhurricane.mcp_server.tools.register_hostname_address
+import shyhurricane.mcp_server.tools.run_unix_command
 
 logger = logging.getLogger(__name__)
 
@@ -51,4 +54,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit(130)

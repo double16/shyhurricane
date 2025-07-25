@@ -69,6 +69,8 @@ def latest_mtime(db: Path) -> float:
 
 
 def extract_domain(hostname: str) -> Optional[str]:
+    if not hostname:
+        return None
     try:
         if ipaddress.ip_address(hostname):
             return ""
@@ -384,3 +386,52 @@ async def stream_lines(byte_stream: AsyncGenerator[bytes, None]):
             yield line.strip("\r")
     if buffer:
         yield buffer
+
+
+def query_to_netloc(query: str) -> Tuple[str | None, int | None]:
+    port = None
+    if query:
+        query = query.lower()
+        if "://" in query:
+            try:
+                parsed = urlparse_ext(query)
+                query = parsed.hostname
+                port = parsed.port
+            except Exception:
+                pass
+        elif ":" in query:
+            try:
+                query, _, port_str = query.partition(":")
+                try:
+                    if validators.domain(query) == False and not ipaddress.ip_address(query):
+                        query = None
+                except (ValueError, ValidationError):
+                    query = None
+
+                port = int(port_str)
+            except Exception:
+                pass
+    return query, port
+
+
+def munge_urls(query) -> Tuple[Optional[str], Optional[List[int]]]:
+    """
+    Munges URLs for query purposes. Returns variants with and without a trailing slash, with and without query string.
+    :return: url prefix for starts with operators, list of URLs for 'in' operators
+    """
+    query_url = query
+    urls_munged = [query]
+    url_prefix = None
+    if '?' in query_url:
+        query_url = query_url.split('?')[0]
+        urls_munged.append(query_url)
+        url_prefix = query_url + "?"
+    if query_url.endswith('/'):
+        urls_munged.append(query_url[:-1])
+        if not url_prefix:
+            url_prefix = query_url
+    else:
+        urls_munged.append(query_url + '/')
+        if not url_prefix:
+            url_prefix = query_url + '/'
+    return url_prefix, urls_munged

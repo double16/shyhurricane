@@ -14,7 +14,7 @@ from starlette.responses import Response
 
 from shyhurricane.doc_type_model_map import map_mime_to_type
 from shyhurricane.mcp_server import mcp_instance, get_server_context, log_tool_history, get_additional_hosts
-from shyhurricane.mcp_server.deobfuscate_javascript import deobfuscate_javascript
+from shyhurricane.mcp_server.tools.deobfuscate_javascript import deobfuscate_javascript
 from shyhurricane.utils import stream_lines, is_katana_jsonl, is_http_csv_header, HttpResource, urlparse_ext, \
     extract_domain
 
@@ -28,7 +28,7 @@ async def index_request_body(request: Request) -> Response:
     forms. The preferred input format matches the output of the "katana" command for spidering.
 
     Example data argument in katana format:
-    {"request": {"headers": {"sec_fetch_mode": "navigate", "priority": "u=0, i", "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "sec_fetch_dest": "document", "host": "example.com", "accept_language": "en-US,en;q=0.5", "connection": "keep-alive", "sec_fetch_site": "none", "upgrade_insecure_requests": "1", "sec_fetch_user": "?1", "user_agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"}, "method": "GET", "source": "katana", "body": "", "endpoint": "https://example.com/", "tag": "katana", "attribute": "http"}, "response": {"headers": {"date": "Sun, 29 Jun 2025 03:44:52 GMT", "content_type": "text/html", "connection": "keep-alive", "location": "https://www.example.com/", "content_length": "169"}, "status_code": 301, "body": "<html>\r\n<head><title>301 Moved Permanently</title></head>\r\n<body>\r\n<center><h1>301 Moved Permanently</h1></center>\r\n<hr><center>nginx/1.20.1</center>\r\n</body>\r\n</html>\r\n"}, "timestamp": "2025-06-28T22:44:52.798000"}
+    {"request": {"headers": {"sec_fetch_mode": "navigate", "priority": "u=0, i", "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "sec_fetch_dest": "document", "host": "target.local", "accept_language": "en-US,en;q=0.5", "connection": "keep-alive", "sec_fetch_site": "none", "upgrade_insecure_requests": "1", "sec_fetch_user": "?1", "user_agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"}, "method": "GET", "source": "katana", "body": "", "endpoint": "https://target.local/", "tag": "katana", "attribute": "http"}, "response": {"headers": {"date": "Sun, 29 Jun 2025 03:44:52 GMT", "content_type": "text/html", "connection": "keep-alive", "location": "https://www.target.local/", "content_length": "169"}, "status_code": 301, "body": "<html>\r\n<head><title>301 Moved Permanently</title></head>\r\n<body>\r\n<center><h1>301 Moved Permanently</h1></center>\r\n<hr><center>nginx/1.20.1</center>\r\n</body>\r\n</html>\r\n"}, "timestamp": "2025-06-28T22:44:52.798000"}
     """
     server_ctx = await get_server_context()
     ingest_queue: persistqueue.SQLiteAckQueue = server_ctx.ingest_queue
@@ -105,7 +105,8 @@ async def index_http_url(
                            cookies=cookies,
                            params=params,
                            follow_redirects=follow_redirects,
-                           content=bool(content is not None)
+                           content=bool(content is not None),
+                           additional_hosts=additional_hosts,
                            )
     server_ctx = await get_server_context()
     ingest_queue: persistqueue.SQLiteAckQueue = server_ctx.ingest_queue

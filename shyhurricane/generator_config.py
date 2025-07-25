@@ -67,7 +67,10 @@ class GeneratorConfig(BaseModel):
         elif self.gemini_model:
             return f"Gemini {self.gemini_model}"
         else:
-            return f"Ollama {self.ollama_model} at {self.ollama_url}"
+            if self.ollama_url:
+                return f"Ollama {self.ollama_model} at {self.ollama_url}"
+            else:
+                return f"Ollama {self.ollama_model}"
 
     def create_chat_generator(self,
                               temperature: Optional[float] = None,

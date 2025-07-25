@@ -15,6 +15,7 @@ doc_type_to_model = {
     "forms": CODE_EMBEDDING_MODEL,
     "nmap": CODE_EMBEDDING_MODEL,  # store raw nmap xml
     "portscan": CODE_EMBEDDING_MODEL,  # store json port scan model
+    "finding": DEFAULT_EMBEDDING_MODEL,  # store markdown formatted findings
     "default": DEFAULT_EMBEDDING_MODEL,
     "content": DEFAULT_EMBEDDING_MODEL,  # stores response content verbatim
 }
@@ -43,6 +44,8 @@ MIME_TYPE_ALIASES = {
 
 
 def map_mime_to_type(mime: str) -> str:
+    if not mime:
+        return "default"
     if mime.endswith("+json"):
         return "json"
     if mime.endswith("+xml"):

@@ -20,9 +20,10 @@ from pydantic import BaseModel, Field, AnyUrl
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server import get_server_context, mcp_instance, log_tool_history, assert_elicitation, \
     ServerContext, get_additional_hosts
-from shyhurricane.mcp_server.find_indexed_metadata import _query_to_netloc, find_netloc
+from shyhurricane.mcp_server.tools.find_indexed_metadata import find_netloc
 from shyhurricane.task_queue import SpiderQueueItem
-from shyhurricane.utils import HttpResource, urlparse_ext, documents_sort_unique, extract_domain
+from shyhurricane.utils import HttpResource, urlparse_ext, documents_sort_unique, extract_domain, query_to_netloc, \
+    munge_urls
 
 logger = logging.getLogger(__name__)
 
@@ -75,21 +76,7 @@ async def _find_web_resources_by_url(ctx: Context, query: str, limit: int = 100)
     server_ctx = await get_server_context()
     try:
         url_parsed = urlparse_ext(query)
-        query_url = query
-        urls_munged = [query]
-        url_prefix = None
-        if '?' in query_url:
-            query_url = query_url.split('?')[0]
-            urls_munged.append(query_url)
-            url_prefix = query_url + "?"
-        if query_url.endswith('/'):
-            urls_munged.append(query_url[:-1])
-            if not url_prefix:
-                url_prefix = query_url
-        else:
-            urls_munged.append(query_url + '/')
-            if not url_prefix:
-                url_prefix = query_url + '/'
+        url_prefix, urls_munged = munge_urls(query)
 
         store = server_ctx.stores["content"]
         docs = []
@@ -102,7 +89,7 @@ async def _find_web_resources_by_url(ctx: Context, query: str, limit: int = 100)
                 {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
                 {"field": "meta.url", "operator": "in", "value": urls_munged}
             ]}
-        docs.extend(store.filter_documents(filters=filters))
+        docs.extend(await store.filter_documents_async(filters=filters))
 
         # Find resources below the URL
         filters = {
@@ -111,7 +98,7 @@ async def _find_web_resources_by_url(ctx: Context, query: str, limit: int = 100)
                 {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
                 {"field": "meta.netloc", "operator": "==", "value": url_parsed.netloc}
             ]}
-        for doc in store.filter_documents(filters=filters):
+        for doc in await store.filter_documents_async(filters=filters):
             if doc.meta.get("url", "").startswith(url_prefix) and doc.meta.get("url") not in urls_munged:
                 docs.append(doc)
 
@@ -128,7 +115,7 @@ async def _find_web_resources_by_url(ctx: Context, query: str, limit: int = 100)
 async def _find_web_resources_by_netloc(ctx: Context, query: str, limit: int = 100) -> Optional[List[HttpResource]]:
     server_ctx = await get_server_context()
     try:
-        hostname, port = _query_to_netloc(query)
+        hostname, port = query_to_netloc(query)
         if hostname is None or port is None:
             return None
         store = server_ctx.stores["content"]
@@ -142,7 +129,7 @@ async def _find_web_resources_by_netloc(ctx: Context, query: str, limit: int = 1
                 {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
                 {"field": "meta.netloc", "operator": "==", "value": query}
             ]}
-        docs.extend(store.filter_documents(filters=filters))
+        docs.extend(await store.filter_documents_async(filters=filters))
 
         docs = documents_sort_unique(docs, limit)
 
@@ -157,7 +144,7 @@ async def _find_web_resources_by_netloc(ctx: Context, query: str, limit: int = 1
 async def _find_web_resources_by_hostname(ctx: Context, query: str, limit: int = 100) -> Optional[List[HttpResource]]:
     server_ctx = await get_server_context()
     try:
-        hostname, port = _query_to_netloc(query)
+        hostname, port = query_to_netloc(query)
         if hostname is None or port is not None:
             return None
         store = server_ctx.stores["content"]
@@ -171,7 +158,7 @@ async def _find_web_resources_by_hostname(ctx: Context, query: str, limit: int =
                 {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
                 {"field": "meta.host", "operator": "==", "value": hostname}
             ]}
-        docs.extend(store.filter_documents(filters=filters))
+        docs.extend(await store.filter_documents_async(filters=filters))
 
         docs = documents_sort_unique(docs, limit)
 
@@ -184,15 +171,15 @@ async def _find_web_resources_by_hostname(ctx: Context, query: str, limit: int =
 
 
 async def _find_recommended_urls(ctx: Context) -> Optional[List[str]]:
-    netlocs = await find_netloc(ctx, "")
-    if not netlocs:
+    net_locs = (await find_netloc(ctx, "")).network_locations
+    if not net_locs:
         return None
-    domains = set(map(lambda n: extract_domain(n.split(':')[0]), netlocs))
+    domains = set(map(lambda n: extract_domain(n.split(':')[0]), net_locs))
     if len(domains) != 1:
         return None
     results = []
-    for netloc in netlocs:
-        hostname, port = _query_to_netloc(netloc)
+    for netloc in net_locs:
+        hostname, port = query_to_netloc(netloc)
         if port % 1000 == 443:
             results.append(f"https://{hostname}:{port}")
         elif not port:
@@ -315,6 +302,7 @@ async def find_web_resources(
             logger.info("elicit not supported, returning")
         finally:
             if not urls:
+                # TODO: return instructions asking for the target
                 raise McpError(ErrorData(code=INVALID_REQUEST,
                                          message="Specify a target URL, IP address or host name for searching"))
 
@@ -322,7 +310,7 @@ async def find_web_resources(
 
     # check if we have data
     missing_netloc = set(filter_netloc.copy())
-    for known_netloc in await find_netloc(ctx, ""):
+    for known_netloc in (await find_netloc(ctx, "")).network_locations:
         try:
             missing_netloc.remove(known_netloc)
         except KeyError:
