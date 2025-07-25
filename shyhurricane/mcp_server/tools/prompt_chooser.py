@@ -108,7 +108,8 @@ async def prompt_chooser(ctx: Context, query: str) -> str:
         return f"At least one target is required. Specify as a host name, IP address, IP subnet, or URL."
 
     mcp_prompt = titles[prompt_title]
-    messages = (await mcp_instance.get_prompt(name=mcp_prompt.name, arguments={"target": ', '.join(targets)})).messages
+    messages = (await mcp_instance.get_prompt(name=mcp_prompt.name,
+                                              arguments={"target": ', '.join(targets), "query": query})).messages
 
     text = []
     for msg in messages:

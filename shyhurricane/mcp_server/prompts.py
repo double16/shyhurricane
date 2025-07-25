@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Optional
 
 from mcp.server.fastmcp.prompts.base import Message, AssistantMessage, UserMessage
 
@@ -8,47 +8,47 @@ from shyhurricane.prompts import pentester_agent_system_prompt, pentester_chat_s
 
 
 @mcp_instance.prompt(title="Automated CTF Solver")
-def ctf_agent_prompt(target: str) -> List[Message]:
+def ctf_agent_prompt(target: str, query: Optional[str] = None) -> List[Message]:
     return [
         AssistantMessage(ctf_agent_system_prompt),
-        UserMessage(f"Find the CTF flags on {target}."),
+        UserMessage(query or f"Find the CTF flags on {target}."),
     ]
 
 
 @mcp_instance.prompt(title="Automated Bug Bounty Hunter")
-def bug_bounty_agent_prompt(target: str) -> List[Message]:
+def bug_bounty_agent_prompt(target: str, query: Optional[str] = None) -> List[Message]:
     return [
         AssistantMessage(bug_bounty_agent_system_prompt),
-        UserMessage(f"Conduct a penetration test on {target}."),
+        UserMessage(query or f"Conduct a penetration test on {target}."),
     ]
 
 
 @mcp_instance.prompt(title="Bug Bounty Hunter Assistant")
-def bug_bounty_assistant_prompt(target: str) -> List[Message]:
+def bug_bounty_assistant_prompt(target: str, query: Optional[str] = None) -> List[Message]:
     return [
         AssistantMessage(bug_bounty_chat_system_prompt),
-        UserMessage(f"Examine {target} for vulnerabilities."),
+        UserMessage(query or f"Examine {target} for vulnerabilities."),
     ]
 
 
 @mcp_instance.prompt(title="Automated Penetration Tester")
-def pentest_agent_prompt(target: str) -> List[Message]:
+def pentest_agent_prompt(target: str, query: Optional[str] = None) -> List[Message]:
     return [
         AssistantMessage(pentester_agent_system_prompt),
-        UserMessage(f"Conduct a penetration test on {target}."),
+        UserMessage(query or f"Conduct a penetration test on {target}."),
     ]
 
 
 @mcp_instance.prompt(title="Penetration Tester Assistant")
-def pentest_assistant_prompt(target: str) -> List[Message]:
+def pentest_assistant_prompt(target: str, query: Optional[str] = None) -> List[Message]:
     return [
         AssistantMessage(pentester_chat_system_prompt),
-        UserMessage(f"Examine {target} for vulnerabilities."),
+        UserMessage(query or f"Examine {target} for vulnerabilities."),
     ]
 
 
 @mcp_instance.prompt(title="Penetration Test Auditor")
-def pentest_audit_prompt(target: str) -> List[Message]:
+def pentest_audit_prompt(target: str, query: Optional[str] = None) -> List[Message]:
     return [
         AssistantMessage("""
 You are **Pentest Audit Bot**, an independent security auditor.  
@@ -104,5 +104,5 @@ Report template (Markdown to return after DONE)
 
 DONE
 """),
-        UserMessage(f"Examine {target} for test coverage."),
+        UserMessage(query or f"Examine {target} for test coverage."),
     ]

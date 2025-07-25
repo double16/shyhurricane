@@ -3,9 +3,12 @@ import logging
 import os
 from typing import Optional, Dict, Any, Union, List
 
+from google.genai import Client
+from google.genai.types import HttpOptions, HttpRetryOptions
 from haystack.components.generators import OpenAIGenerator
 from haystack.components.generators.chat import OpenAIChatGenerator
 from haystack.tools import Toolset
+from haystack.utils import Secret
 from haystack_integrations.components.generators.google_genai.chat.chat_generator import GoogleGenAIChatGenerator
 from haystack_integrations.components.generators.ollama import OllamaChatGenerator, OllamaGenerator
 from mcp import Tool
@@ -29,6 +32,22 @@ def add_generator_args(ap: argparse.ArgumentParser):
 
 
 TEMPERATURE_DEFAULT: float = 0.2
+
+
+class GoogleGenAIChatGeneratorWithRetry(GoogleGenAIChatGenerator):
+    def __init__(self,
+                 api_key: Secret = Secret.from_env_var(["GOOGLE_API_KEY", "GEMINI_API_KEY"], strict=False),
+                 **kwargs):
+        super().__init__(**kwargs)
+        self._client = Client(
+            api_key=api_key.resolve_value(),
+            http_options=HttpOptions(
+                retry_options=HttpRetryOptions(
+                    attempts=10,
+                    exp_base=4.0,
+                )
+            )
+        )
 
 
 class GeneratorConfig(BaseModel):
@@ -78,22 +97,23 @@ class GeneratorConfig(BaseModel):
                               tools: Optional[Union[List[Tool], Toolset]] = None):
         if self.openai_model:
             logger.info("Using OpenAI chat with model %s", self.openai_model)
+            if self.openai_model.startswith("o4-mini"):
+                temperature = 1.0
             generation_kwargs = {
                 "temperature": temperature or self.temperature,
-                "max_retries": 10, "backoff_factor": 4.0,
             }
             return OpenAIChatGenerator(
                 model=self.openai_model,
                 generation_kwargs={"temperature": temperature or self.temperature} | (generation_kwargs or {}),
+                max_retries=10,
                 tools=tools
             )
         elif self.gemini_model:
             logger.info("Using Google Gemini chat with model %s", self.gemini_model)
             generation_kwargs = {
                 "temperature": temperature or self.temperature,
-                "max_retries": 10, "min_backoff": 2.0, "max_backoff": 4.0,
             }
-            return GoogleGenAIChatGenerator(
+            return GoogleGenAIChatGeneratorWithRetry(
                 model=self.gemini_model,
                 generation_kwargs=generation_kwargs | (generation_kwargs or {}),
                 tools=tools
@@ -122,17 +142,22 @@ class GeneratorConfig(BaseModel):
                          generation_kwargs: Optional[Dict[str, Any]] = None):
         if self.openai_model:
             logger.info("Using OpenAI generator with model %s", self.openai_model)
+            if self.openai_model.startswith("o4-mini"):
+                temperature = 1.0
+            generation_kwargs = {
+                "temperature": temperature or self.temperature,
+            }
             return OpenAIGenerator(
                 model=self.openai_model,
-                generation_kwargs={"temperature": temperature or self.temperature} | (generation_kwargs or {}),
+                generation_kwargs=generation_kwargs | (generation_kwargs or {}),
+                max_retries=10,
             )
         elif self.gemini_model:
             logger.info("Using Google Gemini chat with model %s", self.gemini_model)
             generation_kwargs = {
                 "temperature": temperature or self.temperature,
-                "max_retries": 10, "min_backoff": 2.0, "max_backoff": 4.0,
             }
-            return GoogleGenAIChatGenerator(
+            return GoogleGenAIChatGeneratorWithRetry(
                 model=self.gemini_model,
                 generation_kwargs=generation_kwargs | (generation_kwargs or {}),
             )

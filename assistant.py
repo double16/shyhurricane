@@ -4,14 +4,18 @@ Cybersecurity offense assistant.
 """
 import argparse
 import datetime
+import json
 import logging
 import os
 import sys
 from pathlib import Path
-from typing import Iterable, Callable
+from typing import Iterable, Callable, Tuple
 
+from haystack import Pipeline
+from haystack.core.component import Component
 from haystack.core.errors import PipelineRuntimeError
 from haystack.dataclasses import ChatMessage, StreamingChunk
+from haystack.tools import Toolset
 from haystack_integrations.tools.mcp import MCPToolset
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
@@ -20,7 +24,8 @@ from rich.markdown import Markdown
 
 from shyhurricane.config import configure
 from shyhurricane.generator_config import GeneratorConfig, add_generator_args
-from shyhurricane.retrieval_pipeline import build_chat_pipeline, build_agent_pipeline
+from shyhurricane.mcp_server.generator_config import set_generator_config
+from shyhurricane.retrieval_pipeline import build_chat_pipeline, build_agent_pipeline, create_tools
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +41,12 @@ def configure_logging(level=logging.CRITICAL):
         "haystack_telemetry",  # optional telemetry
         "chromadb",  # Chroma client (can be noisy)
         "sentence_transformers",
+        "httpx",
+        "httpcore",
+        "mcp",
+        "fastmcp",
+        "streamable_http",
+        "mcp.transport.streamable_http",
     ]:
         logging.getLogger(name).setLevel(level)
 
@@ -93,20 +104,36 @@ def main():
         configure_logging(logging.CRITICAL)
 
     generator_config = GeneratorConfig.from_args(args)
+    set_generator_config(generator_config)
 
-    if args.mode == "agent":
-        args.stream = True
-        pipe, generator, tools = build_agent_pipeline(generator_config, args.mcp_url)
-    else:
-        pipe, generator, tools = build_chat_pipeline(generator_config, args.mcp_url)
+    tools = create_tools(args.mcp_url)
+    prompt_chooser_tool = None
+    for tool in tools:
+        if tool.name == "prompt_chooser":
+            prompt_chooser_tool = tool
+            break
+    if not prompt_chooser_tool:
+        console.print("[red]No prompt_chooser tool found[/red]")
+        sys.exit(1)
 
     def chat_logger(line):
         Path(args.history).touch(mode=0o644, exist_ok=True)
         with open(args.history, "a", encoding="utf-8") as f:
             f.write(line)
 
-    if args.stream and generator is not None:
-        generator.streaming_callback = streaming_chunk_callback(verbose=bool(args.verbose), chat_logger=chat_logger)
+    def create_pipeline(system_prompt: str, tools: Toolset) -> Tuple[Pipeline, Component, Toolset]:
+        if args.mode == "agent":
+            args.stream = True
+            pipe, generator, _ = build_agent_pipeline(generator_config, system_prompt, args.mcp_url, tools)
+        else:
+            pipe, generator, _ = build_chat_pipeline(generator_config, system_prompt, args.mcp_url, tools)
+
+        if args.stream and generator is not None:
+            generator.streaming_callback = streaming_chunk_callback(verbose=bool(args.verbose), chat_logger=chat_logger)
+
+        return pipe, generator, tools
+
+    pipe = None
 
     prompt_history_path = Path(Path.home(), ".local", "state", "shyhurricane", "prompt_history")
     os.makedirs(prompt_history_path.parent, mode=0o755, exist_ok=True)
@@ -144,6 +171,18 @@ This is a penetration test assistant in {args.mode} mode using {generator_config
                     continue
 
                 chat_logger(f"\n\n---\n\n# {datetime.datetime.now().isoformat()} Q: {user_in}\n\n")
+
+                # special case of needing to bootstrap the pipeline with the correct prompt
+                if pipe is None:
+                    prompt = "\n".join(map(lambda e: e.get("text", ""),
+                                           json.loads(prompt_chooser_tool.invoke(query=user_in)).get("content", [])))
+                    if len(prompt) < 100:
+                        # indicates an error because there should be a lot more text
+                        console.print("🤖 " + prompt)
+                        continue
+                    console.print(Markdown(prompt))
+                    console.print()
+                    pipe, *_ = create_pipeline(prompt, tools)
 
                 console.print("🤖 ", end="")
 

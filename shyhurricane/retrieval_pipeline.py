@@ -289,7 +289,7 @@ class MultiQueryChromaRetriever:
         return {"documents": unique_docs}
 
 
-def _create_tools(mcp_urls: Optional[List[str]] = None) -> Toolset:
+def create_tools(mcp_urls: Optional[List[str]] = None) -> Toolset:
     if mcp_urls is None:
         mcp_urls = ["http://127.0.0.1:8000/mcp/"]
     if len(mcp_urls) == 1:
@@ -329,16 +329,20 @@ class ChatMessageLogger:
         return {}
 
 
-def build_chat_pipeline(generator_config: GeneratorConfig, mcp_urls: Optional[List[str]] = None) -> Tuple[
-    Pipeline, Component, Toolset]:
+def build_chat_pipeline(
+        generator_config: GeneratorConfig,
+        prompt: Optional[str] = pentester_chat_system_prompt,
+        mcp_urls: Optional[List[str]] = None,
+        tools: Toolset = None,
+) -> Tuple[Pipeline, Component, Toolset]:
     """
     Builds a pipeline for a cyber-security chat.
     :return: Pipeline, generator component
     """
 
-    tools = _create_tools(mcp_urls)
+    tools = tools or create_tools(mcp_urls)
     prompt_builder = ChatPromptBuilder(
-        template=[ChatMessage.from_system(pentester_chat_system_prompt),
+        template=[ChatMessage.from_system(prompt),
                   ChatMessage.from_user(user_chat_message_template)],
         variables=["query", "memories"],
         required_variables=["query", "memories"]
@@ -387,14 +391,18 @@ class ChatMessageToListAdapter:
         return {"values": [value]}
 
 
-def build_agent_pipeline(generator_config: GeneratorConfig, mcp_urls: Optional[List[str]] = None) -> Tuple[
-    Pipeline, Component, Toolset]:
+def build_agent_pipeline(
+        generator_config: GeneratorConfig,
+        prompt: Optional[str] = pentester_agent_system_prompt,
+        mcp_urls: Optional[List[str]] = None,
+        tools: Toolset = None,
+) -> Tuple[Pipeline, Component, Toolset]:
     """
     Builds a pipeline for a cyber-security agent.
     :return: Pipeline
     """
 
-    tools = _create_tools(mcp_urls)
+    tools = tools or create_tools(mcp_urls)
     prompt_builder = ChatPromptBuilder(
         template=[ChatMessage.from_user(user_chat_message_template)],
         variables=["query", "memories"],
@@ -407,7 +415,7 @@ def build_agent_pipeline(generator_config: GeneratorConfig, mcp_urls: Optional[L
     assistant = Agent(
         chat_generator=chat_generator,
         tools=tools,
-        system_prompt=pentester_agent_system_prompt,
+        system_prompt=prompt,
         exit_conditions=["text"],
         max_agent_steps=100,
         raise_on_tool_invocation_failure=False

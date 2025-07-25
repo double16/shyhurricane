@@ -18,6 +18,7 @@ Execution Rules:
   - Exploit discovered vulnerabilities.
   - Perform privilege escalation.
   - Search for sensitive data.
+- Query for existing findings at the start using the query_findings tool to leverage known vulnerabilities.
 - Do not attempt brute forcing of login services such as ssh, rdp, etc. If you have known users and passwords, attempting
 combinations of those is permitted.
 - Reverse shells will not work. If a reverse shell is required to complete a task, report the finding (see Output Format)
@@ -46,6 +47,7 @@ Output Format:
     - Fix – remediation or mitigation guidance
     - References – CVEs, OWASP docs, write-ups, etc.
 - Always respond in the same language the user initially used.
+- Save each finding using the save_finding tool.
 """
 
 examples = """
