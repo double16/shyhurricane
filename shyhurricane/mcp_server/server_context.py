@@ -17,6 +17,7 @@ from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.retrieval_pipeline import create_chroma_client, build_document_pipeline, \
     build_website_context_pipeline
 from shyhurricane.task_queue import start_task_worker, TaskPool
+from shyhurricane.utils import unix_command_image
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,7 @@ class ServerContext:
     stores: Dict[str, ChromaDocumentStore]
     chroma_client: chromadb.AsyncClientAPI
     mcp_session_volume: str
+    seclists_volume: str
     disable_elicitation: bool = False
 
     def close(self):
@@ -93,16 +95,38 @@ async def get_server_context() -> ServerContext:
 
         for retry in reversed(range(3)):
             try:
-                subprocess.check_call(["docker", "volume", "inspect", "mcp_session"], stdout=subprocess.DEVNULL)
+                subprocess.check_call(["docker", "volume", "inspect", "mcp_session"],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except subprocess.CalledProcessError:
                 try:
-                    subprocess.check_call(["docker", "volume", "create", "mcp_session"], stdout=subprocess.DEVNULL)
+                    subprocess.check_call(["docker", "volume", "create", "mcp_session"],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                     break
                 except subprocess.CalledProcessError as e:
                     if retry == 0:
                         raise e
                     else:
                         time.sleep(5)
+        try:
+            subprocess.check_call(["docker", "volume", "inspect", "seclists"],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError:
+            try:
+                # make sure the image is available first
+                subprocess.check_call(["docker", "image", "ls", unix_command_image()],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                # try to create the volume
+                subprocess.check_call(["docker", "volume", "create", "seclists"],
+                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                logger.info("Populating seclists volume")
+                subprocess.Popen(
+                    ["docker", "run", "--user=0", "--rm", "-d", "-v", "seclists:/usr/share/seclists",
+                     unix_command_image(),
+                     "git", "clone", "--depth=1", "https://github.com/danielmiessler/SecLists.git",
+                     "/usr/share/seclists"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except subprocess.CalledProcessError as e:
+                logger.error("Failed to create seclists volume", exc_info=e)
 
         _server_context = ServerContext(
             db=db,
@@ -119,6 +143,7 @@ async def get_server_context() -> ServerContext:
             stores=stores,
             chroma_client=chroma_client,
             mcp_session_volume="mcp_session",
+            seclists_volume="seclists",
             disable_elicitation=disable_elicitation,
         )
 

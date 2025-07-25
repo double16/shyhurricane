@@ -11,12 +11,6 @@ ENV FAILURE_CMD="true"
 ADD packages-cargo.sh /tmp
 RUN /tmp/packages-cargo.sh
 
-FROM ubuntu:24.04 AS wordlists
-RUN apt-get update &&\
-    apt-get install -y git
-RUN git clone --depth=1 https://github.com/danielmiessler/SecLists.git /usr/share/seclists
-RUN rm -rf /usr/share/seclists/.git
-
 FROM kalilinux/kali-rolling
 ENV DEBIAN_FRONTEND=noninteractive \
     PIPX_BIN_DIR=/usr/local/bin \
@@ -42,10 +36,10 @@ COPY --chown=0:0 --chmod=755 mitmdump_virtualenv.sh /usr/local/bin/
 
 COPY --from=gobuild /usr/local/bin/* /usr/local/bin/
 COPY --from=cargobuild /usr/local/bin/* /usr/local/bin/
-COPY --from=wordlists /usr/share/seclists /usr/share/seclists/
 
 RUN useradd -u 2000 --home-dir /work --create-home --shell /bin/bash runner
 USER 2000
 WORKDIR /work
 
 VOLUME /work
+VOLUME /usr/share/seclists

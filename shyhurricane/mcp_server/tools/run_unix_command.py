@@ -127,6 +127,7 @@ async def _run_unix_command(ctx: Context, command: str, additional_hosts: Option
                               "--cap-add", "NET_ADMIN",
                               "--cap-add", "NET_RAW",
                               "-v", f"{server_ctx.mcp_session_volume}:/work",
+                              "-v", f"{server_ctx.seclists_volume}:/usr/share/seclists",
                               "--workdir", work_path,
                               ]
             if stdin:
