@@ -375,6 +375,43 @@ class RequestResponseToDocument:
 
 
 @component
+class FilterExistingDocuments:
+    def __init__(self, stores: Dict[str, ChromaDocumentStore]):
+        self.stores = stores
+
+    @component.output_types(documents=List[Document])
+    def run(self, documents: List[Document]):
+        new_documents = []
+        for doc in documents:
+            url = doc.meta.get("url", "")
+            raw_mime = doc.meta.get("content_type", "")
+            timestamp = doc.meta.get("timestamp", "")
+            if not url or not raw_mime or not timestamp:
+                return False
+
+            doc_type = map_mime_to_type(raw_mime)
+            store = self.stores.get(doc_type, None)
+            if store is None:
+                return False
+
+            filters = {
+                "operator": "AND",
+                "conditions": [
+                    {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
+                    {"field": "meta.url", "operator": "==", "value": url},
+                    {"field": "meta.timestamp", "operator": "==", "value": timestamp}
+                ]}
+            logger.debug("Checking for existing document: doc_type %s, filters %s", doc_type, filters)
+            result = store.filter_documents(filters=filters)
+            if len(result) == 0:
+                new_documents.append(doc)
+            else:
+                logger.info("Skipping existing document %s", doc.id)
+
+        return {"documents": new_documents}
+
+
+@component
 class IndexDocTypeDocuments:
     def __init__(
             self,
@@ -634,11 +671,13 @@ def build_doc_type_pipeline(
 
     pipe = Pipeline()
 
-    pipe.add_component("input", GenerateTitleAndDescription(generator_config))
+    pipe.add_component("input", FilterExistingDocuments(stores=stores))
+    pipe.add_component("gen_title", GenerateTitleAndDescription(generator_config))
     pipe.add_component("gen_doc_type", IndexDocTypeDocuments(embedders=embedders, doc_cleaner=doc_cleaner))
     pipe.add_component("store", IngestMultiStore(stores, should_update=lambda d: d.meta.get("type") == "content"))
 
-    pipe.connect("input", "gen_doc_type")
+    pipe.connect("input", "gen_title")
+    pipe.connect("gen_title", "gen_doc_type")
     pipe.connect("gen_doc_type", "store")
 
     return pipe

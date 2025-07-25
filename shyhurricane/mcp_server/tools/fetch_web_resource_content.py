@@ -18,7 +18,8 @@ async def _find_document_by_type_and_id(doc_type: str, doc_id: str) -> Optional[
     if not store:
         logger.info("Not Found document type %s", doc_type)
         return None
-    result = store.filter_documents(filters={"field": "id", "operator": "==", "value": doc_id})
+    filters = {"field": "id", "operator": "==", "value": doc_id}
+    result = await store.filter_documents_async(filters=filters)
     if not result:
         logger.info("Not Found document %s/%s", doc_type, doc_id)
         return None
@@ -78,7 +79,7 @@ async def fetch_web_resource_content(ctx: Context, uri: str) -> Optional[TextRes
     logger.info("Returning %d bytes for %s/%s", len(doc.content), doc_type, doc_id)
     return TextResourceContents(
         uri=AnyUrl(uri),
-        mimeType=doc.meta.get('content_type', 'text/plain'),
+        mimeType=doc.meta.get('content_type', None),
         text=doc.content,
     )
 
@@ -93,6 +94,6 @@ async def web_resource(doc_type: str, doc_id: str) -> Optional[TextResourceConte
         return None
     return TextResourceContents(
         uri=AnyUrl(f"web://{doc_type}/{doc_id}"),
-        mimeType=doc.meta.get('content_type', 'text/plain'),
+        mimeType=doc.meta.get('content_type', None),
         text=doc.content,
     )

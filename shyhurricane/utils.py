@@ -330,6 +330,18 @@ def parse_to_iso8601(timestr: str) -> Tuple[str, float]:
         dt = datetime.datetime.strptime(f"{day} {month} {year} {time_str}", "%d %b %Y %H:%M:%S")
         return dt.replace(tzinfo=tz).isoformat(), dt.timestamp()
 
+    # Try format 3: ISO-8601, e.g. 2025-06-28T22:44:56.069000[Z|±HH:MM]
+    try:
+        # Python’s fromisoformat handles sub-second precision and offsets but not “Z”,
+        # so normalise Z ➜ +00:00 for portability.
+        iso_str = timestr.replace("Z", "+00:00")
+        dt = datetime.datetime.fromisoformat(iso_str)
+        if dt.tzinfo is None:  # assume UTC when no offset provided
+            dt = dt.replace(tzinfo=ZoneInfo("UTC"))
+        return dt.isoformat(), dt.timestamp()
+    except ValueError:
+        pass
+
     raise ValueError(f"Unrecognized time format: {timestr}")
 
 

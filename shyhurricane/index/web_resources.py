@@ -11,6 +11,7 @@ from typing import Tuple
 
 import persistqueue
 from haystack import Pipeline, Document
+from persistqueue import Empty
 
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.index.web_resources_pipeline import build_ingest_pipeline, build_doc_type_pipeline
@@ -59,7 +60,10 @@ def _ingest_worker(db: str):
                 except Exception as e:
                     logger.debug("Shrinking index queue failed: %s", e)
 
-            item = queue.get()
+            try:
+                item = queue.get(block=False, timeout=2)
+            except Empty:
+                continue
             count += 1
             if item is None:
                 queue.ack(item)
@@ -108,7 +112,10 @@ def _doc_type_worker(db: str, generator_config: GeneratorConfig):
                 except Exception as e:
                     logger.debug("Shrinking doc_type queue failed: %s", e)
 
-            item: Document = doc_type_queue.get()
+            try:
+                item: Document = doc_type_queue.get(block=False, timeout=2)
+            except Empty:
+                continue
             count += 1
             if item is None:
                 doc_type_queue.ack(item)
