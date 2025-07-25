@@ -11,10 +11,10 @@ import chromadb
 from chromadb.api.models import AsyncCollection
 from chromadb.errors import NotFoundError
 from haystack import Document, Pipeline
-from mcp import Resource, McpError, ErrorData
+from mcp import Resource, McpError
 from mcp.server.elicitation import AcceptedElicitation, DeclinedElicitation, CancelledElicitation
 from mcp.server.fastmcp import Context
-from mcp.types import ToolAnnotations, INVALID_REQUEST
+from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field, AnyUrl
 
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
@@ -82,13 +82,13 @@ async def _find_web_resources_by_url(ctx: Context, query: str, limit: int = 100)
         docs = []
 
         # Make sure the requested URL is returned
-        logger.info("Searching for web resources at or below %s", url_prefix)
         filters = {
             "operator": "AND",
             "conditions": [
                 {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
                 {"field": "meta.url", "operator": "in", "value": urls_munged}
             ]}
+        logger.info("Searching for web resources at or below %s using filters %s", url_prefix, filters)
         docs.extend(await store.filter_documents_async(filters=filters))
 
         # Find resources below the URL
@@ -98,10 +98,12 @@ async def _find_web_resources_by_url(ctx: Context, query: str, limit: int = 100)
                 {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
                 {"field": "meta.netloc", "operator": "==", "value": url_parsed.netloc}
             ]}
+        logger.info("Searching for web resources at or below %s using filters %s", url_prefix, filters)
         for doc in await store.filter_documents_async(filters=filters):
             if doc.meta.get("url", "").startswith(url_prefix) and doc.meta.get("url") not in urls_munged:
                 docs.append(doc)
 
+        logger.info("Found %d documents", len(docs))
         docs = documents_sort_unique(docs, limit)
 
         if docs:
@@ -122,15 +124,16 @@ async def _find_web_resources_by_netloc(ctx: Context, query: str, limit: int = 1
         docs = []
 
         # Make sure the requested URL is returned
-        logger.info("Searching for web resources for %s", query)
         filters = {
             "operator": "AND",
             "conditions": [
                 {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
                 {"field": "meta.netloc", "operator": "==", "value": query}
             ]}
+        logger.info("Searching for web resources for %s using filters %s", query, filters)
         docs.extend(await store.filter_documents_async(filters=filters))
 
+        logger.info("Found %d documents", len(docs))
         docs = documents_sort_unique(docs, limit)
 
         if docs:
@@ -151,15 +154,16 @@ async def _find_web_resources_by_hostname(ctx: Context, query: str, limit: int =
         docs = []
 
         # Make sure the requested URL is returned
-        logger.info("Searching for web resources for %s", query)
         filters = {
             "operator": "AND",
             "conditions": [
                 {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
                 {"field": "meta.host", "operator": "==", "value": hostname}
             ]}
+        logger.info("Searching for web resources for %s using filters %s", query, filters)
         docs.extend(await store.filter_documents_async(filters=filters))
 
+        logger.info("Found %d documents", len(docs))
         docs = documents_sort_unique(docs, limit)
 
         if docs:
@@ -192,6 +196,34 @@ async def _find_recommended_urls(ctx: Context) -> Optional[List[str]]:
     return results
 
 
+class FindWebResourcesResult(BaseModel):
+    instructions: str = Field(description="Instructions for using the results")
+    query: str = Field(description="Search query used to find web resources")
+    http_methods: Optional[List[str]] = Field(default=None, description="HTTP methods used to find web resources")
+    limit: int = Field(description="Maximum number of results returned")
+    resources: List[HttpResource] = Field(default_factory=list, description="List of web resources found")
+
+
+find_web_resources_instructions = "These resources were found by searching the indexed resources using the given query."
+find_web_resources_instructions_not_found = "No indexed resources were found using the query. Use the spider_website, directory_buster or index_http_url tools to populate the index."
+find_web_resources_instructions_need_target = "Include a target URL, IP address or host name in query."
+
+
+def find_web_resources_result(
+        query: str,
+        http_methods: Optional[List[str]],
+        limit: int,
+        results: List[HttpResource],
+) -> FindWebResourcesResult:
+    return FindWebResourcesResult(
+        instructions=find_web_resources_instructions if results else find_web_resources_instructions_not_found,
+        query=query,
+        http_methods=http_methods,
+        limit=limit,
+        resources=results,
+    )
+
+
 @mcp_instance.tool(
     annotations=ToolAnnotations(
         title="Find Web Resources",
@@ -203,7 +235,7 @@ async def find_web_resources(
         query: str,
         limit: int = 100,
         http_methods: Optional[List[str]] = None,
-) -> List[HttpResource]:
+) -> FindWebResourcesResult:
     """Query indexed resources about a website using natural language and return the URL, request and response bodies,
     request and response headers, HTTP method, MIME type, HTTP status code, technologies found. This tool will
     search using several parameters including response body matching, URL matching, MIME type matching of the response,
@@ -247,11 +279,13 @@ async def find_web_resources(
     website_context_pipeline: Pipeline = server_ctx.website_context_pipeline
 
     if resources_by_url := await _find_web_resources_by_url(ctx, query, limit):
-        return resources_by_url
+        return find_web_resources_result(results=resources_by_url, query=query, http_methods=http_methods, limit=limit)
     if resources_by_netloc := await _find_web_resources_by_netloc(ctx, query, limit):
-        return resources_by_netloc
+        return find_web_resources_result(results=resources_by_netloc, query=query, http_methods=http_methods,
+                                         limit=limit)
     if resources_by_hostname := await _find_web_resources_by_hostname(ctx, query, limit):
-        return resources_by_hostname
+        return find_web_resources_result(results=resources_by_hostname, query=query, http_methods=http_methods,
+                                         limit=limit)
 
     doc_types: list[str] = []
     urls: list[str] = []
@@ -291,20 +325,16 @@ async def find_web_resources(
                     if data.data:
                         logger.info("User provided answer for URL request")
                         await determine_targets(data.data)
-                        if not urls:
-                            return []
-                    return []
-                case DeclinedElicitation():
-                    return []
-                case CancelledElicitation():
-                    return []
-        except McpError as e:
+        except McpError:
             logger.info("elicit not supported, returning")
         finally:
             if not urls:
-                # TODO: return instructions asking for the target
-                raise McpError(ErrorData(code=INVALID_REQUEST,
-                                         message="Specify a target URL, IP address or host name for searching"))
+                return FindWebResourcesResult(
+                    instructions=find_web_resources_instructions_need_target,
+                    query=query,
+                    http_methods=http_methods,
+                    limit=limit,
+                )
 
     filter_netloc = [parsed.netloc for parsed in map(lambda u: urlparse_ext(u), urls)]
 
@@ -333,11 +363,13 @@ async def find_web_resources(
                 case AcceptedElicitation():
                     for url in missing_urls:
                         await spider_website(ctx, url)
-                    return []
-                case DeclinedElicitation():
-                    return []
-                case CancelledElicitation():
-                    return []
+                case DeclinedElicitation(), CancelledElicitation():
+                    return FindWebResourcesResult(
+                        instructions=find_web_resources_instructions_not_found,
+                        query=query,
+                        http_methods=http_methods,
+                        limit=limit,
+                    )
         except McpError as e:
             await ctx.info(f"Spidering {', '.join(missing_urls)}")
             logger.warning("elicit not supported, starting spider")
@@ -369,14 +401,15 @@ async def find_web_resources(
 
     documents = documents_sort_unique(res.get("combine", {}).get("documents", []), limit)
 
-    return _documents_to_http_resources(documents)
+    return find_web_resources_result(results=_documents_to_http_resources(documents), query=query,
+                                     http_methods=http_methods, limit=limit)
 
 
 class SpiderConfirmation(BaseModel):
     confirm: bool = Field(description="Confirm spider?", default=True)
 
 
-spider_results_instructions_found = """These resources were found by navigating a web server using links in the returned content."""
+spider_results_instructions_found = "These resources were found by navigating a web server using links in the returned content."
 spider_results_instructions_has_more = " This list isn't all of the results. Use the find_web_resources and find_urls tools to get more."
 spider_results_instructions_not_found = "No resources were found by spidering the site. It may be there is no web server at the requested address and port."
 
@@ -492,7 +525,7 @@ async def spider_website(
     url = url.strip()
     if await is_spider_time_recent(server_ctx, url):
         logger.info(f"{url} has been recently spidered, returning saved results")
-        resources = await find_web_resources(ctx, url, 100)
+        resources = (await find_web_resources(ctx, url, 100)).resources
         return SpiderResults(
             url=url,
             instructions=spider_instructions(resources, len(resources) >= 100),

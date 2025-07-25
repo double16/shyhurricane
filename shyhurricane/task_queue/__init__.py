@@ -88,4 +88,5 @@ def _task_router(db: str,
                 logger.error(f"Error running {item.__class__.__name__} in PID {os.getpid()}", exc_info=e)
 
     except KeyboardInterrupt:
-        return
+        pass
+    logger.info(f"Finished task router in PID {os.getpid()}")

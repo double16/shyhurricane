@@ -83,7 +83,8 @@ def _ingest_worker(db: str):
                 logger.error(f"Error in ingestion pipeline for {url} {len(item)} bytes, {e}:\n{item[0:1024]} ...",
                              exc_info=e)
     except KeyboardInterrupt:
-        return
+        pass
+    logger.info(f"Index worker finished in PID {os.getpid()}")
 
 
 def _doc_type_worker(db: str, generator_config: GeneratorConfig):
@@ -121,7 +122,8 @@ def _doc_type_worker(db: str, generator_config: GeneratorConfig):
                 url = item.meta.get("url", "???")
                 logger.error(f"Error in document specific pipeline for {url}, {item.id}, {e}", exc_info=e)
     except KeyboardInterrupt:
-        return
+        pass
+    logger.info(f"Document specific index worker finished in PID {os.getpid()}")
 
 
 def start_ingest_worker(db: str, generator_config: GeneratorConfig, pool_size: int = 1) -> Tuple[
