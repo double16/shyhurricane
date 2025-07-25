@@ -35,7 +35,7 @@ def parse_target_info(target: str) -> TargetInfo:
     host, port = query_to_netloc(target)
     if host and filter_hosts_and_addresses([host]):
         return TargetInfo(
-            url=target,
+            url=None,
             netloc=f"{host}:{port}" if port else None,
             host=host,
             port=port,

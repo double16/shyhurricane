@@ -131,6 +131,7 @@ async def query_findings(ctx: Context, target: str, limit: int = 100) -> QueryFi
                 {"field": "meta.version", "operator": "==", "value": FINDING_VERSION},
                 {"field": "meta.url", "operator": "in", "value": urls_munged}
             ]}
+        logger.info("Query findings by url %s", filters)
         docs.extend(await store.filter_documents_async(filters=filters))
     elif target_info.netloc:
         logger.info("Searching for findings for %s", target_info.netloc)
@@ -140,6 +141,7 @@ async def query_findings(ctx: Context, target: str, limit: int = 100) -> QueryFi
                 {"field": "meta.version", "operator": "==", "value": FINDING_VERSION},
                 {"field": "meta.netloc", "operator": "==", "value": target_info.netloc}
             ]}
+        logger.info("Query findings by netloc %s", filters)
         docs.extend(await store.filter_documents_async(filters=filters))
     elif target_info.host:
         logger.info("Searching for findings for %s", target_info.host)
@@ -149,6 +151,7 @@ async def query_findings(ctx: Context, target: str, limit: int = 100) -> QueryFi
                 {"field": "meta.version", "operator": "==", "value": FINDING_VERSION},
                 {"field": "meta.host", "operator": "==", "value": target_info.host}
             ]}
+        logger.info("Query findings by host %s", filters)
         docs.extend(await store.filter_documents_async(filters=filters))
     elif target_info.domain:
         logger.info("Searching for findings for %s", target_info.domain)
@@ -158,6 +161,7 @@ async def query_findings(ctx: Context, target: str, limit: int = 100) -> QueryFi
                 {"field": "meta.version", "operator": "==", "value": FINDING_VERSION},
                 {"field": "meta.domain", "operator": "==", "value": target_info.domain}
             ]}
+        logger.info("Query findings by domain %s", filters)
         docs.extend(await store.filter_documents_async(filters=filters))
 
     findings = []
