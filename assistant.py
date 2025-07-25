@@ -112,10 +112,12 @@ def main():
 
     tools = create_tools(args.mcp_url)
     prompt_chooser_tool = None
+    prompt_titles = []
     for tool in tools:
         if tool.name == "prompt_chooser":
             prompt_chooser_tool = tool
-            break
+        if tool.name == "prompt_list":
+            prompt_titles = json.loads(tool.invoke()).get("structuredContent", {}).get("titles", [])
     if not prompt_chooser_tool:
         console.print("[red]No prompt_chooser tool found[/red]")
         sys.exit(1)
@@ -146,8 +148,9 @@ def main():
                          )
     console.print(f"""
 This is a penetration test assistant in {args.mode} mode using {generator_config.describe()}. You can say things like:
-- Conduct a penetration test on 192.168.1.1
+- Solve the CTF challenge on 192.168.1.1
 - Look for vulnerabilities on http://192.168.1.1
+- Available prompts (chosen automatically): {", ".join(prompt_titles)}
 """)
     console.print("🛡️  Ready. Commands: /show • /exit\n")
 
@@ -168,6 +171,9 @@ This is a penetration test assistant in {args.mode} mode using {generator_config
 - Ollama Model `{generator_config.ollama_model}`
 - Gemini Model `{generator_config.gemini_model}`
 - OpenAI Model `{generator_config.openai_model}`
+
+## Prompts
+{"\n".join(['- ' + title for title in prompt_titles])}
 
 ## Tools
 {"\n".join(['- **' + tool.name + '(' + ', '.join(tool.parameters.keys()) + ')**: ' + tool.description for tool in tools])}

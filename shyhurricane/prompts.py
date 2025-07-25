@@ -38,6 +38,7 @@ You must follow a continuous, iterative penetration testing lifecycle:
 output_format = """
 Output Format:
 - Output results in concise Markdown.
+- In additional to output, it is very important to save each finding using the save_finding tool.
 - For each finding, include:
     - Title – concise & descriptive
     - Issue summary – what’s wrong and why it matters
@@ -47,7 +48,6 @@ Output Format:
     - Fix – remediation or mitigation guidance
     - References – CVEs, OWASP docs, write-ups, etc.
 - Always respond in the same language the user initially used.
-- Save each finding using the save_finding tool.
 """
 
 examples = """

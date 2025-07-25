@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import List
+from typing import List, Optional
 
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
@@ -15,7 +15,7 @@ from shyhurricane.utils import munge_urls
 
 logger = logging.getLogger(__name__)
 
-finding_target_invalid_instructions = "Target must be a valid URL, host name, IP address, host:port or ip:port"
+finding_target_invalid_instructions = "Target must be a valid URL, host name, IP address, host:port or ip:port. Retry with a corrected target."
 finding_not_found_instructions = "No findings found for the target. Expand the target or hack more!"
 finding_instructions = "These findings were found for the target. They provide a good starting place to continue testing."
 
@@ -23,7 +23,7 @@ finding_instructions = "These findings were found for the target. They provide a
 class SaveFindingResult(BaseModel):
     instructions: str = Field(description="Instructions for processing the result")
     target: str = Field(description="Target of the finding")
-    title: str = Field(description="Title of the finding")
+    title: Optional[str] = Field(description="Title of the finding")
 
 
 @mcp_instance.tool(
@@ -34,12 +34,12 @@ class SaveFindingResult(BaseModel):
         idempotentHint=False,
         openWorldHint=False),
 )
-async def save_finding(ctx: Context, target: str, markdown: str, title: str) -> SaveFindingResult:
+async def save_finding(ctx: Context, target: str, markdown: str, title: Optional[str]) -> SaveFindingResult:
     """
     Saves a finding associated with the given target. The target must be a URL, host name, IP address, or domain name.
     The target may include a port number at the end separated with a colon, such as "target.local:8080".
 
-    Invoke this tool when the user finds a vulnerability or working exploit.
+    Invoke this tool for all findings.
 
     The title is a concise description of the finding.
 
