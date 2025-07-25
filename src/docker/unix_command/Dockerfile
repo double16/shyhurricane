@@ -13,7 +13,7 @@ RUN /tmp/packages-cargo.sh
 
 FROM ubuntu:24.04 AS wordlists
 RUN apt-get update &&\
-    apt-get install -y git pipx
+    apt-get install -y git
 RUN git clone --depth=1 https://github.com/danielmiessler/SecLists.git /usr/share/seclists
 RUN rm -rf /usr/share/seclists/.git
 

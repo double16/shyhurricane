@@ -38,7 +38,7 @@ services:
       - .:/src:ro
     environment:
       DOCKER_HOST: "tcp://dind:2375"
-    entrypoint: [ "sh", "-c", "sleep 20 && cd /src && (docker volume create mcp_session || true) && docker build -t ghcr.io/double16/shyhurricane:latest src/docker/unix_command && docker system prune -f" ]
+    entrypoint: [ "sh", "-c", "sleep 20 && cd /src && (docker volume create mcp_session || true) && docker build -t ghcr.io/double16/shyhurricane:main src/docker/unix_command && docker system prune -f" ]
 
   mcp:
     build:

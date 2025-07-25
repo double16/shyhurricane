@@ -450,4 +450,4 @@ def munge_urls(query) -> Tuple[Optional[str], Optional[List[int]]]:
 
 
 def unix_command_image() -> str:
-    return "ghcr.io/double16/shyhurricane:latest"
+    return "ghcr.io/double16/shyhurricane:main"

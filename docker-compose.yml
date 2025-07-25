@@ -31,7 +31,7 @@ services:
       - dind-storage:/var/lib/docker
 
   mcp:
-    image: ghcr.io/double16/shyhurricane:latest
+    image: ghcr.io/double16/shyhurricane:main
     depends_on:
       - dind
       - unix_command_builder

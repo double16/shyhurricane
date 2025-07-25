@@ -3,11 +3,12 @@
 Cybersecurity offense assistant.
 """
 import argparse
+import datetime
 import logging
 import os
 import sys
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Callable
 
 from haystack.core.errors import PipelineRuntimeError
 from haystack.dataclasses import ChatMessage, StreamingChunk
@@ -39,9 +40,11 @@ def configure_logging(level=logging.CRITICAL):
         logging.getLogger(name).setLevel(level)
 
 
-def streaming_chunk_callback(verbose: bool = False):
+def streaming_chunk_callback(verbose: bool = False, chat_logger: Callable[[str], None] = None):
     def callback(chunk: StreamingChunk):
         console.print(chunk.content, end="")
+        if chat_logger:
+            chat_logger(chunk.content)
         if verbose:
             if chunk.tool_calls:
                 for tool_call in chunk.tool_calls:
@@ -53,15 +56,22 @@ def streaming_chunk_callback(verbose: bool = False):
                             f"{chunk.tool_call_result.origin.tool_name}({chunk.tool_call_result.origin.arguments or ""})")
                     console.print(f"{chunk.tool_call_result.result}")
             if chunk.finish_reason:
-                console.print(f"\n🛑 {chunk.finish_reason}")
+                msg = f"\n🛑 {chunk.finish_reason}"
+                console.print(msg)
+                if chat_logger:
+                    chat_logger(msg)
         else:
             if chunk.finish_reason:
                 console.print("\n")
+                if chat_logger:
+                    chat_logger("\n")
 
     return callback
 
 
 def main():
+    chat_history_default = datetime.date.today().isoformat() + "_history.md"
+
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--mode",
@@ -74,7 +84,7 @@ def main():
     ap.add_argument("--mcp-url", nargs="+", required=False,
                     help="URL for the MCP server, i.e. http://127.0.0.1:8000/mcp/")
     ap.add_argument("--stream", action="store_true", help="Stream messages, always on for agent mode")
-    ap.add_argument("--history", default="chat_history.md")
+    ap.add_argument("--history", default=chat_history_default)
     args = ap.parse_args()
 
     if args.verbose:
@@ -90,8 +100,13 @@ def main():
     else:
         pipe, generator, tools = build_chat_pipeline(generator_config, args.mcp_url)
 
+    def chat_logger(line):
+        Path(args.history).touch(mode=0o644, exist_ok=True)
+        with open(args.history, "a", encoding="utf-8") as f:
+            f.write(line)
+
     if args.stream and generator is not None:
-        generator.streaming_callback = streaming_chunk_callback(verbose=bool(args.verbose))
+        generator.streaming_callback = streaming_chunk_callback(verbose=bool(args.verbose), chat_logger=chat_logger)
 
     prompt_history_path = Path(Path.home(), ".local", "state", "shyhurricane", "prompt_history")
     os.makedirs(prompt_history_path.parent, mode=0o755, exist_ok=True)
@@ -105,12 +120,7 @@ This is a penetration test assistant in {args.mode} mode using {generator_config
 """)
     console.print("🛡️  Ready. Commands: /show • /exit\n")
 
-    def chat_logger(q, a):
-        Path(args.history).touch(mode=0o644, exist_ok=True)
-        with open(args.history, "a", encoding="utf-8") as f:
-            f.write(f"# Q: {q}\n\n{a}\n\n---\n\n")
-
-    chat_logger("Assistant Info", f"{args.mode} mode using {generator_config.describe()}")
+    chat_logger(f"Assistant Info\n\n{args.mode} mode using {generator_config.describe()}")
 
     try:
         while True:
@@ -132,6 +142,8 @@ This is a penetration test assistant in {args.mode} mode using {generator_config
 {"\n".join(['- **' + tool.name + '(' + ', '.join(tool.parameters.keys()) + ')**: ' + tool.description for tool in tools])}
 """))
                     continue
+
+                chat_logger(f"\n\n---\n\n# {datetime.datetime.now().isoformat()} Q: {user_in}\n\n")
 
                 console.print("🤖 ", end="")
 
@@ -169,7 +181,7 @@ This is a penetration test assistant in {args.mode} mode using {generator_config
                 console.print("")
                 if not args.stream:
                     console.print(Markdown(ans_md))
-                chat_logger(user_in, ans_md)
+                chat_logger(ans_md)
             except (KeyboardInterrupt, EOFError):
                 break
             # except Exception as e:

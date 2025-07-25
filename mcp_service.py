@@ -20,6 +20,7 @@ import shyhurricane.mcp_server.tools.find_wordlists
 import shyhurricane.mcp_server.tools.findings
 import shyhurricane.mcp_server.tools.indexers
 import shyhurricane.mcp_server.tools.port_scan
+import shyhurricane.mcp_server.tools.prompt_chooser
 import shyhurricane.mcp_server.tools.register_hostname_address
 import shyhurricane.mcp_server.tools.run_unix_command
 
