@@ -47,6 +47,10 @@ def configure_logging(level=logging.CRITICAL):
         "fastmcp",
         "streamable_http",
         "mcp.transport.streamable_http",
+        "haystack_integrations.components.generators.gemini",  # "Using Google Gemini chat …"
+        "google.genai",                                 # AFC lines live here
+        "google_genai.models",
+        "shyhurricane",
     ]:
         logging.getLogger(name).setLevel(level)
 
