@@ -26,7 +26,7 @@ jobs:
           - 11434:11434
 
     env:
-      OLLAMA_HOST: ollama:11434
+      OLLAMA_HOST: localhost:11434
 
     strategy:
       matrix:
