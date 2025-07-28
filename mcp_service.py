@@ -23,6 +23,7 @@ import shyhurricane.mcp_server.tools.port_scan
 import shyhurricane.mcp_server.tools.prompt_chooser
 import shyhurricane.mcp_server.tools.register_hostname_address
 import shyhurricane.mcp_server.tools.run_unix_command
+import shyhurricane.mcp_server.tools.status
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ def main():
     ap.add_argument("--index-pool-size", type=int, default=1, help="The number of processes in the indexing pool")
     add_generator_args(ap)
     args = ap.parse_args()
-    set_generator_config(GeneratorConfig.from_args(args))
+    set_generator_config(GeneratorConfig.from_args(args).apply_summarizing_default().check())
     set_server_config(ServerConfig(
         task_pool_size=args.task_pool_size,
         ingest_pool_size=args.index_pool_size,

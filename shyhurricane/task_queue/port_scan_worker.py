@@ -5,7 +5,7 @@ import tempfile
 import time
 from datetime import datetime
 from multiprocessing import Queue
-from typing import Optional
+from typing import Optional, Set
 from xml.etree import ElementTree as ET
 
 from haystack import Document
@@ -28,8 +28,9 @@ class PortScanContext:
     def __init__(self, db: str):
         self.nmap_store = create_chrome_document_store(db=db, collection_name="nmap")
         self.nmap_embedder = SentenceTransformersDocumentEmbedder(
-            model=doc_type_to_model.get("nmap"),
+            model=doc_type_to_model.get("nmap").model_name,
             batch_size=1,
+            normalize_embeddings=True,
             progress_bar=False)
 
         self.portscan_store = create_chrome_document_store(db=db, collection_name="portscan")
@@ -37,8 +38,9 @@ class PortScanContext:
             self.portscan_embedder = self.nmap_embedder
         else:
             self.portscan_embedder = SentenceTransformersDocumentEmbedder(
-                model=doc_type_to_model.get("portscan"),
+                model=doc_type_to_model.get("portscan").model_name,
                 batch_size=1,
+                normalize_embeddings=True,
                 progress_bar=False)
 
     def warm_up(self):
@@ -64,9 +66,9 @@ def port_scan_worker(ctx: PortScanContext, item: PortScanQueueItem, result_queue
             item_100.ports = list(map(str, bitfield_to_ports(top_ports_100)))
             logger.info("Performing an initial port scan with %d ports", top_ports_100.count())
             _do_port_scan(result_queue, item_100, nmap_store, nmap_embedder, portscan_store, portscan_embedder,
-                          True)
+                          True, item.retry)
 
-    _do_port_scan(result_queue, item, nmap_store, nmap_embedder, portscan_store, portscan_embedder, False)
+    _do_port_scan(result_queue, item, nmap_store, nmap_embedder, portscan_store, portscan_embedder, False, item.retry)
 
 
 def _do_port_scan(
@@ -76,12 +78,14 @@ def _do_port_scan(
         nmap_embedder: SentenceTransformersDocumentEmbedder,
         portscan_store: ChromaDocumentStore,
         portscan_embedder: SentenceTransformersDocumentEmbedder,
-        has_more: bool = False
+        has_more: bool = False,
+        retry: bool = False,
 ) -> None:
-    if stored_results := get_stored_port_scan_results(item, nmap_store, portscan_store):
-        stored_results.has_more = has_more
-        result_queue.put_nowait(stored_results)
-        return None
+    if not retry:
+        if stored_results := get_stored_port_scan_results(item, nmap_store, portscan_store):
+            stored_results.has_more = has_more
+            result_queue.put_nowait(stored_results)
+            return None
 
     if item.ports:
         ports_option = f"-p{','.join(item.ports)}"
@@ -164,24 +168,7 @@ def _do_port_scan(
                     if hostname_el.tag == 'hostname':
                         hostnames.append(hostname_el.attrib['name'])
 
-        for addr in addrs:
-            host_nmap_doc = Document(
-                content=ET.tostring(host_el, encoding="unicode"),
-                meta={
-                    "version": NMAP_DOCUMENT_VERSION,
-                    "targets": addr,
-                    "ports": ','.join(item.ports),
-                    "timestamp": timestamp,
-                    "timestamp_float": runtime_ts,
-                    "runtime_ts": runtime_ts,
-                    "content_type": "text/xml",
-                    "status_code": 200,
-                    # "technologies": technologies_str,
-                }
-            )
-            nmap_store.write_documents(nmap_embedder.run(documents=[host_nmap_doc])["documents"],
-                                       policy=DuplicatePolicy.OVERWRITE)
-
+        ports_found: Set[int] = set()
         for el in host_el:
             if el.tag == 'ports':
                 for port_el in el:
@@ -191,6 +178,7 @@ def _do_port_scan(
                     service_notes = []
                     state = 'unknown'
                     port = int(port_el.attrib.get('portid', 0))
+                    ports_found.add(port)
                     for port_detail_el in port_el:
                         if port_detail_el.tag == 'service':
                             service_name = port_detail_el.attrib.get('name', None)
@@ -228,6 +216,26 @@ def _do_port_scan(
                         portscan_store.write_documents(portscan_embedder.run(documents=[portscan_doc])["documents"],
                                                        policy=DuplicatePolicy.OVERWRITE)
 
+        if ports_found:
+            # only add the nmap doc if ports were found in case it's a temporary failure
+            for addr in addrs:
+                host_nmap_doc = Document(
+                    content=ET.tostring(host_el, encoding="unicode"),
+                    meta={
+                        "version": NMAP_DOCUMENT_VERSION,
+                        "targets": addr,
+                        "ports": ','.join(item.ports),
+                        "timestamp": timestamp,
+                        "timestamp_float": runtime_ts,
+                        "runtime_ts": runtime_ts,
+                        "content_type": "text/xml",
+                        "status_code": 200,
+                        # "technologies": technologies_str,
+                    }
+                )
+                nmap_store.write_documents(nmap_embedder.run(documents=[host_nmap_doc])["documents"],
+                                           policy=DuplicatePolicy.OVERWRITE)
+
     logger.info("Queuing results")
     result_queue.put(PortScanResults(
         runtime_ts=runtime_ts,
@@ -262,6 +270,7 @@ def get_stored_port_scan_results(
     if wanted_ports.count() == 1 and wanted_ports[0]:
         wanted_ports.setall(False)
 
+    results = []
     for doc in nmap_existing:
         if doc.meta.get("runtime_ts", 0) < runtime_expired_ts:
             continue
@@ -270,12 +279,19 @@ def get_stored_port_scan_results(
             continue
         if "ERROR: Script execution failed" in doc.content:
             continue
-        return PortScanResults(
+        results.append(PortScanResults(
             runtime_ts=doc.meta.get("runtime_ts", 0),
-            results=existing_results,  # TODO: populate
+            results=existing_results,
             targets=item.targets,
             ports=item.ports,
             nmap_xml=doc.content,
             has_more=False,
-        )
-    return None
+        ))
+    if not results:
+        return None
+
+    # return the most recent
+    results.sort(key=lambda r: r.runtime_ts, reverse=True)
+    result = results[0]
+    # TODO: populate result.results from port_scan_store
+    return result

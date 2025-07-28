@@ -16,8 +16,56 @@ env:
   latest_tag: latest
 
 jobs:
+  test:
+    runs-on: ubuntu-24.04
+
+    services:
+      ollama:
+        image: alpine/ollama
+        ports:
+          - 11434:11434
+
+    env:
+      OLLAMA_HOST: ollama:11434
+
+    strategy:
+      matrix:
+        python-version: [ "3.12" ]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: Lint with Ruff
+        run: |
+          pip install ruff
+          ruff check --output-format=github .
+        continue-on-error: true
+
+      - name: test
+        run: |
+          pip install -r requirements.txt
+          pip install -r dev_requirements.txt
+          RESULT_DIR="test-results/${{ matrix.python-version }}"
+          mkdir -p "${RESULT_DIR}"
+          PYTHONPATH=$(pwd) pytest tests --junitxml=${RESULT_DIR}/test-results.xml --cov=shyhurricane --cov-branch --cov-report=xml:${RESULT_DIR}/coverage.xml --cov-report=html:${RESULT_DIR}/htmlcov --cov-report=term-missing
+
+      - name: Upload pytest test results
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results-${{ matrix.python-version }}
+          path: |
+            test-results/${{ matrix.python-version }}
+        # Use always() to always run this step to publish test results when there are test failures
+        if: ${{ always() }}
+
   mcp-image:
     runs-on: ubuntu-24.04
+    needs: [ test ]
     permissions:
       contents: read
       packages: write

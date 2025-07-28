@@ -88,12 +88,6 @@ def main():
     chat_history_default = datetime.date.today().isoformat() + "_history.md"
 
     ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--mode",
-        choices=["chat", "agent"],
-        default="chat",
-        help="AI mode to use: chat or agent"
-    )
     ap.add_argument("--verbose", "-v", action="store_true", help="Verbose mode")
     add_generator_args(ap)
     ap.add_argument("--mcp-url", nargs="+", required=False,
@@ -107,7 +101,7 @@ def main():
     else:
         configure_logging(logging.CRITICAL)
 
-    generator_config = GeneratorConfig.from_args(args)
+    generator_config = GeneratorConfig.from_args(args).apply_reasoning_default().check()
     set_generator_config(generator_config)
 
     tools = create_tools(args.mcp_url)
@@ -128,7 +122,8 @@ def main():
             f.write(line)
 
     def create_pipeline(system_prompt: str, tools: Toolset) -> Tuple[Pipeline, Component, Toolset]:
-        if args.mode == "agent":
+        system_prompt_lower = system_prompt.lower()
+        if "autonomous" in system_prompt_lower or "automated" in system_prompt_lower:
             args.stream = True
             pipe, generator, _ = build_agent_pipeline(generator_config, system_prompt, args.mcp_url, tools)
         else:
@@ -147,14 +142,14 @@ def main():
                          # completer=WordCompleter(["/set","/show","/reload","/exit","/quit"], ignore_case=True)
                          )
     console.print(f"""
-This is a penetration test assistant in {args.mode} mode using {generator_config.describe()}. You can say things like:
+This is a penetration test assistant using {generator_config.describe()}. You can say things like:
 - Solve the CTF challenge on 192.168.1.1
 - Look for vulnerabilities on http://192.168.1.1
 - Available prompts (chosen automatically): {", ".join(prompt_titles)}
 """)
     console.print("🛡️  Ready. Commands: /show • /exit\n")
 
-    chat_logger(f"Assistant Info\n\n{args.mode} mode using {generator_config.describe()}")
+    chat_logger(f"Assistant Info\n\n{generator_config.describe()}")
 
     try:
         while True:
@@ -167,7 +162,7 @@ This is a penetration test assistant in {args.mode} mode using {generator_config
                 if user_in.startswith("/show"):
                     console.print(Markdown(f"""
 ## Config
-- Ollama URL `{generator_config.ollama_url}`
+- Ollama Host `{generator_config.ollama_host}`
 - Ollama Model `{generator_config.ollama_model}`
 - Gemini Model `{generator_config.gemini_model}`
 - OpenAI Model `{generator_config.openai_model}`

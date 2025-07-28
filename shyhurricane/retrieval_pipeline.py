@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-import json
 import logging
 import os
 import re
-from json import JSONDecodeError
-from typing import Dict, List, Optional, Any, Tuple
+from typing import Dict, List, Optional, Any, Tuple, Iterable
 
 import chromadb
 from chromadb import AsyncClientAPI
@@ -23,10 +21,8 @@ from haystack_experimental.components.writers import ChatMessageWriter
 from haystack_integrations.components.retrievers.chroma import ChromaEmbeddingRetriever
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 from haystack_integrations.tools.mcp import StreamableHttpServerInfo, MCPToolset
-from mcp import Tool
-from more_itertools import first
 
-from shyhurricane.doc_type_model_map import get_model_for_doc_type, doc_type_to_model
+from shyhurricane.doc_type_model_map import doc_type_to_model, get_chroma_collections
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.prompts import pentester_agent_system_prompt, pentester_chat_system_prompt
 from shyhurricane.utils import documents_sort_unique
@@ -56,7 +52,7 @@ async def list_collections(db: str) -> List[str]:
 
 @component
 class CombineDocs:
-    def __init__(self, collections: list[str]) -> None:
+    def __init__(self, collections: Iterable[str]) -> None:
         input_types = {k: List[Document] for k in collections}
         component.set_input_types(self, **input_types)
 
@@ -103,19 +99,43 @@ class Query:
         return {"text": text, "filters": filters or {}, "max_results": max_results}
 
 
+query_expander_structure = """
+Structure:
+Output the expanded queries as a list of strings deliminated with lines of "----". Only output the list. Do not include any other text except the list of expanded queries. Exclude expanded queries that are only whitespace.
+"""
+
 query_expander_natural_language = """
 You are a cybersecurity search assistant that processes users queries.
-You expand a given query into at most {{ number }} queries that are similar in meaning. The expanded query should not be less specific.
-Never include the URL, hostname or IP address in the expanded queries.
+You expand a given query into exactly {{ number }} queries that are similar in meaning. The expanded query should not be less specific.
+Never include the URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
 
-Structure:
-Output the expanded queries as a valid JSON list of strings. Only output the list. Do not include any other text except the JSON list of expanded queries.
+""" + query_expander_structure + """
+
 Examples:
-1. Example Query 1: "cross-site scripting mitigation"  
-   Example Expanded Queries: ["XSS prevention techniques", "sanitizing user input", "reflected XSS protection", "stored XSS defense"]
+1. Example Query 1: "cross-site scripting mitigation"
+   Example Expanded Queries:
+   ----
+   XSS prevention techniques
+   ----
+   sanitizing user input
+   ----
+   reflected XSS protection
+   ----
+   stored XSS defense
+   ----
 
 2. Example Query 2: "SQL injection exploitation"  
-   Example Expanded Queries: ["union-based SQL injection", "blind SQLi attack", "SQLMap usage examples", "database extraction via SQLi"]          
+   Example Expanded Queries:
+   ----
+   union-based SQL injection
+   ----
+   blind SQLi attack
+   ----
+   SQLMap usage examples
+   ----
+   database extraction via SQLi
+   ----
+
 
 Your Task:
 Query: "{{query}}"
@@ -126,16 +146,36 @@ Expanded Queries:
 query_expander_javascript = """
 You are a cybersecurity search assistant that processes users queries. You are specialized in JavaScript
 programming, securing coding in JavaScript, and obfuscation techniques.
-You expand a given query into at most {{ number }} queries that are example JavaScript snippets that are an interpretation of the given query. Never include console.log(). Never include the URL, hostname or IP address in the expanded queries.
+You expand a given query into exactly {{ number }} queries that are example JavaScript snippets that are an interpretation of the given query. The expanded queries must only be JavaScript code. Never include console.log(). Never include the URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
 
-Structure:
-Output the expanded queries as a valid JSON list of strings. Only output the list. The values must only be JavaScript code. Do not include any other text except the JSON list of expanded queries. Exclude expanded queries that are only whitespace.
+""" + query_expander_structure + """
 
 Examples:
-1. Example Query 1: "What javascript libraries call eval()"
-   Example Expanded Queries: ["Object.prototype.eval = function() {\n return eval(this);\n};", "window.eval = function(code) {\n return eval(code);\n};", "Function.prototype.customEval = function(code) {\n return eval(code);\n}"]
-1. Example Query 1: "Find Javascript libraries on http://target.local"
-   Example Expanded Queries: ["fetch('/libraries').then(res => res.json()).then(data => data.map(lib => lib.name))","axios.get('/libraries').then(response => response.data.map(lib => lib.name))","new XMLHttpRequest().open('GET', '/libraries', true).send(), new Promise((resolve) => { resolve(xhr.responseXML.getElementsByTagName('library').textContent.split(', ')); })","$.ajax({url: '/libraries', success: function(data){ $.each($(data).find('.library'), function(index, lib){ console.log($(lib).text()); }); }})","fetch('/libraries').then(res => res.text()).then(html => Array.from(new DOMParser().parseFromString(html, 'text/html').getElementsByTagName('a')).map(a => a.textContent))"]
+1. Example Query 1: "What javascript libraries call eval()" when asked for 4 expanded queries
+   Example Expanded Queries:
+   ----
+   Object.prototype.eval = function() {\\n return eval(this);\\n};
+   ----
+   window.eval = function(code) {\\n return eval(code);\\n};
+   ----
+   Function.prototype.customEval = function(code) {\\n return eval(code);\\n}
+   ----
+   Function('return eval(\\" + JSON.stringify('some code') + \\")')
+   ----
+   
+1. Example Query 1: "Find Javascript libraries on http://target.local" when asked for 5 expanded queries
+   Example Expanded Queries: 
+   ----
+   fetch('/libraries').then(res => res.json()).then(data => data.map(lib => lib.name))
+   ----
+   axios.get('/libraries').then(response => response.data.map(lib => lib.name))
+   ----
+   new XMLHttpRequest().open('GET', '/libraries', true).send(), new Promise((resolve) => { resolve(xhr.responseXML.getElementsByTagName('library').textContent.split(', ')); })
+   ----
+   $.ajax({url: '/libraries', success: function(data){ $.each($(data).find('.library'), function(index, lib){ console.log($(lib).text()); }); }})
+   ----
+   fetch('/libraries').then(res => res.text()).then(html => Array.from(new DOMParser().parseFromString(html, 'text/html').getElementsByTagName('a')).map(a => a.textContent))
+   ----
 
 Your Task:
 Query: "{{query}}"
@@ -146,14 +186,20 @@ Expanded Queries:
 query_expander_css = """
 You are a cybersecurity search assistant that processes users queries. You are specialized in style sheet
 development and securing CSS.
-You expand a given query into at most {{ number }} queries that are example CSS snippets that are an interpretation of the given query. Never include the URL, hostname or IP address in the expanded queries.
+You expand a given query into exactly {{ number }} queries that are example CSS snippets that are an interpretation of the given query. The expanded queries must only be CSS code. Never include the URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
 
-Structure:
-Output the expanded queries as a valid JSON list of strings. Only output the list. The values must only be CSS code. Do not include any other text except the JSON list of expanded queries. Exclude expanded queries that are only whitespace.
+""" + query_expander_structure + """
 
 Examples:
-1. Example Query 1: "Find CSS vulns"
-   Example Expanded Queries: ["x-allow-cross-origin-resource-sharing: *;\n@font-face { src: url(‘http://attacker.com/malware.ttf’); }\ninput[type=‘text’] { content: url(‘http://attacker.com/hack.jpg’); }"]
+1. Example Query 1: "Find CSS vulns" when asked for 3 expanded queries
+   Example Expanded Queries:
+   ----
+   x-allow-cross-origin-resource-sharing: *;
+   ----
+   @font-face { src: url(‘http://attacker.com/malware.ttf’); }
+   ----
+   input[type=‘text’] { content: url(‘http://attacker.com/hack.jpg’); }
+   ----
 
 Your Task:
 Query: "{{query}}"
@@ -164,14 +210,36 @@ Expanded Queries:
 query_expander_html = """
 You are a cybersecurity search assistant that processes users queries. You are specialized in HTML
 development and securing HTML.
-You expand a given query into at most {{ number }} queries that are example HTML snippets that are an interpretation of the given query. Never include the URL, hostname or IP address in the expanded queries.
+You expand a given query into exactly {{ number }} queries that are example HTML snippets that are an interpretation of the given query. The expanded queries must only be HTML code. Never include the URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
 
-Structure:
-Output the expanded queries as a valid JSON list of strings. Only output the list. The values must only be HTML code. Do not include any other text except the JSON list of expanded queries. Exclude expanded queries that are only whitespace.
+""" + query_expander_structure + """
 
 Examples:
-1. Example Query 1: "Find CSS vulns"
-   Example Expanded Queries: ["x-allow-cross-origin-resource-sharing: *;\n@font-face { src: url(‘http://attacker.com/malware.ttf’); }\ninput[type=‘text’] { content: url(‘http://attacker.com/hack.jpg’); }"]
+1. Example Query 1: "What javascript libraries call eval()" when asked for 5 expanded queries
+   Example Expanded Queries:
+    ----
+    <script>
+    function unsafeEval() {
+        eval("alert('This is an example of eval being called within a function')");
+    }
+    </script>
+    ----
+    <script>
+    (function() {
+        eval("console.log('This is another call to eval')");
+    })();
+    </script>
+    ----
+    <div>
+    <script>eval("document.write('This is yet another way to use eval');")</script>
+    </div>
+    ----
+    <form onsubmit="eval('alert(\"Eval called in form submission handler\")')">
+    <input type="text" name="test"/>
+    </form>
+    ----
+    <button onclick="eval('alert(\"Button click event calling eval\")')">Click Me</button>
+    ----
 
 Your Task:
 Query: "{{query}}"
@@ -182,15 +250,25 @@ Expanded Queries:
 query_expander_xml = """
 You are a cybersecurity search assistant that processes users queries. You are specialized in XML
 development and securing XML.
-You expand a given query into at most {{ number }} queries that are example XML snippets that are an interpretation of the given query.
-Never include the URL, hostname or IP address in the expanded queries.
+You expand a given query into exactly {{ number }} queries that are example XML snippets that are an interpretation of the given query.
+The expanded queries must only be HTML code. Never include the URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
 
-Structure:
-Output the expanded queries as a valid JSON list of strings. Only output the list. The values must only be XML code. Do not include any other text except the JSON list of expanded queries. Exclude expanded queries that are only whitespace.
+""" + query_expander_structure + """
 
 Examples:
-1. Example Query 1: "Find <docs>...</docs>"
-   Example Expanded Queries: ["<docs>...</docs>"]
+1. Example Query 1: "Find the XML entity injections" when asked for 5 expanded queries
+   Example Expanded Queries:
+    ----
+    &lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;
+    ----
+    <!ENTITY xxe SYSTEM &quot;file:///etc/passwd&quot;>
+    ----
+    &lt;!DOCTYPE foo [&lt;![CDATA[&lt;script&gt;document.write(&#39;xss&#39;)&lt;/script&gt;]]&gt;]&gt;&lt;foo&gt;
+    ----
+    &lt;xml&gt;&lt;data&gt;Injection&lt;/data&gt;&lt;/xml&gt;
+    ----
+    <xml><entity>&amp;foo;</entity></xml>
+    ----
 
 Your Task:
 Query: "{{query}}"
@@ -200,16 +278,24 @@ Expanded Queries:
 
 query_expander_network = """
 You are a cybersecurity search assistant that processes users queries. You are specialized in the security of the HTTP protocol and vulnerabilities associated with HTTP.
-You expand a given query into at most {{ number }} queries that are snippets of things in HTTP like headers and response codes.
+You expand a given query into exactly {{ number }} queries that are snippets of things in HTTP like headers and response codes. Think about it 100 times to get {{ number }} unique queries.
 
-Structure:
-Output the expanded queries as a valid JSON list of strings. Only output the list. The values must only be XML code. Do not include any other text except the JSON list of expanded queries. Exclude expanded queries that are only whitespace.
+""" + query_expander_structure + """
 
 Examples:
 1. Example Query 1: "Examine the CSP"
-   Example Expanded Queries: ["Content-Security-Policy:"]
+   Example Expanded Queries:
+   ----
+   Content-Security-Policy:
+   ----
+   
 2. Example Query 1: "Look for vulnerable cookie settings"
-   Example Expanded Queries: ["Set-Cookie: samesite=None", "Set-Cookie: domain="]
+   Example Expanded Queries:
+   ----
+   Set-Cookie: samesite=None
+   ----
+   Set-Cookie: domain=
+   ----
 
 Your Task:
 Query: "{{query}}"
@@ -220,14 +306,21 @@ Expanded Queries:
 
 @component
 class QueryExpander:
-    def __init__(self, generator_config: GeneratorConfig, prompt: Optional[str] = None, number: int = 5):
+    def __init__(
+            self,
+            generator_config: GeneratorConfig,
+            prompt: Optional[str] = None,
+            number: int = 5,
+            include_original_query: bool = True,
+    ):
 
         self.query_expansion_prompt = prompt
         self.number = number
+        self.include_original_query = include_original_query
         if prompt is None:
             self.query_expansion_prompt = query_expander_natural_language
         builder = PromptBuilder(self.query_expansion_prompt, required_variables=["number", "query"])
-        llm = generator_config.create_generator()
+        llm = generator_config.create_generator(temperature=0.6)
         self.pipeline = Pipeline()
         self.pipeline.add_component(name="builder", instance=builder)
         self.pipeline.add_component(name="llm", instance=llm)
@@ -237,23 +330,42 @@ class QueryExpander:
     def run(self, query: str):
         if self.number <= 1:
             return {"queries": [query]}
-        result = \
-            self.pipeline.run({'builder': {'query': query, 'number': self.number}}).get('llm', {}).get('replies', [""])[
-                0]
-        logger.info(f"Expanded query result:\n{result}")
-        if not result:
-            return {"queries": [query]}
-        try:
-            expanded_list = [query]
-            expanded_json = json.loads(result)
-            if isinstance(expanded_json, list):
-                expanded_list.extend(list(map(
-                    lambda e: first(e.values()) if isinstance(e, dict) else str(e),
-                    expanded_json)))
-            expanded_list = list(filter(bool, expanded_list))
-            return {"queries": expanded_list}
-        except JSONDecodeError:
-            return {"queries": [query]}
+
+        expanded_set = set()
+        retry = 2
+        while retry > 0 and len(expanded_set) < self.number:
+            retry -= 1
+
+            result = \
+                self.pipeline.run({'builder': {'query': query, 'number': self.number}}).get('llm', {}).get('replies',
+                                                                                                           [""])[
+                    0]
+            logger.info(f"Expanded query result:\n{result}")
+            if not result:
+                continue
+
+            collected = ""
+            for line in result.split("\n"):
+                if line.startswith("----"):
+                    line = line[4:].strip()
+                    if collected.strip():
+                        expanded_set.add(collected.strip())
+                        collected = ""
+                if line.endswith("----"):
+                    line = line[:-4].strip()
+                    collected = '\n'.join([collected, line])
+                    if collected.strip():
+                        expanded_set.add(collected.strip())
+                        collected = ""
+                if line:
+                    collected = '\n'.join([collected, line])
+            if collected.strip():
+                expanded_set.add(collected.strip())
+
+        expanded_list = list(expanded_set)[:self.number]
+        if self.include_original_query:
+            expanded_list.insert(0, query)
+        return {"queries": expanded_list}
 
 
 @component
@@ -451,10 +563,9 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
     Builds a pipeline for retrieving documents from the store.
     :return: Pipeline
     """
-    collections = doc_type_to_model.keys()
 
     pipe = Pipeline()
-    comb = CombineDocs([f"{col}_documents" for col in collections])
+    comb = CombineDocs([f"{col}_documents" for col in get_chroma_collections()])
     pipe.add_component("combine", comb)
     pipe.add_component("query", Query())
     pipe.add_component("query_expander", QueryExpander(generator_config))
@@ -464,47 +575,61 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
     stores: Dict[str, ChromaDocumentStore] = {}
 
     embedder_cache = dict()
-    for col in collections:
-        model_name = get_model_for_doc_type(col)
+    for doc_type_model in doc_type_to_model.values():
+        model_name = doc_type_model.model_name
 
         if model_name in embedder_cache:
             embedder = embedder_cache[model_name]
         else:
-            embedder = SentenceTransformersTextEmbedder(model=model_name, batch_size=1, progress_bar=False)
+            embedder = SentenceTransformersTextEmbedder(
+                model=model_name,
+                batch_size=1,
+                normalize_embeddings=True,
+                progress_bar=False,
+            )
             embedder.warm_up()
             embedder_cache[model_name] = embedder
 
-        store = create_chrome_document_store(db=db, collection_name=col)
-        stores[col] = store
-        retriever = ChromaEmbeddingRetriever(document_store=store)
-        multiquery_retriever = MultiQueryChromaRetriever(embedder, retriever)
-        retrievers[col] = multiquery_retriever
-
-        ret_name = f"ret_{col}"
-        pipe.add_component(ret_name, multiquery_retriever)
-
         custom_query_expander = None
-        if col == "javascript":
-            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_javascript, number=10)
-        elif col == "css":
-            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_css, number=5)
-        elif col == "html":
-            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_html, number=10)
-        elif col == "xml":
-            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_xml, number=5)
-        elif col == "network":
-            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_network, number=5)
-
-        # wiring: Query → embedder → retriever → combiner
-        pipe.connect("query.max_results", ret_name + ".top_k")
+        custom_query_expander_name = None
+        if doc_type_model.doc_type == "javascript":
+            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_javascript, number=10,
+                                                  include_original_query=False)
+        elif doc_type_model.doc_type == "css":
+            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_css, number=5,
+                                                  include_original_query=False)
+        elif doc_type_model.doc_type == "html":
+            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_html, number=10,
+                                                  include_original_query=False)
+        elif doc_type_model.doc_type == "xml":
+            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_xml, number=5,
+                                                  include_original_query=False)
+        elif doc_type_model.doc_type == "network":
+            custom_query_expander = QueryExpander(generator_config, prompt=query_expander_network, number=5,
+                                                  include_original_query=False)
         if custom_query_expander is not None:
-            pipe.add_component("query_expander_" + col, custom_query_expander)
-            pipe.connect("query.text", "query_expander_" + col + ".query")
-            pipe.connect("query_expander_" + col + ".queries", ret_name + ".queries")
-        else:
-            pipe.connect("query_expander.queries", ret_name + ".queries")
-        pipe.connect("query.filters", ret_name + ".filters")
-        pipe.connect(ret_name + ".documents", f"combine.{col}_documents")
+            custom_query_expander_name = "query_expander_" + doc_type_model.doc_type
+            pipe.add_component(custom_query_expander_name, custom_query_expander)
+            pipe.connect("query.text", custom_query_expander_name + ".query")
+
+        for col in doc_type_model.get_chroma_collections():
+            store = create_chrome_document_store(db=db, collection_name=col)
+            stores[col] = store
+            retriever = ChromaEmbeddingRetriever(document_store=store)
+            multiquery_retriever = MultiQueryChromaRetriever(embedder, retriever)
+            retrievers[col] = multiquery_retriever
+
+            ret_name = f"ret_{col}"
+            pipe.add_component(ret_name, multiquery_retriever)
+
+            # wiring: Query → embedder → retriever → combiner
+            pipe.connect("query.max_results", ret_name + ".top_k")
+            if custom_query_expander_name is not None:
+                pipe.connect(custom_query_expander_name + ".queries", ret_name + ".queries")
+            else:
+                pipe.connect("query_expander.queries", ret_name + ".queries")
+            pipe.connect("query.filters", ret_name + ".filters")
+            pipe.connect(ret_name + ".documents", f"combine.{col}_documents")
 
     # pipe.add_component("trace_docs", TraceDocs())
     # pipe.connect("query.text", "trace_docs.query")
@@ -517,19 +642,34 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
 def build_website_context_pipeline(generator_config: GeneratorConfig) -> Pipeline:
     prompt = """
       You are a cybersecurity search assistant that processes users queries for websites.
-      You determine the site url(s) and/or ip address(es) and ports the user is interested in. If the user specifies
-      a scheme do not change it. If no scheme and port is given, only a domain or host name, provide both http and https.
+
+      You determine the site url(s) and/or ip address(es) and ports the user is targeting. Follow these rules when determining the targets:
+       - Multiple sites may be specified, preserve the host name and IP addresses.
+         Example: http://example.com and http://sub1.example.com are two targets, http://example.com and http://sub1.example.com
+       - If the user specifies a protocol, keep it.
+         Example: http://example.com is exactly one target, http://example.com
+         Example: https://example.com is exactly one target, https://example.com
+       - If a host name or IP address is given without a protocol and without a port, such as target.local, add the protocol. If the top level domain (TLD) is public such as .com, .net, .edu, etc. use the protocol "https", otherwise use "http".
+         Example: example.com is one target, https://example.com
+         Example: target.local is one target, http://target.local
+       - If a host name or IP address is given without a protocol but with a port, such as target.local:443, add the protocol. If the port is 443 or the TLD is public such as .com, .net, .edu, etc. use the protocol "https".
+         Example: example.com:443 is one target, https://example.com:443
+         Example: example.com:80 is one target, http://example.com:80
+       - Default to the "http" protocol if no other rules apply.
+
       You also determine optional types of content the user is interested in from the following list:
-      "html", "forms", "xml", "javascript", "css", "json", "network". If the query includes things that would be in the HTTP headers such as cookies or the content security policy include the content type "network".
+      "html", "forms", "xml", "javascript", "css", "json", "network". If the query includes things that would be in the HTTP headers such as cookies, the content security policy or response messages include the content type "network".
+
       You also determine technology stacks the user references, if any.
-      You also determine if anything in the query implies a specific set of HTTP response codes, if any. Be cautious about providing response codes so to not be too limiting.
+
+      You also determine if anything in the query implies a specific set of HTTP response codes, if any. Do not include response codes in the 200-299 range.
+
       You also determine if anything in the query implies the request was made using a specific set of HTTP methods such as "GET", "POST", "PUT", if any. Only include methods if the user is asking for how the request was made. Usually the user will intend HTTP methods that are in the RFC, but may ask for specific non-standard methods. Be cautious about providing methods so to not be too limiting.
       
       Structure:
       Output the information as a valid JSON object. Only output the JSON. Do not include any other text except the JSON.
       
-      The list of web sites uses key "target". The value of "target" is a valid JSON list. It is a list of site url(s) or ip address(es) and port numbers in the form of URLs. If no protocol is specified and the port contains "443", use "https". If no protocol is specified and the url host TLD is typically for a public site like .com, .net, .etc, use protocol "https". Otherwise use "http". 
-      Examples are: http://target.local, https://target.local, http://target.local:8080, http://10.10.10.10, http://10.10.10.11:8000, etc.
+      The list of web sites uses key "target". The value of "target" is a valid JSON list. It is a list of url(s). 
 
       The list of content types uses key "content". The value of "content" is a valid JSON list. Only use the aforementioned list of content types.
 
@@ -543,24 +683,30 @@ def build_website_context_pipeline(generator_config: GeneratorConfig) -> Pipelin
         1. Example Query 1: "Examine http://target.local for vulns"  
            Example Result: {"target": ["http://target.local"], "content": [], "tech": [], "methods": [], "response_codes": []}
 
-        2. Example Query 2: "Examine 10.10.10.10:8000 for risky javascript functions"  
-           Example Result: {"target": ["http://10.10.10.10:8000"], "content": ["javascript"], "tech": [], "methods": [], "response_codes": []}
+        2. Example Query 2: "Examine http://target.local and http://sub1.target.local for vulns"
+           Example Result: {"target": ["http://target.local", "http://sub1.target.local"], "content": [], "tech": [], "methods": [], "response_codes": []}
 
-        3. Example Query 3: "Examine nobody.net for vulnerable versions of WordPress"  
-           Example Result: {"target": ["http://nobody.net", "https://nobody.net"], "content": [""], "tech": ["WordPress"], "methods": [], "response_codes": []}
+        3. Example Query 3: "Examine 10.10.10.10:8000 for risky javascript functions"  
+           Example Result: {"target": ["http://10.10.10.10:8000"], "content": ["html", "javascript"], "tech": [], "methods": [], "response_codes": []}
 
-        4. Example Query 4: "Examine authentication failures on schooldaze.edu for username disclosure"
-           Example Result: {"target": ["http://schooldaze.edu", "https://schooldaze.edu"], "content": [""], "tech": [""], "methods": [], "response_codes": [403]}
+        4. Example Query 4: "Examine nobody.net for vulnerable versions of WordPress"  
+           Example Result: {"target": ["http://nobody.net", "https://nobody.net"], "content": ["network", "html", "javascript"], "tech": ["WordPress"], "methods": [], "response_codes": []}
 
-        5. Example Query 5: "Examine posted forms on 192.168.1.1:8090 for XSS vulns."
-           Example Result: {"target": ["http://192.168.1.1:8090"], "content": [""], "tech": [""], "methods": ["POST"], "response_codes": []}
+        5. Example Query 5: "Examine authentication failures on schooldaze.edu for username disclosure"
+           Example Result: {"target": ["http://schooldaze.edu", "https://schooldaze.edu"], "content": ["html", "javascript"], "tech": [""], "methods": [], "response_codes": [403]}
+
+        6. Example Query 6: "Examine posted forms on 192.168.1.1:8090 for XSS vulns."
+           Example Result: {"target": ["http://192.168.1.1:8090"], "content": ["html", "javascript"], "tech": [""], "methods": ["POST"], "response_codes": []}
+
+        7. Example Query 7: "Find forbidden pages on https://schooldaze.edu"   
+           Example Result: {"target": ["https://schooldaze.edu"], "content": ["network"], "tech": [""], "methods": [], "response_codes": [403]}
 
       Your Task:
       Query: "{{query}}"
       JSON targets, optional content, optional tech:
       """
     builder = PromptBuilder(prompt, required_variables=["query"])
-    llm = generator_config.create_generator()
+    llm = generator_config.create_generator(temperature=0.1)
     pipeline = Pipeline()
     pipeline.add_component(name="builder", instance=builder)
     pipeline.add_component(name="llm", instance=llm)

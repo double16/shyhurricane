@@ -48,6 +48,7 @@ async def port_scan(
         port_range_high: Optional[int] = 65535,
         additional_hosts: Optional[Dict[str, str]] = None,
         timeout_seconds: Optional[int] = None,
+        retry: bool = False,
 ) -> PortScanToolResult:
     """
     Performs a port scan and service identification on the target(s), similar to the functions of nmap.
@@ -96,6 +97,7 @@ async def port_scan(
         targets=(hostnames or []) + (ip_addresses or []) + (ip_subnets or []),
         ports=ports_list,
         additional_hosts=get_additional_hosts(ctx, additional_hosts),
+        retry=retry,
     )
 
     if not port_scan_queue_item.targets:
@@ -108,20 +110,21 @@ async def port_scan(
             nmap_xml=None
         )
 
-    if stored_results := get_stored_port_scan_results(
-            port_scan_queue_item,
-            server_ctx.stores["nmap"],
-            server_ctx.stores["portscan"],
-    ):
-        logger.info("Returning stored port scan results for %s", port_scan_queue_item.targets)
-        return PortScanToolResult(
-            instructions=port_scan_instructions,
-            hostnames=hostnames,
-            ip_addresses=ip_addresses,
-            ip_subnets=ip_subnets,
-            ports=ports_list,
-            nmap_xml=stored_results.nmap_xml
-        )
+    if not retry:
+        if stored_results := get_stored_port_scan_results(
+                port_scan_queue_item,
+                server_ctx.stores["nmap"],
+                server_ctx.stores["portscan"],
+        ):
+            logger.info("Returning stored port scan results for %s", port_scan_queue_item.targets)
+            return PortScanToolResult(
+                instructions=port_scan_instructions,
+                hostnames=hostnames,
+                ip_addresses=ip_addresses,
+                ip_subnets=ip_subnets,
+                ports=ports_list,
+                nmap_xml=stored_results.nmap_xml
+            )
 
     await asyncio.to_thread(port_scan_queue.put, port_scan_queue_item)
     results: Optional[PortScanResults] = None

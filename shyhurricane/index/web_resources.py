@@ -34,7 +34,7 @@ def get_ingest_queue(db: str) -> persistqueue.SQLiteAckQueue:
     return _get_queue(db, "ingest_queue")
 
 
-def _get_doc_type_queue(db: str) -> persistqueue.SQLiteAckQueue:
+def get_doc_type_queue(db: str) -> persistqueue.SQLiteAckQueue:
     return _get_queue(db, "doc_type_queue")
 
 
@@ -45,7 +45,9 @@ def _ingest_worker(db: str):
 
         queue = get_ingest_queue(db)
         atexit.register(queue.close)
-        doc_type_queue = _get_doc_type_queue(db)
+        queue.resume_unack_tasks()
+
+        doc_type_queue = get_doc_type_queue(db)
         atexit.register(doc_type_queue.close)
 
         pipeline: Pipeline = build_ingest_pipeline(db=db)
@@ -96,8 +98,9 @@ def _doc_type_worker(db: str, generator_config: GeneratorConfig):
         faulthandler.register(signal.SIGUSR1)
         logger.info(f"Document specific index worker starting in PID {os.getpid()}")
 
-        doc_type_queue = _get_doc_type_queue(db)
+        doc_type_queue = get_doc_type_queue(db)
         atexit.register(doc_type_queue.close)
+        doc_type_queue.resume_unack_tasks()
 
         pipeline: Pipeline = build_doc_type_pipeline(db=db, generator_config=generator_config)
 

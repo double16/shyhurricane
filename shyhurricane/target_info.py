@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Iterable, List
 
 from pydantic import BaseModel, Field
 
@@ -52,3 +52,14 @@ def parse_target_info(target: str) -> TargetInfo:
         )
 
     raise ValueError()
+
+
+def filter_targets_str(targets: Iterable[str]) -> List[str]:
+    result = []
+    for target_in in targets:
+        try:
+            parse_target_info(target_in)
+            result.append(target_in)
+        except ValueError:
+            pass
+    return result

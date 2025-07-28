@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import subprocess
+import sys
 from math import floor
 from typing import List, Optional, Dict, Any, Tuple
 
@@ -15,7 +16,10 @@ from haystack.components.routers import ConditionalRouter
 from haystack.document_stores.types import DuplicatePolicy
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 
-from shyhurricane.doc_type_model_map import map_mime_to_type, doc_type_to_model
+from shyhurricane.clean_css import normalize_css
+from shyhurricane.cleaners import normalize_html, normalize_xml, normalize_json
+from shyhurricane.doc_type_model_map import map_mime_to_type, doc_type_to_model, \
+    get_chroma_collection_name_by_doc_type_token_length
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.retrieval_pipeline import create_chrome_document_store
 from shyhurricane.utils import IngestableRequestResponse, urlparse_ext, BeautifulSoupExtractor, extract_domain, \
@@ -218,21 +222,25 @@ def _quantize_timestamp(timestamp: str):
 
 def _build_splitters(embedders: Dict[str, SentenceTransformersDocumentEmbedder]):
     splitters: Dict[str, SuffixIdSplitter] = dict()
-    for doc_type, embedder in embedders.items():
-        max_model_length = embedder.embedding_backend.model.max_seq_length
-        # treat "infinite" as 512
-        if max_model_length > 1_000_000:
-            max_model_length = 512
-        split_len = int(floor(max_model_length * 0.93) / 2)
-        overlap = int(floor(max_model_length * 0.03))
-        logger.info(f"Splitting document {doc_type} by {split_len} words, overlap {overlap}")
-        splitter = SuffixIdSplitter(
-            split_by="word",
-            split_length=split_len,
-            split_overlap=overlap,
-        )
-        splitter.warm_up()
-        splitters[doc_type] = splitter
+    for doc_type_model in doc_type_to_model.values():
+        embedder = embedders[doc_type_model.doc_type]
+        for token_length in (doc_type_model.token_lengths or [sys.maxsize]):
+            max_model_length = embedder.embedding_backend.model.max_seq_length
+            # treat "infinite" as 512
+            if max_model_length > 1_000_000:
+                max_model_length = 512
+            target_token_length = min(token_length, max_model_length)
+            split_len = int(floor(target_token_length * 0.93) / 2)
+            overlap = int(floor(target_token_length * 0.06))
+            logger.info(
+                f"Splitting document {doc_type_model.doc_type} by {split_len} words, overlap {overlap} (target {token_length} tokens, model has {max_model_length} tokens)")
+            splitter = SuffixIdSplitter(
+                split_by="word",
+                split_length=split_len,
+                split_overlap=overlap,
+            )
+            splitter.warm_up()
+            splitters[doc_type_model.get_chroma_collection(token_length)] = splitter
     return splitters
 
 
@@ -242,12 +250,6 @@ class RequestResponseToDocument:
         self.embedders = embedders
         self._soup_extractor = BeautifulSoupExtractor()
         self._title_soup_strainer = SoupStrainer(['title', 'meta'])
-        self.splitters: Dict[str, SuffixIdSplitter] = dict()
-
-    def warm_up(self):
-        if self.splitters:
-            return
-        self.splitters = _build_splitters(self.embedders)
 
     @component.output_types(documents=List[Document])
     def run(self, request_responses: List[IngestableRequestResponse]):
@@ -259,8 +261,7 @@ class RequestResponseToDocument:
     def _embed_single(self, doc: Document) -> Document:
         doc_type = doc.meta["type"]
         embedder = self.embedders.get(doc_type, self.embedders["default"])
-        split_docs = self.splitters[doc_type].run(documents=[doc])["documents"]
-        embedded_docs = embedder.run(documents=[split_docs[0]])["documents"]
+        embedded_docs = embedder.run(documents=[Document(content=doc.content[0:4096])])["documents"]
         doc.embedding = embedded_docs[0].embedding
         return doc
 
@@ -324,6 +325,7 @@ class RequestResponseToDocument:
                 content=response_body,
                 meta=base_meta | {
                     "type": "content",
+                    "token_length": doc_type_to_model.get("content").get_primary_token_length(),
                     "request_headers": json.dumps(request_headers),
                     "response_headers": json.dumps(response_headers),
                 },
@@ -349,6 +351,7 @@ class RequestResponseToDocument:
             content=net_text,
             meta=base_meta | {
                 "type": "network",
+                "token_length": doc_type_to_model.get("network").get_primary_token_length(),
                 "description": "HTTP request and response headers",
                 "content_type": "text/plain"
             },
@@ -364,6 +367,7 @@ class RequestResponseToDocument:
                 content=json.dumps(sorted_forms, indent=None, separators=(',', ':'), sort_keys=True),
                 meta=base_meta | {
                     "type": "forms",
+                    "token_length": doc_type_to_model.get("forms").get_primary_token_length(),
                     "description": "HTTP form information in JSON format",
                     "content_type": "text/json"
                 },
@@ -387,12 +391,13 @@ class FilterExistingDocuments:
             raw_mime = doc.meta.get("content_type", "")
             timestamp = doc.meta.get("timestamp", "")
             if not url or not raw_mime or not timestamp:
-                return False
+                continue
 
             doc_type = map_mime_to_type(raw_mime)
-            store = self.stores.get(doc_type, None)
+            token_length = doc.meta.get("token_length", sys.maxsize)
+            store = self.stores.get(get_chroma_collection_name_by_doc_type_token_length(doc_type, token_length))
             if store is None:
-                return False
+                continue
 
             filters = {
                 "operator": "AND",
@@ -423,9 +428,8 @@ class IndexDocTypeDocuments:
         self.splitters: Dict[str, SuffixIdSplitter] = dict()
 
     def warm_up(self):
-        if self.splitters:
-            return
-        self.splitters = _build_splitters(self.embedders)
+        if not self.splitters:
+            self.splitters = _build_splitters(self.embedders)
 
     @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]):
@@ -444,38 +448,52 @@ class IndexDocTypeDocuments:
                 logger.info(f"Skipping {doc.id} for missing url, raw_mime, or timestamp_for_id")
                 continue
 
-            content = doc.content
-
-            if is_binary(content, raw_mime):
+            if is_binary(doc.content, raw_mime):
                 logger.info(f"Skipping {url} ({raw_mime}) binary content")
                 continue
 
             # Map MIME to a logical doc type
             doc_type = map_mime_to_type(raw_mime)
 
-            run_cleaner = True
-            if doc_type == "javascript":
-                content = _deobfuscate_javascript(content)
-                if content != doc.content:
-                    doc.content = content
-                    response_headers = json.loads(doc.meta.get("response_headers", "{}"))
-                    response_headers["Content-Length"] = str(len(content))
-                    doc.meta["response_headers"] = json.dumps(response_headers)
-                    run_cleaner = False
-
-            new_doc = Document(
-                content=doc.content,
-                meta=doc.meta.copy() | {"type": doc_type},
-                id=hashlib.sha256(f"{url}:{doc_type}:{timestamp_for_id}".encode()).hexdigest()
-            )
+            normalized_content = doc.content
             try:
-                if run_cleaner:
-                    new_doc = self.doc_cleaner.run(documents=[new_doc])["documents"][0]
-            except Exception:
-                logger.warning(f"Content cleaning failed, continuing with original content")
-            split_docs = self.splitters[doc_type].run(documents=[new_doc])["documents"]
-            embedder = self.embedders.get(doc_type, self.embedders["default"])
-            results.extend(embedder.run(documents=split_docs)["documents"])
+                if doc_type == "javascript":
+                    normalized_content = _deobfuscate_javascript(normalized_content)
+                elif doc_type == "html":
+                    normalized_content = normalize_html(normalized_content)
+                elif doc_type == "xml":
+                    normalized_content = normalize_xml(normalized_content)
+                elif doc_type == "json":
+                    normalized_content = normalize_json(normalized_content)
+                elif doc_type == "css":
+                    normalized_content = normalize_css(normalized_content)
+                else:
+                    normalized_content = \
+                        self.doc_cleaner.run(documents=[Document(content=normalized_content)])["documents"][0].content
+            except Exception as e:
+                logger.warning(f"Normalizing content failed, continuing with original content: {e}")
+
+            if normalized_content != doc.content:
+                if len(normalized_content) < len(doc.content) / 2:
+                    logger.warning(
+                        f"Normalized content for {doc_type} reduced {len(doc.content)} bytes to {len(normalized_content)} bytes, skipping")
+                else:
+                    doc.content = normalized_content
+                    response_headers = json.loads(doc.meta.get("response_headers", "{}"))
+                    response_headers["Content-Length"] = str(len(normalized_content))
+                    doc.meta["response_headers"] = json.dumps(response_headers)
+
+            for token_length in (doc_type_to_model.get(doc_type).token_lengths or [sys.maxsize]):
+                # create docs per token_length
+                new_doc = Document(
+                    content=doc.content,
+                    meta=doc.meta.copy() | {"type": doc_type, "token_length": token_length},
+                    id=hashlib.sha256(f"{url}:{doc_type}:{token_length}:{timestamp_for_id}".encode()).hexdigest()
+                )
+                collection_name = get_chroma_collection_name_by_doc_type_token_length(doc_type, token_length)
+                split_docs = self.splitters[collection_name].run(documents=[new_doc])["documents"]
+                embedder = self.embedders.get(doc_type, self.embedders["default"])
+                results.extend(embedder.run(documents=split_docs)["documents"])
 
         return {"documents": results}
 
@@ -486,7 +504,8 @@ class IngestMultiStore:
         self.stores = stores
         self.should_update = should_update
 
-    def update_document(self, doc: Document, store: ChromaDocumentStore):
+    @staticmethod
+    def _update_document(doc: Document, store: ChromaDocumentStore):
         store._ensure_initialized()
         assert store._collection is not None
         data = store._convert_document_to_chroma(doc)
@@ -496,14 +515,20 @@ class IngestMultiStore:
     @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]):
         for doc in documents:
+            doc_type = "???"
             try:
-                store = self.stores.get(doc.meta.get('type'))
-                if self.should_update and self.should_update(doc):
-                    self.update_document(doc, store)
+                doc_type = doc.meta.get("type")
+                token_length = doc.meta.get("token_length", sys.maxsize)
+                collection_name = get_chroma_collection_name_by_doc_type_token_length(doc_type, token_length)
+                store = self.stores.get(collection_name)
+                if store is None:
+                    logger.error(f"No store for {collection_name}")
+                elif self.should_update and self.should_update(doc):
+                    self._update_document(doc, store)
                 else:
                     store.write_documents([doc], policy=DuplicatePolicy.OVERWRITE)
-            except ValueError:
-                logger.warning(f"Document {doc.id} not written to the store")
+            except Exception as e:
+                logger.warning(f"Document {doc_type} {doc.id} not written to the store: {e}", e)
 
         return {"documents": documents}
 
@@ -514,12 +539,13 @@ class GenerateTitleAndDescription:
       You are a web site content analyst. You are good at summarizing the content of a web resource, whether it be
       HTML, text, javascript or css, into a short title and 2-3 sentence description. The consumer of the title and
       description is another LLM such as yourself.
-      
+
       Structure:
       Output the title and description information as a valid JSON object. Only output the JSON. Do not include any other text except the JSON.
-      
+      Ensure the JSON values have proper string escaping.
+
       The title uses the key "title" and the value is a string. It should be between 5 and 30 words long.
-      
+
       The description uses the key "description" and the value is a string. It should be about 2 or 3 sentences.
 
       Your Task:
@@ -567,28 +593,31 @@ class GenerateTitleAndDescription:
 
 def _build_store_and_embedders(db: str) -> Tuple[
     Dict[str, ChromaDocumentStore], Dict[str, SentenceTransformersDocumentEmbedder]]:
-    stores = {}
+    stores: Dict[str, ChromaDocumentStore] = {}
     embedders = {}
     embedder_cache = {}
-    for dtype, model_name in doc_type_to_model.items():
+    for doc_type_model in doc_type_to_model.values():
+        model_name = doc_type_model.model_name
         if model_name in embedder_cache:
             embedder = embedder_cache[model_name]
         else:
             embedder = SentenceTransformersDocumentEmbedder(
                 model=model_name,
                 batch_size=1,
-                progress_bar=False
+                normalize_embeddings=True,
+                progress_bar=False,
             )
             embedder.warm_up()
             embedder_cache[model_name] = embedder
+        embedders[doc_type_model.doc_type] = embedder
 
-        document_store = create_chrome_document_store(
-            db=db,
-            collection_name=dtype,
-        )
-        document_store.count_documents()  # ensure the collection exists
-        stores[dtype] = document_store
-        embedders[dtype] = embedder
+        for col in doc_type_model.get_chroma_collections():
+            document_store = create_chrome_document_store(
+                db=db,
+                collection_name=col,
+            )
+            document_store.count_documents()  # ensure the collection exists
+            stores[col] = document_store
 
     return stores, embedders
 

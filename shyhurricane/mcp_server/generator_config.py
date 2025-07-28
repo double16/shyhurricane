@@ -2,7 +2,7 @@ from typing import Optional
 
 from shyhurricane.generator_config import GeneratorConfig
 
-_generator_config: Optional[GeneratorConfig] = GeneratorConfig.from_env()
+_generator_config: Optional[GeneratorConfig] = GeneratorConfig.from_env().apply_summarizing_default()
 
 
 def set_generator_config(config: GeneratorConfig):

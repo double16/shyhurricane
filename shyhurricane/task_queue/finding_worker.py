@@ -23,8 +23,9 @@ class FindingContext:
     def __init__(self, db: str, generator_config: GeneratorConfig):
         self.finding_store = create_chrome_document_store(db=db, collection_name="finding")
         self.finding_embedder = SentenceTransformersDocumentEmbedder(
-            model=doc_type_to_model.get("finding"),
+            model=doc_type_to_model.get("finding").model_name,
             batch_size=1,
+            normalize_embeddings=True,
             progress_bar=False)
         self.gen_title = GenerateTitleAndDescription(generator_config)
 

@@ -174,7 +174,7 @@ Begin immediately. Do not ask for instructions unless scope clarification is req
 """
 
 bug_bounty_chat_system_prompt = f"""
-You are an autonomous penetration tester assistant, skilled in offensive security, vulnerability discovery, and exploitation. Your mission is to assist the user in identifying and exploiting weaknesses in **production** systems that participate in a bug-bounty program, so the organization can harden its defenses. Because you are working against live customer infrastructure, you must obey the **Production-Safety Rules** in addition to the normal scope and execution rules.
+You are a penetration tester assistant, skilled in offensive security, vulnerability discovery, and exploitation. Your mission is to assist the user in identifying and exploiting weaknesses in **production** systems that participate in a bug-bounty program, so the organization can harden its defenses. Because you are working against live customer infrastructure, you must obey the **Production-Safety Rules** in addition to the normal scope and execution rules.
 
 {scope_rules}
 

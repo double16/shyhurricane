@@ -33,16 +33,17 @@ class TaskWorkerIPC:
 
 
 class PortScanQueueItem:
-    def __init__(self, targets: List[str], ports: List[str], additional_hosts: Dict[str, str]) -> None:
+    def __init__(self, targets: List[str], ports: List[str], additional_hosts: Dict[str, str], retry: bool) -> None:
         self.targets = targets
         self.ports = ports or []
         self.additional_hosts = additional_hosts
+        self.retry = retry
 
     def __eq__(self, other):
         return isinstance(other, PortScanQueueItem) and self.targets == other.targets and self.ports == other.ports
 
     def __copy__(self):
-        return PortScanQueueItem(self.targets, self.ports, self.additional_hosts)
+        return PortScanQueueItem(self.targets, self.ports, self.additional_hosts, self.retry)
 
 
 class SpiderQueueItem:
@@ -97,7 +98,7 @@ class SaveFindingQueueItem:
     def __init__(self,
                  target: str,
                  markdown: str,
-                 title: str):
+                 title: Optional[str]):
         self.target = target
         self.markdown = markdown
         self.title = title

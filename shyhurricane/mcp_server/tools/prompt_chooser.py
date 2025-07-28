@@ -1,16 +1,94 @@
 import asyncio
 import inspect
 import json
-from typing import Dict, List
+import logging
+from typing import Dict, List, Tuple, Iterable
 
 from haystack.dataclasses import ChatMessage
 from mcp.server.fastmcp import Context
-from mcp.types import ToolAnnotations, PromptMessage, TextContent
+from mcp.types import ToolAnnotations, TextContent
 from mcp.types import Prompt as MCPPrompt
 from pydantic import BaseModel, Field
 
 from shyhurricane.mcp_server import mcp_instance, log_tool_history
 from shyhurricane.mcp_server.generator_config import get_generator_config
+from shyhurricane.target_info import filter_targets_str
+
+logger = logging.getLogger(__name__)
+
+
+async def extract_targets_and_prompt_title(query: str, titles: Iterable[str]) -> Tuple[List[str], str]:
+    # TODO: extract extra rules defined by the rules for inclusion in the resulting prompt
+    prompt = f"""
+      You are a cybersecurity management expert.
+      
+      You determine the intent of a test and choose an appropriate agent or chat prompt based on the user query.
+    
+      You determine the target host name, IP address(es), site url(s) and ports the user is interested in. If the user specifies
+      a scheme do not change it. Never suggest targets. Only accept explicit targets given by the user.
+      
+      Structure:
+      Output the information as a valid JSON object. Only output the JSON. Do not include any other text except the JSON.
+      
+      The list of targets uses the key "targets". The value of "targets" is a valid JSON list of strings.
+
+      The prompt is chosen from a fixed set of titles. The prompt title uses the key "title". The following are valid prompt titles:
+      {", ".join(map(lambda t: '"' + t + '"', titles))}
+      If the user is asking you to do something, prefer an agent or automated prompt. If the user is asking for help or
+      research, prefer an assistant prompt.
+
+      Example 1: Solve the CTF challenge at 192.168.1.1
+      Result: {{ "targets": ["192.168.1.1"], "title": "Automated CTF Solver" }} 
+
+      Example 2: Perform a penetration test on 192.168.68.1 and 192.168.68.2
+      Result: {{ "targets": ["192.168.68.1", "192.168.68.2"], "title": "Automated Penetration Tester" }} 
+      
+      Your Task:
+      """
+    generator = get_generator_config().create_generator()
+    sig = inspect.signature(generator.run)
+    if "messages" in sig.parameters:
+        prompt_messages = [
+            ChatMessage.from_system(prompt),
+            ChatMessage.from_user(query),
+        ]
+        generator_output = await asyncio.to_thread(generator.run, messages=prompt_messages)
+    else:
+        generator_output = await asyncio.to_thread(generator.run, prompt=prompt + "\n" + query)
+
+    if "replies" in generator_output:
+        replies = generator_output["replies"]
+        if len(replies) > 0:
+            reply = replies[0]
+        else:
+            reply = None
+    else:
+        reply = None
+
+    targets = []
+    prompt_title = None
+
+    if reply:
+        try:
+            parsed = json.loads(reply)
+            parsed_targets = parsed["targets"]
+            if isinstance(parsed_targets, list):
+                for target in parsed_targets:
+                    if isinstance(target, str):
+                        targets.append(target)
+                    elif isinstance(target, dict):
+                        targets.extend(target.values())
+            elif isinstance(parsed_targets, dict):
+                targets.extend(parsed_targets.values())
+            elif isinstance(parsed_targets, str):
+                targets.append(parsed_targets)
+
+            targets = filter_targets_str(targets)
+            prompt_title = parsed["title"]
+        except json.decoder.JSONDecodeError:
+            pass
+
+    return targets, prompt_title
 
 
 @mcp_instance.tool(
@@ -49,57 +127,7 @@ async def prompt_chooser(ctx: Context, query: str) -> str:
     for mcp_prompt in await mcp_instance.list_prompts():
         titles[mcp_prompt.title] = mcp_prompt
 
-    prompt = f"""
-      You are a cybersecurity management expert.
-      
-      You determine the intent of a test and choose an appropriate agent or chat prompt based on the user query.
-    
-      You determine the target host name, IP address(es), site url(s) and ports the user is interested in. If the user specifies
-      a scheme do not change it. Never suggest targets. Only accept explicit targets given by the user.
-      
-      Structure:
-      Output the information as a valid JSON object. Only output the JSON. Do not include any other text except the JSON.
-      
-      The list of targets uses the key "targets". The value of "targets" is a valid JSON list. 
-
-      The prompt is chosen from a fixed set of titles. The prompt title uses the key "title". The following are valid prompt titles:
-      {", ".join(map(lambda t: '"' + t + '"', titles.keys()))}
-      If the user is asking you to do something, prefer an agent or automated prompt. If the user is asking for help or
-      research, prefer an assistant prompt.
-
-      Your Task:
-      """
-
-    generator = get_generator_config().create_generator()
-    sig = inspect.signature(generator.run)
-    if "messages" in sig.parameters:
-        prompt_messages = [
-            ChatMessage.from_system(prompt),
-            ChatMessage.from_user(query),
-        ]
-        generator_output = await asyncio.to_thread(generator.run, messages=prompt_messages)
-    else:
-        generator_output = await asyncio.to_thread(generator.run, prompt=prompt + "\n" + query)
-
-    if "replies" in generator_output:
-        replies = generator_output["replies"]
-        if len(replies) > 0:
-            reply = replies[0]
-        else:
-            reply = None
-    else:
-        reply = None
-
-    targets = []
-    prompt_title = None
-
-    if reply:
-        try:
-            parsed = json.loads(reply)
-            targets = parsed["targets"]
-            prompt_title = parsed["title"]
-        except json.decoder.JSONDecodeError:
-            pass
+    targets, prompt_title = await extract_targets_and_prompt_title(query, titles.keys())
 
     if not prompt_title or prompt_title not in titles:
         return f"Choose a prompt title from: {', '.join(titles.keys())}"

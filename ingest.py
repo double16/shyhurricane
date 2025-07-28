@@ -60,7 +60,7 @@ except Exception as e:
 if args.katana:
     for line in sys.stdin:
         try:
-            url = str(json.loads(line).get('request', {}).get('endpoint', '???'))
+            url = str(json.loads(line).get('request', {}).get('endpoint'))
         except Exception:
             continue
         try:
@@ -70,6 +70,7 @@ if args.katana:
             print(f"[✘] Error: {url}, {e}", file=sys.stderr)
             continue
 
+# TODO: move to /index endpoint
 elif args.csv:
     # Burp Logger++ does not always emit a header line so we're guessing
     csv.field_size_limit(sys.maxsize)

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def add_generator_args(ap: argparse.ArgumentParser):
-    ap.add_argument("--ollama-url", help="The URL for the Ollama service", required=False)
+    ap.add_argument("--ollama-host", help="The location (host:port) for the Ollama service", required=False)
     ap.add_argument("--ollama-model",
                     help="Use Ollama with the specified model (qwen instruct models are recommended), must already be pulled",
                     required=False)
@@ -51,28 +51,27 @@ class GoogleGenAIChatGeneratorWithRetry(GoogleGenAIChatGenerator):
 
 
 class GeneratorConfig(BaseModel):
-    ollama_url: Optional[str] = Field(description="The URL of the OLLAMA server")
-    ollama_model: Optional[str] = Field(description="The name of the OLLAMA model")
-    gemini_model: Optional[str] = Field(description="The name of the GEMINI model")
-    openai_model: Optional[str] = Field(description="The name of the OpenAI model")
+    ollama_host: Optional[str] = Field(description="The location of the Ollama server", default=None)
+    ollama_model: Optional[str] = Field(description="The name of the Ollama model", default=None)
+    gemini_model: Optional[str] = Field(description="The name of the Gemini model", default=None)
+    openai_model: Optional[str] = Field(description="The name of the OpenAI model", default=None)
     temperature: float = Field(description="The temperature of the generator", default=TEMPERATURE_DEFAULT)
 
     @staticmethod
     def from_args(args):
         generator_config = GeneratorConfig(
-            ollama_url=args.ollama_url or os.environ.get("OLLAMA_URL", None),
+            ollama_host=args.ollama_host or os.environ.get("OLLAMA_HOST", None),
             ollama_model=args.ollama_model or os.environ.get("OLLAMA_MODEL", None),
             gemini_model=args.gemini_model or os.environ.get("GEMINI_MODEL", None),
             openai_model=args.openai_model or os.environ.get("OPENAI_MODEL", None),
             temperature=args.temperature,
         )
-        assert generator_config.ollama_model or generator_config.gemini_model or generator_config.openai_model
         return generator_config
 
     @staticmethod
     def from_env():
         generator_config = GeneratorConfig(
-            ollama_url=os.environ.get("OLLAMA_URL", None),
+            ollama_host=os.environ.get("OLLAMA_HOST", None),
             ollama_model=os.environ.get("OLLAMA_MODEL", None),
             gemini_model=os.environ.get("GEMINI_MODEL", None),
             openai_model=os.environ.get("OPENAI_MODEL", None),
@@ -80,14 +79,40 @@ class GeneratorConfig(BaseModel):
         )
         return generator_config
 
+    def apply_reasoning_default(self):
+        if self.ollama_model or self.gemini_model or self.openai_model:
+            return self
+        if os.environ.get("GEMINI_API_KEY", None) or os.environ.get("GOOGLE_API_KEY", None):
+            self.gemini_model = "gemini-2.5-flash"
+        elif os.environ.get("OPENAI_API_KEY", None):
+            self.openai_model = "o4-mini"
+        else:
+            self.ollama_model = "qwen3:8b"
+        return self
+
+    def apply_summarizing_default(self):
+        if self.ollama_model or self.gemini_model or self.openai_model:
+            return self
+        if os.environ.get("GEMINI_API_KEY", None) or os.environ.get("GOOGLE_API_KEY", None):
+            self.gemini_model = "gemini-2.0-flash-lite"
+        elif os.environ.get("OPENAI_API_KEY", None):
+            self.openai_model = "gpt-4-turbo"
+        else:
+            self.ollama_model = "llama3.2:3b"
+        return self
+
+    def check(self):
+        assert self.ollama_model or self.gemini_model or self.openai_model
+        return self
+
     def describe(self) -> str:
         if self.openai_model:
             return f"OpenAI {self.openai_model}"
         elif self.gemini_model:
             return f"Gemini {self.gemini_model}"
         else:
-            if self.ollama_url:
-                return f"Ollama {self.ollama_model} at {self.ollama_url}"
+            if self.ollama_host:
+                return f"Ollama {self.ollama_model} at {self.ollama_host}"
             else:
                 return f"Ollama {self.ollama_model}"
 
@@ -99,39 +124,42 @@ class GeneratorConfig(BaseModel):
             logger.info("Using OpenAI chat with model %s", self.openai_model)
             if self.openai_model.startswith("o4-mini"):
                 temperature = 1.0
-            generation_kwargs = {
+            _generation_kwargs = {
                 "temperature": temperature or self.temperature,
             }
             return OpenAIChatGenerator(
                 model=self.openai_model,
-                generation_kwargs={"temperature": temperature or self.temperature} | (generation_kwargs or {}),
+                generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
                 max_retries=10,
                 tools=tools
             )
         elif self.gemini_model:
             logger.info("Using Google Gemini chat with model %s", self.gemini_model)
-            generation_kwargs = {
+            _generation_kwargs = {
                 "temperature": temperature or self.temperature,
             }
             return GoogleGenAIChatGeneratorWithRetry(
                 model=self.gemini_model,
-                generation_kwargs=generation_kwargs | (generation_kwargs or {}),
+                generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
                 tools=tools
             )
         elif self.ollama_model:
-            if self.ollama_url:
-                logger.info("Using Ollama chat with model %s at %s", self.ollama_model, self.ollama_url)
+            _generation_kwargs = {
+                "temperature": temperature or self.temperature,
+            }
+            if self.ollama_host:
+                logger.info("Using Ollama chat with model %s at %s", self.ollama_model, self.ollama_host)
                 return OllamaChatGenerator(
-                    url=self.ollama_url,
+                    url="http://" + self.ollama_host,
                     model=self.ollama_model,
-                    generation_kwargs={"temperature": temperature or self.temperature} | (generation_kwargs or {}),
+                    generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
                     tools=tools
                 )
             else:
                 logger.info("Using Ollama chat with model %s", self.ollama_model)
                 return OllamaChatGenerator(
                     model=self.ollama_model,
-                    generation_kwargs={"temperature": temperature or self.temperature} | (generation_kwargs or {}),
+                    generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
                     tools=tools
                 )
         else:
@@ -144,36 +172,39 @@ class GeneratorConfig(BaseModel):
             logger.info("Using OpenAI generator with model %s", self.openai_model)
             if self.openai_model.startswith("o4-mini"):
                 temperature = 1.0
-            generation_kwargs = {
+            _generation_kwargs = {
                 "temperature": temperature or self.temperature,
             }
             return OpenAIGenerator(
                 model=self.openai_model,
-                generation_kwargs=generation_kwargs | (generation_kwargs or {}),
+                generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
                 max_retries=10,
             )
         elif self.gemini_model:
             logger.info("Using Google Gemini chat with model %s", self.gemini_model)
-            generation_kwargs = {
+            _generation_kwargs = {
                 "temperature": temperature or self.temperature,
             }
             return GoogleGenAIChatGeneratorWithRetry(
                 model=self.gemini_model,
-                generation_kwargs=generation_kwargs | (generation_kwargs or {}),
+                generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
             )
         elif self.ollama_model:
-            if self.ollama_url:
-                logger.info("Using Ollama generator with model %s at %s", self.ollama_model, self.ollama_url)
+            _generation_kwargs = {
+                "temperature": temperature or self.temperature,
+            }
+            if self.ollama_host:
+                logger.info("Using Ollama generator with model %s at %s", self.ollama_model, self.ollama_host)
                 return OllamaGenerator(
-                    url=self.ollama_url,
+                    url="http://" + self.ollama_host,
                     model=self.ollama_model,
-                    generation_kwargs={"temperature": temperature or self.temperature} | (generation_kwargs or {}),
+                    generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
                 )
             else:
                 logger.info("Using Ollama generator with model %s", self.ollama_model)
                 return OllamaGenerator(
                     model=self.ollama_model,
-                    generation_kwargs={"temperature": temperature or self.temperature} | (generation_kwargs or {}),
+                    generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
                 )
         else:
             raise NotImplementedError

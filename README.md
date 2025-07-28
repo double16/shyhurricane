@@ -6,20 +6,33 @@ MCP server and AI assistant for penetration testing.
 
 ### Dependencies
 
+#### Docker Desktop or colima
+
+On Mac, Apple Virtualization networking has issues. Use qemu.
+
 ```shell
+brew install colima docker qemu
+colima start --runtime docker --cpu 6 --disk 50 -m 12 --vm-type qemu -V ${HOME}:${HOME}:m
+```
+
+#### Python Environment
+
+```shell
+virtualenv --try-first-with $(command -v python3.12) .venv
+source .venv/bin/activate
 virtualenv .venv
 source .venv/bin/activate
 ```
 
-### Ollama
+#### Ollama
 
-Install Ollama and the qwen2.5:7b-instruct model:
+Install Ollama and the llama3.2:3b model:
 
 Ubuntu:
 
 ```shell
 apt-get install ollama
-ollama pull qwen2.5:7b-instruct
+ollama pull llama3.2:3b
 ```
 
 macOS:
@@ -27,10 +40,10 @@ macOS:
 ```shell
 brew install ollama
 brew services start ollama
-ollama pull qwen2.5:7b-instruct
+ollama pull llama3.2:3b
 ```
 
-### Chroma Database
+#### Chroma Database
 
 ```shell
 chroma run --path chroma_store --host 127.0.0.1 --port 8200 
@@ -43,8 +56,8 @@ chroma run --path chroma_store --host 127.0.0.1 --port 8200
 Configure your desired provider and model in `.env`:
 
 ```shell
-OLLAMA_MODEL=qwen2.5:7b-instruct
-OLLAMA_URL=http://192.168.100.100:11434
+OLLAMA_MODEL=llama3.2:3b
+OLLAMA_HOST=192.168.100.100:11434
 GEMINI_API_KEY=
 GEMINI_MODEL=
 OPENAI_MODEL=
@@ -69,7 +82,7 @@ The unix command is run in a container to prevent bad things, so you still need 
 
 ```shell
 docker build -t ghcr.io/double16/shyhurricane:main src/docker/unix_command
-python3 mcp_service.py --ollama-model qwen2.5:7b-instruct
+python3 mcp_service.py
 ```
 
 ### Run the assistant
@@ -79,7 +92,7 @@ Run the assistant as a chat:
 ```shell
 pip install -r requirements.txt
 
-python3 assistant.py --ollama-model qwen2.5:7b-instruct --mode chat
+python3 assistant.py
 ```
 
 Run the assistant as an agent:
@@ -87,7 +100,7 @@ Run the assistant as an agent:
 ```shell
 pip install -r requirements.txt
 
-python3 assistant.py --ollama-model qwen2.5:7b-instruct --mode agent
+python3 assistant.py
 ```
 
 ### Other MCP Client
@@ -112,11 +125,12 @@ model may be set using `--openai-model`. The API key must be an environment vari
 
 ## Ollama
 
-Ollama can be configured to use a remote server by setting the URL. The URL can also be set using `--ollama-url` and the
+Ollama can be configured to use a remote server by setting the host and port. The host can also be set using
+`--ollama-host` and the
 model with `--ollama-model`.
 
-- `OLLAMA_MODEL=qwen2.5:7b-instruct`
-- `OLLAMA_URL=http://localhost:11434`
+- `OLLAMA_MODEL=llama3.2:3b`
+- `OLLAMA_HOST=localhost:11434`
 
 # misc.
 
