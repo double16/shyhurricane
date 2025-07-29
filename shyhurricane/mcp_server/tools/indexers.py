@@ -15,8 +15,9 @@ from starlette.responses import Response
 from shyhurricane.doc_type_model_map import map_mime_to_type
 from shyhurricane.mcp_server import mcp_instance, get_server_context, log_tool_history, get_additional_hosts
 from shyhurricane.mcp_server.tools.deobfuscate_javascript import deobfuscate_javascript
-from shyhurricane.utils import stream_lines, is_katana_jsonl, is_http_csv_header, HttpResource, urlparse_ext, \
+from shyhurricane.utils import stream_lines, is_katana_jsonl, HttpResource, urlparse_ext, \
     extract_domain
+from shyhurricane.http_csv import is_http_csv, http_csv_generator
 
 logger = logging.getLogger(__name__)
 
@@ -33,21 +34,34 @@ async def index_request_body(request: Request) -> Response:
     server_ctx = await get_server_context()
     ingest_queue: persistqueue.SQLiteAckQueue = server_ctx.ingest_queue
     line_generator = stream_lines(request.stream())
-    first = await anext(line_generator)
+    first = await anext(line_generator, "")
+    second = await anext(line_generator, "")
+    if not first and not second:
+        return Response(status_code=400)
     if is_katana_jsonl(first):
+        logger.info("Indexing katana JSONL")
         # each line is a request/response
         ingest_queue.put(first)
+        if second:
+            ingest_queue.put(second)
         async for line in line_generator:
             ingest_queue.put(line)
-    elif is_http_csv_header(first):
+    elif is_http_csv(first, second):
+        logger.info("Indexing CSV")
         # each line is a request/response
-        # TODO: map columns -> properties using "first"
+        lines = [first]
+        if second:
+            lines.append(second)
         async for line in line_generator:
-            # TODO: map csv to katana
-            ingest_queue.put(line)
+            lines.append(line)
+        for rr in http_csv_generator(lines):
+            ingest_queue.put(rr.to_katana())
     else:
+        logger.info("Indexing entire body as single request")
         # send entire body
         lines = [first]
+        if second:
+            lines.append(second)
         async for line in line_generator:
             lines.append(line)
         ingest_queue.put("\n".join(lines))

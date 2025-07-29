@@ -606,6 +606,9 @@ def _build_store_and_embedders(db: str) -> Tuple[
                 batch_size=1,
                 normalize_embeddings=True,
                 progress_bar=False,
+                model_kwargs={
+                    "attn_implementation": "eager",
+                },
             )
             embedder.warm_up()
             embedder_cache[model_name] = embedder

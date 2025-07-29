@@ -586,6 +586,9 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
                 batch_size=1,
                 normalize_embeddings=True,
                 progress_bar=False,
+                model_kwargs={
+                    "attn_implementation": "eager",
+                },
             )
             embedder.warm_up()
             embedder_cache[model_name] = embedder

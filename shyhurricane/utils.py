@@ -40,7 +40,18 @@ class HttpResource(BaseModel):
 
 
 def urlparse_ext(url: str) -> ParseResult:
+    # urlparse does not do validation, so we need to add our own
+    url = url.strip()
+
+    try:
+        if not validators.url(url):
+            raise ValueError()
+    except ValidationError as ve:
+        raise ValueError(ve)
+
     url_parsed = urlparse(url, 'http')
+    if not all([url_parsed.scheme in ("http", "https"), url_parsed.netloc]):
+        raise ValueError()
     if url_parsed.port:
         port = url_parsed.port
     elif url_parsed.scheme == "http":
@@ -199,6 +210,28 @@ class IngestableRequestResponse(BaseModel):
     technologies: Optional[List[str]] = Field(description="Technologies")
     forms: Optional[List[Dict[str, Any]]] = Field(description="Forms")  # see katana response.forms "schema"
 
+    def to_katana(self) -> str:
+        data: Dict[str, Any] = {
+            "timestamp": self.timestamp,
+            "request": {
+                "endpoint": self.url,
+                "method": self.method,
+                "headers": self.request_headers,
+                "body": self.request_body,
+            },
+            "response": {
+                "status_code": self.response_code,
+                "headers": self.response_headers,
+                "body": self.response_body,
+            }
+        }
+        if self.response_rtt is not None:
+            data["response"]["rtt"] = self.response_rtt
+        if self.technologies is not None:
+            data["response"]["technologies"] = self.technologies
+        if self.forms is not None:
+            data["response"]["forms"] = self.forms
+        return json.dumps(data)
 
 def is_katana_jsonl(value: str):
     logger.debug("is_katana_jsonl: %s ... %s", value[0:64], value[-64:])
@@ -211,7 +244,7 @@ def is_katana_jsonl(value: str):
             return True
         return False
     except Exception as e:
-        logger.debug("is_katana_jsonl: parsing %s", e)
+        logger.debug("is_katana_jsonl: parsing %d bytes: %s", len(value), e)
         return False
 
 
@@ -243,10 +276,6 @@ def is_http_raw(value: str):
         return bool(http_request_re.search(value) and http_response_re.search(value))
     except Exception:
         return False
-
-
-def is_http_csv_header(value: str):
-    return False
 
 
 class BeautifulSoupExtractor:
@@ -390,14 +419,14 @@ def filter_ip_networks(input: Optional[List[str]] = None) -> List[str]:
 
 
 async def stream_lines(byte_stream: AsyncGenerator[bytes, None]):
-    buffer = ""
+    buffer = b""
     async for chunk in byte_stream:
-        buffer += chunk.decode("utf-8", errors="replace")
-        while "\n" in buffer:
-            line, buffer = buffer.split("\n", 1)
-            yield line.strip("\r")
+        buffer += chunk
+        while b"\n" in buffer:
+            line, buffer = buffer.split(b"\n", 1)
+            yield line.decode("utf-8", errors="replace").strip()
     if buffer:
-        yield buffer
+        yield buffer.decode("utf-8", errors="replace").strip()
 
 
 def query_to_netloc(query: str) -> Tuple[str | None, int | None]:
