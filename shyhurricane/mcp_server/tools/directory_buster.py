@@ -1,15 +1,18 @@
 import asyncio
 import logging
+import os.path
 import queue
 import time
 from multiprocessing import Queue
 from typing import List, Optional, Dict
 
+from mcp import McpError
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context, get_additional_hosts
+from shyhurricane.mcp_server.tools.find_wordlists import find_wordlists
 from shyhurricane.task_queue import DirBustingQueueItem
 
 logger = logging.getLogger(__name__)
@@ -73,7 +76,7 @@ async def directory_buster(
     know the IP address for a host, be sure to include these in the additional_hosts parameter for
     commands to run properly in a containerized environment.
 
-    The url may contain the FUZZ keyword that will be replaced with values from the wordlist.
+    The url may contain the FUZZ keyword that will be replaced with values from the wordlist. For example, "http://target.local/path/FUZZ".
 
     The user_agent can be used to specify the "User-Agent" request header. This is useful if a particular browser needs
     to be spoofed or the user requests extra information in the user agent header to identify themselves as a bug bounty hunter.
@@ -103,6 +106,27 @@ async def directory_buster(
     url = url.strip()
     depth = min(5, max(1, depth))
 
+    # validate wordlist
+    if wordlist:
+        wordlist_filename = os.path.split(wordlist)[-1]
+        try:
+            wordlist_results = await find_wordlists(ctx, wordlist_filename)
+            if len(wordlist_results) == 0:
+                logger.warning("No wordlists found for %s, using default", wordlist_filename)
+                wordlist = None
+            elif wordlist in wordlist_results:
+                logger.info("Validated wordlist %s", wordlist)
+            else:
+                original_wordlist = wordlist
+                for found_wordlist in wordlist_results:
+                    wordlist = found_wordlist
+                    if found_wordlist.endswith("/" + wordlist_filename):
+                        # exact filename, different path
+                        break
+                logger.info("Corrected wordlist from %s to %s", original_wordlist, wordlist)
+        except McpError as e:
+            logger.warning("Could not validate wordlist, using as given: %s", e)
+
     task_queue: Queue = server_ctx.task_queue
     dir_busting_result_queue: Queue = server_ctx.dir_busting_result_queue
     queue_item = DirBustingQueueItem(
@@ -117,6 +141,7 @@ async def directory_buster(
         cookies=cookies,
         params=params,
         additional_hosts=get_additional_hosts(ctx, additional_hosts),
+        seclists_volume=server_ctx.seclists_volume,
     )
     await asyncio.to_thread(task_queue.put, queue_item)
     results: List[str] = []

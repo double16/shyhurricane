@@ -59,6 +59,8 @@ def _do_busting(
     mitmdump_docker_command = ["docker", "run", "--rm", "--name", container_name]
     for host, ip in (item.additional_hosts or {}).items():
         mitmdump_docker_command.extend(["--add-host", f"{host}:{ip}"])
+    if item.seclists_volume:
+        mitmdump_docker_command.extend(["-v", f"{item.seclists_volume}:/usr/share/seclists"])
     mitmdump_docker_command.append(unix_command_image())
     mitmdump_docker_command.extend(mitmdump_command)
 
@@ -68,6 +70,14 @@ def _do_busting(
     logger.info(f"Dir busting with command {' '.join(buster_docker_command)}")
     mitmdump_proc = subprocess.Popen(mitmdump_docker_command, universal_newlines=True, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL)
+    try:
+        mitmdump_return_code = mitmdump_proc.wait(timeout=2)
+        logger.error("mitmdump for %s returned exit code %d", item.uri, mitmdump_return_code)
+        return None
+    except subprocess.TimeoutExpired:
+        # this is good
+        pass
+
     try:
         buster_proc_succeed = False
         for _ in range(5):
@@ -130,8 +140,9 @@ def _do_busting(
         return_code = buster_proc.wait()
 
         if return_code in [0, 124, 125, 137]:
-            logger.info("Dir busting for %s completed", item.uri)
+            logger.info("Dir busting for %s completed with exit code %d", item.uri, return_code)
             # logger.error("Dir busting errors %s", mitmdump_proc.stderr.read())
+            # logger.error("Dir busting output %s", buster_proc.stdout.read())
             # logger.error("Dir busting errors %s", buster_proc.stderr.read())
         else:
             logger.error("Dir busting for %s returned exit code %d", item.uri, return_code)

@@ -1,11 +1,12 @@
 import re
 from typing import List
 
+from mcp import McpError
 from mcp.server.fastmcp import Context
-from mcp.types import ToolAnnotations
+from mcp.types import ToolAnnotations, ErrorData, INTERNAL_ERROR
 
 from shyhurricane.mcp_server import mcp_instance, log_tool_history
-from shyhurricane.mcp_server.tools.run_unix_command import RunUnixCommand, run_unix_command
+from shyhurricane.mcp_server.tools.run_unix_command import RunUnixCommand, _run_unix_command
 
 
 @mcp_instance.tool(
@@ -26,9 +27,9 @@ async def find_wordlists(ctx: Context, query: str) -> List[str]:
     await log_tool_history(ctx, "find_wordlists")
     command = "find /usr/share/seclists -type f -not -path '*/.*'"
     if query and query.strip():
-        query_clean = re.sub(r'[^\w\-_]', '', query)
+        query_clean = re.sub(r'[^\w\-_.]', '', query)
         command = f"find /usr/share/seclists -type f -ipath '*{query_clean}*' -not -path '*/.*'"
-    result: RunUnixCommand = await run_unix_command(ctx, command, None)
+    result: RunUnixCommand = await _run_unix_command(ctx, command, None)
     if result.return_code != 0:
-        raise RuntimeError(f"Failed to find word lists: {result.error}")
+        raise McpError(ErrorData(code=INTERNAL_ERROR, message=f"Failed to find word lists: {result.error}"))
     return result.output.splitlines()

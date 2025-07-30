@@ -15,7 +15,7 @@ class TargetInfo(BaseModel):
 
 def parse_target_info(target: str) -> TargetInfo:
     """
-    Parse a target info string. May be a URL, host, host:port, or domain.
+    Parse a target info string. Maybe a URL, host, host:port, or domain.
     :exception: ValueError if malformed
     """
     try:

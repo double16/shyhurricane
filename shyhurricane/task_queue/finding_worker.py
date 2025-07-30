@@ -1,4 +1,5 @@
 import datetime
+import json
 import logging
 import time
 
@@ -12,6 +13,7 @@ from shyhurricane.index.web_resources_pipeline import GenerateTitleAndDescriptio
 from shyhurricane.retrieval_pipeline import create_chrome_document_store
 from shyhurricane.target_info import parse_target_info
 from shyhurricane.task_queue.types import SaveFindingQueueItem
+from shyhurricane.utils import get_log_path
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +30,7 @@ class FindingContext:
             normalize_embeddings=True,
             progress_bar=False)
         self.gen_title = GenerateTitleAndDescription(generator_config)
+        self.finding_log_path = get_log_path(db, "finding.jsonl")
 
     def warm_up(self):
         self.finding_embedder.warm_up()
@@ -42,6 +45,15 @@ def save_finding_worker(ctx: FindingContext, item: SaveFindingQueueItem):
     except ValueError as e:
         logger.error(f"Finding has invalid target: {item.target}")
         return
+
+    if ctx.finding_log_path is not None:
+        try:
+            with open(ctx.finding_log_path, "a") as finding_log:
+                finding_log.write(json.dumps({"target": item.target, "title": item.title, "markdown": item.markdown}))
+                finding_log.write("\n")
+        except Exception as e:
+            logger.error("Failed to write finding log at %s: %s", ctx.finding_log_path, e)
+            ctx.finding_log_path = None
 
     meta = {
         "version": FINDING_VERSION,

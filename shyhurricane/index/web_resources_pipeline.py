@@ -120,6 +120,7 @@ class KatanaDocument:
             entry = text
         else:
             entry = json.loads(str(text))
+            # TODO: Handle JSONDecodeError
         if "request" not in entry:
             logger.warning("Missing request")
             return self._empty_response
@@ -476,12 +477,11 @@ class IndexDocTypeDocuments:
             if normalized_content != doc.content:
                 if len(normalized_content) < len(doc.content) / 2:
                     logger.warning(
-                        f"Normalized content for {doc_type} reduced {len(doc.content)} bytes to {len(normalized_content)} bytes, skipping")
-                else:
-                    doc.content = normalized_content
-                    response_headers = json.loads(doc.meta.get("response_headers", "{}"))
-                    response_headers["Content-Length"] = str(len(normalized_content))
-                    doc.meta["response_headers"] = json.dumps(response_headers)
+                        f"Normalized content for {doc_type} reduced {len(doc.content)} bytes to {len(normalized_content)} bytes")
+                doc.content = normalized_content
+                response_headers = json.loads(doc.meta.get("response_headers", "{}"))
+                response_headers["Content-Length"] = str(len(normalized_content))
+                doc.meta["response_headers"] = json.dumps(response_headers)
 
             for token_length in (doc_type_to_model.get(doc_type).token_lengths or [sys.maxsize]):
                 # create docs per token_length

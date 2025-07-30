@@ -11,6 +11,7 @@ class PromptChooserTest(unittest.TestCase):
         super().__init__(methodName)
         self.titles = [
             "Automated CTF Solver",
+            "Automated Hack-the-Box (HTB) CTF Solver",
             "Automated Bug Bounty Hunter",
             "Bug Bounty Hunter Assistant",
             "Automated Penetration Tester",
@@ -24,6 +25,12 @@ class PromptChooserTest(unittest.TestCase):
                                                                        self.titles)
         self.assertEqual(["192.168.1.1"], targets)
         self.assertEqual("Automated CTF Solver", prompt_title)
+
+    async def test_extract_targets_and_prompt_title_htb(self):
+        targets, prompt_title = await extract_targets_and_prompt_title("Solve the HTB challenge at 192.168.1.1",
+                                                                       self.titles)
+        self.assertEqual(["192.168.1.1"], targets)
+        self.assertEqual("Automated Hack-the-Box (HTB) CTF Solver", prompt_title)
 
     async def test_extract_targets_and_prompt_title_pentest_agent(self):
         targets, prompt_title = await extract_targets_and_prompt_title(

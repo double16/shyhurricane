@@ -79,6 +79,7 @@ class DirBustingQueueItem:
                  cookies: Optional[Dict[str, str]] = None,
                  params: Optional[Dict[str, str]] = None,
                  rate_limit_requests_per_second: Optional[int] = None,
+                 seclists_volume: Optional[str] = None,
                  ):
         self.uri = uri
         self.depth = depth
@@ -92,6 +93,7 @@ class DirBustingQueueItem:
         self.cookies = cookies
         self.params = params
         self.rate_limit_requests_per_second = rate_limit_requests_per_second
+        self.seclists_volume = seclists_volume
 
 
 class SaveFindingQueueItem:

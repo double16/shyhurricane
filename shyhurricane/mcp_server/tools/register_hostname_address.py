@@ -35,6 +35,8 @@ async def register_hostname_address(ctx: Context, host: str, address: str) -> st
     Invoke this tool when another tool has found an additional host name for a target in-scope.
 
     Invoke this tool when the user asks to register a hostname with an IP address.
+
+    Invoke this tool instead of adding a hostname to the /etc/hosts file.
     """
     await log_tool_history(ctx, "register_hostname_address", host=host, address=address)
 

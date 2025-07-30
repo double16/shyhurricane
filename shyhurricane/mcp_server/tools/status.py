@@ -1,30 +1,17 @@
+import json
 from typing import Dict
 
 import chromadb
 from chromadb.api.models import AsyncCollection
-from mcp.types import ToolAnnotations
-from pydantic import Field, BaseModel
+from starlette.requests import Request
+from starlette.responses import Response
 
 from shyhurricane.index.web_resources import get_doc_type_queue
 from shyhurricane.mcp_server import mcp_instance, get_server_context
 
 
-class StatusResult(BaseModel):
-    document_counts: Dict[str, int] = Field("The count of documents in  each document collection")
-    domain_counts: Dict[str, int] = Field("The count of documents for each domain")
-    host_counts: Dict[str, int] = Field("The count of documents for each host")
-    index_active: int = Field("The number of active requests to index (light-weight)")
-    type_specific_index_active: int = Field(
-        "The number of active requests to index type-specific information (heavy-weight)")
-
-
-@mcp_instance.tool(
-    annotations=ToolAnnotations(
-        title="Status Report",
-        readOnlyHint=True,
-        openWorldHint=False),
-)
-async def status() -> StatusResult:
+@mcp_instance.custom_route('/status', methods=['POST'])
+async def status(request: Request) -> Response:
     """
     Returns various statistics and runtime status for the MCP server.
     """
@@ -64,10 +51,14 @@ async def status() -> StatusResult:
                     else:
                         host_counts[host] = 1
 
-    return StatusResult(
-        document_counts=document_counts,
-        domain_counts=domain_counts,
-        host_counts=host_counts,
-        index_active=server_ctx.ingest_queue.active_size(),
-        type_specific_index_active=doc_type_queue.active_size(),
+    return Response(
+        status_code=200,
+        media_type="application/json",
+        content=json.dumps({
+            "document_counts": document_counts,
+            "domain_counts": domain_counts,
+            "host_counts": host_counts,
+            "index_active": server_ctx.ingest_queue.active_size(),
+            "type_specific_index_active": doc_type_queue.active_size(),
+        })
     )

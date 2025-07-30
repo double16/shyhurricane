@@ -3,14 +3,22 @@ from typing import List, Optional
 from mcp.server.fastmcp.prompts.base import Message, AssistantMessage, UserMessage
 
 from shyhurricane.mcp_server import mcp_instance
-from shyhurricane.prompts import pentester_agent_system_prompt, pentester_chat_system_prompt, ctf_agent_system_prompt, \
-    bug_bounty_agent_system_prompt, bug_bounty_chat_system_prompt
+from shyhurricane.prompts import ctf_agent_system_prompt, bug_bounty_agent_system_prompt, bug_bounty_chat_system_prompt, \
+    pentester_agent_system_prompt, pentester_chat_system_prompt, htb_ctf_agent_system_prompt
 
 
 @mcp_instance.prompt(title="Automated CTF Solver")
 def ctf_agent_prompt(target: str, query: Optional[str] = None) -> List[Message]:
     return [
         AssistantMessage(ctf_agent_system_prompt),
+        UserMessage(query or f"Find the CTF flags on {target}."),
+    ]
+
+
+@mcp_instance.prompt(title="Automated Hack-the-Box (HTB) CTF Solver")
+def htb_ctf_agent_prompt(target: str, query: Optional[str] = None) -> List[Message]:
+    return [
+        AssistantMessage(htb_ctf_agent_system_prompt),
         UserMessage(query or f"Find the CTF flags on {target}."),
     ]
 
@@ -55,17 +63,19 @@ You are **Pentest Audit Bot**, an independent security auditor.
 Your job is to grade how thoroughly the test team examined the target **using only the documents stored in the retrieval system.**  
 You **must not** collect new data from the internet or from the live target.
 
-────────────────────────────────────────────────────────
-Allowed actions
-────────────────────────────────────────────────────────
+--- 
+
+## Allowed actions:
+--------------------
 | Action           | Tool              | Purpose                                         |
 | ---------------- | ----------------- | ----------------------------------------------- |
 | Retrieve services covered | `find_netloc`     | Pull indexed hostname and ports in the form of hostname:port |
 | Retrieve resources | `find_web_resources`     | Pull chunks that match a query (HTML, headers, scripts, logs). |
 
-────────────────────────────────────────────────────────
-Audit checklist
-────────────────────────────────────────────────────────
+---
+
+## Audit checklist:
+
 Evaluate whether each phase below is present in the indexed evidence.  
 Mark “✅ covered” or “❌ missing”.
 
@@ -75,12 +85,12 @@ Mark “✅ covered” or “❌ missing”.
 4. **Privilege Escalation** – local-root attempts, token theft  
 5. **Post-Exploitation Loot** – DB dumps, secrets, sensitive files  
 
-────────────────────────────────────────────────────────
-Execution rules
-────────────────────────────────────────────────────────
+---
+
+## Execution rules:
 * Speak in concise **Markdown**.  
 * Log progress in one-line notes such as  
-  `🔍 website_rag("open ports") → 12 hits`  
+  `website_rag("open ports") → 12 hits`  
 * Iterate queries until all evidence is reviewed.  
 * End the loop with **DONE** followed by the final report.
 

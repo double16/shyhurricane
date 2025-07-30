@@ -16,6 +16,7 @@ from persistqueue import Empty
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.index.web_resources_pipeline import build_ingest_pipeline, build_doc_type_pipeline
 from shyhurricane.task_queue import TaskPool
+from shyhurricane.utils import get_log_path
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,8 @@ def _ingest_worker(db: str):
         doc_type_queue = get_doc_type_queue(db)
         atexit.register(doc_type_queue.close)
 
+        index_log_path = get_log_path(db, "index.txt")
+
         pipeline: Pipeline = build_ingest_pipeline(db=db)
         count = 0
         logger.info(f"Index worker ready in PID {os.getpid()}")
@@ -71,6 +74,15 @@ def _ingest_worker(db: str):
                 queue.ack(item)
                 continue
             logger.info(f"Processing {item[0:128]} in PID {os.getpid()}")
+
+            if index_log_path is not None:
+                try:
+                    with open(index_log_path, "a") as index_log:
+                        index_log.write(f"{item}\n")
+                except Exception as e:
+                    logger.error("Failed to write index log at %s: %s", index_log_path, e)
+                    index_log_path = None
+
             try:
                 output = pipeline.run({"input_router": {"text": str(item)}})
 

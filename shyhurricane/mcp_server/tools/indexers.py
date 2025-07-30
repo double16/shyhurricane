@@ -49,6 +49,7 @@ async def index_request_body(request: Request) -> Response:
     elif is_http_csv(first, second):
         logger.info("Indexing CSV")
         # each line is a request/response
+        # the csv library doesn't support async, so we need to collect everything first
         lines = [first]
         if second:
             lines.append(second)

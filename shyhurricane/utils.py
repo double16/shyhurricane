@@ -2,6 +2,7 @@ import datetime
 import ipaddress
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Optional, Dict, Any, Union, List, Tuple, AsyncGenerator
@@ -398,7 +399,7 @@ def filter_hosts_and_addresses(input: Optional[List[str]] = None) -> List[str]:
     result = []
     for e in input:
         try:
-            if validators.domain(e) == True or ipaddress.ip_address(e):
+            if e == "localhost" or validators.domain(e) == True or ipaddress.ip_address(e):
                 result.append(e)
         except (ValueError, ValidationError):
             pass
@@ -480,3 +481,13 @@ def munge_urls(query) -> Tuple[Optional[str], Optional[List[int]]]:
 
 def unix_command_image() -> str:
     return "ghcr.io/double16/shyhurricane:main"
+
+
+def get_log_path(db: str, log_name: str) -> Path:
+    if os.path.exists("/data"):
+        # Running inside a container
+        path = Path("/data", "logs", log_name)
+    else:
+        path = Path(Path.home(), ".local", "state", "shyhurricane", re.sub(r'[^A-Za-z0-9_.-]', '_', db), log_name)
+    os.makedirs(path.parent, mode=0o755, exist_ok=True)
+    return path
