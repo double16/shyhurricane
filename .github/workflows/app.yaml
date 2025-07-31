@@ -41,14 +41,14 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: 'pip'
 
-      - name: Install Ollama
-        run: |
-          curl -fsSL https://ollama.com/install.sh | sh
-
-      - name: Pull llama3.2:3b
-        run: |
-          ollama pull llama3.2:3b
-
+#      - name: Install Ollama
+#        run: |
+#          curl -fsSL https://ollama.com/install.sh | sh
+#
+#      - name: Pull llama3.2:3b
+#        run: |
+#          ollama pull llama3.2:3b
+#
       - name: Lint with Ruff
         run: |
           pip install ruff
