@@ -1,10 +1,13 @@
 import unittest
 
+import pytest
+
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.mcp_server.generator_config import set_generator_config
 from shyhurricane.mcp_server.tools.prompt_chooser import extract_targets_and_prompt_title
 
 
+@pytest.mark.ollama
 class PromptChooserTest(unittest.TestCase):
 
     def __init__(self, methodName: str = ...):

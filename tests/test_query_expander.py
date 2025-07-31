@@ -1,11 +1,14 @@
 import unittest
 from typing import List
 
+import pytest
+
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.retrieval_pipeline import QueryExpander, query_expander_javascript, \
     query_expander_natural_language, query_expander_css, query_expander_html, query_expander_xml, query_expander_network
 
 
+@pytest.mark.ollama
 class QueryExpanderBase(unittest.TestCase):
     __test__ = False
 

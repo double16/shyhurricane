@@ -2,10 +2,13 @@ import json
 import unittest
 from typing import List, Tuple
 
+import pytest
+
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.retrieval_pipeline import build_website_context_pipeline
 
 
+@pytest.mark.ollama
 class WebsiteContextPipelineTest(unittest.TestCase):
 
     def __init__(self, methodName: str = ...):

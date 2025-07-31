@@ -1,12 +1,14 @@
 import unittest
 from typing import Tuple, Optional
 
+import pytest
 from haystack import Document
 
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.index.web_resources_pipeline import GenerateTitleAndDescription
 
 
+@pytest.mark.ollama
 class GenerateTitleAndDescriptionTest(unittest.TestCase):
 
     def __init__(self, methodName: str = ...):

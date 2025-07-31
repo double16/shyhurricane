@@ -19,14 +19,15 @@ jobs:
   test:
     runs-on: ubuntu-24.04
 
-    services:
-      ollama:
-        image: alpine/ollama
-        ports:
-          - 11434:11434
-
-    env:
-      OLLAMA_HOST: localhost:11434
+# TODO: test with ollama when we can run with GPU
+#    services:
+#      ollama:
+#        image: alpine/ollama
+#        ports:
+#          - 11434:11434
+#
+#    env:
+#      OLLAMA_HOST: localhost:11434
 
     strategy:
       matrix:
