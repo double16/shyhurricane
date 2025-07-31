@@ -1,5 +1,6 @@
 import copy
 import logging
+import shutil
 import subprocess
 import tempfile
 import time
@@ -94,29 +95,39 @@ def _do_port_scan(
     nmap_command = ["nmap", "-sT", "--open", "-sC", "-sV", "-oX", "-", ports_option]
     nmap_command.extend(item.targets)
 
-    docker_command = [
-        "docker", "run", "--rm",
-        "--user=0",
-        "--cap-add", "NET_BIND_SERVICE",
-        "--cap-add", "NET_ADMIN",
-        "--cap-add", "NET_RAW",
-    ]
-    for host, ip in (item.additional_hosts or {}).items():
-        docker_command.extend(["--add-host", f"{host}:{ip}"])
-    docker_command.append(unix_command_image())
-    docker_command.extend(nmap_command)
+    # running nmap inside docker is not always great because of networking, try locally if it's installed
+    nmap_path = shutil.which("nmap")
+    if nmap_path and not item.additional_hosts:
+        logger.info("Using host nmap at %s", nmap_path)
+        nmap_command[0] = nmap_path
+        final_command = nmap_command
+    else:
+        docker_command = [
+            "docker", "run", "--rm",
+            "--user=0",
+            "--cap-add", "NET_BIND_SERVICE",
+            "--cap-add", "NET_ADMIN",
+            "--cap-add", "NET_RAW",
+        ]
+        for host, ip in (item.additional_hosts or {}).items():
+            docker_command.extend(["--add-host", f"{host}:{ip}"])
+        docker_command.append(unix_command_image())
+        docker_command.extend(nmap_command)
+
+        final_command = docker_command
+
 
     runtime_ts = time.time()
     timestamp = datetime.fromtimestamp(runtime_ts).isoformat()
 
-    logger.info(f"port scan with command {' '.join(docker_command)}")
+    logger.info(f"port scan with command {' '.join(final_command)}")
     with tempfile.TemporaryFile(mode="w+") as output_file:
-        proc = subprocess.Popen(docker_command, universal_newlines=True, stdout=output_file.fileno(),
+        proc = subprocess.Popen(final_command, universal_newlines=True, stdout=output_file.fileno(),
                                 stderr=subprocess.DEVNULL)
         return_code = proc.wait()
         if return_code != 0:
             logger.error("Port scan for %s returned exit code %d: %s", item.targets, return_code,
-                         ' '.join(docker_command))
+                         ' '.join(final_command))
             return None
 
         logger.info("Port scan for %s completed", item.targets)

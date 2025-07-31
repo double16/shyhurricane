@@ -1,4 +1,4 @@
-# ZAP httpsender script — emits Katana‑style JSONL
+# ZAP shyhurricane httpsender script — posts Katana‑style JSONL to the shyhurricane /index endpoint
 # Target: "response" (fires after full HTTP exchange)
 # Engine: Jython
 
@@ -27,19 +27,11 @@ import datetime
 import json
 
 import java.io
-from org.parosproxy.paros.network import HttpMessage
+from org.apache.commons.httpclient import URI
+from java.lang import String
+from org.parosproxy.paros.network import HttpMessage, HttpRequestHeader, HttpHeader, HttpSender
 
-# ─── configure output file ─────────────────────────────
-LOG_PATH = "/tmp/zap_katana.jsonl"  # change as required
-# global writer (append)
-try:
-    _writer = java.io.BufferedWriter(java.io.FileWriter(LOG_PATH, True))
-except Exception as _e:
-    print("[zap script] cannot open log file:", _e)
-    _writer = None
-
-
-# ─── utility ───────────────────────────────────────────────────
+MCP_URI = URI("http://127.0.0.1:8001/index")
 
 def to_headers(java_headers):
     """Return lower‑cased header map from ZAP header object."""
@@ -50,7 +42,7 @@ def to_headers(java_headers):
     return h
 
 
-SKIP_PREFIXES = ("audio/", "video/", "font/")
+SKIP_PREFIXES = ("audio/", "video/", "font/", "binary/")
 
 
 def should_skip(content_type):
@@ -63,12 +55,19 @@ def should_skip(content_type):
         return True
     if ct.startswith("image/") and "svg" not in ct:
         return True
-    if ct == 'application/octet-stream':
+    if ct in [
+        "application/octet-stream",
+        "application/pdf",
+        "application/x-pdf",
+        "application/zip",
+        "application/x-zip-compressed",
+        "application/x-protobuf",
+        "application/font-woff",
+        "application/font-woff2",
+        "application/vnd.ms-fontobject",
+    ]:
         return True
     return False
-
-
-# ─── ZAP callbacks ────────────────────────────────────────────
 
 def sendingRequest(msg, initiator, helper):
     pass  # only care after response
@@ -76,11 +75,15 @@ def sendingRequest(msg, initiator, helper):
 
 def responseReceived(msg, initiator, helper):
     try:
+        if not msg.isInScope():
+            return
+
         req_hdr = msg.getRequestHeader()
         res_hdr = msg.getResponseHeader()
 
         ctype = res_hdr.getHeader("Content-Type") or res_hdr.getHeader("content-type") or ""
         if should_skip(ctype):
+            print("Skip indexing of "+str(req_hdr.getURI()))
             return  # ignore binary assets
 
         now = datetime.datetime.now().isoformat()
@@ -99,12 +102,22 @@ def responseReceived(msg, initiator, helper):
             "response": {
                 "status_code": res_hdr.getStatusCode(),
                 "headers": to_headers(res_hdr),
-                "body": msg.getResponseBody().toString()
+                "body": msg.getResponseBody().toString(),
+                "rtt": float(msg.getTimeElapsedMillis()) / 1000.0,
             }
         }
 
-        if _writer:
-            _writer.write(json.dumps(entry) + "\n")
-            _writer.flush()
+        print("Indexing "+str(req_hdr.getURI()))
+
+        payload = json.dumps(entry)
+        header = HttpRequestHeader(HttpRequestHeader.POST, MCP_URI, HttpHeader.HTTP11)
+        header.setHeader(HttpHeader.CONTENT_TYPE, "application/json")
+        message = HttpMessage()
+        message.setRequestHeader(header)
+        message.setRequestBody(String(payload))
+        header.setContentLength(len(payload))
+
+        sender = HttpSender(HttpSender.MANUAL_REQUEST_INITIATOR)
+        sender.sendAndReceive(message, False)
     except Exception as e:
         print("[zap script] serialisation error:", e)
