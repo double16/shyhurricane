@@ -486,7 +486,7 @@ def munge_urls(query) -> Tuple[Optional[str], Optional[List[int]]]:
 
 
 def unix_command_image() -> str:
-    return "ghcr.io/double16/shyhurricane:main"
+    return "ghcr.io/double16/shyhurricane_unix_command:main"
 
 
 def get_log_path(db: str, log_name: str) -> Path:

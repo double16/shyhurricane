@@ -81,7 +81,7 @@ docker compose -f docker-compose.dev.yml up -d
 The unix command is run in a container to prevent bad things, so you still need docker.
 
 ```shell
-docker build -t ghcr.io/double16/shyhurricane:main src/docker/unix_command
+docker build -t ghcr.io/double16/shyhurricane_unix_command:main src/docker/unix_command
 python3 mcp_service.py
 ```
 
