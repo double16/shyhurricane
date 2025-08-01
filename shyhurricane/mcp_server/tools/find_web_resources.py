@@ -21,9 +21,10 @@ from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server import get_server_context, mcp_instance, log_tool_history, assert_elicitation, \
     ServerContext, get_additional_hosts
 from shyhurricane.mcp_server.tools.find_indexed_metadata import find_netloc
+from shyhurricane.target_info import parse_target_info, TargetInfo
 from shyhurricane.task_queue import SpiderQueueItem
 from shyhurricane.utils import HttpResource, urlparse_ext, documents_sort_unique, extract_domain, query_to_netloc, \
-    munge_urls
+    munge_urls, filter_hosts_and_addresses
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,8 @@ async def _find_web_resources_by_netloc(ctx: Context, query: str, limit: int = 1
         hostname, port = query_to_netloc(query)
         if hostname is None or port is None:
             return None
+        if not filter_hosts_and_addresses([hostname]):
+            return None
         store = server_ctx.stores["content"]
         docs = []
 
@@ -149,6 +152,8 @@ async def _find_web_resources_by_hostname(ctx: Context, query: str, limit: int =
     try:
         hostname, port = query_to_netloc(query)
         if hostname is None or port is not None:
+            return None
+        if not filter_hosts_and_addresses([hostname]):
             return None
         store = server_ctx.stores["content"]
         docs = []
@@ -288,7 +293,7 @@ async def find_web_resources(
                                          limit=limit)
 
     doc_types: list[str] = []
-    urls: list[str] = []
+    targets: list[str] = []
     methods: list[str] = http_methods or []
     response_codes: list[str] = []
 
@@ -300,7 +305,7 @@ async def find_web_resources(
             logger.info("Target result: %s", json.dumps(target_result))
             try:
                 target_json = json.loads(target_result)
-                urls.extend(target_json.get('target', []))
+                targets.extend(target_json.get('target', []))
                 doc_types.extend(target_json.get('content', []))
                 # methods.extend(target_json.get('methods', [])) # may be too limiting, or maybe ignore for certain doc types
                 response_codes.extend(target_json.get('response_codes', []))
@@ -309,11 +314,11 @@ async def find_web_resources(
 
     await determine_targets(query)
 
-    if not urls:
+    if not targets:
         if recommended_urls := await _find_recommended_urls(ctx):
-            urls.extend(recommended_urls)
+            targets.extend(recommended_urls)
 
-    if not urls:
+    if not targets:
         try:
             logger.info("Asking user for URL(s)")
             assert_elicitation(server_ctx)
@@ -328,7 +333,7 @@ async def find_web_resources(
         except McpError:
             logger.info("elicit not supported, returning")
         finally:
-            if not urls:
+            if not targets:
                 return FindWebResourcesResult(
                     instructions=find_web_resources_instructions_need_target,
                     query=query,
@@ -336,7 +341,14 @@ async def find_web_resources(
                     limit=limit,
                 )
 
-    filter_netloc = [parsed.netloc for parsed in map(lambda u: urlparse_ext(u), urls)]
+    parsed_targets: List[TargetInfo] = []
+    for target in targets:
+        try:
+            parsed_targets.append(parse_target_info(target))
+        except ValueError:
+            pass
+    filter_netloc = list(map(lambda t: t.netloc, parsed_targets))
+    filter_domain = set()
 
     # check if we have data
     missing_netloc = set(filter_netloc.copy())
@@ -344,25 +356,33 @@ async def find_web_resources(
         try:
             missing_netloc.remove(known_netloc)
         except KeyError:
-            pass
+            for target in parsed_targets:
+                if known_netloc.split(":")[0].endswith("." + target.host):
+                    filter_domain.add(target.host)
         if len(missing_netloc) == 0:
             break
-    missing_urls = []
-    for url in urls:
-        if urlparse(url).netloc in missing_netloc:
-            missing_urls.append(url)
-    if missing_urls:
-        logger.info(f"Asking user to spider {', '.join(missing_urls)}")
+    missing_targets: List[TargetInfo] = []
+    # if we're missing network locations but we have domains, do a domain filter
+    if missing_netloc and filter_domain:
+        missing_netloc.clear()
+        filter_netloc.clear()
+    else:
+        for target in parsed_targets:
+            if target.netloc in missing_netloc:
+                missing_targets.append(target)
+    if missing_targets:
+        missing_targets_str = ", ".join(map(str, missing_targets))
+        logger.info(f"Asking user to spider {missing_targets_str}")
         try:
             assert_elicitation(server_ctx)
             spider_elicit_result = await ctx.elicit(
-                message=f"There is no data for {', '.join(missing_urls)}. Would you like to start a scan?",
+                message=f"There is no data for {missing_targets_str}. Would you like to start a scan?",
                 schema=RequestTargetUrl
             )
             match spider_elicit_result:
                 case AcceptedElicitation():
-                    for url in missing_urls:
-                        await spider_website(ctx, url)
+                    for target in missing_targets:
+                        await spider_website(ctx, target.to_url())
                 case DeclinedElicitation(), CancelledElicitation():
                     return FindWebResourcesResult(
                         instructions=find_web_resources_instructions_not_found,
@@ -371,15 +391,18 @@ async def find_web_resources(
                         limit=limit,
                     )
         except McpError as e:
-            await ctx.info(f"Spidering {', '.join(missing_urls)}")
+            await ctx.info(f"Spidering {missing_targets_str}")
             logger.warning("elicit not supported, starting spider")
-            for url in missing_urls:
-                await spider_website(ctx, url)
+            for target in missing_targets:
+                await spider_website(ctx, target.to_url())
 
     conditions = [
         {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION}
     ]
-    _append_in_filter(conditions, "meta.netloc", filter_netloc)
+    if filter_netloc:
+        _append_in_filter(conditions, "meta.netloc", filter_netloc)
+    elif filter_domain:
+        _append_in_filter(conditions, "meta.domain", list(filter_domain))
     # _append_in_filter(conditions, "meta.type", doc_types) # tends to be too limiting
     _append_in_filter(conditions, "meta.http_method", methods)
     _append_in_filter(conditions, "meta.status_code", response_codes)
@@ -393,11 +416,21 @@ async def find_web_resources(
             "conditions": conditions,
         }
 
-    logger.info(f"Searching for {', '.join(urls)} with filter {json.dumps(filters)}")
-    await ctx.info(f"Searching for {', '.join(urls)}")
+    logger.info(f"Searching for {', '.join(targets)} with filter {json.dumps(filters)}")
+    await ctx.info(f"Searching for {', '.join(targets)}")
 
-    res = document_pipeline.run(data={"query": {"text": query, "filters": filters, "max_results": limit}},
-                                include_outputs_from={"combine"})
+    loop = asyncio.get_running_loop()
+
+    def progress_callback(message: str):
+        try:
+            asyncio.run_coroutine_threadsafe(ctx.info(message), loop).result()
+        except Exception as e:
+            logger.warning(f"Error reporting progress: {e}")
+
+    res = await asyncio.to_thread(document_pipeline.run,
+                                  data={"query": {"text": query, "filters": filters, "max_results": limit,
+                                                  "progress_callback": progress_callback}},
+                                  include_outputs_from={"combine"})
 
     documents = documents_sort_unique(res.get("combine", {}).get("documents", []), limit)
 

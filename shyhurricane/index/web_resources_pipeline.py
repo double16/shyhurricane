@@ -111,6 +111,9 @@ def _deobfuscate_javascript(content: str) -> str:
 
 @component
 class KatanaDocument:
+    """
+    Convert katana jsonl into IngestableRequestResponse.
+    """
     def __init__(self):
         self._empty_response = {"request_responses": []}
 
@@ -180,21 +183,29 @@ class KatanaDocument:
 
 @component
 class HttpRawDocument:
+    """
+    Convert raw HTTP request/response into IngestableRequestResponse.
+    """
     def __init__(self):
         self._empty_response = {"request_responses": []}
 
     @component.output_types(request_responses=List[IngestableRequestResponse])
     def run(self, text: str):
+        # TODO: implement
         return self._empty_response
 
 
 @component
 class HarDocument:
+    """
+    Convert HAR into IngestableRequestResponse.
+    """
     def __init__(self):
         self._empty_response = {"request_responses": []}
 
     @component.output_types(request_responses=List[IngestableRequestResponse])
     def run(self, text: str):
+        # TODO: implement
         return self._empty_response
 
 
@@ -354,7 +365,9 @@ class RequestResponseToDocument:
                 "type": "network",
                 "token_length": doc_type_to_model.get("network").get_primary_token_length(),
                 "description": "HTTP request and response headers",
-                "content_type": "text/plain"
+                "content_type": "text/plain",
+                "request_headers": json.dumps(request_headers),
+                "response_headers": json.dumps(response_headers),
             },
             id=hashlib.sha256(f"{url}:network:{timestamp_for_id}".encode()).hexdigest()
         )

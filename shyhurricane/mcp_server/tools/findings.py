@@ -153,26 +153,27 @@ async def query_findings(ctx: Context, target: str, limit: int = 100) -> QueryFi
             ]}
         logger.info("Query findings by netloc %s", filters)
         docs.extend(await store.filter_documents_async(filters=filters))
-    elif target_info.host:
-        logger.info("Searching for findings for %s", target_info.host)
-        filters = {
-            "operator": "AND",
-            "conditions": [
-                {"field": "meta.version", "operator": "==", "value": FINDING_VERSION},
-                {"field": "meta.host", "operator": "==", "value": target_info.host}
-            ]}
-        logger.info("Query findings by host %s", filters)
-        docs.extend(await store.filter_documents_async(filters=filters))
-    elif target_info.domain:
-        logger.info("Searching for findings for %s", target_info.domain)
-        filters = {
-            "operator": "AND",
-            "conditions": [
-                {"field": "meta.version", "operator": "==", "value": FINDING_VERSION},
-                {"field": "meta.domain", "operator": "==", "value": target_info.domain}
-            ]}
-        logger.info("Query findings by domain %s", filters)
-        docs.extend(await store.filter_documents_async(filters=filters))
+    else:
+        if target_info.host:
+            logger.info("Searching for findings for %s", target_info.host)
+            filters = {
+                "operator": "AND",
+                "conditions": [
+                    {"field": "meta.version", "operator": "==", "value": FINDING_VERSION},
+                    {"field": "meta.host", "operator": "==", "value": target_info.host}
+                ]}
+            logger.info("Query findings by host %s", filters)
+            docs.extend(await store.filter_documents_async(filters=filters))
+        if target_info.domain == target_info.host and len(docs) == 0:
+            logger.info("Searching for findings for %s", target_info.domain)
+            filters = {
+                "operator": "AND",
+                "conditions": [
+                    {"field": "meta.version", "operator": "==", "value": FINDING_VERSION},
+                    {"field": "meta.domain", "operator": "==", "value": target_info.domain}
+                ]}
+            logger.info("Query findings by domain %s", filters)
+            docs.extend(await store.filter_documents_async(filters=filters))
 
     findings = []
     for doc in docs:

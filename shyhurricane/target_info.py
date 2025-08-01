@@ -1,6 +1,7 @@
 from typing import Optional, Iterable, List
 
 from pydantic import BaseModel, Field
+from tldextract import tldextract
 
 from shyhurricane.utils import urlparse_ext, extract_domain, filter_hosts_and_addresses, query_to_netloc
 
@@ -11,6 +12,19 @@ class TargetInfo(BaseModel):
     host: str = Field(default="host")
     port: Optional[int] = Field(default="port")
     domain: str = Field(default="domain")
+
+    def to_url(self) -> str:
+        if self.url:
+            return self.url
+        scheme = "https" if self.port and self.port % 1000 == 443 else "http"
+        if self.netloc:
+            return f"{scheme}://{self.netloc}"
+        host = self.host or self.domain
+        if tldextract.extract(host, include_psl_private_domains=False).top_domain_under_public_suffix:
+            scheme = "https"
+        else:
+            scheme = "http"
+        return f"{scheme}://{host}"
 
 
 def parse_target_info(target: str) -> TargetInfo:

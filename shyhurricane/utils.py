@@ -45,7 +45,13 @@ def urlparse_ext(url: str) -> ParseResult:
     url = url.strip()
 
     try:
-        if not validators.url(url):
+        if not validators.url(url,
+                              skip_ipv4_addr=False,
+                              skip_ipv6_addr=False,
+                              simple_host=True,
+                              strict_query=False,
+                              consider_tld=False,
+                              ):
             raise ValueError()
     except ValidationError as ve:
         raise ValueError(ve)

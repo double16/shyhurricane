@@ -2,7 +2,7 @@
 import logging
 import os
 import re
-from typing import Dict, List, Optional, Any, Tuple, Iterable
+from typing import Dict, List, Optional, Any, Tuple, Iterable, Callable
 
 import chromadb
 from chromadb import AsyncClientAPI
@@ -93,10 +93,21 @@ class TraceDocs:
 
 @component
 class Query:
-    @component.output_types(text=str, filters=Dict[str, Any], max_results=int)
-    def run(self, text: str, filters: Optional[Dict[str, Any]] = None, max_results: Optional[int] = None):
+    @component.output_types(text=str, filters=Dict[str, Any], max_results=int, progress_callback=Callable[[str], None])
+    def run(
+            self,
+            text: str,
+            filters: Optional[Dict[str, Any]] = None,
+            max_results: Optional[int] = None,
+            progress_callback: Optional[Callable[[str], None]] = None
+    ):
         max_results = min(1000, max(1, max_results or 100))
-        return {"text": text, "filters": filters or {}, "max_results": max_results}
+        return {
+            "text": text,
+            "filters": filters or {},
+            "max_results": max_results,
+            "progress_callback": progress_callback,
+        }
 
 
 query_expander_structure = """
@@ -370,7 +381,8 @@ class QueryExpander:
 
 @component
 class MultiQueryChromaRetriever:
-    def __init__(self, embedder: SentenceTransformersTextEmbedder, retriever: ChromaEmbeddingRetriever):
+    def __init__(self, name: str, embedder: SentenceTransformersTextEmbedder, retriever: ChromaEmbeddingRetriever):
+        self.name = name
         self.embedder = embedder
         self.retriever = retriever
 
@@ -378,13 +390,20 @@ class MultiQueryChromaRetriever:
         self.embedder.warm_up()
 
     @component.output_types(documents=List[Document])
-    def run(self, queries: List[str], top_k: int, filters: Optional[Dict[str, Any]] = None):
+    def run(self,
+            queries: List[str],
+            top_k: int,
+            filters: Optional[Dict[str, Any]] = None,
+            progress_callback: Optional[Callable[[str], None]] = None,
+            ):
         top_k = min(1000, max(1, top_k))
         results = []
         ids = set()
         for query in queries:
-            logger.info(f"Query: {query}")
+            logger.info(f"Querying {self.name}: {query}")
             try:
+                if progress_callback is not None:
+                    progress_callback(f"Querying {self.name}: {query}")
                 result = self.retriever.run(
                     query_embedding=self.embedder.run(query)["embedding"],
                     filters=filters,
@@ -619,7 +638,7 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
             store = create_chrome_document_store(db=db, collection_name=col)
             stores[col] = store
             retriever = ChromaEmbeddingRetriever(document_store=store)
-            multiquery_retriever = MultiQueryChromaRetriever(embedder, retriever)
+            multiquery_retriever = MultiQueryChromaRetriever(doc_type_model.doc_type, embedder, retriever)
             retrievers[col] = multiquery_retriever
 
             ret_name = f"ret_{col}"
@@ -627,6 +646,7 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
 
             # wiring: Query → embedder → retriever → combiner
             pipe.connect("query.max_results", ret_name + ".top_k")
+            pipe.connect("query.progress_callback", ret_name + ".progress_callback")
             if custom_query_expander_name is not None:
                 pipe.connect(custom_query_expander_name + ".queries", ret_name + ".queries")
             else:
@@ -646,33 +666,35 @@ def build_website_context_pipeline(generator_config: GeneratorConfig) -> Pipelin
     prompt = """
       You are a cybersecurity search assistant that processes users queries for websites.
 
-      You determine the site url(s) and/or ip address(es) and ports the user is targeting. Follow these rules when determining the targets:
+      You determine the target host name, IP address(es), site url(s) and ports the user is interested in. If the user specifies
+      a scheme do not change it. Never add a scheme the user did not provide. Never suggest targets. Only accept explicit targets given by the user.
+      Follow these rules when determining the targets:
        - Multiple sites may be specified, preserve the host name and IP addresses.
          Example: http://example.com and http://sub1.example.com are two targets, http://example.com and http://sub1.example.com
+       - The hostname may include several components in dot-notation.
+         Example: web01.internal.example.com is one target, web01.internal.example.com
        - If the user specifies a protocol, keep it.
          Example: http://example.com is exactly one target, http://example.com
          Example: https://example.com is exactly one target, https://example.com
-       - If a host name or IP address is given without a protocol and without a port, such as target.local, add the protocol. If the top level domain (TLD) is public such as .com, .net, .edu, etc. use the protocol "https", otherwise use "http".
-         Example: example.com is one target, https://example.com
-         Example: target.local is one target, http://target.local
-       - If a host name or IP address is given without a protocol but with a port, such as target.local:443, add the protocol. If the port is 443 or the TLD is public such as .com, .net, .edu, etc. use the protocol "https".
-         Example: example.com:443 is one target, https://example.com:443
-         Example: example.com:80 is one target, http://example.com:80
-       - Default to the "http" protocol if no other rules apply.
+       - A host name or IP address is permitted without a protocol and without a port, such as target.local
+         Example: target.local is one target, target.local
+       - A host name or IP address is permitted without a protocol but with a port, such as target.local:443
+         Example: example.com:443 is one target, example.com:443
+         Example: example.com:80 is one target, example.com:80
 
       You also determine optional types of content the user is interested in from the following list:
       "html", "forms", "xml", "javascript", "css", "json", "network". If the query includes things that would be in the HTTP headers such as cookies, the content security policy or response messages include the content type "network".
 
       You also determine technology stacks the user references, if any.
 
-      You also determine if anything in the query implies a specific set of HTTP response codes, if any. Do not include response codes in the 200-299 range.
+      You also determine if anything in the query implies a specific set of HTTP response codes. Do not include response codes in the 200-299 range.
 
       You also determine if anything in the query implies the request was made using a specific set of HTTP methods such as "GET", "POST", "PUT", if any. Only include methods if the user is asking for how the request was made. Usually the user will intend HTTP methods that are in the RFC, but may ask for specific non-standard methods. Be cautious about providing methods so to not be too limiting.
       
       Structure:
       Output the information as a valid JSON object. Only output the JSON. Do not include any other text except the JSON.
       
-      The list of web sites uses key "target". The value of "target" is a valid JSON list. It is a list of url(s). 
+      The list of web sites uses key "target". The value of "target" is a valid JSON list. It is a list of url(s), hostnames, and/or IP addresses.
 
       The list of content types uses key "content". The value of "content" is a valid JSON list. Only use the aforementioned list of content types.
 
@@ -690,19 +712,22 @@ def build_website_context_pipeline(generator_config: GeneratorConfig) -> Pipelin
            Example Result: {"target": ["http://target.local", "http://sub1.target.local"], "content": [], "tech": [], "methods": [], "response_codes": []}
 
         3. Example Query 3: "Examine 10.10.10.10:8000 for risky javascript functions"  
-           Example Result: {"target": ["http://10.10.10.10:8000"], "content": ["html", "javascript"], "tech": [], "methods": [], "response_codes": []}
+           Example Result: {"target": ["10.10.10.10:8000"], "content": ["html", "javascript"], "tech": [], "methods": [], "response_codes": []}
 
         4. Example Query 4: "Examine nobody.net for vulnerable versions of WordPress"  
-           Example Result: {"target": ["http://nobody.net", "https://nobody.net"], "content": ["network", "html", "javascript"], "tech": ["WordPress"], "methods": [], "response_codes": []}
+           Example Result: {"target": ["nobody.net"], "content": ["network", "html", "javascript"], "tech": ["WordPress"], "methods": [], "response_codes": []}
 
         5. Example Query 5: "Examine authentication failures on schooldaze.edu for username disclosure"
-           Example Result: {"target": ["http://schooldaze.edu", "https://schooldaze.edu"], "content": ["html", "javascript"], "tech": [""], "methods": [], "response_codes": [403]}
+           Example Result: {"target": ["schooldaze.edu"], "content": ["html", "javascript"], "tech": [""], "methods": [], "response_codes": [403]}
 
         6. Example Query 6: "Examine posted forms on 192.168.1.1:8090 for XSS vulns."
-           Example Result: {"target": ["http://192.168.1.1:8090"], "content": ["html", "javascript"], "tech": [""], "methods": ["POST"], "response_codes": []}
+           Example Result: {"target": ["192.168.1.1:8090"], "content": ["html", "javascript"], "tech": [""], "methods": ["POST"], "response_codes": []}
 
         7. Example Query 7: "Find forbidden pages on https://schooldaze.edu"   
            Example Result: {"target": ["https://schooldaze.edu"], "content": ["network"], "tech": [""], "methods": [], "response_codes": [403]}
+
+        8. Example Query 7: "Find bad requests on https://schooldaze.edu"   
+           Example Result: {"target": ["https://schooldaze.edu"], "content": ["network"], "tech": [""], "methods": [], "response_codes": [400]}
 
       Your Task:
       Query: "{{query}}"
