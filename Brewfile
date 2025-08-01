@@ -1,0 +1,5 @@
+brew "python@3.12"
+brew "virtualenv"
+brew "docker"
+brew "colima"
+brew "qemu"
