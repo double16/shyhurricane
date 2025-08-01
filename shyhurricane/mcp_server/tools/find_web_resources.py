@@ -372,6 +372,15 @@ async def find_web_resources(
                 missing_targets.append(target)
     if missing_targets:
         missing_targets_str = ", ".join(map(str, missing_targets))
+
+        if not server_ctx.open_world:
+            return FindWebResourcesResult(
+                instructions=find_web_resources_instructions_not_found,
+                query=query,
+                http_methods=http_methods,
+                limit=limit,
+            )
+
         logger.info(f"Asking user to spider {missing_targets_str}")
         try:
             assert_elicitation(server_ctx)
@@ -555,6 +564,8 @@ async def spider_website(
     await log_tool_history(ctx, "spider_website", url=url, additional_hosts=additional_hosts, user_agent=user_agent,
                            request_headers=request_headers)
     server_ctx = await get_server_context()
+    assert server_ctx.open_world
+
     url = url.strip()
     if await is_spider_time_recent(server_ctx, url):
         logger.info(f"{url} has been recently spidered, returning saved results")

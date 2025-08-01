@@ -103,6 +103,8 @@ async def directory_buster(
                            user_agent=user_agent, request_headers=request_headers, cookies=cookies, params=params,
                            timeout_seconds=timeout_seconds)
     server_ctx = await get_server_context()
+    assert server_ctx.open_world
+
     url = url.strip()
     depth = min(5, max(1, depth))
 

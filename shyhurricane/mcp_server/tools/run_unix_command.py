@@ -73,6 +73,9 @@ When generating Linux commands for execution in a containerized environment, fol
 - The directly accessible filesystem is part of the containerized environment, not the target. Commands such as find, cat, etc. are not enumerating the target unless they are part of a command that connects to the target, such as ssh.
 """
     await log_tool_history(ctx, title="run_unix_command", command=command, additional_hosts=additional_hosts)
+    server_ctx = await get_server_context()
+    assert server_ctx.open_world
+
     # TODO: check for nmap command and see if we can redirect to port_scan
     # TODO: check for curl command and see if we can redirect to index_http_url
     try:
@@ -80,7 +83,6 @@ When generating Linux commands for execution in a containerized environment, fol
 
         if result.return_code != 0 and (
                 "executable file not found" in result.error or "command not found" in result.error):
-            server_ctx = await get_server_context()
             # list the available commands
             if server_ctx.commands is None:
                 command_list_result = await _run_unix_command(

@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 class ServerConfig:
     task_pool_size: int = 3
     ingest_pool_size: int = 1
+    open_world: bool = True
 
 
 _server_config: ServerConfig = ServerConfig()
@@ -48,6 +49,7 @@ class ServerContext:
     chroma_client: chromadb.AsyncClientAPI
     mcp_session_volume: str
     seclists_volume: str
+    open_world: bool = True
     commands: Optional[List[str]] = None
     disable_elicitation: bool = False
 
@@ -75,7 +77,7 @@ def set_server_config(config: ServerConfig):
 
 
 async def get_server_context() -> ServerContext:
-    global _server_context
+    global _server_context, _server_config
     if _server_context is None:
         db = os.environ.get('CHROMA', '127.0.0.1:8200')
         logger.info("Using chroma database at %s", db)
@@ -146,6 +148,7 @@ async def get_server_context() -> ServerContext:
             mcp_session_volume="mcp_session",
             seclists_volume="seclists",
             disable_elicitation=disable_elicitation,
+            open_world=_server_config.open_world,
         )
 
     return _server_context

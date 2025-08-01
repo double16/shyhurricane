@@ -42,16 +42,23 @@ def main():
     ap.add_argument("--port", type=int, default=8000, help="Port to listen on")
     ap.add_argument("--task-pool-size", type=int, default=3, help="The number of processes in the task pool")
     ap.add_argument("--index-pool-size", type=int, default=1, help="The number of processes in the indexing pool")
+    ap.add_argument("--open-world", type=str, default="True",
+                    help="If true, the server is allowed to reach out to hosts. If false, only tools using indexed content are advertised.")
     add_generator_args(ap)
     args = ap.parse_args()
     set_generator_config(GeneratorConfig.from_args(args).apply_summarizing_default().check())
     set_server_config(ServerConfig(
         task_pool_size=args.task_pool_size,
         ingest_pool_size=args.index_pool_size,
+        open_world=args.open_world,
     ))
     asyncio.run(get_server_context())
     mcp_instance.settings.host = args.host
     mcp_instance.settings.port = args.port
+
+    if args.open_world in ["False", "false", "0", "no"]:
+        mcp_instance.open_world = False
+
     mcp_instance.run(transport=args.transport)
 
 

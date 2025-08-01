@@ -86,6 +86,8 @@ async def port_scan(
                            additional_hosts=additional_hosts, timeout_seconds=timeout_seconds)
 
     server_ctx = await get_server_context()
+    assert server_ctx.open_world
+
     port_scan_queue: Queue = server_ctx.task_queue
     port_scan_result_queue: Queue = server_ctx.port_scan_result_queue
 

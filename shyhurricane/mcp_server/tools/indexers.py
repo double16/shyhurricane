@@ -124,6 +124,8 @@ async def index_http_url(
                            additional_hosts=additional_hosts,
                            )
     server_ctx = await get_server_context()
+    assert server_ctx.open_world
+
     ingest_queue: persistqueue.SQLiteAckQueue = server_ctx.ingest_queue
     additional_hosts = get_additional_hosts(ctx, additional_hosts)
     if follow_redirects is None:

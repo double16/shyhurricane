@@ -15,7 +15,7 @@ import validators
 from mcp import McpError, ErrorData
 from mcp.server import FastMCP
 from mcp.server.fastmcp import Context
-from mcp.types import INVALID_REQUEST
+from mcp.types import INVALID_REQUEST, Tool
 from pydantic import ValidationError
 
 import shyhurricane.mcp_server.server_context
@@ -79,7 +79,22 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         pass
 
 
-mcp_instance = FastMCP("shyhurricane", lifespan=app_lifespan, instructions=mcp_server_instructions)
+class ShyHurricaneFastMCP(FastMCP):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.open_world = True
+
+    async def list_tools(self) -> list[Tool]:
+        logger.info("Listing tools")
+        tools = await super().list_tools()
+        if not self.open_world:
+            logger.info("Filtering tools for open_world = False")
+            tools = list(
+                filter(lambda tool: tool.annotations is not None and tool.annotations.openWorldHint == False, tools))
+        return tools
+
+
+mcp_instance = ShyHurricaneFastMCP("shyhurricane", lifespan=app_lifespan, instructions=mcp_server_instructions)
 
 
 def assert_elicitation(ctx: ServerContext):
