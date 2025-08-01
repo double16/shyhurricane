@@ -61,7 +61,8 @@ doc_type_to_model: Dict[str, EmbeddingModelConfig] = {
     "forms": EmbeddingModelConfig("forms", CODE_EMBEDDING_MODEL, token_lengths=[256]),
     "nmap": EmbeddingModelConfig("nmap", CODE_EMBEDDING_MODEL),  # store raw nmap xml
     "portscan": EmbeddingModelConfig("portscan", CODE_EMBEDDING_MODEL),  # store json port scan model
-    "finding": EmbeddingModelConfig("finding", DEFAULT_EMBEDDING_MODEL),  # store markdown formatted findings
+    "finding": EmbeddingModelConfig("finding", DEFAULT_EMBEDDING_MODEL, token_lengths=[sys.maxsize, 256]),
+    # store markdown formatted findings
     "default": EmbeddingModelConfig("default", DEFAULT_EMBEDDING_MODEL, token_lengths=[sys.maxsize, 256]),
     "content": EmbeddingModelConfig("content", DEFAULT_EMBEDDING_MODEL),  # stores response content verbatim
 }

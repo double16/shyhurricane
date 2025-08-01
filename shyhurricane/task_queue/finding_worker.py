@@ -4,13 +4,11 @@ import logging
 import time
 
 from haystack import Document
-from haystack.components.embedders import SentenceTransformersDocumentEmbedder
 from haystack.document_stores.types import DuplicatePolicy
 
-from shyhurricane.doc_type_model_map import doc_type_to_model
 from shyhurricane.generator_config import GeneratorConfig
-from shyhurricane.index.web_resources_pipeline import GenerateTitleAndDescription
-from shyhurricane.retrieval_pipeline import create_chrome_document_store
+from shyhurricane.index.web_resources_pipeline import GenerateTitleAndDescription, build_store_and_embedders, \
+    build_splitters
 from shyhurricane.target_info import parse_target_info
 from shyhurricane.task_queue.types import SaveFindingQueueItem
 from shyhurricane.utils import get_log_path
@@ -23,17 +21,14 @@ FINDING_VERSION = 1
 
 class FindingContext:
     def __init__(self, db: str, generator_config: GeneratorConfig):
-        self.finding_store = create_chrome_document_store(db=db, collection_name="finding")
-        self.finding_embedder = SentenceTransformersDocumentEmbedder(
-            model=doc_type_to_model.get("finding").model_name,
-            batch_size=1,
-            normalize_embeddings=True,
-            progress_bar=False)
+        self.stores, self.embedders = build_store_and_embedders(db, {"finding"})
+        self.splitters = build_splitters(self.embedders)
         self.gen_title = GenerateTitleAndDescription(generator_config)
         self.finding_log_path = get_log_path(db, "finding.jsonl")
 
     def warm_up(self):
-        self.finding_embedder.warm_up()
+        for embedder in self.embedders.values():
+            embedder.warm_up()
 
 
 def save_finding_worker(ctx: FindingContext, item: SaveFindingQueueItem):
@@ -78,5 +73,12 @@ def save_finding_worker(ctx: FindingContext, item: SaveFindingQueueItem):
     if not item.title:
         doc = ctx.gen_title.run(documents=[doc])["documents"][0]
 
-    finding_docs = ctx.finding_embedder.run(documents=[doc])["documents"]
-    ctx.finding_store.write_documents(finding_docs, policy=DuplicatePolicy.OVERWRITE)
+    for collection_name, store in ctx.stores.items():
+        logger.info("Storing finding '%s' into collection %s", item.title, collection_name)
+        if collection_name == "finding":
+            # we want the full document in the primary store
+            split_docs = [doc]
+        else:
+            split_docs = ctx.splitters[collection_name].run(documents=[doc])["documents"]
+        finding_docs = ctx.embedders["finding"].run(documents=split_docs)["documents"]
+        store.write_documents(finding_docs, policy=DuplicatePolicy.OVERWRITE)

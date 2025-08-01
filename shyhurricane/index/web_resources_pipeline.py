@@ -5,7 +5,7 @@ import logging
 import subprocess
 import sys
 from math import floor
-from typing import List, Optional, Dict, Any, Tuple
+from typing import List, Optional, Dict, Any, Tuple, Set
 
 from bs4 import SoupStrainer
 from haystack import component, Document, Pipeline
@@ -232,9 +232,10 @@ def _quantize_timestamp(timestamp: str):
     return timestamp[0:11]
 
 
-def _build_splitters(embedders: Dict[str, SentenceTransformersDocumentEmbedder]):
+def build_splitters(embedders: Dict[str, SentenceTransformersDocumentEmbedder]):
     splitters: Dict[str, SuffixIdSplitter] = dict()
-    for doc_type_model in doc_type_to_model.values():
+    for doc_type in embedders.keys():
+        doc_type_model = doc_type_to_model[doc_type]
         embedder = embedders[doc_type_model.doc_type]
         for token_length in (doc_type_model.token_lengths or [sys.maxsize]):
             max_model_length = embedder.embedding_backend.model.max_seq_length
@@ -443,7 +444,7 @@ class IndexDocTypeDocuments:
 
     def warm_up(self):
         if not self.splitters:
-            self.splitters = _build_splitters(self.embedders)
+            self.splitters = build_splitters(self.embedders)
 
     @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]):
@@ -604,12 +605,14 @@ class GenerateTitleAndDescription:
         return {"documents": documents}
 
 
-def _build_store_and_embedders(db: str) -> Tuple[
+def build_store_and_embedders(db: str, doc_types: Optional[Set[str]] = None) -> Tuple[
     Dict[str, ChromaDocumentStore], Dict[str, SentenceTransformersDocumentEmbedder]]:
     stores: Dict[str, ChromaDocumentStore] = {}
     embedders = {}
     embedder_cache = {}
     for doc_type_model in doc_type_to_model.values():
+        if doc_types is not None and doc_type_model.doc_type not in doc_types:
+            continue
         model_name = doc_type_model.model_name
         if model_name in embedder_cache:
             embedder = embedder_cache[model_name]
@@ -639,7 +642,7 @@ def _build_store_and_embedders(db: str) -> Tuple[
 
 
 def build_ingest_pipeline(db: str) -> Pipeline:
-    stores, embedders = _build_store_and_embedders(db)
+    stores, embedders = build_store_and_embedders(db)
 
     pipe = Pipeline()
 
@@ -704,7 +707,7 @@ def build_doc_type_pipeline(
         db: str,
         generator_config: GeneratorConfig,
 ) -> Pipeline:
-    stores, embedders = _build_store_and_embedders(db)
+    stores, embedders = build_store_and_embedders(db)
 
     doc_cleaner = DocumentCleaner(
         keep_id=True,
