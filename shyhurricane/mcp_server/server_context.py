@@ -5,7 +5,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from multiprocessing import Queue
-from typing import Optional, Dict
+from typing import Optional, Dict, List
 
 import chromadb
 import persistqueue
@@ -48,6 +48,7 @@ class ServerContext:
     chroma_client: chromadb.AsyncClientAPI
     mcp_session_volume: str
     seclists_volume: str
+    commands: Optional[List[str]] = None
     disable_elicitation: bool = False
 
     def close(self):

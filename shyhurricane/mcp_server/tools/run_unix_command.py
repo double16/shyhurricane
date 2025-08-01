@@ -77,6 +77,23 @@ When generating Linux commands for execution in a containerized environment, fol
     # TODO: check for curl command and see if we can redirect to index_http_url
     try:
         result = await _run_unix_command(ctx, command, additional_hosts)
+
+        if result.return_code != 0 and (
+                "executable file not found" in result.error or "command not found" in result.error):
+            server_ctx = await get_server_context()
+            # list the available commands
+            if server_ctx.commands is None:
+                command_list_result = await _run_unix_command(
+                    ctx,
+                    """tr ':' '\n' <<<"$PATH" | while read -r d; do find "$d" -maxdepth 1 -type f -executable -printf '%f\n'; done 2>/dev/null | sort -u""",
+                    None)
+                if command_list_result.return_code == 0:
+                    server_ctx.commands = list(filter(lambda s: bool(s) and s[0].isalnum(), map(lambda s: s.strip(),
+                                                                                                command_list_result.output.splitlines())))
+
+            if server_ctx.commands:
+                result.error += "\nThe available commands are: " + ", ".join(server_ctx.commands)
+
         return result
     except Exception as e:
         exc_type, exc_value, exc_tb = sys.exc_info()
