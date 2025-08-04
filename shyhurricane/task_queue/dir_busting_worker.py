@@ -12,7 +12,7 @@ import persistqueue
 
 from shyhurricane.index.web_resources_pipeline import KatanaDocument
 from shyhurricane.task_queue.types import DirBustingQueueItem
-from shyhurricane.utils import IngestableRequestResponse, unix_command_image
+from shyhurricane.utils import IngestableRequestResponse, unix_command_image, remove_unencodable
 
 logger = logging.getLogger(__name__)
 
@@ -103,12 +103,18 @@ def _do_busting(
         katana_component = KatanaDocument()
 
         def process_stdout(data: str):
+            data = remove_unencodable(data)
+            try:
+                json.loads(data)
+            except json.decoder.JSONDecodeError:
+                logger.warning("katana result is unparseable, possibly due to incorrect utf-8 encoding, skipping")
+                return
+
             ingest_queue.put(data)
             if result_queue is not None:
                 try:
                     katana_results: List[IngestableRequestResponse] = katana_component.run(data).get(
-                        "request_responses",
-                        [])
+                        "request_responses", [])
                     if not katana_results:
                         return
                     parsed = katana_results[0]

@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 
 import pytest
@@ -23,26 +24,33 @@ class PromptChooserTest(unittest.TestCase):
         ]
         set_generator_config(GeneratorConfig().apply_summarizing_default())
 
-    async def test_extract_targets_and_prompt_title_ctf(self):
-        targets, prompt_title = await extract_targets_and_prompt_title("Solve the CTF challenge at 192.168.1.1",
-                                                                       self.titles)
+    def test_extract_targets_and_prompt_title_ctf(self):
+        targets, prompt_title = asyncio.run(extract_targets_and_prompt_title("Solve the CTF challenge at 192.168.1.1",
+                                                                             self.titles))
         self.assertEqual(["192.168.1.1"], targets)
         self.assertEqual("Automated CTF Solver", prompt_title)
 
-    async def test_extract_targets_and_prompt_title_htb(self):
-        targets, prompt_title = await extract_targets_and_prompt_title("Solve the HTB challenge at 192.168.1.1",
-                                                                       self.titles)
+    def test_extract_targets_and_prompt_title_htb(self):
+        targets, prompt_title = asyncio.run(extract_targets_and_prompt_title("Solve the HTB challenge at 192.168.1.1",
+                                                                             self.titles))
         self.assertEqual(["192.168.1.1"], targets)
         self.assertEqual("Automated Hack-the-Box (HTB) CTF Solver", prompt_title)
 
-    async def test_extract_targets_and_prompt_title_pentest_agent(self):
-        targets, prompt_title = await extract_targets_and_prompt_title(
-            "Find all the vulns on 192.168.1.1 and 192.168.10.12", self.titles)
+    def test_extract_targets_and_prompt_title_pentest_agent(self):
+        targets, prompt_title = asyncio.run(extract_targets_and_prompt_title(
+            "Find all the vulns on 192.168.1.1 and 192.168.10.12", self.titles))
         self.assertEqual(["192.168.1.1", "192.168.10.12"], targets)
         self.assertEqual("Automated Penetration Tester", prompt_title)
 
-    async def test_extract_targets_and_prompt_title_pentest_assistant(self):
-        targets, prompt_title = await extract_targets_and_prompt_title(
-            "Help me find vulns on http://vulnerable.net", self.titles)
+    def test_extract_targets_and_prompt_title_pentest_assistant(self):
+        targets, prompt_title = asyncio.run(extract_targets_and_prompt_title(
+            "Help me find vulns on http://vulnerable.net", self.titles))
         self.assertEqual(["http://vulnerable.net"], targets)
-        self.assertEqual("Penetration Tester Assistant", prompt_title)
+        self.assertEqual("Bug Bounty Hunter Assistant", prompt_title)
+
+    def test_specific_title(self):
+        for title in self.titles:
+            targets, prompt_title = asyncio.run(extract_targets_and_prompt_title(
+                f"I am a \"{title.lower()}\". My target is http://vulnerable.net", self.titles))
+            self.assertEqual(["http://vulnerable.net"], targets)
+            self.assertEqual(title, prompt_title)

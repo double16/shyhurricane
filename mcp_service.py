@@ -24,6 +24,7 @@ import shyhurricane.mcp_server.tools.prompt_chooser
 import shyhurricane.mcp_server.tools.register_hostname_address
 import shyhurricane.mcp_server.tools.run_unix_command
 import shyhurricane.mcp_server.tools.status
+import shyhurricane.mcp_server.tools.web_search
 
 logger = logging.getLogger(__name__)
 

@@ -334,6 +334,7 @@ class RequestResponseToDocument:
 
         # ─ Content Document (if body is present)
         if response_body and not is_binary(response_body, raw_mime):
+            content_sha256 = hashlib.sha256(response_body.encode("utf-8", errors="ignore")).hexdigest()
             doc = Document(
                 content=response_body,
                 meta=base_meta | {
@@ -341,6 +342,7 @@ class RequestResponseToDocument:
                     "token_length": doc_type_to_model.get("content").get_primary_token_length(),
                     "request_headers": json.dumps(request_headers),
                     "response_headers": json.dumps(response_headers),
+                    "content_sha256": content_sha256,
                 },
                 id=hashlib.sha256(f"{url}:content:{timestamp_for_id}".encode()).hexdigest()
             )
@@ -406,24 +408,40 @@ class FilterExistingDocuments:
             raw_mime = doc.meta.get("content_type", "")
             timestamp = doc.meta.get("timestamp", "")
             if not url or not raw_mime or not timestamp:
+                logger.warning(f"No url or raw_mime or timestamp found for {doc}")
                 continue
 
             doc_type = map_mime_to_type(raw_mime)
             token_length = doc.meta.get("token_length", sys.maxsize)
-            store = self.stores.get(get_chroma_collection_name_by_doc_type_token_length(doc_type, token_length))
+            collection_name = get_chroma_collection_name_by_doc_type_token_length(doc_type, token_length)
+            store = self.stores.get(collection_name)
             if store is None:
+                logger.warning(f"No chroma collection '{collection_name}' found for {doc}")
                 continue
 
-            filters = {
-                "operator": "AND",
-                "conditions": [
-                    {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
-                    {"field": "meta.url", "operator": "==", "value": url},
-                    {"field": "meta.timestamp", "operator": "==", "value": timestamp}
-                ]}
-            logger.debug("Checking for existing document: doc_type %s, filters %s", doc_type, filters)
-            result = store.filter_documents(filters=filters)
-            if len(result) == 0:
+            existing_docs = []
+            content_sha256 = doc.meta.get("content_sha256", "")
+            if content_sha256:
+                filters = {
+                    "operator": "AND",
+                    "conditions": [
+                        {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
+                        {"field": "meta.url", "operator": "==", "value": url},
+                        {"field": "meta.content_sha256", "operator": "==", "value": content_sha256}
+                    ]}
+                logger.debug("Checking for existing document: doc_type %s, filters %s", doc_type, filters)
+                existing_docs.extend(store.filter_documents(filters=filters))
+            if not existing_docs:
+                filters = {
+                    "operator": "AND",
+                    "conditions": [
+                        {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
+                        {"field": "meta.url", "operator": "==", "value": url},
+                        {"field": "meta.timestamp", "operator": "==", "value": timestamp}
+                    ]}
+                logger.debug("Checking for existing document: doc_type %s, filters %s", doc_type, filters)
+                existing_docs.extend(store.filter_documents(filters=filters))
+            if len(existing_docs) == 0:
                 new_documents.append(doc)
             else:
                 logger.info("Skipping existing document %s", doc.id)
@@ -621,6 +639,7 @@ def build_store_and_embedders(db: str, doc_types: Optional[Set[str]] = None) -> 
                 model=model_name,
                 batch_size=1,
                 normalize_embeddings=True,
+                trust_remote_code=True,
                 progress_bar=False,
                 model_kwargs={
                     "attn_implementation": "eager",

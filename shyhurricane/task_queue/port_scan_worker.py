@@ -32,6 +32,7 @@ class PortScanContext:
             model=doc_type_to_model.get("nmap").model_name,
             batch_size=1,
             normalize_embeddings=True,
+            trust_remote_code=True,
             progress_bar=False)
 
         self.portscan_store = create_chrome_document_store(db=db, collection_name="portscan")
@@ -42,6 +43,7 @@ class PortScanContext:
                 model=doc_type_to_model.get("portscan").model_name,
                 batch_size=1,
                 normalize_embeddings=True,
+                trust_remote_code=True,
                 progress_bar=False)
 
     def warm_up(self):

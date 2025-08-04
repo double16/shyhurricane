@@ -6,3 +6,5 @@ def configure():
     os.environ['ANONYMIZED_TELEMETRY'] = "False"
     os.environ['HAYSTACK_TELEMETRY_ENABLED'] = "False"
     os.environ['HAYSTACK_TELEMETRY_DISABLED'] = "1"
+    # the following reduces performance a little
+    os.environ['TOKENIZERS_PARALLELISM'] = "false"

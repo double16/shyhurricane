@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 async def extract_targets_and_prompt_title(query: str, titles: Iterable[str]) -> Tuple[List[str], str]:
     # TODO: extract extra rules defined by the rules for inclusion in the resulting prompt
+    example_title = next(iter(titles))
     prompt = f"""
       You are a cybersecurity management expert.
       
@@ -26,22 +27,32 @@ async def extract_targets_and_prompt_title(query: str, titles: Iterable[str]) ->
     
       You determine the target host name, IP address(es), site url(s) and ports the user is interested in. If the user specifies
       a scheme do not change it. Never suggest targets. Only accept explicit targets given by the user.
+
+      The prompt is chosen from a fixed set of titles. The following are valid prompt titles:
+      {", ".join(map(lambda t: '"' + t + '"', titles))}
+      If the user provides an exact match for a prompt title (ignoring case), always use it.
+      If the user is asking you to do something, prefer an agent or automated prompt. If the user is asking for help or
+      research, prefer an assistant prompt. The "auditor" prompts are not for finding vulnerabilities, but instead
+      evaluating the coverage of tests already performed.
       
       Structure:
       Output the information as a valid JSON object. Only output the JSON. Do not include any other text except the JSON.
       
       The list of targets uses the key "targets". The value of "targets" is a valid JSON list of strings.
 
-      The prompt is chosen from a fixed set of titles. The prompt title uses the key "title". The following are valid prompt titles:
-      {", ".join(map(lambda t: '"' + t + '"', titles))}
-      If the user is asking you to do something, prefer an agent or automated prompt. If the user is asking for help or
-      research, prefer an assistant prompt.
+      The prompt title uses the key "title". The value must be one of the mentioned valid prompt titles. 
 
       Example 1: Solve the CTF challenge at 192.168.1.1
       Result: {{ "targets": ["192.168.1.1"], "title": "Automated CTF Solver" }} 
 
       Example 2: Perform a penetration test on 192.168.68.1 and 192.168.68.2
       Result: {{ "targets": ["192.168.68.1", "192.168.68.2"], "title": "Automated Penetration Tester" }} 
+
+      Example 3: Help me test the security of http://vulnerable.net
+      Result: {{ "targets": ["http://vulnerable.net"], "title": "Bug Bounty Hunter Assistant" }} 
+
+      Example 4: Use {example_title} with http://vulnerable.net
+      Result: {{ "targets": ["http://vulnerable.net"], "title": "{example_title}" }} 
       
       Your Task:
       """
@@ -134,6 +145,8 @@ async def prompt_chooser(ctx: Context, query: str) -> str:
 
     if not targets:
         return f"At least one target is required. Specify as a host name, IP address, IP subnet, or URL."
+
+    await log_tool_history(ctx, "prompt_chooser: result", query=query, prompt_title=prompt_title, targets=targets)
 
     mcp_prompt = titles[prompt_title]
     messages = (await mcp_instance.get_prompt(name=mcp_prompt.name,

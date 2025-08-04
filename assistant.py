@@ -35,24 +35,7 @@ console = get_console()
 
 
 def configure_logging(level=logging.CRITICAL):
-    for name in [
-        "haystack",  # core
-        "haystack_integrations",  # all integrations
-        "haystack_telemetry",  # optional telemetry
-        "chromadb",  # Chroma client (can be noisy)
-        "sentence_transformers",
-        "httpx",
-        "httpcore",
-        "mcp",
-        "fastmcp",
-        "streamable_http",
-        "mcp.transport.streamable_http",
-        "haystack_integrations.components.generators.gemini",  # "Using Google Gemini chat …"
-        "google.genai",                                 # AFC lines live here
-        "google_genai.models",
-        "shyhurricane",
-    ]:
-        logging.getLogger(name).setLevel(level)
+    logging.getLogger().setLevel(level)
 
 
 def streaming_chunk_callback(verbose: bool = False, chat_logger: Callable[[str], None] = None):
@@ -82,6 +65,40 @@ def streaming_chunk_callback(verbose: bool = False, chat_logger: Callable[[str],
                     chat_logger("\n")
 
     return callback
+
+
+def prompt_multiline(session: PromptSession) -> str:
+    history = session.history
+    session.history = None
+    try:
+        line = session.prompt("💬 ").strip()
+        if len(line) > 6 and line.startswith('"""') and line.endswith('"""'):
+            full_input = line[3:-3]
+        elif line.startswith('"""'):
+            # Start collecting multiline input
+            lines = []
+            if len(line) > 3:
+                lines.append(line[3:])
+            while True:
+                next_line = session.prompt("💬... ").strip()
+                if next_line.endswith('"""'):
+                    if len(next_line) > 3:
+                        lines.append(next_line[:-3])
+                    break
+                lines.append(next_line)
+            full_input = "\n".join(lines)
+        else:
+            full_input = line
+
+        if history is not None:
+            if "\n" in full_input:
+                history.append_string(f'"""\n{full_input}\n"""')
+            else:
+                history.append_string(full_input)
+
+        return full_input
+    finally:
+        session.history = history
 
 
 def main():
@@ -116,9 +133,13 @@ def main():
         console.print("[red]No prompt_chooser tool found[/red]")
         sys.exit(1)
 
-    def chat_logger(line):
+    def chat_logger(line, output_timestamp: bool = False):
         Path(args.history).touch(mode=0o644, exist_ok=True)
         with open(args.history, "a", encoding="utf-8") as f:
+            if output_timestamp:
+                f.write("\n`")
+                f.write(datetime.datetime.now().astimezone().isoformat())
+                f.write("`\n\n")
             f.write(line)
 
     def create_pipeline(system_prompt: str, tools: Toolset) -> Tuple[Pipeline, Component, Toolset]:
@@ -145,16 +166,17 @@ def main():
 This is a penetration test assistant using {generator_config.describe()}. You can say things like:
 - Solve the CTF challenge on 192.168.1.1
 - Look for vulnerabilities on http://192.168.1.1
+- Multi-line prompts can be entered by starting and ending with \"\"\"
 - Available prompts (chosen automatically): {", ".join(prompt_titles)}
 """)
     console.print("🛡️  Ready. Commands: /show • /exit\n")
 
-    chat_logger(f"Assistant Info\n\n{generator_config.describe()}")
+    chat_logger(f"Assistant Info\n\n{generator_config.describe()}", output_timestamp=True)
 
     try:
         while True:
             try:
-                user_in = sess.prompt("💬 ")
+                user_in = prompt_multiline(sess)
                 if not user_in.strip():
                     continue
                 if user_in.lower() in {"/exit", "/quit"}:
@@ -175,7 +197,8 @@ This is a penetration test assistant using {generator_config.describe()}. You ca
 """))
                     continue
 
-                chat_logger(f"\n\n---\n\n# {datetime.datetime.now().isoformat()} Q: {user_in}\n\n")
+                chat_logger(f"\n\n---\n\n# {datetime.datetime.now().isoformat()} Q: {user_in}\n\n",
+                            output_timestamp=True)
 
                 # special case of needing to bootstrap the pipeline with the correct prompt
                 if pipe is None:
@@ -225,7 +248,7 @@ This is a penetration test assistant using {generator_config.describe()}. You ca
                 console.print("")
                 if not args.stream:
                     console.print(Markdown(ans_md))
-                chat_logger(ans_md)
+                chat_logger(ans_md, output_timestamp=True)
             except (KeyboardInterrupt, EOFError):
                 break
             # except Exception as e:

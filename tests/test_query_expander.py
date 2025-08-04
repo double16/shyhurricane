@@ -33,11 +33,25 @@ class QueryExpanderBase(unittest.TestCase):
         self.assertEqual(self.expander.number, len(unique_expanded))
         for expanded_query in unique_expanded:
             self.assertNotEqual(query, expanded_query)
+            for hallucinated_targets in ["example.com", "192.168", "10.10", "10.129"]:
+                self.assertFalse(hallucinated_targets in expanded_query,
+                                 f"hallucinated {hallucinated_targets}: {expanded_query}")
 
-    def test_javascript_eval(self):
-        query = "What javascript libraries call eval()"
+    def _base_test(self, query: str, target: str) -> List[str]:
         expanded = self._run_pipeline(query)
         self._test_sanity(query, expanded)
+        for expanded_query in expanded[1:]:
+            self.assertFalse(target in expanded_query, f"target name referenced: {expanded_query}")
+        return expanded
+
+    def test_javascript_eval(self) -> List[str]:
+        return self._base_test("What javascript libraries call eval() on vulernablesite.net?", "vulernablesite.net")
+
+    def test_csp(self) -> List[str]:
+        return self._base_test("Examine the content security policy on notarealsite.com", "notarealsite.com")
+
+    def test_cookie(self) -> List[str]:
+        return self._base_test("Look for vulnerable cookie settings on notarealsite.com", "notarealsite.com")
 
 
 class TestQueryExpanderNaturalLanguage(QueryExpanderBase):
@@ -87,11 +101,9 @@ class TestQueryExpanderNetwork(QueryExpanderBase):
         super().__init__(query_expander_network, 3, False, methodName)
 
     def test_csp(self):
-        query = "Examine the CSP"
-        expanded = self._run_pipeline(query)
+        expanded = super().test_csp()
         self.assertTrue(any(filter(lambda e: "Content-Security-Policy" in e, expanded)))
 
     def test_cookie(self):
-        query = "Look for vulnerable cookie settings"
-        expanded = self._run_pipeline(query)
+        expanded = super().test_cookie()
         self.assertTrue(any(filter(lambda e: "Set-Cookie" in e, expanded)))

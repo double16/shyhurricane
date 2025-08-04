@@ -31,12 +31,12 @@ def response(flow: http.HTTPFlow) -> None:
             "method": flow.request.method,
             "endpoint": flow.request.url,
             "headers": dict(flow.request.headers),
-            "body": flow.request.get_text(),
+            "body": flow.request.get_text(strict=False),
         },
         "response": {
             "status_code": flow.response.status_code,
             "headers": dict(flow.response.headers),
-            "body": flow.response.get_text(),
+            "body": flow.response.get_text(strict=False),
         }
     }
     if flow.response.timestamp_end and flow.response.timestamp_start:

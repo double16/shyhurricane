@@ -103,12 +103,16 @@ def assert_elicitation(ctx: ServerContext):
 
 
 async def log_history(ctx: Context, data: Dict[str, Any]):
+    data["timestamp"] = datetime.now().isoformat()
+    data_str = json.dumps(data)
     try:
-        async with aiofiles.open(os.path.join(ctx.request_context.lifespan_context.cache_path, 'history.jsonl'),
-                                 'ta') as history_file:
-            data["timestamp"] = datetime.now().isoformat()
-            await history_file.write(json.dumps(data))
-            await history_file.write("\n")
+        if ctx is None:
+            logger.info(data_str)
+        else:
+            async with aiofiles.open(os.path.join(ctx.request_context.lifespan_context.cache_path, 'history.jsonl'),
+                                     'ta') as history_file:
+                await history_file.write(data_str)
+                await history_file.write("\n")
     except IOError as e:
         logger.info("Cannot write to history file", exc_info=e)
 

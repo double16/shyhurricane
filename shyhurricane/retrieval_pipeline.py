@@ -118,12 +118,12 @@ Output the expanded queries as a list of strings deliminated with lines of "----
 query_expander_natural_language = """
 You are a cybersecurity search assistant that processes users queries.
 You expand a given query into exactly {{ number }} queries that are similar in meaning. The expanded query should not be less specific.
-Never include the URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
+Never include a specific URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
 
 """ + query_expander_structure + """
 
 Examples:
-1. Example Query 1: "cross-site scripting mitigation"
+1. Example Query 1: "cross-site scripting mitigation on example.com"
    Example Expanded Queries:
    ----
    XSS prevention techniques
@@ -135,7 +135,7 @@ Examples:
    stored XSS defense
    ----
 
-2. Example Query 2: "SQL injection exploitation"  
+2. Example Query 2: "SQL injection exploitation on example.com"  
    Example Expanded Queries:
    ----
    union-based SQL injection
@@ -157,13 +157,13 @@ Expanded Queries:
 query_expander_javascript = """
 You are a cybersecurity search assistant that processes users queries. You are specialized in JavaScript
 programming, securing coding in JavaScript, and obfuscation techniques.
-You expand a given query into exactly {{ number }} queries that are example JavaScript snippets that are an interpretation of the given query. The expanded queries must only be JavaScript code. Never include console.log(). Never include the URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
+You expand a given query into exactly {{ number }} queries that are example JavaScript snippets that are an interpretation of the given query. The expanded queries must only be JavaScript code. Never include console.log(). Never include a specific URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
 
 """ + query_expander_structure + """
 
 Examples:
-1. Example Query 1: "What javascript libraries call eval()" when asked for 4 expanded queries
-   Example Expanded Queries:
+1. Example Query 1: "What javascript libraries call eval() on example.com" when asked for 4 expanded queries
+   Expanded Queries:
    ----
    Object.prototype.eval = function() {\\n return eval(this);\\n};
    ----
@@ -174,8 +174,8 @@ Examples:
    Function('return eval(\\" + JSON.stringify('some code') + \\")')
    ----
    
-1. Example Query 1: "Find Javascript libraries on http://target.local" when asked for 5 expanded queries
-   Example Expanded Queries: 
+2. Example Query 2: "Find Javascript libraries on http://target.local" when asked for 5 expanded queries
+   Expanded Queries: 
    ----
    fetch('/libraries').then(res => res.json()).then(data => data.map(lib => lib.name))
    ----
@@ -190,43 +190,43 @@ Examples:
 
 Your Task:
 Query: "{{query}}"
-Never include the URL, hostname or IP address in the expanded queries.
+Never include a specific URL, hostname or IP address in the expanded queries.
 Expanded Queries:
 """
 
 query_expander_css = """
 You are a cybersecurity search assistant that processes users queries. You are specialized in style sheet
 development and securing CSS.
-You expand a given query into exactly {{ number }} queries that are example CSS snippets that are an interpretation of the given query. The expanded queries must only be CSS code. Never include the URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
+You expand a given query into exactly {{ number }} queries that are example CSS snippets that are an interpretation of the given query. The expanded queries must only be CSS code. Never include a specific URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
 
 """ + query_expander_structure + """
 
 Examples:
-1. Example Query 1: "Find CSS vulns" when asked for 3 expanded queries
+1. Example Query 1: "Find CSS vulns on example.com" when asked for 3 expanded queries
    Example Expanded Queries:
    ----
    x-allow-cross-origin-resource-sharing: *;
    ----
-   @font-face { src: url(‘http://attacker.com/malware.ttf’); }
+   @font-face { src: url(‘/malware.ttf’); }
    ----
-   input[type=‘text’] { content: url(‘http://attacker.com/hack.jpg’); }
+   input[type=‘text’] { content: url(‘/hack.jpg’); }
    ----
 
 Your Task:
 Query: "{{query}}"
-Never include the URL, hostname or IP address in the expanded queries.
+Never include a specific URL, hostname or IP address in the expanded queries.
 Expanded Queries:
 """
 
 query_expander_html = """
 You are a cybersecurity search assistant that processes users queries. You are specialized in HTML
 development and securing HTML.
-You expand a given query into exactly {{ number }} queries that are example HTML snippets that are an interpretation of the given query. The expanded queries must only be HTML code. Never include the URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
+You expand a given query into exactly {{ number }} queries that are example HTML snippets that are an interpretation of the given query. The expanded queries must only be HTML code. Never include a specific URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
 
 """ + query_expander_structure + """
 
 Examples:
-1. Example Query 1: "What javascript libraries call eval()" when asked for 5 expanded queries
+1. Example Query 1: "What javascript libraries call eval() on example.com" when asked for 5 expanded queries
    Example Expanded Queries:
     ----
     <script>
@@ -254,7 +254,7 @@ Examples:
 
 Your Task:
 Query: "{{query}}"
-Never include the URL, hostname or IP address in the expanded queries.
+Never include a specific URL, hostname or IP address in the expanded queries.
 Expanded Queries:
 """
 
@@ -262,12 +262,12 @@ query_expander_xml = """
 You are a cybersecurity search assistant that processes users queries. You are specialized in XML
 development and securing XML.
 You expand a given query into exactly {{ number }} queries that are example XML snippets that are an interpretation of the given query.
-The expanded queries must only be HTML code. Never include the URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
+The expanded queries must only be HTML code. Never include a specific URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
 
 """ + query_expander_structure + """
 
 Examples:
-1. Example Query 1: "Find the XML entity injections" when asked for 5 expanded queries
+1. Example Query 1: "Find the XML entity injections on example.com" when asked for 5 expanded queries
    Example Expanded Queries:
     ----
     &lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;
@@ -289,18 +289,18 @@ Expanded Queries:
 
 query_expander_network = """
 You are a cybersecurity search assistant that processes users queries. You are specialized in the security of the HTTP protocol and vulnerabilities associated with HTTP.
-You expand a given query into exactly {{ number }} queries that are snippets of things in HTTP like headers and response codes. Think about it 100 times to get {{ number }} unique queries.
+You expand a given query into exactly {{ number }} queries that are snippets of HTTP header names and values that are related to the input query. Think about it 100 times to get {{ number }} unique queries.
 
 """ + query_expander_structure + """
 
 Examples:
-1. Example Query 1: "Examine the CSP"
+1. Example Query 1: "Examine the CSP on example.com"
    Example Expanded Queries:
    ----
    Content-Security-Policy:
    ----
    
-2. Example Query 1: "Look for vulnerable cookie settings"
+2. Example Query 1: "Look for vulnerable cookie settings on example.com"
    Example Expanded Queries:
    ----
    Set-Cookie: samesite=None
@@ -310,7 +310,7 @@ Examples:
 
 Your Task:
 Query: "{{query}}"
-Never include the URL, hostname or IP address in the expanded queries.
+Never include a specific URL, hostname or IP address in the expanded queries.
 Expanded Queries:
 """
 
@@ -408,10 +408,13 @@ class MultiQueryChromaRetriever:
                     query_embedding=self.embedder.run(query)["embedding"],
                     filters=filters,
                     top_k=top_k)
+                found_count = 0
                 for doc in result['documents']:
                     if doc.id not in ids:
+                        found_count += 1
                         results.append(doc)
                         ids.add(doc.id)
+                logger.info(f"Query for {self.name}: {query} found {found_count} documents")
             except Exception as e:
                 logger.error(f"Exception querying chroma database: {str(e)}", exc_info=e)
 
@@ -548,7 +551,7 @@ def build_agent_pipeline(
         tools=tools,
         system_prompt=prompt,
         exit_conditions=["text"],
-        max_agent_steps=100,
+        max_agent_steps=1000,
         raise_on_tool_invocation_failure=False
     )
 
@@ -604,6 +607,7 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
                 model=model_name,
                 batch_size=1,
                 normalize_embeddings=True,
+                trust_remote_code=True,
                 progress_bar=False,
                 model_kwargs={
                     "attn_implementation": "eager",
