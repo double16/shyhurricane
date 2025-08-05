@@ -18,9 +18,7 @@ colima start --runtime docker --cpu 6 --disk 50 -m 12 --vm-type qemu -V ${HOME}:
 #### Python Environment
 
 ```shell
-virtualenv --try-first-with $(command -v python3.12) .venv
-source .venv/bin/activate
-virtualenv .venv
+$(command -v python3.12) -m venv .venv
 source .venv/bin/activate
 ```
 

@@ -20,7 +20,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update &&\
     apt-get install -y --install-recommends ruby nmap sqlmap curl wget dirb ffuf wfuzz hydra netcat-openbsd git pipx iputils-ping nodejs npm mitmproxy python3-pip python3-virtualenv jq exploitdb nuclei ftp sshpass tshark &&\
     apt-get clean
-RUN pipx install impacket
+RUN pipx install impacket git-dumper
 RUN gem install evil-winrm
 RUN mkdir /usr/share/wakaru/ && chown 0:0 /usr/share/wakaru/ && chmod 0755 /usr/share/wakaru/
 COPY --chown=0:0 --chmod=644 package.json package-lock.json /usr/share/wakaru/
