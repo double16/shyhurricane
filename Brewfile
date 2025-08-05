@@ -1,6 +1,7 @@
 brew "python@3.12"
 brew "virtualenv"
 brew "docker"
+brew "docker-compose"
 brew "colima"
 brew "qemu"
 brew "nmap"

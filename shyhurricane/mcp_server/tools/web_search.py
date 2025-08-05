@@ -1,11 +1,11 @@
 import asyncio
 import random
 
-from duckduckgo_search.exceptions import RatelimitException, TimeoutException
+from ddgs.exceptions import RatelimitException, TimeoutException
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from typing import List, Callable
 
 from shyhurricane.mcp_server import mcp_instance, log_tool_history
@@ -17,9 +17,10 @@ class WebSearchHit(BaseModel):
     snippet: str = Field(description="Result snippet")
 
 
+# 9.5.1 has backend: annasarchive, bing, brave, duckduckgo, google, mojeek, mullvad_brave, mullvad_google, wikipedia, yahoo, yandex
 def search_duckduckgo(query: str, num: int) -> List[WebSearchHit]:
     with DDGS() as ddg:
-        results = ddg.text(query, backend="html", max_results=num)
+        results = ddg.text(query, backend="duckduckgo", max_results=num)
         return [WebSearchHit(title=r["title"], url=r["href"], snippet=r["body"])
                 for r in results]
 

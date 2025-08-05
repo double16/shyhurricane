@@ -2,6 +2,7 @@ import atexit
 import logging
 import os
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from multiprocessing import Queue
@@ -85,16 +86,6 @@ async def get_server_context() -> ServerContext:
         os.makedirs(cache_path, exist_ok=True)
         disable_elicitation = bool(os.environ.get('DISABLE_ELICITATION', 'False'))
         chroma_client = await create_chroma_client(db=db)
-        document_pipeline, retrievers, stores = await build_document_pipeline(
-            db=db,
-            generator_config=get_generator_config(),
-        )
-        website_context_pipeline = build_website_context_pipeline(
-            generator_config=get_generator_config(),
-        )
-        ingest_queue, ingest_pool = start_ingest_worker(db=db, generator_config=get_generator_config(),
-                                                        pool_size=_server_config.ingest_pool_size)
-        task_worker_ipc = start_task_worker(db, ingest_queue.path, _server_config.task_pool_size)
 
         for retry in reversed(range(3)):
             try:
@@ -107,7 +98,8 @@ async def get_server_context() -> ServerContext:
                     break
                 except subprocess.CalledProcessError as e:
                     if retry == 0:
-                        raise e
+                        logger.error("Failed to create mcp_session volume", exc_info=e)
+                        sys.exit(1)
                     else:
                         time.sleep(5)
         try:
@@ -130,6 +122,18 @@ async def get_server_context() -> ServerContext:
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except subprocess.CalledProcessError as e:
                 logger.error("Failed to create seclists volume", exc_info=e)
+                sys.exit(1)
+
+        document_pipeline, retrievers, stores = await build_document_pipeline(
+            db=db,
+            generator_config=get_generator_config(),
+        )
+        website_context_pipeline = build_website_context_pipeline(
+            generator_config=get_generator_config(),
+        )
+        ingest_queue, ingest_pool = start_ingest_worker(db=db, generator_config=get_generator_config(),
+                                                        pool_size=_server_config.ingest_pool_size)
+        task_worker_ipc = start_task_worker(db, ingest_queue.path, _server_config.task_pool_size)
 
         _server_context = ServerContext(
             db=db,
