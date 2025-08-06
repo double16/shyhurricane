@@ -208,7 +208,7 @@ async def _run_unix_command(ctx: Context, command: str, additional_hosts: Option
                 )
 
 
-async def _write_stream_to_file(stream, file: aiofiles.tempfile.TemporaryFile):
+async def _write_stream_to_file(stream, file):
     while True:
         line = await stream.readline()
         if not line:

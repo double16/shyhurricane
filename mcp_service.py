@@ -2,6 +2,7 @@
 import argparse
 import asyncio
 import logging
+import os
 import sys
 
 from shyhurricane.config import configure
@@ -32,6 +33,8 @@ configure()
 
 
 def main():
+    open_world_default = os.environ.get("OPEN_WORLD", "True")
+
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--transport",
@@ -43,7 +46,7 @@ def main():
     ap.add_argument("--port", type=int, default=8000, help="Port to listen on")
     ap.add_argument("--task-pool-size", type=int, default=3, help="The number of processes in the task pool")
     ap.add_argument("--index-pool-size", type=int, default=1, help="The number of processes in the indexing pool")
-    ap.add_argument("--open-world", type=str, default="True",
+    ap.add_argument("--open-world", type=str, default=open_world_default,
                     help="If true, the server is allowed to reach out to hosts. If false, only tools using indexed content are advertised.")
     add_generator_args(ap)
     args = ap.parse_args()

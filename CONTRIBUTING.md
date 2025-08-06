@@ -3,7 +3,7 @@
 python3 virtualenv:
 
 ```shell
-virtualenv --try-first-with $(command -v python3.12) .venv
+$(command -v python3.12) -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 pip install -r dev_requirements.txt
@@ -30,7 +30,7 @@ DANGEROUSLY_OMIT_AUTH=true mcp dev mcp_service.py:mcp_instance
 Start assistant:
 
 ```shell
-python3 assistant.py --ollama-model qwen3:14b --ollama-host 192.168.68.1:11434
+python3 assistant.py --ollama-model qwen3:30b
 ```
 
 Browse the chroma collections:
