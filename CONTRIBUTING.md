@@ -76,3 +76,24 @@ export SSL_CERT_FILE="$HOME/.mitmproxy/mitmproxy-ca-cert.pem"
   “What ports were open in all scans across the week and which ones changed?” Requires holistic view.
 - Spec compliance checks
   “Does this payment flow meet PCI requirements?” Pulls from long policy docs + code.
+
+## queries seen from gemini-2.5-flash
+
+- example.com "IDOR" OR "access control" OR "unauthorized"
+- example.com "encryption" OR "cryptographic" OR "sensitive data" OR "weak algorithm" OR "key exposure"
+- example.com "SQL injection" OR "XSS" OR "command injection" OR "LDAP injection" OR "NoSQL injection" OR "XPath injection" OR "code injection" OR "template injection"
+- example.com "insecure design" OR "business logic flaw" OR "design flaw" OR "unhandled exception"
+- example.com "security misconfiguration" OR "default credentials" OR "unpatched" OR "unnecessary features" OR "open port" OR "misconfigured"
+- example.com "outdated component" OR "vulnerable library" OR "known vulnerability" OR "unpatched software"
+- example.com "authentication bypass" OR "session fixation" OR "broken authentication" OR "weak password" OR "credential stuffing" OR "MFA bypass"
+- example.com "insecure deserialization" OR "software integrity" OR "data integrity" OR "untrusted input" OR "supply chain" OR "auto-update"
+- example.com "logging" OR "monitoring" OR "alerting" OR "audit trail" OR "event logs" OR "detection"
+- example.com "SSRF" OR "server-side request forgery" OR "URL parsing" OR "external entity"
+- example.com error
+- example.com debug
+- example.com admin
+- example.com .env
+- example.com api
+- example.com user info
+- example.com config
+- example.com server header
