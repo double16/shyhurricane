@@ -43,7 +43,7 @@ def _append_in_filter(conditions: List[Dict[str, Any]], field: str, values: List
 def _documents_to_http_resources(documents: List[Document]) -> List[HttpResource]:
     https_resources = []
     for doc in documents:
-        if doc.content:
+        if doc.content and 'url' in doc.meta and 'type' in doc.meta:
             resource = Resource(
                 name=doc.meta['url'],
                 title=doc.meta.get('title', None),

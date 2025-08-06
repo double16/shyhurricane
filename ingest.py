@@ -7,12 +7,13 @@ import requests
 
 from shyhurricane.http_csv import http_csv_generator
 
-# ─── Argument Parser ───────────────────────────────────────────────────
 parser = argparse.ArgumentParser(description="Queue request-responses for indexing.")
 parser.add_argument("--mcp-url", default="http://127.0.0.1:8000/", required=True,
                     help="URL for the MCP server, i.e. http://127.0.0.1:8000/")
 parser.add_argument("--katana", action="store_true", help="Read katana jsonl")
-parser.add_argument("--csv", action="store_true", help="Read Burp Logger++ CSV")
+parser.add_argument("--csv", action="store_true",
+                    help="Read Burp Logger++ CSV (Minimum required fields: Request.AsBase64, Request.Time, Request.URL, Response.AsBase64)")
+
 args = parser.parse_args()
 
 if not args.katana and not args.csv:
@@ -41,7 +42,6 @@ if args.katana:
             print(f"[✔] Queued for indexing: {url}", file=sys.stderr)
         except Exception as e:
             print(f"[✘] Error: {url}, {e}", file=sys.stderr)
-            continue
 
 elif args.csv:
     for rr in http_csv_generator(sys.stdin):
@@ -51,4 +51,3 @@ elif args.csv:
             print(f"[✔] Queued for indexing: {rr.url}", file=sys.stderr)
         except Exception as e:
             print(f"[✘] Error: {rr.url}, {e}", file=sys.stderr)
-            continue

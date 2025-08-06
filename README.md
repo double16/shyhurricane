@@ -1,13 +1,44 @@
 # shyhurricane
 
 ShyHurricane is an MCP server to assist AI in offensive security testing. It aims to solve a few problems observed with
-AI and a command executor:
+AI using a single tool to execute commands:
 
 1. Spidering and directory busting commands can be quite noisy and long-running. AI models will go through a few iterations to pick a suitable command and options. The server provides spidering and busting tools to consistently provide the AI with usable results.
 2. Models will also enumerate websites with many curl commands. The server saves and indexes responses to return data without contacting the website repeatedly. Large sites, common with bug bounty programs, are not efficiently enumerated with individual curl commands. 
 3. Port scans may take a long time causing the AI to assume the scan has failed and issue a repeated scan. The port_scan tool provided by the server addresses this.
 
 An important feature of the server is the indexing of website content using LLM embedding models. The find_web_resources tool uses LLM prompts to find vulnerabilities specific to content type: html, javascript, css, xml, HTTP headers. The content is indexed when found by the tools. Content may also be indexed by feeding external data into the `/index` endpoint. Formats supported are `katana jsonl`, `hal json` and Burp Suite Logger++ CSV. Extensions exist for Burp Suite, ZAP, Firefox and Chrome to send requests to the server as the site is browsed.
+
+## Tools
+
+The following tools are provided:
+
+| Tool                       | Description                                                                                         | Open World? |
+|----------------------------|-----------------------------------------------------------------------------------------------------|-------------|
+| run_unix_command           | Run a Linux or macOS command and return its output.                                                 | Yes         |
+| port_scan                  | Performs a port scan and service identification on the target(s), similar to the functions of nmap. | Yes         |
+| spider_website             | Spider the website at the url and index the results for further analysis                            | Yes         |
+| directory_buster           | Search a website for hidden directories and files.                                                  | Yes         |
+| index_http_url             | Index an HTTP URL to allow for further analysis. (aka curl)                                         | Yes         |
+| find_wordlists             | Find available word lists for spidering and `run_unix_command`                                      | No          |
+| find_web_resources         | Query indexed resources about a website using natural language .                                    | No          |
+| fetch_web_resource_content | Fetch the content of a web resource that has already been indexed.                                  | No          |
+| find_domains               | Query indexed resources for a list of domains.                                                      | No          |
+| find_hosts                 | Query indexed resources for a list of hosts for the given domain.                                   | No          |
+| find_netloc                | Query indexed resources for a list of network locations, i.e. host:port, for a given domain.        | No          |
+| find_urls                  | Query indexed resources for a list of URLs for the given host or domain.                            | No          |
+| register_hostname_address  | Registers a hostname with an IP address.                                                            | No          |
+| save_finding               | Save findings as a markdown.                                                                        | No          |
+| query_findings             | Query for previous findings for a target.                                                           | No          |
+| web_search                 | Searches the web with the provided query.                                                           | Yes         |
+| deobfuscate_javascript     | De-obfuscate a JavaScript file (automatically done during indexing)                                 | No          |
+| prompt_chooser             | Chooses the best prompt for an offensive security operation.                                        | No          |
+| prompt_list                | Provides a list of available prompt titles for offensive security operations.                       | No          |
+
+## GPU
+
+The MCP server requires GPUs that pytorch supports, such as nvidia or Apple Silicon. Even if non-local LLMs are used,
+the index embeddings require GPU.
 
 ## Install
 
@@ -155,8 +186,9 @@ python3 assistant.py --ollama-model qwen3:30b
 
 Give the assistant instructions like:
 - Solve the CTF challenge at 10.129.10.10
-- Help me find vulns at https://example.com
 - Solve the HTB CTF challenge at 10.129.10.10  (Hack-the-Box specific agent)
+- Help me find vulns at https://example.com  (chat)
+- Find all the vulns at https://example.com  (agent)
 
 ### Ollama Remote Server
 

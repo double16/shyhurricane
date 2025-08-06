@@ -49,7 +49,8 @@ def _ingest_worker(db: str):
             if index_log_path is not None:
                 try:
                     with open(index_log_path, "a") as index_log:
-                        index_log.write(f"{item}\n")
+                        index_log.write(item)
+                        index_log.write("\n")
                 except Exception as e:
                     logger.error("Failed to write index log at %s: %s", index_log_path, e)
                     index_log_path = None

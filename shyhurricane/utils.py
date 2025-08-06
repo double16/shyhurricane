@@ -112,6 +112,7 @@ def parse_http_request(request_text):
     lines = request_text.splitlines()
     headers = {}
     body_lines = []
+    response_lines = []
     in_headers = True
     method, path, http_version = None, None, None
 
@@ -124,13 +125,15 @@ def parse_http_request(request_text):
                 pass  # Malformed request line
             continue
 
-        if in_headers:
+        if len(response_lines) > 0:
+            response_lines.append(line)
+        elif in_headers:
             if line.strip() == "":
                 in_headers = False
                 continue
             key, sep, value = line.partition(":")
             if sep:
-                key = key.strip().lower()
+                key = key.strip().title()
                 value = value.strip()
                 if key in headers:
                     if isinstance(headers[key], list):
@@ -139,11 +142,15 @@ def parse_http_request(request_text):
                         headers[key] = ', '.join([headers[key], value])
                 else:
                     headers[key] = value
+        elif line.startswith("HTTP/"):
+            # start of response
+            response_lines.append(line)
         else:
             body_lines.append(line)
 
     body = "\n".join(body_lines)
-    return method, path, http_version, headers, body
+    response = "\n".join(response_lines)
+    return method, path, http_version, headers, body, response
 
 
 def parse_http_response(response_text) -> Tuple[

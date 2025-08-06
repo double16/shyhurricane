@@ -4,6 +4,8 @@ import json
 import logging
 import subprocess
 import sys
+import time
+from json import JSONDecodeError
 from math import floor
 from typing import List, Optional, Dict, Any, Tuple, Set
 
@@ -23,7 +25,8 @@ from shyhurricane.doc_type_model_map import map_mime_to_type, doc_type_to_model,
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.retrieval_pipeline import create_chrome_document_store
 from shyhurricane.utils import IngestableRequestResponse, urlparse_ext, BeautifulSoupExtractor, extract_domain, \
-    parse_to_iso8601, remove_unencodable, is_katana_jsonl, is_har_json, is_http_raw, unix_command_image
+    parse_to_iso8601, remove_unencodable, is_katana_jsonl, is_har_json, is_http_raw, unix_command_image, \
+    parse_http_request, parse_http_response
 
 logger = logging.getLogger(__name__)
 
@@ -122,8 +125,11 @@ class KatanaDocument:
         if isinstance(text, dict):
             entry = text
         else:
-            entry = json.loads(str(text))
-            # TODO: Handle JSONDecodeError
+            try:
+                entry = json.loads(str(text))
+            except JSONDecodeError:
+                logger.warning("Invalid katana json")
+                return self._empty_response
         if "request" not in entry:
             logger.warning("Missing request")
             return self._empty_response
@@ -145,6 +151,7 @@ class KatanaDocument:
             return self._empty_response
 
         timestamp = entry["timestamp"]  # 2025-06-28T22:52:07.882000
+        request_body: Optional[str] = entry.get("request", {}).get("body", None)
         response_body: Optional[str] = entry.get("response", {}).get("body", None)
         status_code = entry["response"].get("status_code", 200)
         http_method = entry["request"].get("method", "").upper()
@@ -163,7 +170,7 @@ class KatanaDocument:
             timestamp=timestamp,
             method=http_method,
             request_headers=request_headers,
-            request_body=response_body,
+            request_body=request_body,
             response_code=status_code,
             response_headers=response_headers,
             response_body=response_body,
@@ -191,8 +198,43 @@ class HttpRawDocument:
 
     @component.output_types(request_responses=List[IngestableRequestResponse])
     def run(self, text: str):
-        # TODO: implement
-        return self._empty_response
+        http_method, path, http_version, request_headers, request_body, response = parse_http_request(text)
+        if not (http_method and path and response):
+            return self._empty_response
+
+        status_code, response_headers, response_body = parse_http_response(response)
+        if not status_code:
+            return self._empty_response
+
+        if "://" in path:
+            url = path
+        else:
+            host = request_headers.get("Host", request_headers.get("host", None))
+            if host is None:
+                return self._empty_response
+            url = f"http://{host}{path}"
+
+        timestamp = datetime.datetime.now().isoformat()
+        if "Date" in response_headers:
+            try:
+                timestamp, _ = parse_to_iso8601(response_headers["Date"])
+            except Exception:
+                pass
+
+        request_response = IngestableRequestResponse(
+            url=url,
+            timestamp=timestamp,
+            method=http_method,
+            request_headers=request_headers,
+            request_body=request_body,
+            response_code=status_code,
+            response_headers=response_headers,
+            response_body=response_body,
+            response_rtt=None,
+            technologies=None,
+            forms=None,
+        )
+        return {"request_responses": [request_response]}
 
 
 @component
@@ -203,10 +245,85 @@ class HarDocument:
     def __init__(self):
         self._empty_response = {"request_responses": []}
 
+    @staticmethod
+    def parse_headers(har_headers: List[Dict[str, str]]) -> Dict[str, str]:
+        headers = {}
+        if not har_headers:
+            return headers
+        for req_header in har_headers:
+            key = req_header.get("name", "").strip().title()
+            if not key:
+                continue
+            value = req_header.get("value", "")
+            if key in headers:
+                headers[key] += ";" + value
+            else:
+                headers[key] = value
+        return headers
+
     @component.output_types(request_responses=List[IngestableRequestResponse])
-    def run(self, text: str):
-        # TODO: implement
-        return self._empty_response
+    def run(self, text: str | dict):
+        if isinstance(text, dict):
+            har = text
+        else:
+            try:
+                har = json.loads(str(text))
+            except JSONDecodeError:
+                return self._empty_response
+        if "log" not in har:
+            logger.info("Missing log")
+            return self._empty_response
+
+        results = []
+        for entry in har.get("log", {}).get("entries", []):
+            if "request" not in entry:
+                continue
+            request = entry.get("request")
+
+            if "response" not in entry:
+                continue
+            response = entry.get("response")
+
+            url = request.get("url", None)
+            if not url:
+                continue
+            try:
+                urlparse_ext(url)
+            except Exception:
+                logger.warning(f"Malformed URL: {url}")
+                continue
+
+            timestamp = entry.get("startedDateTime",
+                                  datetime.datetime.now().isoformat())  # 2025-08-06T12:03:55.711-05:00
+
+            request_headers = self.parse_headers(request.get("headers", []))
+            request_body = request.get("content", {}).get("text", None)
+            http_method = request.get("method", "").upper()
+
+            response_headers = self.parse_headers(response.get("headers", []))
+            response_body = response.get("content", {}).get("text", None)
+            status_code = response.get("status", 200)
+
+            if "time" in entry:
+                response_rtt = float(entry.get("time")) / 1000.0
+            else:
+                response_rtt = None
+
+            results.append(IngestableRequestResponse(
+                url=url,
+                timestamp=timestamp,
+                method=http_method,
+                request_headers=request_headers,
+                request_body=request_body,
+                response_code=status_code,
+                response_headers=response_headers,
+                response_body=response_body,
+                response_rtt=response_rtt,
+                technologies=None,
+                forms=None,
+            ))
+
+        return {"request_responses": results}
 
 
 class SuffixIdSplitter(DocumentSplitter):
