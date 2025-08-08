@@ -4,8 +4,6 @@ import json
 import logging
 import subprocess
 import sys
-import time
-from json import JSONDecodeError
 from math import floor
 from typing import List, Optional, Dict, Any, Tuple, Set
 
@@ -22,11 +20,12 @@ from shyhurricane.clean_css import normalize_css
 from shyhurricane.cleaners import normalize_html, normalize_xml, normalize_json
 from shyhurricane.doc_type_model_map import map_mime_to_type, doc_type_to_model, \
     get_chroma_collection_name_by_doc_type_token_length
+from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import GeneratorConfig
+from shyhurricane.index.input_documents import HarDocument, HttpRawDocument, KatanaDocument, IngestableRequestResponse
 from shyhurricane.retrieval_pipeline import create_chrome_document_store
-from shyhurricane.utils import IngestableRequestResponse, urlparse_ext, BeautifulSoupExtractor, extract_domain, \
-    parse_to_iso8601, remove_unencodable, is_katana_jsonl, is_har_json, is_http_raw, unix_command_image, \
-    parse_http_request, parse_http_response
+from shyhurricane.utils import urlparse_ext, BeautifulSoupExtractor, extract_domain, \
+    parse_to_iso8601, remove_unencodable, is_katana_jsonl, is_har_json, is_http_raw, unix_command_image
 
 logger = logging.getLogger(__name__)
 
@@ -112,220 +111,6 @@ def _deobfuscate_javascript(content: str) -> str:
         return result
 
 
-@component
-class KatanaDocument:
-    """
-    Convert katana jsonl into IngestableRequestResponse.
-    """
-    def __init__(self):
-        self._empty_response = {"request_responses": []}
-
-    @component.output_types(request_responses=List[IngestableRequestResponse])
-    def run(self, text: str | dict):
-        if isinstance(text, dict):
-            entry = text
-        else:
-            try:
-                entry = json.loads(str(text))
-            except JSONDecodeError:
-                logger.warning("Invalid katana json")
-                return self._empty_response
-        if "request" not in entry:
-            logger.warning("Missing request")
-            return self._empty_response
-        if "response" not in entry:
-            logger.warning("Missing response")
-            return self._empty_response
-        if "status_code" not in entry["response"]:
-            logger.info("No status_code, usually indicates out of scope")
-            return self._empty_response
-        if "endpoint" not in entry["request"]:
-            logger.info("No endpoint")
-            return self._empty_response
-
-        url = entry["request"]["endpoint"]
-        try:
-            urlparse_ext(url)
-        except Exception:
-            logger.warning(f"Malformed URL: {url}")
-            return self._empty_response
-
-        timestamp = entry["timestamp"]  # 2025-06-28T22:52:07.882000
-        request_body: Optional[str] = entry.get("request", {}).get("body", None)
-        response_body: Optional[str] = entry.get("response", {}).get("body", None)
-        status_code = entry["response"].get("status_code", 200)
-        http_method = entry["request"].get("method", "").upper()
-        request_headers = self._title_case_header(entry["request"].get("headers", {}))
-        request_headers.pop("raw", None)
-        response_headers = self._title_case_header(entry["response"].get("headers", {}))
-        response_headers.pop("raw", None)
-        response_rtt: Optional[float] = entry.get("response", {}).get("rtt", None)
-        technologies = entry["response"].get("technologies", [])
-        if not isinstance(technologies, list):
-            technologies = [str(technologies)]
-        forms = entry.get("response", {}).get("forms", None)
-
-        request_response = IngestableRequestResponse(
-            url=url,
-            timestamp=timestamp,
-            method=http_method,
-            request_headers=request_headers,
-            request_body=request_body,
-            response_code=status_code,
-            response_headers=response_headers,
-            response_body=response_body,
-            response_rtt=response_rtt,
-            technologies=technologies,
-            forms=forms,
-        )
-        return {"request_responses": [request_response]}
-
-    def _title_case_header(self, katana_headers: Dict[str, str]) -> Dict[str, str]:
-        result = dict()
-        for k, v in katana_headers.items():
-            result[k.replace('_', '-').title()] = v
-            pass
-        return result
-
-
-@component
-class HttpRawDocument:
-    """
-    Convert raw HTTP request/response into IngestableRequestResponse.
-    """
-    def __init__(self):
-        self._empty_response = {"request_responses": []}
-
-    @component.output_types(request_responses=List[IngestableRequestResponse])
-    def run(self, text: str):
-        http_method, path, http_version, request_headers, request_body, response = parse_http_request(text)
-        if not (http_method and path and response):
-            return self._empty_response
-
-        status_code, response_headers, response_body = parse_http_response(response)
-        if not status_code:
-            return self._empty_response
-
-        if "://" in path:
-            url = path
-        else:
-            host = request_headers.get("Host", request_headers.get("host", None))
-            if host is None:
-                return self._empty_response
-            url = f"http://{host}{path}"
-
-        timestamp = datetime.datetime.now().isoformat()
-        if "Date" in response_headers:
-            try:
-                timestamp, _ = parse_to_iso8601(response_headers["Date"])
-            except Exception:
-                pass
-
-        request_response = IngestableRequestResponse(
-            url=url,
-            timestamp=timestamp,
-            method=http_method,
-            request_headers=request_headers,
-            request_body=request_body,
-            response_code=status_code,
-            response_headers=response_headers,
-            response_body=response_body,
-            response_rtt=None,
-            technologies=None,
-            forms=None,
-        )
-        return {"request_responses": [request_response]}
-
-
-@component
-class HarDocument:
-    """
-    Convert HAR into IngestableRequestResponse.
-    """
-    def __init__(self):
-        self._empty_response = {"request_responses": []}
-
-    @staticmethod
-    def parse_headers(har_headers: List[Dict[str, str]]) -> Dict[str, str]:
-        headers = {}
-        if not har_headers:
-            return headers
-        for req_header in har_headers:
-            key = req_header.get("name", "").strip().title()
-            if not key:
-                continue
-            value = req_header.get("value", "")
-            if key in headers:
-                headers[key] += ";" + value
-            else:
-                headers[key] = value
-        return headers
-
-    @component.output_types(request_responses=List[IngestableRequestResponse])
-    def run(self, text: str | dict):
-        if isinstance(text, dict):
-            har = text
-        else:
-            try:
-                har = json.loads(str(text))
-            except JSONDecodeError:
-                return self._empty_response
-        if "log" not in har:
-            logger.info("Missing log")
-            return self._empty_response
-
-        results = []
-        for entry in har.get("log", {}).get("entries", []):
-            if "request" not in entry:
-                continue
-            request = entry.get("request")
-
-            if "response" not in entry:
-                continue
-            response = entry.get("response")
-
-            url = request.get("url", None)
-            if not url:
-                continue
-            try:
-                urlparse_ext(url)
-            except Exception:
-                logger.warning(f"Malformed URL: {url}")
-                continue
-
-            timestamp = entry.get("startedDateTime",
-                                  datetime.datetime.now().isoformat())  # 2025-08-06T12:03:55.711-05:00
-
-            request_headers = self.parse_headers(request.get("headers", []))
-            request_body = request.get("content", {}).get("text", None)
-            http_method = request.get("method", "").upper()
-
-            response_headers = self.parse_headers(response.get("headers", []))
-            response_body = response.get("content", {}).get("text", None)
-            status_code = response.get("status", 200)
-
-            if "time" in entry:
-                response_rtt = float(entry.get("time")) / 1000.0
-            else:
-                response_rtt = None
-
-            results.append(IngestableRequestResponse(
-                url=url,
-                timestamp=timestamp,
-                method=http_method,
-                request_headers=request_headers,
-                request_body=request_body,
-                response_code=status_code,
-                response_headers=response_headers,
-                response_body=response_body,
-                response_rtt=response_rtt,
-                technologies=None,
-                forms=None,
-            ))
-
-        return {"request_responses": results}
-
-
 class SuffixIdSplitter(DocumentSplitter):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -352,7 +137,8 @@ def _quantize_timestamp(timestamp: str):
 def build_splitters(embedders: Dict[str, SentenceTransformersDocumentEmbedder]):
     splitters: Dict[str, SuffixIdSplitter] = dict()
     for doc_type in embedders.keys():
-        doc_type_model = doc_type_to_model[doc_type]
+        _doc_type_to_model = doc_type_to_model()
+        doc_type_model = _doc_type_to_model[doc_type]
         embedder = embedders[doc_type_model.doc_type]
         for token_length in (doc_type_model.token_lengths or [sys.maxsize]):
             max_model_length = embedder.embedding_backend.model.max_seq_length
@@ -380,6 +166,7 @@ class RequestResponseToDocument:
         self.embedders = embedders
         self._soup_extractor = BeautifulSoupExtractor()
         self._title_soup_strainer = SoupStrainer(['title', 'meta'])
+        self._doc_type_to_model = doc_type_to_model()
 
     @component.output_types(documents=List[Document])
     def run(self, request_responses: List[IngestableRequestResponse]):
@@ -456,7 +243,7 @@ class RequestResponseToDocument:
                 content=response_body,
                 meta=base_meta | {
                     "type": "content",
-                    "token_length": doc_type_to_model.get("content").get_primary_token_length(),
+                    "token_length": self._doc_type_to_model.get("content").get_primary_token_length(),
                     "request_headers": json.dumps(request_headers),
                     "response_headers": json.dumps(response_headers),
                     "content_sha256": content_sha256,
@@ -483,7 +270,7 @@ class RequestResponseToDocument:
             content=net_text,
             meta=base_meta | {
                 "type": "network",
-                "token_length": doc_type_to_model.get("network").get_primary_token_length(),
+                "token_length": self._doc_type_to_model.get("network").get_primary_token_length(),
                 "description": "HTTP request and response headers",
                 "content_type": "text/plain",
                 "request_headers": json.dumps(request_headers),
@@ -501,7 +288,7 @@ class RequestResponseToDocument:
                 content=json.dumps(sorted_forms, indent=None, separators=(',', ':'), sort_keys=True),
                 meta=base_meta | {
                     "type": "forms",
-                    "token_length": doc_type_to_model.get("forms").get_primary_token_length(),
+                    "token_length": self._doc_type_to_model.get("forms").get_primary_token_length(),
                     "description": "HTTP form information in JSON format",
                     "content_type": "text/json"
                 },
@@ -575,6 +362,7 @@ class IndexDocTypeDocuments:
     ) -> None:
         self.embedders = embedders
         self.doc_cleaner = doc_cleaner
+        self._doc_type_to_model = doc_type_to_model()
         self.splitters: Dict[str, SuffixIdSplitter] = dict()
 
     def warm_up(self):
@@ -632,7 +420,7 @@ class IndexDocTypeDocuments:
                 response_headers["Content-Length"] = str(len(normalized_content))
                 doc.meta["response_headers"] = json.dumps(response_headers)
 
-            for token_length in (doc_type_to_model.get(doc_type).token_lengths or [sys.maxsize]):
+            for token_length in (self._doc_type_to_model.get(doc_type).token_lengths or [sys.maxsize]):
                 # create docs per token_length
                 new_doc = Document(
                     content=doc.content,
@@ -740,32 +528,11 @@ class GenerateTitleAndDescription:
         return {"documents": documents}
 
 
-def build_store_and_embedders(db: str, doc_types: Optional[Set[str]] = None) -> Tuple[
-    Dict[str, ChromaDocumentStore], Dict[str, SentenceTransformersDocumentEmbedder]]:
+def build_stores(db: str, doc_types: Optional[Set[str]] = None) -> Dict[str, ChromaDocumentStore]:
     stores: Dict[str, ChromaDocumentStore] = {}
-    embedders = {}
-    embedder_cache = {}
-    for doc_type_model in doc_type_to_model.values():
+    for doc_type_model in doc_type_to_model().values():
         if doc_types is not None and doc_type_model.doc_type not in doc_types:
             continue
-        model_name = doc_type_model.model_name
-        if model_name in embedder_cache:
-            embedder = embedder_cache[model_name]
-        else:
-            embedder = SentenceTransformersDocumentEmbedder(
-                model=model_name,
-                batch_size=1,
-                normalize_embeddings=True,
-                trust_remote_code=True,
-                progress_bar=False,
-                model_kwargs={
-                    "attn_implementation": "eager",
-                },
-            )
-            embedder.warm_up()
-            embedder_cache[model_name] = embedder
-        embedders[doc_type_model.doc_type] = embedder
-
         for col in doc_type_model.get_chroma_collections():
             document_store = create_chrome_document_store(
                 db=db,
@@ -774,11 +541,27 @@ def build_store_and_embedders(db: str, doc_types: Optional[Set[str]] = None) -> 
             document_store.count_documents()  # ensure the collection exists
             stores[col] = document_store
 
-    return stores, embedders
+    return stores
+
+
+def build_embedders(
+        doc_types: Optional[Set[str]] = None,
+        embedder_cache: EmbedderCache = None,
+) -> Dict[str, SentenceTransformersDocumentEmbedder]:
+    embedders = {}
+    if embedder_cache is None:
+        embedder_cache = EmbedderCache()
+    for doc_type_model in doc_type_to_model().values():
+        if doc_types is not None and doc_type_model.doc_type not in doc_types:
+            continue
+        embedders[doc_type_model.doc_type] = embedder_cache.get(doc_type_model)
+
+    return embedders
 
 
 def build_ingest_pipeline(db: str) -> Pipeline:
-    stores, embedders = build_store_and_embedders(db)
+    stores = build_stores(db)
+    embedders = build_embedders()
 
     pipe = Pipeline()
 
@@ -843,7 +626,8 @@ def build_doc_type_pipeline(
         db: str,
         generator_config: GeneratorConfig,
 ) -> Pipeline:
-    stores, embedders = build_store_and_embedders(db)
+    stores = build_stores(db)
+    embedders = build_embedders()
 
     doc_cleaner = DocumentCleaner(
         keep_id=True,

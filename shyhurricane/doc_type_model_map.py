@@ -50,7 +50,8 @@ class EmbeddingModelConfig:
 
 
 # Mapping of document types (collections) to embedding model names
-doc_type_to_model: Dict[str, EmbeddingModelConfig] = {
+# TODO: remove some of these for low_power mode
+_doc_type_to_model: Dict[str, EmbeddingModelConfig] = {
     # for any collection that needs full content, do not add token_lengths
     "html": EmbeddingModelConfig("html", CODE_EMBEDDING_MODEL, token_lengths=[sys.maxsize, 256]),
     "xml": EmbeddingModelConfig("xml", CODE_EMBEDDING_MODEL, token_lengths=[sys.maxsize, 256]),
@@ -68,17 +69,21 @@ doc_type_to_model: Dict[str, EmbeddingModelConfig] = {
 }
 
 
+def doc_type_to_model() -> Dict[str, EmbeddingModelConfig]:
+    return _doc_type_to_model
+
+
 def get_model_for_doc_type(doc_type: str) -> EmbeddingModelConfig:
-    return doc_type_to_model.get(doc_type, doc_type_to_model.get("default"))
+    return doc_type_to_model().get(doc_type, doc_type_to_model().get("default"))
 
 
 def get_all_required_models(collections: list[str]) -> set[str]:
-    return {doc_type_to_model[c].model_name for c in collections if c in doc_type_to_model}
+    return {doc_type_to_model()[c].model_name for c in collections if c in doc_type_to_model}
 
 
 def get_chroma_collections() -> set[str]:
     collections = set()
-    for model in doc_type_to_model.values():
+    for model in doc_type_to_model().values():
         collections.update(model.get_chroma_collections())
     return collections
 

@@ -77,3 +77,17 @@ def filter_targets_str(targets: Iterable[str]) -> List[str]:
         except ValueError:
             pass
     return result
+
+
+def filter_targets_query(query: str) -> List[str]:
+    result = []
+    for part in query.split():
+        # check for end of sentence
+        if part[-1] in ['.', '!', '?', ':', ';']:
+            part = part[:-1]
+        try:
+            parse_target_info(part)
+            result.append(part)
+        except ValueError:
+            pass
+    return result

@@ -15,6 +15,7 @@ from haystack.document_stores.types import DuplicatePolicy
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 
 from shyhurricane.doc_type_model_map import doc_type_to_model
+from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.ports import parse_ports_spec, bitfield_to_ports, is_subset
 from shyhurricane.retrieval_pipeline import create_chrome_document_store
 from shyhurricane.task_queue.types import PortScanQueueItem
@@ -26,25 +27,13 @@ logger = logging.getLogger(__name__)
 
 
 class PortScanContext:
-    def __init__(self, db: str):
+    def __init__(self, db: str, embedder_cache: EmbedderCache):
         self.nmap_store = create_chrome_document_store(db=db, collection_name="nmap")
-        self.nmap_embedder = SentenceTransformersDocumentEmbedder(
-            model=doc_type_to_model.get("nmap").model_name,
-            batch_size=1,
-            normalize_embeddings=True,
-            trust_remote_code=True,
-            progress_bar=False)
+        _doc_type_to_model = doc_type_to_model()
+        self.nmap_embedder = embedder_cache.get(_doc_type_to_model.get("nmap"))
 
         self.portscan_store = create_chrome_document_store(db=db, collection_name="portscan")
-        if doc_type_to_model.get("portscan") == doc_type_to_model.get("nmap"):
-            self.portscan_embedder = self.nmap_embedder
-        else:
-            self.portscan_embedder = SentenceTransformersDocumentEmbedder(
-                model=doc_type_to_model.get("portscan").model_name,
-                batch_size=1,
-                normalize_embeddings=True,
-                trust_remote_code=True,
-                progress_bar=False)
+        self.portscan_embedder = embedder_cache.get(_doc_type_to_model.get("portscan"))
 
     def warm_up(self):
         self.nmap_embedder.warm_up()

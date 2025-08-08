@@ -597,7 +597,7 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
     stores: Dict[str, ChromaDocumentStore] = {}
 
     embedder_cache = dict()
-    for doc_type_model in doc_type_to_model.values():
+    for doc_type_model in doc_type_to_model().values():
         model_name = doc_type_model.model_name
 
         if model_name in embedder_cache:

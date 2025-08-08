@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 )
 async def deobfuscate_javascript(ctx: Context, content: str) -> str:
     """
-    De-obfuscate a JavaScript file to be closer to the original source.
+    Deobfuscate a JavaScript file to be closer to the original source.
 
-    Invoke this tool when the user needs to unpack and/or un-minify JavaScript to aid in understanding.
+    Invoke this tool when the user needs to deobfuscate, unpack and/or un-minify JavaScript to aid in understanding.
     """
     await log_tool_history(ctx, "deobfuscate_javascript", content=content[0:128])
     if content is None or not content.strip():

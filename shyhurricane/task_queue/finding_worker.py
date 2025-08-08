@@ -6,8 +6,9 @@ import time
 from haystack import Document
 from haystack.document_stores.types import DuplicatePolicy
 
+from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import GeneratorConfig
-from shyhurricane.index.web_resources_pipeline import GenerateTitleAndDescription, build_store_and_embedders, \
+from shyhurricane.index.web_resources_pipeline import GenerateTitleAndDescription, build_stores, build_embedders, \
     build_splitters
 from shyhurricane.target_info import parse_target_info
 from shyhurricane.task_queue.types import SaveFindingQueueItem
@@ -20,8 +21,9 @@ FINDING_VERSION = 1
 
 
 class FindingContext:
-    def __init__(self, db: str, generator_config: GeneratorConfig):
-        self.stores, self.embedders = build_store_and_embedders(db, {"finding"})
+    def __init__(self, db: str, generator_config: GeneratorConfig, embedder_cache: EmbedderCache):
+        self.stores = build_stores(db, {"finding"})
+        self.embedders = build_embedders(doc_types={"finding"}, embedder_cache=embedder_cache)
         self.splitters = build_splitters(self.embedders)
         self.gen_title = GenerateTitleAndDescription(generator_config)
         self.finding_log_path = get_log_path(db, "finding.jsonl")

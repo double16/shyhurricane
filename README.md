@@ -40,6 +40,21 @@ The following tools are provided:
 The MCP server requires GPUs that pytorch supports, such as nvidia or Apple Silicon. Even if non-local LLMs are used,
 the index embeddings require GPU.
 
+Features that use embeddings can be disabled by enabling "low power" mode.
+
+Configure `.env`:
+
+```shell
+echo LOW_POWER=true >> .env
+docker compose up -d
+```
+
+OR
+
+```shell
+python3 mcp_service.py --low-power true
+```
+
 ## Install
 
 The MCP server itself uses an LLM for light tasks such that the `llama3.2:3b` model is sufficient. Ollama is recommended but not required. OpenAI and Google AI models are also supported. Docker is required to run the generic unix commands.

@@ -13,6 +13,8 @@ import persistqueue
 from haystack import Pipeline
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 
+from shyhurricane.index.web_resources_pipeline import build_stores
+from shyhurricane.mcp_server.server_config import get_server_config
 from shyhurricane.index.web_resources import start_ingest_worker
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.retrieval_pipeline import create_chroma_client, build_document_pipeline, \
@@ -24,21 +26,17 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class ServerConfig:
-    task_pool_size: int = 3
-    ingest_pool_size: int = 1
-    open_world: bool = True
-
-
-_server_config: ServerConfig = ServerConfig()
-
-
-@dataclass
 class ServerContext:
     db: str
     cache_path: str
-    document_pipeline: Pipeline
-    website_context_pipeline: Pipeline
+    document_pipeline: Optional[Pipeline]
+    """
+    Processes retrieval of documents using embeddings. May be None when in low power mode.
+    """
+    website_context_pipeline: Optional[Pipeline]
+    """
+    Determines the context of the query to `document_pipeline` using an LLM. May be None when in low power mode.
+    """
     ingest_queue: persistqueue.SQLiteAckQueue
     ingest_pool: TaskPool
     task_queue: Queue
@@ -72,14 +70,10 @@ class ServerContext:
 _server_context: Optional[ServerContext] = None
 
 
-def set_server_config(config: ServerConfig):
-    global _server_config
-    _server_config = config
-
-
 async def get_server_context() -> ServerContext:
-    global _server_context, _server_config
+    global _server_context
     if _server_context is None:
+        server_config = get_server_config()
         db = os.environ.get('CHROMA', '127.0.0.1:8200')
         logger.info("Using chroma database at %s", db)
         cache_path: str = os.path.join(os.environ.get('TOOL_CACHE', os.environ.get('TMPDIR', '/tmp')), 'tool_cache')
@@ -124,16 +118,23 @@ async def get_server_context() -> ServerContext:
                 logger.error("Failed to create seclists volume", exc_info=e)
                 sys.exit(1)
 
-        document_pipeline, retrievers, stores = await build_document_pipeline(
-            db=db,
-            generator_config=get_generator_config(),
-        )
-        website_context_pipeline = build_website_context_pipeline(
-            generator_config=get_generator_config(),
-        )
+        if server_config.low_power:
+            logger.warning("low_power: skipping embedding based retrieval pipelines")
+            document_pipeline = None
+            website_context_pipeline = None
+            stores = build_stores(db)
+        else:
+            document_pipeline, _, stores = await build_document_pipeline(
+                db=db,
+                generator_config=get_generator_config(),
+            )
+            website_context_pipeline = build_website_context_pipeline(
+                generator_config=get_generator_config(),
+            )
+
         ingest_queue, ingest_pool = start_ingest_worker(db=db, generator_config=get_generator_config(),
-                                                        pool_size=_server_config.ingest_pool_size)
-        task_worker_ipc = start_task_worker(db, ingest_queue.path, _server_config.task_pool_size)
+                                                        pool_size=server_config.ingest_pool_size)
+        task_worker_ipc = start_task_worker(db, ingest_queue.path, server_config.task_pool_size)
 
         _server_context = ServerContext(
             db=db,
@@ -152,7 +153,7 @@ async def get_server_context() -> ServerContext:
             mcp_session_volume="mcp_session",
             seclists_volume="seclists",
             disable_elicitation=disable_elicitation,
-            open_world=_server_config.open_world,
+            open_world=server_config.open_world,
         )
 
     return _server_context

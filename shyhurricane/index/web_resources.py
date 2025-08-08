@@ -12,6 +12,7 @@ from haystack import Pipeline
 
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.index.web_resources_pipeline import build_ingest_pipeline, build_doc_type_pipeline
+from shyhurricane.mcp_server.server_config import get_server_config
 from shyhurricane.persistent_queue import get_persistent_queue, persistent_queue_get
 from shyhurricane.task_queue import TaskPool
 from shyhurricane.utils import get_log_path
@@ -105,17 +106,23 @@ def _doc_type_worker(db: str, generator_config: GeneratorConfig):
 
 def start_ingest_worker(db: str, generator_config: GeneratorConfig, pool_size: int = 1) -> Tuple[
     persistqueue.SQLiteAckQueue, TaskPool]:
-    queue = get_ingest_queue(db)
+
     processes = []
-    for idx in range(pool_size):
-        # these processes are heavy-weight
-        process = multiprocessing.Process(target=_doc_type_worker, args=(db, generator_config))
-        process.start()
-        processes.append(process)
+
+    if get_server_config().low_power:
+        logger.warning(
+            "low_power: disabling document type specific indexing, but still queuing (run with '--low-power false' to process)")
+    else:
+        for idx in range(pool_size):
+            # these processes are heavy-weight
+            process = multiprocessing.Process(target=_doc_type_worker, args=(db, generator_config))
+            process.start()
+            processes.append(process)
 
     # this is a light-weight process, we only need one
     ingest_process = multiprocessing.Process(target=_ingest_worker, args=(db,))
     ingest_process.start()
     processes.append(ingest_process)
 
+    queue = get_ingest_queue(db)
     return queue, TaskPool(processes)

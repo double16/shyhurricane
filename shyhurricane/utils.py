@@ -5,7 +5,7 @@ import logging
 import os
 import re
 from pathlib import Path
-from typing import Optional, Dict, Any, Union, List, Tuple, AsyncGenerator
+from typing import Optional, Dict, Union, List, Tuple, AsyncGenerator
 from urllib.parse import ParseResult, urlparse
 from zoneinfo import ZoneInfo
 
@@ -210,42 +210,6 @@ class PortScanResults(BaseModel):
     nmap_xml: str = Field(description="NMAP XML output")
     has_more: bool = Field(False, description="Whether there are more results")
 
-
-class IngestableRequestResponse(BaseModel):
-    url: str = Field(description="URL")
-    timestamp: str = Field(description="Timestamp")
-    method: str = Field(description="HTTP method")
-    request_headers: Dict[str, str] = Field(description="Request headers")
-    request_body: Optional[str] = Field(description="Request body")
-    response_code: int = Field(description="HTTP response code")
-    response_headers: Dict[str, str] = Field(description="Response headers")
-    response_body: Optional[str] = Field(description="HTTP response body")
-    response_rtt: Optional[float] = Field(description="Response RTT in milliseconds")
-    technologies: Optional[List[str]] = Field(description="Technologies")
-    forms: Optional[List[Dict[str, Any]]] = Field(description="Forms")  # see katana response.forms "schema"
-
-    def to_katana(self) -> str:
-        data: Dict[str, Any] = {
-            "timestamp": self.timestamp,
-            "request": {
-                "endpoint": self.url,
-                "method": self.method,
-                "headers": self.request_headers,
-                "body": self.request_body,
-            },
-            "response": {
-                "status_code": self.response_code,
-                "headers": self.response_headers,
-                "body": self.response_body,
-            }
-        }
-        if self.response_rtt is not None:
-            data["response"]["rtt"] = self.response_rtt
-        if self.technologies is not None:
-            data["response"]["technologies"] = self.technologies
-        if self.forms is not None:
-            data["response"]["forms"] = self.forms
-        return json.dumps(data)
 
 def is_katana_jsonl(value: str):
     logger.debug("is_katana_jsonl: %s ... %s", value[0:64], value[-64:])

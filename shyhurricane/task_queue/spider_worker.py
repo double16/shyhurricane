@@ -8,9 +8,9 @@ import persistqueue
 from mcp import Resource
 from pydantic import AnyUrl
 
-from shyhurricane.index.web_resources_pipeline import KatanaDocument
+from shyhurricane.index.input_documents import KatanaDocument, IngestableRequestResponse
 from shyhurricane.task_queue.types import SpiderQueueItem
-from shyhurricane.utils import BeautifulSoupExtractor, IngestableRequestResponse, urlparse_ext, HttpResource, \
+from shyhurricane.utils import BeautifulSoupExtractor, urlparse_ext, HttpResource, \
     extract_domain, unix_command_image
 
 logger = logging.getLogger(__name__)

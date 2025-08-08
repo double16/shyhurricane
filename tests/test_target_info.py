@@ -1,6 +1,6 @@
 import unittest
 
-from shyhurricane.target_info import parse_target_info
+from shyhurricane.target_info import parse_target_info, filter_targets_query
 
 
 class TestTargetInfo(unittest.TestCase):
@@ -26,3 +26,7 @@ class TestTargetInfo(unittest.TestCase):
     def test_to_url_from_host(self):
         self.assertEqual("https://example.com", parse_target_info("example.com").to_url())
         self.assertEqual("http://example.local", parse_target_info("example.local").to_url())
+
+    def test_filter_targets_query(self):
+        self.assertEqual(["https://example.com"], filter_targets_query("Find vulns on https://example.com"))
+        self.assertEqual(["example.com"], filter_targets_query("Find vulns on example.com"))

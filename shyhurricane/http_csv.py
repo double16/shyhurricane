@@ -5,8 +5,9 @@ import re
 import sys
 from typing import Optional, Generator
 
-from shyhurricane.utils import IngestableRequestResponse, urlparse_ext, parse_to_iso8601, parse_http_request, \
+from shyhurricane.utils import urlparse_ext, parse_to_iso8601, parse_http_request, \
     parse_http_response
+from shyhurricane.index.input_documents import IngestableRequestResponse
 
 logger = logging.getLogger(__name__)
 

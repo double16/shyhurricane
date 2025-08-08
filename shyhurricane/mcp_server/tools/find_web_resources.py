@@ -20,6 +20,7 @@ from pydantic import BaseModel, Field, AnyUrl
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server import get_server_context, mcp_instance, log_tool_history, assert_elicitation, \
     ServerContext, get_additional_hosts
+from shyhurricane.mcp_server.server_config import get_server_config
 from shyhurricane.mcp_server.tools.find_indexed_metadata import find_netloc
 from shyhurricane.target_info import parse_target_info, TargetInfo
 from shyhurricane.task_queue import SpiderQueueItem
@@ -212,6 +213,7 @@ class FindWebResourcesResult(BaseModel):
 find_web_resources_instructions = "These resources were found by searching the indexed resources using the given query."
 find_web_resources_instructions_not_found = "No indexed resources were found using the query. Use the spider_website, directory_buster or index_http_url tools to populate the index."
 find_web_resources_instructions_need_target = "Include a target URL, IP address or host name in query."
+find_web_resources_instructions_low_power = "No indexed resources were considered due to low power mode. Include only host names, IP addresses or URLs in the query."
 
 
 def find_web_resources_result(
@@ -280,9 +282,6 @@ async def find_web_resources(
     limit = min(1000, max(10, limit or 100))
     logger.info("finding web resources for %s up to %d results", query, limit)
 
-    document_pipeline: Pipeline = server_ctx.document_pipeline
-    website_context_pipeline: Pipeline = server_ctx.website_context_pipeline
-
     if resources_by_url := await _find_web_resources_by_url(ctx, query, limit):
         return find_web_resources_result(results=resources_by_url, query=query, http_methods=http_methods, limit=limit)
     if resources_by_netloc := await _find_web_resources_by_netloc(ctx, query, limit):
@@ -291,6 +290,19 @@ async def find_web_resources(
     if resources_by_hostname := await _find_web_resources_by_hostname(ctx, query, limit):
         return find_web_resources_result(results=resources_by_hostname, query=query, http_methods=http_methods,
                                          limit=limit)
+
+    document_pipeline: Optional[Pipeline] = server_ctx.document_pipeline
+    website_context_pipeline: Optional[Pipeline] = server_ctx.website_context_pipeline
+
+    if website_context_pipeline is None or document_pipeline is None:
+        logger.warning("low_power: embedding based-retrieval disabled")
+        return FindWebResourcesResult(
+            instructions=find_web_resources_instructions_low_power,
+            query=query,
+            http_methods=http_methods,
+            limit=limit,
+            resources=[],
+        )
 
     doc_types: list[str] = []
     targets: list[str] = []

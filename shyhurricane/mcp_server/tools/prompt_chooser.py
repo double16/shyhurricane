@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from shyhurricane.mcp_server import mcp_instance, log_tool_history
 from shyhurricane.mcp_server.generator_config import get_generator_config
-from shyhurricane.target_info import filter_targets_str
+from shyhurricane.target_info import filter_targets_str, filter_targets_query
 
 logger = logging.getLogger(__name__)
 
@@ -141,7 +141,16 @@ async def prompt_chooser(ctx: Context, query: str) -> str:
     targets, prompt_title = await extract_targets_and_prompt_title(query, titles.keys())
 
     if not prompt_title or prompt_title not in titles:
-        return f"Choose a prompt title from: {', '.join(titles.keys())}"
+        prompt_title = ""
+        for title in titles.keys():
+            if title in query:
+                prompt_title = title
+                break
+        if not prompt_title:
+            return f"Choose a prompt title from: {', '.join(titles.keys())}"
+
+    if not targets:
+        targets = filter_targets_query(query)
 
     if not targets:
         return f"At least one target is required. Specify as a host name, IP address, IP subnet, or URL."

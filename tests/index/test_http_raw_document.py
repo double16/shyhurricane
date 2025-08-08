@@ -2,8 +2,7 @@ import os
 import unittest
 from typing import List
 
-from shyhurricane.index.web_resources_pipeline import HttpRawDocument
-from shyhurricane.utils import IngestableRequestResponse
+from shyhurricane.index.input_documents import HttpRawDocument, IngestableRequestResponse
 
 
 class HttpRawDocumentTest(unittest.TestCase):

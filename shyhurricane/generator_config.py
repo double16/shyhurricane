@@ -9,6 +9,8 @@ from haystack.components.generators import OpenAIGenerator
 from haystack.components.generators.chat import OpenAIChatGenerator
 from haystack.tools import Toolset
 from haystack.utils import Secret
+from haystack import component
+from haystack.dataclasses import ChatMessage, StreamingCallbackT
 from haystack_integrations.components.generators.google_genai.chat.chat_generator import GoogleGenAIChatGenerator
 from haystack_integrations.components.generators.ollama import OllamaChatGenerator, OllamaGenerator
 from mcp import Tool
@@ -36,7 +38,7 @@ TEMPERATURE_DEFAULT: float = 0.2
 
 class GoogleGenAIChatGeneratorWithRetry(GoogleGenAIChatGenerator):
     def __init__(self,
-                 api_key: Secret = Secret.from_env_var(["GOOGLE_API_KEY", "GEMINI_API_KEY"], strict=False),
+                 api_key: Secret = Secret.from_env_var(["GOOGLE_API_KEY", "GEMINI_API_KEY"], strict=True),
                  **kwargs):
         super().__init__(**kwargs)
         self._client = Client(
@@ -48,6 +50,36 @@ class GoogleGenAIChatGeneratorWithRetry(GoogleGenAIChatGenerator):
                 )
             )
         )
+
+
+@component
+class GoogleGenAIGeneratorWithRetry:
+    def __init__(self, *args, **kwargs):
+        self.chat_generator = GoogleGenAIChatGeneratorWithRetry(*args, **kwargs)
+
+    @component.output_types(replies=List[str])
+    def run(
+            self,
+            prompt: str,
+            system_prompt: Optional[str] = None,
+            generation_kwargs: Optional[Dict[str, Any]] = None,
+            safety_settings: Optional[List[Dict[str, Any]]] = None,
+            streaming_callback: Optional[StreamingCallbackT] = None,
+    ) -> Dict[str, Any]:
+        messages = []
+        if system_prompt:
+            messages.append(ChatMessage.from_system(system_prompt))
+        messages.append(ChatMessage.from_user(prompt))
+        chat_result = self.chat_generator.run(
+            messages=messages,
+            generation_kwargs=generation_kwargs,
+            safety_settings=safety_settings,
+            streaming_callback=streaming_callback,
+        )
+        text_result = []
+        for reply in chat_result.get("replies", []):
+            text_result.extend(reply.texts)
+        return {"replies": text_result}
 
 
 class GeneratorConfig(BaseModel):
@@ -185,7 +217,7 @@ class GeneratorConfig(BaseModel):
             _generation_kwargs = {
                 "temperature": temperature or self.temperature,
             }
-            return GoogleGenAIChatGeneratorWithRetry(
+            return GoogleGenAIGeneratorWithRetry(
                 model=self.gemini_model,
                 generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
             )

@@ -8,6 +8,7 @@ from multiprocessing import Queue, Process
 
 import persistqueue
 
+from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.task_queue.dir_busting_worker import dir_busting_worker
@@ -60,14 +61,13 @@ def _task_router(db: str,
         faulthandler.register(signal.SIGUSR1)
         logger.info(f"Starting task router in PID {os.getpid()}")
 
+        embedder_cache = EmbedderCache()
+
         ingest_queue = persistqueue.SQLiteAckQueue(path=ingest_queue_path, auto_commit=True)
         atexit.register(ingest_queue.close)
 
-        port_scan_ctx = PortScanContext(db=db)
-        port_scan_ctx.warm_up()
-
-        finding_ctx = FindingContext(db=db, generator_config=generator_config)
-        finding_ctx.warm_up()
+        port_scan_ctx = None
+        finding_ctx = None
 
         while True:
             item = task_queue.get()
@@ -75,11 +75,21 @@ def _task_router(db: str,
             try:
                 if isinstance(item, SpiderQueueItem):
                     spider_worker(item, ingest_queue, spider_result_queue)
+
                 elif isinstance(item, PortScanQueueItem):
+                    if port_scan_ctx is None:
+                        port_scan_ctx = PortScanContext(db=db, embedder_cache=embedder_cache)
+                        port_scan_ctx.warm_up()
                     port_scan_worker(port_scan_ctx, item, port_scan_result_queue)
+
                 elif isinstance(item, DirBustingQueueItem):
                     dir_busting_worker(item, ingest_queue, dir_busting_result_queue)
+
                 elif isinstance(item, SaveFindingQueueItem):
+                    if finding_ctx is None:
+                        finding_ctx = FindingContext(db=db, generator_config=generator_config,
+                                                     embedder_cache=embedder_cache)
+                        finding_ctx.warm_up()
                     save_finding_worker(finding_ctx, item)
 
             except KeyboardInterrupt:

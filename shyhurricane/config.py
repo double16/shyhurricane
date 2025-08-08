@@ -1,3 +1,4 @@
+import logging
 import os
 
 
@@ -8,3 +9,5 @@ def configure():
     os.environ['HAYSTACK_TELEMETRY_DISABLED'] = "1"
     # the following reduces performance a little
     os.environ['TOKENIZERS_PARALLELISM'] = "false"
+
+    logging.getLogger("httpx").setLevel(logging.CRITICAL)

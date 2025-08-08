@@ -10,9 +10,9 @@ from urllib.parse import urlencode
 
 import persistqueue
 
-from shyhurricane.index.web_resources_pipeline import KatanaDocument
+from shyhurricane.index.input_documents import KatanaDocument, IngestableRequestResponse
 from shyhurricane.task_queue.types import DirBustingQueueItem
-from shyhurricane.utils import IngestableRequestResponse, unix_command_image, remove_unencodable
+from shyhurricane.utils import unix_command_image, remove_unencodable
 
 logger = logging.getLogger(__name__)
 

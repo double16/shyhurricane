@@ -5,11 +5,13 @@ import logging
 import os
 import sys
 
+import torch
+
 from shyhurricane.config import configure
 from shyhurricane.generator_config import GeneratorConfig, add_generator_args
 from shyhurricane.mcp_server import mcp_instance, get_server_context
 from shyhurricane.mcp_server.generator_config import set_generator_config
-from shyhurricane.mcp_server.server_context import set_server_config, ServerConfig
+from shyhurricane.mcp_server.server_config import ServerConfig, set_server_config
 
 import shyhurricane.mcp_server.prompts
 import shyhurricane.mcp_server.tools.deobfuscate_javascript
@@ -32,8 +34,20 @@ logger = logging.getLogger(__name__)
 configure()
 
 
+def _str_to_bool(bool_as_str: str) -> bool:
+    if bool_as_str in ["False", "false", "0", "no"]:
+        return False
+    return True
+
+
 def main():
     open_world_default = os.environ.get("OPEN_WORLD", "True")
+
+    if torch.empty(0).device.type == 'cpu':
+        logger.info("low_power: CPU is the default pytorch device, defaulting to low power mode")
+        low_power_default = os.environ.get("LOW_POWER", "True")
+    else:
+        low_power_default = os.environ.get("LOW_POWER", "False")
 
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -48,21 +62,21 @@ def main():
     ap.add_argument("--index-pool-size", type=int, default=1, help="The number of processes in the indexing pool")
     ap.add_argument("--open-world", type=str, default=open_world_default,
                     help="If true, the server is allowed to reach out to hosts. If false, only tools using indexed content are advertised.")
+    ap.add_argument("--low-power", type=str, default=low_power_default,
+                    help="If true, disables compute intensive features and those requiring GPU.")
     add_generator_args(ap)
     args = ap.parse_args()
     set_generator_config(GeneratorConfig.from_args(args).apply_summarizing_default().check())
     set_server_config(ServerConfig(
         task_pool_size=args.task_pool_size,
         ingest_pool_size=args.index_pool_size,
-        open_world=args.open_world,
+        open_world=_str_to_bool(args.open_world),
+        low_power=_str_to_bool(args.low_power),
     ))
     asyncio.run(get_server_context())
     mcp_instance.settings.host = args.host
     mcp_instance.settings.port = args.port
-
-    if args.open_world in ["False", "false", "0", "no"]:
-        mcp_instance.open_world = False
-
+    mcp_instance.open_world = _str_to_bool(args.open_world)
     mcp_instance.run(transport=args.transport)
 
 
