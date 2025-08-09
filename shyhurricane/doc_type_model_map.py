@@ -99,6 +99,7 @@ MIME_TYPE_ALIASES = {
     "text/javascript": "javascript",
     "application/json": "json",
     "text/json": "json",
+    "text/x-finding": "finding",
 }
 
 

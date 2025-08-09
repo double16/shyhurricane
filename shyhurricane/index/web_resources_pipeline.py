@@ -136,8 +136,8 @@ def _quantize_timestamp(timestamp: str):
 
 def build_splitters(embedders: Dict[str, SentenceTransformersDocumentEmbedder]):
     splitters: Dict[str, SuffixIdSplitter] = dict()
+    _doc_type_to_model = doc_type_to_model()
     for doc_type in embedders.keys():
-        _doc_type_to_model = doc_type_to_model()
         doc_type_model = _doc_type_to_model[doc_type]
         embedder = embedders[doc_type_model.doc_type]
         for token_length in (doc_type_model.token_lengths or [sys.maxsize]):

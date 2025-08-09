@@ -6,7 +6,7 @@ from chromadb.api.models import AsyncCollection
 from starlette.requests import Request
 from starlette.responses import Response
 
-from shyhurricane.index.web_resources import get_doc_type_queue
+from shyhurricane.persistent_queue import get_doc_type_queue
 from shyhurricane.mcp_server import mcp_instance, get_server_context
 
 

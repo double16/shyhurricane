@@ -1,10 +1,13 @@
 import datetime
+import hashlib
 import json
 import logging
 import time
 
 from haystack import Document
 from haystack.document_stores.types import DuplicatePolicy
+
+import persistqueue
 
 from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import GeneratorConfig
@@ -21,10 +24,17 @@ FINDING_VERSION = 1
 
 
 class FindingContext:
-    def __init__(self, db: str, generator_config: GeneratorConfig, embedder_cache: EmbedderCache):
+    def __init__(
+            self,
+            db: str,
+            generator_config: GeneratorConfig,
+            embedder_cache: EmbedderCache,
+            doc_type_queue: persistqueue.SQLiteAckQueue
+    ):
         self.stores = build_stores(db, {"finding"})
         self.embedders = build_embedders(doc_types={"finding"}, embedder_cache=embedder_cache)
         self.splitters = build_splitters(self.embedders)
+        self.doc_type_queue = doc_type_queue
         self.gen_title = GenerateTitleAndDescription(generator_config)
         self.finding_log_path = get_log_path(db, "finding.jsonl")
 
@@ -52,6 +62,8 @@ def save_finding_worker(ctx: FindingContext, item: SaveFindingQueueItem):
             logger.error("Failed to write finding log at %s: %s", ctx.finding_log_path, e)
             ctx.finding_log_path = None
 
+    content_sha256 = hashlib.sha256(item.markdown.encode("utf-8", errors="ignore")).hexdigest()
+
     meta = {
         "version": FINDING_VERSION,
         "url": target_info.url or "",
@@ -61,10 +73,11 @@ def save_finding_worker(ctx: FindingContext, item: SaveFindingQueueItem):
         "domain": target_info.domain or "",
         "timestamp": timestamp,
         "timestamp_float": timestamp_float,
-        "content_type": "text/plain",
+        "content_type": "text/x-finding",
         "status_code": "201",
         "http_method": "POST",
         "title": item.title or "",
+        "content_sha256": content_sha256,
     }
 
     doc = Document(
@@ -75,12 +88,12 @@ def save_finding_worker(ctx: FindingContext, item: SaveFindingQueueItem):
     if not item.title:
         doc = ctx.gen_title.run(documents=[doc])["documents"][0]
 
-    for collection_name, store in ctx.stores.items():
-        logger.info("Storing finding '%s' into collection %s", item.title, collection_name)
-        if collection_name == "finding":
-            # we want the full document in the primary store
-            split_docs = [doc]
-        else:
-            split_docs = ctx.splitters[collection_name].run(documents=[doc])["documents"]
-        finding_docs = ctx.embedders["finding"].run(documents=split_docs)["documents"]
-        store.write_documents(finding_docs, policy=DuplicatePolicy.OVERWRITE)
+    logger.debug("Splitting finding '%s'", item.title)
+    split_docs = ctx.splitters["finding"].run(documents=[doc])["documents"]
+    logger.info("Embedding finding '%s'", item.title)
+    embedded_docs = ctx.embedders["finding"].run(documents=[split_docs[0]])["documents"]
+    doc.embedding = embedded_docs[0].embedding
+    logger.info("Storing finding '%s' into collection finding", item.title)
+    ctx.stores["finding"].write_documents([doc], policy=DuplicatePolicy.OVERWRITE)
+
+    ctx.doc_type_queue.put(doc)

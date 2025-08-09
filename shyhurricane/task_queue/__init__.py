@@ -10,6 +10,7 @@ import persistqueue
 
 from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import GeneratorConfig
+from shyhurricane.persistent_queue import get_doc_type_queue
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.task_queue.dir_busting_worker import dir_busting_worker
 from shyhurricane.task_queue.finding_worker import save_finding_worker, FindingContext
@@ -66,6 +67,9 @@ def _task_router(db: str,
         ingest_queue = persistqueue.SQLiteAckQueue(path=ingest_queue_path, auto_commit=True)
         atexit.register(ingest_queue.close)
 
+        doc_type_queue = get_doc_type_queue(db)
+        atexit.register(doc_type_queue.close)
+
         port_scan_ctx = None
         finding_ctx = None
 
@@ -87,8 +91,11 @@ def _task_router(db: str,
 
                 elif isinstance(item, SaveFindingQueueItem):
                     if finding_ctx is None:
-                        finding_ctx = FindingContext(db=db, generator_config=generator_config,
-                                                     embedder_cache=embedder_cache)
+                        finding_ctx = FindingContext(
+                            db=db,
+                            generator_config=generator_config,
+                            embedder_cache=embedder_cache,
+                            doc_type_queue=doc_type_queue)
                         finding_ctx.warm_up()
                     save_finding_worker(finding_ctx, item)
 

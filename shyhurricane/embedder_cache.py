@@ -21,7 +21,7 @@ class EmbedderCache:
         if model_name in self.cache:
             embedder = self.cache[model_name]
         else:
-            logger.info(f"Loading new embedder for {model_name} in PID {os.getpid()}")
+            logger.info(f"Loading embedder for {model_name} in PID {os.getpid()}")
             embedder = SentenceTransformersDocumentEmbedder(
                 model=model_name,
                 batch_size=1,
@@ -33,5 +33,7 @@ class EmbedderCache:
                 },
             )
             embedder.warm_up()
+            logger.info(
+                f"Loaded embedder for {model_name}, {embedder.embedding_backend.model.max_seq_length} max tokens in PID {os.getpid()}")
             self.cache[model_name] = embedder
         return embedder

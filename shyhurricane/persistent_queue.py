@@ -46,9 +46,18 @@ def persistent_queue_get(queue: persistqueue.SQLiteAckQueue, shrink_count: int =
                 _shrink_persistent_queue(queue, name)
                 last_shrink = time.time()
                 count = 0
+            time.sleep(10)
             continue
         count += 1
         if item is None:
             queue.ack(item)
             continue
         yield item
+
+
+def get_ingest_queue(db: str) -> persistqueue.SQLiteAckQueue:
+    return get_persistent_queue(db, "ingest_queue")
+
+
+def get_doc_type_queue(db: str) -> persistqueue.SQLiteAckQueue:
+    return get_persistent_queue(db, "doc_type_queue")
