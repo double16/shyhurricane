@@ -16,6 +16,7 @@ from shyhurricane.mcp_server.server_config import ServerConfig, set_server_confi
 import shyhurricane.mcp_server.prompts
 import shyhurricane.mcp_server.tools.deobfuscate_javascript
 import shyhurricane.mcp_server.tools.directory_buster
+import shyhurricane.mcp_server.tools.encoder_decoder
 import shyhurricane.mcp_server.tools.fetch_web_resource_content
 import shyhurricane.mcp_server.tools.find_indexed_metadata
 import shyhurricane.mcp_server.tools.find_web_resources
