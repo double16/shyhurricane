@@ -121,7 +121,7 @@ def http_csv_generator(iterable) -> Generator[IngestableRequestResponse, None, N
                     parse_results = parse_http_request(request_raw)
                     if parse_results and parse_results[0] and parse_results[1] and parse_results[2] and parse_results[
                         3]:
-                        method, _, _, request_headers, request_body = parse_results
+                        method, _, _, request_headers, request_body, *_ = parse_results
                         continue
                 except Exception:
                     pass
