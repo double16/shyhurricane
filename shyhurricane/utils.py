@@ -1,3 +1,4 @@
+import base64
 import datetime
 import ipaddress
 import json
@@ -75,15 +76,6 @@ def urlparse_ext(url: str) -> ParseResult:
         query=url_parsed.query,
         fragment=url_parsed.fragment
     )
-
-
-def latest_mtime(db: Path) -> float:
-    """
-    Get the latest modified time of the database.
-    :param db: path to the database.
-    :return:  the latest modified time as a float.
-    """
-    return max(f.stat().st_mtime for f in db.rglob("*.sqlite3") if f.is_file())
 
 
 def extract_domain(hostname: str) -> Optional[str]:
@@ -433,11 +425,15 @@ def query_to_netloc(query: str) -> Tuple[str | None, int | None]:
     return query, port
 
 
-def munge_urls(query) -> Tuple[Optional[str], Optional[List[int]]]:
+def munge_urls(query) -> Tuple[Optional[str], Optional[List[str]]]:
     """
     Munges URLs for query purposes. Returns variants with and without a trailing slash, with and without query string.
     :return: url prefix for starts with operators, list of URLs for 'in' operators
     """
+    if not query.strip():
+        return "", []
+    if "://" not in query:
+        return query, [query]
     query_url = query
     urls_munged = [query]
     url_prefix = None
@@ -468,3 +464,7 @@ def get_log_path(db: str, log_name: str) -> Path:
         path = Path(Path.home(), ".local", "state", "shyhurricane", re.sub(r'[^A-Za-z0-9_.-]', '_', db), log_name)
     os.makedirs(path.parent, mode=0o755, exist_ok=True)
     return path
+
+
+def b64(b: bytes) -> str:
+    return base64.b64encode(b).decode("ascii")

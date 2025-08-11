@@ -14,6 +14,7 @@ from shyhurricane.mcp_server.generator_config import set_generator_config
 from shyhurricane.mcp_server.server_config import ServerConfig, set_server_config
 
 import shyhurricane.mcp_server.prompts
+import shyhurricane.mcp_server.tools.channels
 import shyhurricane.mcp_server.tools.deobfuscate_javascript
 import shyhurricane.mcp_server.tools.directory_buster
 import shyhurricane.mcp_server.tools.encoder_decoder
@@ -23,6 +24,7 @@ import shyhurricane.mcp_server.tools.find_web_resources
 import shyhurricane.mcp_server.tools.find_wordlists
 import shyhurricane.mcp_server.tools.findings
 import shyhurricane.mcp_server.tools.indexers
+import shyhurricane.mcp_server.tools.out_of_band_collaborator
 import shyhurricane.mcp_server.tools.port_scan
 import shyhurricane.mcp_server.tools.prompt_chooser
 import shyhurricane.mcp_server.tools.register_hostname_address
