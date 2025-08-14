@@ -5,7 +5,6 @@ import queue
 import time
 from multiprocessing import Queue
 from typing import List, Dict, Any, Optional
-from urllib.parse import urlparse
 
 import chromadb
 from chromadb.api.models import AsyncCollection
@@ -20,7 +19,6 @@ from pydantic import BaseModel, Field, AnyUrl
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server import get_server_context, mcp_instance, log_tool_history, assert_elicitation, \
     ServerContext, get_additional_hosts
-from shyhurricane.mcp_server.server_config import get_server_config
 from shyhurricane.mcp_server.tools.find_indexed_metadata import find_netloc
 from shyhurricane.target_info import parse_target_info, TargetInfo
 from shyhurricane.task_queue import SpiderQueueItem

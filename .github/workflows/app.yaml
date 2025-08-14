@@ -41,7 +41,17 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: 'pip'
 
-#      - name: Install Ollama
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22.x'
+
+      - name: Install interactsh-server
+        run: |
+          go install -v github.com/projectdiscovery/interactsh/cmd/interactsh-server@latest
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+
+      #      - name: Install Ollama
 #        run: |
 #          curl -fsSL https://ollama.com/install.sh | sh
 #

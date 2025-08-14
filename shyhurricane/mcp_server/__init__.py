@@ -1,14 +1,12 @@
 import asyncio
-import hashlib
 import ipaddress
 import json
 import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, AsyncIterator, Any
+from typing import Dict, AsyncIterator, Any, Annotated, Optional, TypeAlias
 
 import aiofiles
 import validators
@@ -16,39 +14,44 @@ from mcp import McpError, ErrorData
 from mcp.server import FastMCP
 from mcp.server.fastmcp import Context
 from mcp.types import INVALID_REQUEST, Tool
-from pydantic import ValidationError
+from pydantic import ValidationError, Field
 
 import shyhurricane.mcp_server.server_context
+from shyhurricane.mcp_server.app_context import AppContext
+from shyhurricane.server_config import get_server_config
 from shyhurricane.mcp_server.server_context import get_server_context, ServerContext
+from shyhurricane.oast.interactsh import InteractProvider
+from shyhurricane.oast.webhook_site import WebhookSiteProvider
 from shyhurricane.prompts import mcp_server_instructions
 from shyhurricane.utils import unix_command_image
 
 logger = logging.getLogger(__name__)
 
+AdditionalHostsField: TypeAlias = Annotated[
+    Optional[Dict[str, str]],
+    Field(
+        None,
+        description=(
+            "The additional_hosts parameter is a dictionary of host name (the key) "
+            "to IP address (the value) for hosts that do not have DNS records. "
+            "This also includes CTF targets or web server virtual hosts found during "
+            "other scans. If you know the IP address for a host, be sure to include "
+            "these in the additional_hosts parameter for commands to run properly "
+            "in a containerized environment."
+        )
+    )
+]
 
-@dataclass
-class AppContext:
-    # TODO: add scope?
-    cached_get_additional_hosts: Dict[str, str]
-    cache_path: str
-    app_context_id: str
-    work_path: str
-
-    def get_cache_path_for_tool(self, tool_id_str: str, additional_hosts: Dict[str, str]) -> str:
-        digest = hashlib.sha512()
-        digest.update(tool_id_str.encode("utf-8"))
-        if additional_hosts:
-            digest.update(json.dumps(additional_hosts).encode("utf-8"))
-        sha512_str = digest.hexdigest()
-        path = os.path.join(self.cache_path, sha512_str[0:2], sha512_str[2:4], sha512_str[4:])
-        os.makedirs(path, exist_ok=True)
-        return path
+ProcessEnvField: TypeAlias = Annotated[Optional[Dict[str, str]], Field(
+    None,
+    description="Environment variables to set for the process."
+)]
 
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     """Manage application lifecycle (per session) with type-safe context"""
-    # Initialize on startup
+    _server_config = get_server_config()
     server_ctx = await get_server_context()
     cache_path = server_ctx.cache_path
 
@@ -67,16 +70,26 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         logger.error("Failed to create MCP session work dir %s", work_path)
         work_path = "/var/tmp"
 
+    if _server_config.oast.provider == "interactsh":
+        oast_provider = InteractProvider()
+    else:
+        oast_provider = WebhookSiteProvider()
+
+    app_context = AppContext(
+        cache_path=cache_path,
+        app_context_id=app_context_id,
+        work_path=work_path,
+        cached_get_additional_hosts={},
+        oast_provider=oast_provider,
+    )
+
     try:
-        yield AppContext(
-            cache_path=cache_path,
-            app_context_id=app_context_id,
-            work_path=work_path,
-            cached_get_additional_hosts={},
-        )
+        yield app_context
     finally:
         # Cleanup on shutdown
-        pass
+        if oast_provider.inited:
+            await oast_provider.deregister()
+        await app_context.channel_manager.cleanup()
 
 
 class ShyHurricaneFastMCP(FastMCP):

@@ -55,7 +55,8 @@ class WebsiteContextPipelineTest(unittest.TestCase):
         doc_types, targets, methods, response_codes = self._run_pipeline(
             "What origins are allowed via the Access-Control-Allow-Origin header on example.com?")
         # self._assert_empty_list(doc_types)
-        self.assertIn("example.com", targets)
+        # target could legit have http:// or https:// because we've referenced an HTTP header in the query
+        self.assertIn("example.com", ' '.join(targets))
         self._assert_empty_list(methods)
         self._assert_empty_list(response_codes)
 

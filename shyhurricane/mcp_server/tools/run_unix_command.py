@@ -12,7 +12,7 @@ from mcp.types import ToolAnnotations, INVALID_REQUEST
 from pydantic import BaseModel, Field
 
 from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context, assert_elicitation, \
-    get_additional_hosts, log_history
+    get_additional_hosts, log_history, AdditionalHostsField, ProcessEnvField
 from shyhurricane.utils import read_last_text_bytes, unix_command_image
 
 logger = logging.getLogger(__name__)
@@ -36,8 +36,12 @@ class RunUnixCommand(BaseModel):
         readOnlyHint=True,
         openWorldHint=True),
 )
-async def run_unix_command(ctx: Context, command: str,
-                           additional_hosts: Optional[Dict[str, str]] = None) -> RunUnixCommand:
+async def run_unix_command(
+        ctx: Context,
+        command: str,
+        additional_hosts: AdditionalHostsField = None,
+        env: ProcessEnvField = None,
+) -> RunUnixCommand:
     """
 Run a Linux or macOS command and return its output. The command is run in a containerized environment for safety.
 The command is run using the bash shell.
@@ -66,20 +70,20 @@ When generating Linux commands for execution in a containerized environment, fol
 - Never use commands that prompt for user input (e.g., passwd, vi, mysql).
 - Prefer tools with non-interactive flags (e.g., --batch, --quiet) and avoid interactive ones (e.g., hash-identifier, ftp).
 - Use automated alternatives where available.
-- Do not use reverse shells or other command that opening a listening socket.
+- Do not use reverse shells or other command that opening a listening socket with this tool, use the channel tools for reverse or forward connections.
 - Pipe input into commands as needed; do not rely on TTY or prompts.
 - Always set a timeout for potentially blocking commands (e.g., timeout 10s nmap ...). Use a timeout value appropriate for the command. For example, directory busting with a large word list may take 10 minutes, whereas a short wordlist may be 2 minutes.
 - Ensure commands can be complete without user interaction before execution.
 - The directly accessible filesystem is part of the containerized environment, not the target. Commands such as find, cat, etc. are not enumerating the target unless they are part of a command that connects to the target, such as ssh.
 """
-    await log_tool_history(ctx, title="run_unix_command", command=command, additional_hosts=additional_hosts)
+    await log_tool_history(ctx, title="run_unix_command", command=command, additional_hosts=additional_hosts, env=env)
     server_ctx = await get_server_context()
     assert server_ctx.open_world
 
     # TODO: check for nmap command and see if we can redirect to port_scan
     # TODO: check for curl command and see if we can redirect to index_http_url
     try:
-        result = await _run_unix_command(ctx, command, additional_hosts)
+        result = await _run_unix_command(ctx, command=command, additional_hosts=additional_hosts, env=env)
 
         if result.return_code != 0 and (
                 "executable file not found" in result.error or "command not found" in result.error):
@@ -109,7 +113,7 @@ When generating Linux commands for execution in a containerized environment, fol
 
 
 async def _run_unix_command(ctx: Context, command: str, additional_hosts: Optional[Dict[str, str]],
-                            stdin: Optional[str] = None) -> Optional[
+                            stdin: Optional[str] = None, env: Optional[Dict[str, str]] = None) -> Optional[
     RunUnixCommand]:
     command = command.strip()
     if not command:
@@ -155,6 +159,9 @@ async def _run_unix_command(ctx: Context, command: str, additional_hosts: Option
             additional_hosts = get_additional_hosts(ctx, additional_hosts)
             for host, ip in additional_hosts.items():
                 docker_command.extend(["--add-host", f"{host}:{ip}"])
+
+            for k, v in (env or {}).items():
+                docker_command.extend(["-e", f"{k}={v}"])
 
             docker_command.append(unix_command_image())
             if not command.startswith("timeout "):

@@ -37,4 +37,4 @@ def bitfield_to_ports(ba: bitarray) -> list[int]:
 
 
 def is_subset(a_ports: bitarray, b_ports: bitarray) -> bool:
-    return (a_ports & ~b_ports).count() == 0
+    return (a_ports & b_ports).count() == a_ports.count()

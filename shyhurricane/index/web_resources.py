@@ -12,7 +12,7 @@ from haystack import Pipeline
 
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.index.web_resources_pipeline import build_ingest_pipeline, build_doc_type_pipeline
-from shyhurricane.mcp_server.server_config import get_server_config
+from shyhurricane.server_config import get_server_config
 from shyhurricane.persistent_queue import persistent_queue_get, get_ingest_queue, \
     get_doc_type_queue
 from shyhurricane.task_queue import TaskPool
