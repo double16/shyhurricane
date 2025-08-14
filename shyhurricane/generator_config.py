@@ -185,14 +185,16 @@ class GeneratorConfig(BaseModel):
                     url="http://" + self.ollama_host,
                     model=self.ollama_model,
                     generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
-                    tools=tools
+                    tools=tools,
+                    think=True,
                 )
             else:
                 logger.info("Using Ollama chat with model %s", self.ollama_model)
                 return OllamaChatGenerator(
                     model=self.ollama_model,
                     generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
-                    tools=tools
+                    tools=tools,
+                    think=True,
                 )
         else:
             raise NotImplementedError

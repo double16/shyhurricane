@@ -11,26 +11,26 @@ from shyhurricane.config import configure
 from shyhurricane.generator_config import GeneratorConfig, add_generator_args
 from shyhurricane.mcp_server import mcp_instance, get_server_context
 from shyhurricane.mcp_server.generator_config import set_generator_config
-from shyhurricane.mcp_server.server_config import ServerConfig, set_server_config
+from shyhurricane.server_config import ServerConfig, set_server_config, add_oast_args, OASTConfig
 
-import shyhurricane.mcp_server.prompts
-import shyhurricane.mcp_server.tools.channels
-import shyhurricane.mcp_server.tools.deobfuscate_javascript
-import shyhurricane.mcp_server.tools.directory_buster
-import shyhurricane.mcp_server.tools.encoder_decoder
-import shyhurricane.mcp_server.tools.fetch_web_resource_content
-import shyhurricane.mcp_server.tools.find_indexed_metadata
-import shyhurricane.mcp_server.tools.find_web_resources
-import shyhurricane.mcp_server.tools.find_wordlists
-import shyhurricane.mcp_server.tools.findings
-import shyhurricane.mcp_server.tools.indexers
-import shyhurricane.mcp_server.tools.out_of_band_collaborator
-import shyhurricane.mcp_server.tools.port_scan
-import shyhurricane.mcp_server.tools.prompt_chooser
-import shyhurricane.mcp_server.tools.register_hostname_address
-import shyhurricane.mcp_server.tools.run_unix_command
-import shyhurricane.mcp_server.tools.status
-import shyhurricane.mcp_server.tools.web_search
+import shyhurricane.mcp_server.prompts  # noqa: F401
+import shyhurricane.mcp_server.tools.channels  # noqa: F401
+import shyhurricane.mcp_server.tools.deobfuscate_javascript  # noqa: F401
+import shyhurricane.mcp_server.tools.directory_buster  # noqa: F401
+import shyhurricane.mcp_server.tools.encoder_decoder  # noqa: F401
+import shyhurricane.mcp_server.tools.fetch_web_resource_content  # noqa: F401
+import shyhurricane.mcp_server.tools.find_indexed_metadata  # noqa: F401
+import shyhurricane.mcp_server.tools.find_web_resources  # noqa: F401
+import shyhurricane.mcp_server.tools.find_wordlists  # noqa: F401
+import shyhurricane.mcp_server.tools.findings  # noqa: F401
+import shyhurricane.mcp_server.tools.indexers  # noqa: F401
+import shyhurricane.mcp_server.tools.oast  # noqa: F401
+import shyhurricane.mcp_server.tools.port_scan  # noqa: F401
+import shyhurricane.mcp_server.tools.prompt_chooser  # noqa: F401
+import shyhurricane.mcp_server.tools.register_hostname_address  # noqa: F401
+import shyhurricane.mcp_server.tools.run_unix_command  # noqa: F401
+import shyhurricane.mcp_server.tools.status  # noqa: F401
+import shyhurricane.mcp_server.tools.web_search  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ def _str_to_bool(bool_as_str: str) -> bool:
 def main():
     open_world_default = os.environ.get("OPEN_WORLD", "True")
 
-    if torch.empty(0).device.type == 'cpu':
+    if torch.accelerator.device_count() == 0:
         logger.info("low_power: CPU is the default pytorch device, defaulting to low power mode")
         low_power_default = os.environ.get("LOW_POWER", "True")
     else:
@@ -68,6 +68,7 @@ def main():
     ap.add_argument("--low-power", type=str, default=low_power_default,
                     help="If true, disables compute intensive features and those requiring GPU.")
     add_generator_args(ap)
+    add_oast_args(ap)
     args = ap.parse_args()
     set_generator_config(GeneratorConfig.from_args(args).apply_summarizing_default().check())
     set_server_config(ServerConfig(
@@ -75,6 +76,7 @@ def main():
         ingest_pool_size=args.index_pool_size,
         open_world=_str_to_bool(args.open_world),
         low_power=_str_to_bool(args.low_power),
+        oast=OASTConfig.from_args(args),
     ))
     asyncio.run(get_server_context())
     mcp_instance.settings.host = args.host

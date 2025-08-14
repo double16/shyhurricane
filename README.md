@@ -265,3 +265,30 @@ Extensions are available at the following GitHub repos:
 - https://github.com/double16/shyhurricane-zap
 - https://github.com/double16/shyhurricane-chrome
 - https://github.com/double16/shyhurricane-firefox
+
+## OAST
+
+Out-of-band Application Security Testing allows for callbacks from various payloads, such as XSS.
+
+### webhook_site
+
+This is the default.
+
+```shell
+# webhook.site (unauthenticated)
+OAST_PROVIDER=webhook_site
+
+# webhook.site (with API key)
+OAST_PROVIDER=webhook_site
+WEBHOOK_API_KEY=xxxxxxxx-xxxx-...
+```
+
+### interact.sh
+
+```shell
+OAST_PROVIDER=interactsh
+# optional, randomly chosen if not specified
+INTERACT_SERVER=oast.pro
+# optional
+INTERACT_TOKEN=
+```

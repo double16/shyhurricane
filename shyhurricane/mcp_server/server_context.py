@@ -14,7 +14,7 @@ from haystack import Pipeline
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 
 from shyhurricane.index.web_resources_pipeline import build_stores
-from shyhurricane.mcp_server.server_config import get_server_config
+from shyhurricane.server_config import get_server_config
 from shyhurricane.index.web_resources import start_ingest_worker
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.retrieval_pipeline import create_chroma_client, build_document_pipeline, \
