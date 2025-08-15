@@ -21,6 +21,7 @@ from haystack_experimental.components.writers import ChatMessageWriter
 from haystack_integrations.components.retrievers.chroma import ChromaEmbeddingRetriever
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 from haystack_integrations.tools.mcp import StreamableHttpServerInfo, MCPToolset
+from mcp import Tool
 
 from shyhurricane.doc_type_model_map import doc_type_to_model, get_chroma_collections
 from shyhurricane.generator_config import GeneratorConfig
@@ -423,20 +424,21 @@ class MultiQueryChromaRetriever:
         return {"documents": unique_docs}
 
 
-def create_tools(mcp_urls: Optional[List[str]] = None) -> Toolset:
+def create_tools(mcp_urls: Optional[List[str]] = None, shim: Callable[[Tool], Tool] = None) -> Toolset:
     if mcp_urls is None:
         mcp_urls = ["http://127.0.0.1:8000/mcp/"]
-    if len(mcp_urls) == 1:
-        return MCPToolset(
-            server_info=StreamableHttpServerInfo(url=mcp_urls[0]),
-            invocation_timeout=600.0
-        )
     tools = []
     for mcp_url in mcp_urls:
-        tools.extend(list(MCPToolset(
+        toolset = MCPToolset(
             server_info=StreamableHttpServerInfo(url=mcp_url),
             invocation_timeout=600.0
-        )))
+        )
+        if shim is not None:
+            tools.extend(list(map(lambda t: shim(t), toolset)))
+        else:
+            if len(mcp_urls) == 1:
+                return toolset
+            tools.extend(list(toolset))
     return Toolset(tools=tools)
 
 

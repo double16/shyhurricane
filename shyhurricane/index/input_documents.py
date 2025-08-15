@@ -80,8 +80,12 @@ class HarDocument:
         if isinstance(text, dict):
             har = text
         else:
+            if isinstance(text, bytes):
+                text = text.decode("utf-8", errors="ignore")
+            else:
+                text = str(text)
             try:
-                har = json.loads(str(text))
+                har = json.loads(text)
             except JSONDecodeError:
                 return self._empty_response
         if "log" not in har:
@@ -151,6 +155,10 @@ class HttpRawDocument:
 
     @component.output_types(request_responses=List[IngestableRequestResponse])
     def run(self, text: str):
+        if isinstance(text, bytes):
+            text = text.decode("utf-8", errors="ignore")
+        else:
+            text = str(text)
         http_method, path, http_version, request_headers, request_body, response = parse_http_request(text)
         if not (http_method and path and response):
             return self._empty_response
@@ -201,63 +209,78 @@ class KatanaDocument:
 
     @component.output_types(request_responses=List[IngestableRequestResponse])
     def run(self, text: str | dict):
+        input_json = []
         if isinstance(text, dict):
-            entry = text
+            input_json.append(text)
         else:
-            try:
-                entry = json.loads(str(text))
-            except JSONDecodeError:
-                logger.warning("Invalid katana json")
+            if isinstance(text, bytes):
+                text = text.decode("utf-8", errors="ignore")
+            else:
+                text = str(text)
+            for line in text.splitlines():
+                try:
+                    input_json.append(json.loads(line))
+                except JSONDecodeError:
+                    # try one multi-line json
+                    if len(input_json) == 0:
+                        try:
+                            input_json.append(json.loads(text))
+                            break
+                        except JSONDecodeError:
+                            pass
+                    logger.warning(f"Invalid katana json: {line[0:300]}")
+
+        results = []
+        for entry in input_json:
+            if "request" not in entry:
+                logger.warning("Missing request")
                 return self._empty_response
-        if "request" not in entry:
-            logger.warning("Missing request")
-            return self._empty_response
-        if "response" not in entry:
-            logger.warning("Missing response")
-            return self._empty_response
-        if "status_code" not in entry["response"]:
-            logger.info("No status_code, usually indicates out of scope")
-            return self._empty_response
-        if "endpoint" not in entry["request"]:
-            logger.info("No endpoint")
-            return self._empty_response
+            if "response" not in entry:
+                logger.warning("Missing response")
+                return self._empty_response
+            if "status_code" not in entry["response"]:
+                logger.info("No status_code, usually indicates out of scope")
+                return self._empty_response
+            if "endpoint" not in entry["request"]:
+                logger.info("No endpoint")
+                return self._empty_response
 
-        url = entry["request"]["endpoint"]
-        try:
-            urlparse_ext(url)
-        except Exception:
-            logger.warning(f"Malformed URL: {url}")
-            return self._empty_response
+            url = entry["request"]["endpoint"]
+            try:
+                urlparse_ext(url)
+            except Exception:
+                logger.warning(f"Malformed URL: {url}")
+                return self._empty_response
 
-        timestamp = entry["timestamp"]  # 2025-06-28T22:52:07.882000
-        request_body: Optional[str] = entry.get("request", {}).get("body", None)
-        response_body: Optional[str] = entry.get("response", {}).get("body", None)
-        status_code = entry["response"].get("status_code", 200)
-        http_method = entry["request"].get("method", "").upper()
-        request_headers = self._title_case_header(entry["request"].get("headers", {}))
-        request_headers.pop("raw", None)
-        response_headers = self._title_case_header(entry["response"].get("headers", {}))
-        response_headers.pop("raw", None)
-        response_rtt: Optional[float] = entry.get("response", {}).get("rtt", None)
-        technologies = entry["response"].get("technologies", [])
-        if not isinstance(technologies, list):
-            technologies = [str(technologies)]
-        forms = entry.get("response", {}).get("forms", None)
+            timestamp = entry["timestamp"]  # 2025-06-28T22:52:07.882000
+            request_body: Optional[str] = entry.get("request", {}).get("body", None)
+            response_body: Optional[str] = entry.get("response", {}).get("body", None)
+            status_code = entry["response"].get("status_code", 200)
+            http_method = entry["request"].get("method", "").upper()
+            request_headers = self._title_case_header(entry["request"].get("headers", {}))
+            request_headers.pop("raw", None)
+            response_headers = self._title_case_header(entry["response"].get("headers", {}))
+            response_headers.pop("raw", None)
+            response_rtt: Optional[float] = entry.get("response", {}).get("rtt", None)
+            technologies = entry["response"].get("technologies", [])
+            if not isinstance(technologies, list):
+                technologies = [str(technologies)]
+            forms = entry.get("response", {}).get("forms", None)
 
-        request_response = IngestableRequestResponse(
-            url=url,
-            timestamp=timestamp,
-            method=http_method,
-            request_headers=request_headers,
-            request_body=request_body,
-            response_code=status_code,
-            response_headers=response_headers,
-            response_body=response_body,
-            response_rtt=response_rtt,
-            technologies=technologies,
-            forms=forms,
-        )
-        return {"request_responses": [request_response]}
+            results.append(IngestableRequestResponse(
+                url=url,
+                timestamp=timestamp,
+                method=http_method,
+                request_headers=request_headers,
+                request_body=request_body,
+                response_code=status_code,
+                response_headers=response_headers,
+                response_body=response_body,
+                response_rtt=response_rtt,
+                technologies=technologies,
+                forms=forms,
+            ))
+        return {"request_responses": results}
 
     def _title_case_header(self, katana_headers: Dict[str, str]) -> Dict[str, str]:
         result = dict()

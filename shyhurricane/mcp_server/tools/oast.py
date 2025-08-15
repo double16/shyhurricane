@@ -11,7 +11,6 @@ from shyhurricane.oast import Endpoints, PollOutput, HealthOutput
 
 
 @mcp_instance.tool(
-    "oast.health_check",
     annotations=ToolAnnotations(
         title="OAST Health Check",
         readOnlyHint=True,
@@ -30,7 +29,6 @@ async def oast_health(ctx: Context) -> HealthOutput:
 
 
 @mcp_instance.tool(
-    "oast.endpoints",
     annotations=ToolAnnotations(
         title="OAST Endpoints",
         readOnlyHint=False,
@@ -59,7 +57,6 @@ async def oast_endpoints(ctx: Context) -> Endpoints:
 
 
 @mcp_instance.tool(
-    "oast.poll",
     annotations=ToolAnnotations(
         title="OAST Poll Interactions",
         readOnlyHint=False,

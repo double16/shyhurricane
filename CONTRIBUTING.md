@@ -41,6 +41,22 @@ chroma browse --host http://127.0.0.1:8200 javascript
 chroma browse --host http://127.0.0.1:8200 javascript_256
 ```
 
+# Debugging Model Communication
+
+Sometimes results from the model cannot be parsed.  Use `mitmproxy` to inspect model traffic.
+
+```shell
+mitmproxy -w assistant.log
+```
+
+This works for haystack-ai components using httpx:
+
+```shell
+export HTTP_PROXY=http://127.0.0.1:8080
+export HTTPS_PROXY=http://127.0.0.1:8080
+export SSL_CERT_FILE="$HOME/.mitmproxy/mitmproxy-ca-cert.pem"
+```
+
 # Dev Notes
 
 ## Queries that benefit from longer context

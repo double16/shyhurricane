@@ -7,7 +7,6 @@ from typing import Dict, Optional, List, Literal, Annotated
 from pydantic import BaseModel, Field
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
-from shellingham.posix import proc
 
 from shyhurricane.channels import PollEvent, Channel, ChannelManager
 from shyhurricane.mcp_server import mcp_instance, log_tool_history, AdditionalHostsField, get_server_context, \
@@ -93,7 +92,6 @@ def _mgr(ctx: Context) -> ChannelManager:
 
 
 @mcp_instance.tool(
-    "channels.create_forward",
     annotations=ToolAnnotations(
         title="Create a forward Channel",
         readOnlyHint=False,
@@ -175,7 +173,6 @@ async def channels_create_forward(
 
 
 @mcp_instance.tool(
-    "channels.create_reverse",
     annotations=ToolAnnotations(
         title="Wait for a reverse Channel",
         readOnlyHint=False,
@@ -268,7 +265,6 @@ async def channel_create_reverse(
 
 
 @mcp_instance.tool(
-    "channels.poll",
     annotations=ToolAnnotations(
         title="Poll Channel for events",
         readOnlyHint=False,
@@ -337,7 +333,6 @@ async def channel_poll(
 
 
 @mcp_instance.tool(
-    "channels.send",
     annotations=ToolAnnotations(
         title="Write bytes to a channel",
         readOnlyHint=True,
@@ -401,7 +396,6 @@ async def channel_send(
 
 
 @mcp_instance.tool(
-    "channels.status",
     annotations=ToolAnnotations(
         title="Channel connection status",
         readOnlyHint=True,
@@ -465,7 +459,6 @@ async def channel_status(
 
 
 @mcp_instance.tool(
-    "channels.close",
     annotations=ToolAnnotations(
         title="Close a specific channel",
         readOnlyHint=False,
@@ -490,7 +483,6 @@ async def channel_close(
 
 
 @mcp_instance.tool(
-    "channels.close_all",
     annotations=ToolAnnotations(
         title="Close all channels in this MCP session",
         readOnlyHint=False,

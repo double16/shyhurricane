@@ -58,49 +58,50 @@ def _katana_ingest(
     soup_extractor = BeautifulSoupExtractor()
 
     def process_stdout(data: str):
+        if not data or '"request"' not in data:
+            return
+
         ingest_queue.put(data)
         if result_queue is not None:
             try:
                 katana_results: List[IngestableRequestResponse] = katana_component.run(data).get("request_responses",
-                                                                                                 [])
-                if not katana_results:
-                    return
-                parsed = katana_results[0]
-                url = parsed.url
-                status_code = parsed.response_code
-                if url and status_code > 0:
-                    raw_mime = parsed.response_headers.get("Content-Type", "").lower().split(";")[0].strip()
-                    title: Optional[str] = None
-                    description: Optional[str] = None
-                    if parsed.response_body and raw_mime == "text/html":
-                        title, description = soup_extractor.extract(parsed.response_body)
+                                                           [])
+                for parsed in katana_results:
+                    url = parsed.url
+                    status_code = parsed.response_code
+                    if url and status_code > 0:
+                        raw_mime = parsed.response_headers.get("Content-Type", "").lower().split(";")[0].strip()
+                        title: Optional[str] = None
+                        description: Optional[str] = None
+                        if parsed.response_body and raw_mime == "text/html":
+                            title, description = soup_extractor.extract(parsed.response_body)
 
-                    resource = Resource(
-                        name=url,
-                        uri=AnyUrl(url),
-                        title=title,
-                        description=description,
-                        mimeType=parsed.response_headers.get('Content-Type', ''),
-                        size=parsed.response_headers.get('Content-Length', None),
-                    )
-                    try:
-                        url_parsed = urlparse_ext(resource.name)
-                        http_resource = HttpResource(
-                            score=100,
-                            url=resource.name,
-                            host=url_parsed.hostname,
-                            port=url_parsed.port,
-                            domain=extract_domain(url_parsed.hostname),
-                            status_code=status_code,
-                            method=parsed.method,
-                            response_headers=parsed.response_headers,
-                            resource=resource,
-                            contents=None,
+                        resource = Resource(
+                            name=url,
+                            uri=AnyUrl(url),
+                            title=title,
+                            description=description,
+                            mimeType=parsed.response_headers.get('Content-Type', ''),
+                            size=parsed.response_headers.get('Content-Length', None),
                         )
-                        result_queue.put_nowait(http_resource)
-                    except Exception as e:
-                        logger.warning(f"Queueing spider results: {e}", exc_info=e)
-                        pass
+                        try:
+                            url_parsed = urlparse_ext(resource.name)
+                            http_resource = HttpResource(
+                                score=100,
+                                url=resource.name,
+                                host=url_parsed.hostname,
+                                port=url_parsed.port,
+                                domain=extract_domain(url_parsed.hostname),
+                                status_code=status_code,
+                                method=parsed.method,
+                                response_headers=parsed.response_headers,
+                                resource=resource,
+                                contents=None,
+                            )
+                            result_queue.put_nowait(http_resource)
+                        except Exception as e:
+                            logger.warning(f"Queueing spider results: {e}", exc_info=e)
+                            pass
             except json.decoder.JSONDecodeError as e:
                 logger.warning(f"Parsing katana output: {e}\n\n{data}", exc_info=e)
             except Exception as e:
@@ -110,15 +111,13 @@ def _katana_ingest(
     try:
         while proc.poll() is None:
             line_out = proc.stdout.readline()
-            if line_out and '"request"' in line_out:
-                process_stdout(line_out)
+            process_stdout(line_out)
         # read any buffered output
         while True:
             line_out = proc.stdout.readline()
             if not line_out:
                 break
-            if '"request"' in line_out:
-                process_stdout(line_out)
+            process_stdout(line_out)
     except EOFError:
         pass
 

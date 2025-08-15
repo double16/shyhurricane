@@ -40,9 +40,11 @@ def configure_logging(level=logging.CRITICAL):
 
 def streaming_chunk_callback(verbose: bool = False, chat_logger: Callable[[str], None] = None):
     def callback(chunk: StreamingChunk):
-        console.print(chunk.content, end="")
-        if chat_logger:
-            chat_logger(chunk.content)
+        content = ' '.join(filter(bool, [chunk.content, chunk.meta.get("thinking", None)]))
+        if content:
+            console.print(content, end="")
+            if chat_logger:
+                chat_logger(content)
         if verbose:
             if chunk.tool_calls:
                 for tool_call in chunk.tool_calls:
@@ -59,7 +61,7 @@ def streaming_chunk_callback(verbose: bool = False, chat_logger: Callable[[str],
                 if chat_logger:
                     chat_logger(msg)
         else:
-            if chunk.finish_reason:
+            if chunk.finish_reason not in [None, '', 'tool_calls']:
                 console.print("\n")
                 if chat_logger:
                     chat_logger("\n")
@@ -110,6 +112,7 @@ def main():
     ap.add_argument("--mcp-url", nargs="+", required=False,
                     help="URL for the MCP server, i.e. http://127.0.0.1:8000/mcp/")
     ap.add_argument("--stream", action="store_true", help="Stream messages, always on for agent mode")
+    ap.add_argument("--no-stream", action="store_true", help="Force disabling of streaming messages")
     ap.add_argument("--history", default=chat_history_default)
     args = ap.parse_args()
 
@@ -134,6 +137,8 @@ def main():
         sys.exit(1)
 
     def chat_logger(line, output_timestamp: bool = False):
+        if not line:
+            return
         Path(args.history).touch(mode=0o644, exist_ok=True)
         with open(args.history, "a", encoding="utf-8") as f:
             if output_timestamp:
@@ -145,7 +150,8 @@ def main():
     def create_pipeline(system_prompt: str, tools: Toolset) -> Tuple[Pipeline, Component, Toolset]:
         system_prompt_lower = system_prompt.lower()
         if "autonomous" in system_prompt_lower or "automated" in system_prompt_lower:
-            args.stream = True
+            if not args.no_stream:
+                args.stream = True
             pipe, generator, _ = build_agent_pipeline(generator_config, system_prompt, args.mcp_url, tools)
         else:
             pipe, generator, _ = build_chat_pipeline(generator_config, system_prompt, args.mcp_url, tools)

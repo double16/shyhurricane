@@ -154,7 +154,7 @@ class GeneratorConfig(BaseModel):
                               tools: Optional[Union[List[Tool], Toolset]] = None):
         if self.openai_model:
             logger.info("Using OpenAI chat with model %s", self.openai_model)
-            if self.openai_model.startswith("o4-mini"):
+            if self.openai_model.startswith("o4-mini") or self.openai_model.startswith("gpt-5"):
                 temperature = 1.0
             _generation_kwargs = {
                 "temperature": temperature or self.temperature,
@@ -204,7 +204,7 @@ class GeneratorConfig(BaseModel):
                          generation_kwargs: Optional[Dict[str, Any]] = None):
         if self.openai_model:
             logger.info("Using OpenAI generator with model %s", self.openai_model)
-            if self.openai_model.startswith("o4-mini"):
+            if self.openai_model.startswith("o4-mini") or self.openai_model.startswith("gpt-5"):
                 temperature = 1.0
             _generation_kwargs = {
                 "temperature": temperature or self.temperature,
