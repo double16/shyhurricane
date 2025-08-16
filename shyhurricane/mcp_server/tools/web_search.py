@@ -6,7 +6,7 @@ from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 from ddgs import DDGS
-from typing import List, Callable
+from typing import List, Callable, Annotated
 
 from shyhurricane.mcp_server import mcp_instance, log_tool_history
 
@@ -77,11 +77,10 @@ websearch_instructions = "These are the results from searching the web for the p
         readOnlyHint=True,
         openWorldHint=True),
 )
-async def web_search(ctx: Context, query: str, limit: int = 20) -> WebSearchResult:
-    """
-    Searches the web with the provided query. The query is a keyword search that may include common search operators
-    such as:
-
+async def web_search(
+        ctx: Context,
+        query: Annotated[str, Field(
+            description="""Keyword search that may include common search operators such as:
     | Example | Result |
     | ------- | ------ |
     | cats dogs | Results about cats or dogs |
@@ -94,6 +93,12 @@ async def web_search(ctx: Context, query: str, limit: int = 20) -> WebSearchResu
     | cats -site:example.com | Pages about cats, excluding example.com |
     | intitle:dogs | Page title includes the word "dogs" |
     | inurl:cats | Page URL includes the word "cats" |
+"""
+        )],
+        limit: Annotated[int, Field(20, description="The maximum number of results to return", ge=1, le=50)] = 20
+) -> WebSearchResult:
+    """
+    Searches the web with the provided query.
 
     Invoke this tool when the user needs to find general information on vulnerabilities, CVEs, published exploits,
     and instructions for using tools. When searching for published exploits, in additional to this tool,

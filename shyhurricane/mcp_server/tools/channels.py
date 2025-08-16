@@ -99,14 +99,14 @@ def _mgr(ctx: Context) -> ChannelManager:
         idempotentHint=False,
         openWorldHint=True),
 )
-async def channels_create_forward(
+async def channel_create_forward(
         ctx: Context,
         command: Annotated[str, Field(
             description=(
                     "Command to execute in a bash shell, shell expansion is supported. "
                     "Example: 'sshpass -p passw0rd ssh user@host'.\n"
-                    "Usage: channels.create_forward → save channel_id → loop channels.poll for output → "
-                    "channels.send to write stdin → channels.close when done."
+                    "Usage: channel_create_forward → save channel_id → loop channel_poll for output → "
+                    "channel_send to write stdin → channel_close when done."
             ),
         )],
         env: ProcessEnvField = None,
@@ -115,13 +115,13 @@ async def channels_create_forward(
     """
     Create a new channel backed by a local subprocess. Output is stdout+stderr merged.
     Usage:
-    1) channels.create_forward(cmd=['nc','target.local','8080']) → channel_id
-    2) channels.status(channel_id)  # optional, check readiness
-    3) channels.poll(channel_id, timeout=5, min_events=1)
-    4) channels.send(channel_id, mode='text', data='help', append_newline=True)
-    5) channels.close(channel_id)
+    1) channel_create_forward(cmd=['nc','target.local','8080']) → channel_id
+    2) channel_status(channel_id)  # optional, check readiness
+    3) channel_poll(channel_id, timeout=5, min_events=1)
+    4) channel_send(channel_id, mode='text', data='help', append_newline=True)
+    5) channel_close(channel_id)
     """
-    await log_tool_history(ctx, "channels.create_forward")
+    await log_tool_history(ctx, "channel_create_forward", command=command, env=env, additional_hosts=additional_hosts)
     server_ctx = await get_server_context()
 
     mgr = _mgr(ctx)
@@ -186,8 +186,8 @@ async def channel_create_reverse(
             "0.0.0.0",
             description=(
                     "Interface to bind the reverse channel listener (single duplex client).\n"
-                    "Usage: channels.create_reverse → get {host,port} → remote connects → "
-                    "wait for 'client_connected' via channels.poll → exchange data via channels.send/poll."
+                    "Usage: channel_create_reverse → get {host,port} → remote connects → "
+                    "wait for 'client_connected' via channel_poll → exchange data via channel_send/poll."
             ),
         )],
         listener_port: Annotated[int, Field(
@@ -204,14 +204,14 @@ async def channel_create_reverse(
     """
     Create a reverse channel that listens on a single TCP port for one duplex client.
     Usage:
-    1) r = channels.create_reverse(listener_host='0.0.0.0', listener_port=0) → port in r.listen_port
-    2) channels.status(channel_id)  # check listening/connected
+    1) r = channel_create_reverse(listener_host='0.0.0.0', listener_port=0) → port in r.listen_port
+    2) channel_status(channel_id)  # check listening/connected
     3) Remote connects to listener_host:listener_port; poll until status 'client_connected'
-    4) channels.send(channel_id, mode='text', data='ping', append_newline=True)
-    5) channels.poll(channel_id, timeout=5, min_events=1) → 'output' events
-    6) channels.close(channel_id)
+    4) channel_send(channel_id, mode='text', data='ping', append_newline=True)
+    5) channel_poll(channel_id, timeout=5, min_events=1) → 'output' events
+    6) channel_close(channel_id)
     """
-    await log_tool_history(ctx, "channels.create_reverse", listener_host=listener_host, listener_port=listener_port,
+    await log_tool_history(ctx, "channel_create_reverse", listener_host=listener_host, listener_port=listener_port,
                            target=target)
 
     if target and listener_host == "0.0.0.0":
@@ -254,7 +254,7 @@ async def channel_create_reverse(
     await ch.mark_status("listening")
 
     mgr.add(ch)
-    await log_tool_history(ctx, "channels.create_reverse result", channel_id=cid, listener_host=listener_host, listener_port=port)
+    await log_tool_history(ctx, "channel_create_reverse result", channel_id=cid, listener_host=listener_host, listener_port=port)
     return CreateReverseResult(
         channel_id=cid,
         kind="reverse",
@@ -274,7 +274,7 @@ async def channel_create_reverse(
 )
 async def channel_poll(
         ctx: Context,
-        channel_id: Annotated[str, Field(description="Channel id returned by a create_* tool.")],
+        channel_id: Annotated[str, Field(description="Channel id returned by the channel_create_forward or channel_create_reverse tool.")],
         timeout: Annotated[float, Field(
             5.0,
             description=(
@@ -290,7 +290,7 @@ async def channel_poll(
         )],
         min_events: Annotated[int, Field(
             0,
-            description="Early-return threshold. Set to 1 to wake on first event.",
+            description="Early-return threshold. Set to 1 to wait on first event.",
             ge=0, le=10_000
         )]
 ) -> PollResult:
@@ -298,10 +298,10 @@ async def channel_poll(
     Long-poll for events from a channel; events are consumed on delivery.
     Usage:
     loop:
-      r = channels.poll(channel_id, timeout=5, min_events=1)
+      r = channel_poll(channel_id, timeout=5, min_events=1)
       for e in r.events: if e.stream=='output': decode e.data_b64
     """
-    await log_tool_history(ctx, "channels.poll", channel_id=channel_id, timeout=timeout, min_events=min_events, max_events=max_events)
+    await log_tool_history(ctx, "channel_poll", channel_id=channel_id, timeout=timeout, min_events=min_events, max_events=max_events)
 
     ch = _mgr(ctx).get(channel_id)
 
@@ -347,7 +347,7 @@ async def channel_send(
             "text",
             description=(
                     "'text' = UTF-8 (optionally add newline). 'base64' = raw bytes from base64.\n"
-                    "Usage: channels.send(mode='text', data='whoami', append_newline=True)."
+                    "Usage: channel_send(mode='text', data='whoami', append_newline=True)."
             ),
         )],
         data: Annotated[str, Field(
@@ -361,10 +361,10 @@ async def channel_send(
     """
     Write bytes to a channel's stdin (forward → subprocess, reverse → connected client).
     Usage:
-    channels.send(channel_id, mode='text', data='ls -la', append_newline=True)
-    channels.send(channel_id, mode='base64', data='<b64>')
+    channel_send(channel_id, mode='text', data='ls -la', append_newline=True)
+    channel_send(channel_id, mode='base64', data='<b64>')
     """
-    await log_tool_history(ctx, "channels.send", channel_id=channel_id, mode=mode, data_len=len(data), append_newline=append_newline)
+    await log_tool_history(ctx, "channel_send", channel_id=channel_id, mode=mode, data_len=len(data), append_newline=append_newline)
 
     ch = _mgr(ctx).get(channel_id)
     payload = base64.b64decode(data) if mode == "base64" else (
@@ -408,18 +408,18 @@ async def channel_status(
         channel_id: Annotated[str, Field(
             description=(
                     "Channel to check.\n"
-                    "Usage: s = channels.status(channel_id); if s.connected and s.ready_for_send: channels.send(...)."
+                    "Usage: s = channel_status(channel_id); if s.connected and s.ready_for_send: channel_send(...)."
             )
         )]
 ) -> StatusResult:
     """
     Check whether a channel is established and ready for send/receive.
     Usage:
-    s = channels.status(channel_id)
+    s = channel_status(channel_id)
     if s.connected and s.ready_for_send:
-        channels.send(channel_id, mode='text', data='ping', append_newline=True)
+        channel_send(channel_id, mode='text', data='ping', append_newline=True)
     """
-    await log_tool_history(ctx, "channels.status", channel_id=channel_id)
+    await log_tool_history(ctx, "channel_status", channel_id=channel_id)
 
     ch = _mgr(ctx).get(channel_id)
 
@@ -469,14 +469,14 @@ async def channel_status(
 async def channel_close(
         ctx: Context,
         channel_id: Annotated[str, Field(
-            description="Channel to close.\nUsage: channels.close with saved channel_id."
+            description="Channel to close.\nUsage: channel_close with saved channel_id."
         )]
 ) -> CloseResult:
     """
     Close a specific channel; safe to call multiple times.
-    Usage: channels.close(channel_id)
+    Usage: channel_close(channel_id)
     """
-    await log_tool_history(ctx, "channels.close", channel_id=channel_id)
+    await log_tool_history(ctx, "channel_close", channel_id=channel_id)
 
     ok = await _mgr(ctx).close(channel_id)
     return CloseResult(channel_id=channel_id, success=ok)
@@ -493,9 +493,9 @@ async def channel_close(
 async def channel_close_all(ctx: Context) -> Dict[str, int]:
     """
     Close all channels in this MCP session (also happens automatically on session end).
-    Usage: channels.close_all()
+    Usage: channel_close_all()
     """
-    await log_tool_history(ctx, "channels.close_all")
+    await log_tool_history(ctx, "channel_close_all")
 
     mgr = _mgr(ctx)
     count = len(getattr(mgr, "_channels", {}))

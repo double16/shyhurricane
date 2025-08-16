@@ -1,19 +1,20 @@
 import json
 import logging
 from datetime import datetime
-from typing import Optional, Dict
+from typing import Optional, Dict, Annotated
 
 import httpx
 import persistqueue
 import requests
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations, TextResourceContents
-from pydantic import AnyUrl
+from pydantic import AnyUrl, Field
 from starlette.requests import Request
 from starlette.responses import Response
 
 from shyhurricane.doc_type_model_map import map_mime_to_type
-from shyhurricane.mcp_server import mcp_instance, get_server_context, log_tool_history, get_additional_hosts
+from shyhurricane.mcp_server import mcp_instance, get_server_context, log_tool_history, get_additional_hosts, \
+    UserAgentField, CookiesField, RequestHeadersField, AdditionalHostsField, RequestParamsField
 from shyhurricane.mcp_server.tools.deobfuscate_javascript import deobfuscate_javascript
 from shyhurricane.utils import stream_lines, is_katana_jsonl, HttpResource, urlparse_ext, \
     extract_domain
@@ -81,12 +82,12 @@ async def index_request_body(request: Request) -> Response:
 async def index_http_url(
         ctx: Context,
         url: str,
-        additional_hosts: Optional[Dict[str, str]] = None,
-        method: str = "GET",
-        user_agent: Optional[str] = None,
-        request_headers: Optional[Dict[str, str]] = None,
-        cookies: Optional[Dict[str, str]] = None,
-        params: Optional[Dict[str, str]] = None,
+        additional_hosts: AdditionalHostsField = None,
+        method: Annotated[str, Field("GET", description="The HTTP method to use")] = "GET",
+        user_agent: UserAgentField = None,
+        request_headers: RequestHeadersField = None,
+        cookies: CookiesField = None,
+        params: RequestParamsField = None,
         content: Optional[str] = None,
         follow_redirects: Optional[bool] = None,
 ) -> Optional[HttpResource]:
@@ -94,19 +95,6 @@ async def index_http_url(
     Index an HTTP URL to allow for further analysis and return the context, response code, response headers.
 
     Invoke this tool when the user needs the content of one specific URL.
-
-    The additional_hosts parameter is a dictionary of host name (the key) to IP address (the value) for hosts that do not have DNS records. This also includes CTF targets or web server virtual hosts found during other scans. If you
-    know the IP address for a host, be sure to include these in the additional_hosts parameter for
-    commands to run properly in a containerized environment.
-
-    The user_agent can be used to specify the "User-Agent" request header. This is useful if a particular browser needs
-    to be spoofed or the user requests extra information in the user agent header to identify themselves as a bug bounty hunter.
-
-    The request_headers map is extra request headers sent with the request.
-
-    The cookies parameter is name, value pairs for cookies to send.
-
-    The params is used to send either GET or POST parameters.
 
     The content is optional request body content.
 

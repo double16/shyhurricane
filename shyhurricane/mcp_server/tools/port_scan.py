@@ -3,13 +3,14 @@ import logging
 import queue
 import time
 from multiprocessing import Queue
-from typing import Optional, List, Dict
+from typing import Optional, List, Annotated
 
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context, get_additional_hosts
+from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context, get_additional_hosts, \
+    AdditionalHostsField
 from shyhurricane.task_queue import PortScanQueueItem
 from shyhurricane.task_queue.port_scan_worker import get_stored_port_scan_results
 from shyhurricane.utils import filter_hosts_and_addresses, filter_ip_networks, PortScanResults
@@ -45,11 +46,26 @@ async def port_scan(
         hostnames: Optional[List[str]] = None,
         ip_addresses: Optional[List[str]] = None,
         ip_subnets: Optional[str] = None,
-        ports: Optional[List[int]] = None,
-        port_range_low: Optional[int] = None,
-        port_range_high: Optional[int] = None,
-        additional_hosts: Optional[Dict[str, str]] = None,
-        timeout_seconds: Optional[int] = None,
+        ports: Annotated[
+            Optional[List[int]],
+            Field(None, description="List of individual ports to scan, leave empty for all ports")
+        ] = None,
+        port_range_low: Annotated[
+            Optional[int],
+            Field(None, description="The low end of the optional port range", ge=1, le=65535)
+        ] = None,
+        port_range_high: Annotated[
+            Optional[int],
+            Field(None, description="The high end of the optional port range", ge=1, le=65535)
+        ] = None,
+        additional_hosts: AdditionalHostsField = None,
+        timeout_seconds: Annotated[
+            Optional[int],
+            Field(120,
+                  description="How long to wait, in seconds, for responses before returning. The port scan will continue after returning.",
+                  ge=30, le=600,
+                  )
+        ] = None,
         retry: bool = False,
 ) -> PortScanToolResult:
     """
@@ -65,18 +81,7 @@ async def port_scan(
     a list of IPv4 or IPv6 addresses. The ip_subnets parameter is a list of IPv4 or IPv6 subnets in CIDR notation, such
     as "192.168.1.0/24".
 
-    The ports parameter is a list of individual ports to scan.
-    The port_range_low and port_range_high allow specifying a range of ports to scan.
-    By not specifying ports, port_range_low and port_range_high, all ports will be scanned.
-
-    The additional_hosts parameter is a dictionary of host name (the key) to IP address (the value) for hosts that do not have DNS records. This also includes CTF targets or web server virtual hosts found during other scans. If you
-    know the IP address for a host, be sure to include these in the additional_hosts parameter for
-    commands to run properly in a containerized environment.
-
     If the port scan reveals additional host names, use the `register_hostname_address` tool to register them.
-
-    The timeout_seconds parameter specifies how long to wait for responses before returning. Port scanning will
-    continue after returning.
 
     The port scan may take a long time, and this tool may return before the scan is finished.
     If a timeout occurs, call this tool again with the same parameters, and it will return indexed results.

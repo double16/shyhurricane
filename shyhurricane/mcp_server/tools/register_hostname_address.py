@@ -1,11 +1,13 @@
+from typing import Annotated
 
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
+from pydantic import Field
 
 from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_additional_hosts
 
 #
-# For some models, returning the host name and IP address that was registered causes it to rethink it's task. It sees
+# For some models, returning the host name and IP address that was registered causes it to rethink its task. It sees
 # the response as user instructions. We've got to try to get it to continue on. Returning an empty string can confuse
 # it.
 #
@@ -27,7 +29,11 @@ register_hostname_address_instructions_error = "The host name or IP address was 
         idempotentHint=True,
         openWorldHint=False),
 )
-async def register_hostname_address(ctx: Context, host: str, address: str) -> str:
+async def register_hostname_address(
+        ctx: Context,
+        host: Annotated[str, Field(description="The host name")],
+        address: Annotated[str, Field(description="The IPv4 or IPv6 address")],
+) -> str:
     """
     Registers a hostname with an IP address. This is useful when a hostname has no DNS entry
     and we know the IP address by other means. Especially useful in CTF or private networks.

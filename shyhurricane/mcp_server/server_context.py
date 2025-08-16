@@ -110,8 +110,10 @@ async def get_server_context() -> ServerContext:
                 logger.info("Populating seclists volume")
                 subprocess.Popen(
                     ["docker", "run", "--user=0", "--rm", "-d", "-v", "seclists:/usr/share/seclists",
-                     unix_command_image(),
-                     "git", "clone", "--depth=1", "https://github.com/danielmiessler/SecLists.git",
+                     unix_command_image(), "/bin/bash", "-c",
+                     "git clone --depth=1 https://github.com/danielmiessler/SecLists.git /usr/share/seclists && "
+                     "tar -xf /usr/share/seclists/Passwords/Leaked-Databases/rockyou.txt.tar.gz -C /usr/share/seclists/Passwords/Leaked-Databases/ && "
+                     "chmod a+r /usr/share/seclists/Passwords/Leaked-Databases/rockyou.txt",
                      "/usr/share/seclists"],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except subprocess.CalledProcessError as e:

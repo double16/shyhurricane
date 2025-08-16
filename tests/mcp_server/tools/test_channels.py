@@ -132,7 +132,7 @@ def mock_subprocess(monkeypatch):
 @pytest.mark.asyncio
 async def test_forward_create_status_send_poll_close(ctx, mock_subprocess):
     # Create forward channel
-    res = await mod.channels_create_forward(ctx,
+    res = await mod.channel_create_forward(ctx,
                                             command="/bin/bash -lc 'echo ready; while true; do read L; echo $L; done'")
     cid = res.channel_id
     assert res.kind == "forward"
@@ -166,7 +166,7 @@ async def test_forward_create_status_send_poll_close(ctx, mock_subprocess):
 @pytest.mark.asyncio
 async def test_poll_timeout_returns_quickly(ctx, mock_subprocess):
     # Create forward channel and poll with short timeout; ensure it doesn't hang
-    res = await mod.channels_create_forward(ctx, command="bash -lc true")
+    res = await mod.channel_create_forward(ctx, command="bash -lc true")
     cid = res.channel_id
     out = await mod.channel_poll(ctx, channel_id=cid, timeout=0.010, max_events=10, min_events=1)
     assert isinstance(out.events, list)
@@ -230,8 +230,8 @@ async def test_reverse_send_when_not_connected_returns_zero(ctx):
 
 @pytest.mark.asyncio
 async def test_close_all(ctx, mock_subprocess):
-    r1 = await mod.channels_create_forward(ctx, command="bash -lc 'echo a'")
-    r2 = await mod.channels_create_forward(ctx, command="bash -lc 'echo b'")
+    r1 = await mod.channel_create_forward(ctx, command="bash -lc 'echo a'")
+    r2 = await mod.channel_create_forward(ctx, command="bash -lc 'echo b'")
     res = await mod.channel_close_all(ctx)
     assert res["closed"] >= 2
 

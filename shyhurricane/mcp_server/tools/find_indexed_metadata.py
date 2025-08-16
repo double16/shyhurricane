@@ -1,5 +1,5 @@
 import logging
-from typing import Optional, List, Any
+from typing import Optional, List, Any, Annotated, TypeAlias
 
 import chromadb
 from chromadb.api.models.AsyncCollection import AsyncCollection
@@ -30,6 +30,9 @@ class FindDomainsResult(BaseModel):
     query: Optional[str] = Field(description="The query used to these find domains")
     domains: List[str] = Field(description="The domains that have been indexed")
 
+DomainQueryField: TypeAlias = Annotated[str,
+    Field(description="""Limit the results using the "ends with" operator on the domain""")
+]
 
 @mcp_instance.tool(
     annotations=ToolAnnotations(
@@ -37,12 +40,17 @@ class FindDomainsResult(BaseModel):
         readOnlyHint=True,
         openWorldHint=False),
 )
-async def find_domains(ctx: Context, query: Optional[str] = None) -> FindDomainsResult:
+async def find_domains(
+        ctx: Context,
+        query: Annotated[
+            Optional[str],
+            Field(description="Limit the results using a \"contains\" operator, if empty return all domains")
+        ] = None
+) -> FindDomainsResult:
     """
     Query indexed resources for a list of domains that have resources that can be researched.
 
-    Invoke this tool when the user asks about websites that have been scanned, spidered or indexed. The
-    query parameter is optional and will limit the results using a "contains" operator.
+    Invoke this tool when the user asks about websites that have been scanned, spidered or indexed.
     """
     await log_tool_history(ctx, "find_domains", query=query)
     server_ctx = await get_server_context()
@@ -76,13 +84,14 @@ class FindHostsResult(BaseModel):
         readOnlyHint=True,
         openWorldHint=False),
 )
-async def find_hosts(ctx: Context, domain_query: str) -> FindHostsResult:
+async def find_hosts(
+        ctx: Context,
+        domain_query: DomainQueryField
+) -> FindHostsResult:
     """
     Query indexed resources for a list of hosts for the given domain.
 
     Invoke this tool when the user asks about websites that have been scanned, spidered or indexed.
-
-    The domain_query parameter will limit the results using the "ends with" operator.
     """
     await log_tool_history(ctx, "find_hosts", domain_query=domain_query)
     server_ctx = await get_server_context()
@@ -121,13 +130,14 @@ class FindNetworkLocationResult(BaseModel):
         readOnlyHint=True,
         openWorldHint=False),
 )
-async def find_netloc(ctx: Context, domain_query: str) -> FindNetworkLocationResult:
+async def find_netloc(
+        ctx: Context,
+        domain_query: DomainQueryField
+) -> FindNetworkLocationResult:
     """
     Query indexed resources for a list of network locations, i.e. host:port, for a given domain.
 
     Invoke this tool when the user asks about websites that have been scanned, spidered or indexed.
-
-    The domain_query parameter will limit the results using the "ends with" operator on the host name.
     """
     await log_tool_history(ctx, "find_netloc", domain_query=domain_query)
     server_ctx = await get_server_context()
@@ -165,20 +175,18 @@ class FindURLsResult(BaseModel):
         readOnlyHint=True,
         openWorldHint=False),
 )
-async def find_urls(ctx: Context, host_query: str, path_query: Optional[str] = None,
-                    limit: int = 100) -> FindURLsResult:
+async def find_urls(
+        ctx: Context,
+        host_query: Annotated[str, Field(description="Limit the results using the \"ends with\" operator")],
+        path_query: Annotated[Optional[str], Field(description="If specified, match URLs using a \"contains\" operator.")] = None,
+        limit: Annotated[int, Field(100, description="Limit the results", ge=10, le=1000)] = 100
+) -> FindURLsResult:
     """
     Query indexed resources for a list of URLs for the given host or domain.
 
     Invoke this tool when the user asks for page URLs that have been scanned, spidered or indexed.
 
     Invoke this tool when a list of URLs for a website is needed for analysis.
-
-    The host_query parameter will limit the results using the "ends with" operator.
-
-    The path_query parameter, if specified, will match URLs using a "contains" operator.
-
-    The limit parameter limits the number of results. The default limit is 100. Valid limit values are 100-1000.
     """
     await log_tool_history(ctx, "find_urls", host_query=host_query, limit=limit)
     server_ctx = await get_server_context()

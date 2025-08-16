@@ -47,6 +47,27 @@ ProcessEnvField: TypeAlias = Annotated[Optional[Dict[str, str]], Field(
     description="Environment variables to set for the process."
 )]
 
+CookiesField: TypeAlias = Annotated[
+    Optional[Dict[str, str]], Field(description="Name, value pairs for cookies to send with each request.")
+]
+
+UserAgentField: TypeAlias = Annotated[
+    Optional[str],
+    Field(description=(
+        "The user_agent can be used to specify the \"User-Agent\" request header. This is useful if a "
+        "particular browser needs to be spoofed or the user requests extra information in the user "
+        "agent header to identify themselves as a bug bounty hunter."
+    ))]
+
+RequestHeadersField: TypeAlias = Annotated[
+    Optional[Dict[str, str]],
+    Field(None, description="Extra HTTP headers sent with the request.")
+]
+
+RequestParamsField: TypeAlias = Annotated[
+    Optional[Dict[str, str]], Field(),
+    Field(description="name, value pairs for GET or POST parameters")
+]
 
 @asynccontextmanager
 async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:

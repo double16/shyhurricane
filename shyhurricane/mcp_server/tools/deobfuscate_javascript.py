@@ -1,7 +1,9 @@
 import logging
+from typing import Annotated
 
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
+from pydantic import Field
 
 from shyhurricane.mcp_server import mcp_instance, log_tool_history
 from shyhurricane.mcp_server.tools.run_unix_command import _run_unix_command
@@ -15,7 +17,10 @@ logger = logging.getLogger(__name__)
         readOnlyHint=True,
         openWorldHint=False),
 )
-async def deobfuscate_javascript(ctx: Context, content: str) -> str:
+async def deobfuscate_javascript(
+        ctx: Context,
+        content: Annotated[str, Field(description="Javascript content to deobfuscate")]
+) -> str:
     """
     Deobfuscate a JavaScript file to be closer to the original source.
 

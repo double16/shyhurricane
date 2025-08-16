@@ -4,14 +4,15 @@ import os.path
 import queue
 import time
 from multiprocessing import Queue
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Annotated
 
 from mcp import McpError
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context, get_additional_hosts
+from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context, get_additional_hosts, \
+    AdditionalHostsField, CookiesField, RequestParamsField
 from shyhurricane.mcp_server.tools.find_wordlists import find_wordlists
 from shyhurricane.task_queue import DirBustingQueueItem
 
@@ -51,18 +52,48 @@ class DirBusterResults(BaseModel):
 )
 async def directory_buster(
         ctx: Context,
-        url: str,
-        depth: int = 3,
-        method: str = "GET",
-        wordlist: Optional[str] = None,
-        cookies: Optional[Dict[str, str]] = None,
-        params: Optional[Dict[str, str]] = None,
-        extensions: Optional[List[str]] = None,
-        ignored_response_codes: Optional[List[int]] = None,
-        additional_hosts: Optional[Dict[str, str]] = None,
-        user_agent: Optional[str] = None,
-        request_headers: Optional[Dict[str, str]] = None,
-        timeout_seconds: Optional[int] = None,
+        url: Annotated[str, Field(description=(
+                "The URL to brute-force. May contain the FUZZ keyword that will be replaced with values "
+                "from the wordlist. For example, \"http://target.local/path/FUZZ\"."
+        ))],
+        depth: Annotated[
+            int, Field(3, description="How deep to recurse in found paths. 1 means not to recurse.",
+                       ge=1, le=5)] = 3,
+        method: Annotated[str, Field("GET", description="The HTTP method: GET or POST")] = "GET",
+        wordlist: Annotated[Optional[str], Field(
+            description="The path to the wordlist. Use the find_wordlists tool to find available wordlists.")] = None,
+        cookies: CookiesField = None,
+        params: RequestParamsField = None,
+        extensions: Annotated[
+            Optional[List[str]],
+            Field(
+                description="Specify file extensions to search for such as pdf, php, etc. Do not include a leading period.")
+        ] = None,
+        ignored_response_codes: Annotated[
+            Optional[List[int]], Field(description="List of HTTP response codes to ignore")] = None,
+        additional_hosts: AdditionalHostsField = None,
+        user_agent: Annotated[
+            Optional[str],
+            Field(description=(
+                    "The user_agent can be used to specify the \"User-Agent\" request header. This is useful if a "
+                    "particular browser needs to be spoofed or the user requests extra information in the user "
+                    "agent header to identify themselves as a bug bounty hunter. The user_agent may contain the FUZZ "
+                    "keyword that will be replaced with values from the wordlist."
+            ))] = None,
+        request_headers: Annotated[
+            Optional[Dict[str, str]],
+            Field(description=(
+                    "The request_headers map is extra request headers sent with the request. "
+                    "The request_headers key and/or values may contain the FUZZ keyword that will be replaced with "
+                    "values from the wordlist."
+            ))] = None,
+        timeout_seconds: Annotated[
+            Optional[int],
+            Field(120,
+                description="How long to wait, in seconds, for responses before returning. Directory busting will continue after returning.",
+                ge=30, le=600,
+            )
+        ] = None,
 ) -> DirBusterResults:
     """
     Search a website for hidden directories and files. This tool uses a wordlist to append each word to a URL and see if
@@ -71,29 +102,6 @@ async def directory_buster(
     Invoke this tool when the user wants to run a directory busting (i.e. brute-forcing) tool. The results are indexed and available in the
     find_web_resources, find_urls and other tools that use indexed content. This tool is preferred over feroxbuster,
     gobuster, ffuf, wfuzz, and other like commands.
-
-    The additional_hosts parameter is a dictionary of host name (the key) to IP address (the value) for hosts that do not have DNS records. This also includes CTF targets or web server virtual hosts found during other scans. If you
-    know the IP address for a host, be sure to include these in the additional_hosts parameter for
-    commands to run properly in a containerized environment.
-
-    The url may contain the FUZZ keyword that will be replaced with values from the wordlist. For example, "http://target.local/path/FUZZ".
-
-    The user_agent can be used to specify the "User-Agent" request header. This is useful if a particular browser needs
-    to be spoofed or the user requests extra information in the user agent header to identify themselves as a bug bounty hunter.
-    The user_agent may contain the FUZZ keyword that will be replaced with values from the wordlist.
-
-    The request_headers map is extra request headers sent with the request.The request_headers key and/or values may
-    contain the FUZZ keyword that will be replaced with values from the wordlist.
-
-    The extensions parameter specifies file extensions to search for such as pdf, php, etc. Do not include a leading
-    period.
-
-    The cookies parameter is name, value pairs for cookies to send with each request.
-
-    The params is used to send either GET or POST parameters.
-
-    The timeout_seconds parameter specifies how long to wait for responses before returning. Directory busting will
-    continue after returning.
 
     Returns a list of URLs found. Indexes each URL that can be queried using the find_web_resources and find_urls tools. URL content can be returned using the fetch_web_resource_content tool.
     """
@@ -128,6 +136,9 @@ async def directory_buster(
                 logger.info("Corrected wordlist from %s to %s", original_wordlist, wordlist)
         except McpError as e:
             logger.warning("Could not validate wordlist, using as given: %s", e)
+
+    if extensions:
+        extensions = list(map(lambda e: e[1:] if len(e) > 1 and e[0] == '.' else e, extensions))
 
     task_queue: Queue = server_ctx.task_queue
     dir_busting_result_queue: Queue = server_ctx.dir_busting_result_queue

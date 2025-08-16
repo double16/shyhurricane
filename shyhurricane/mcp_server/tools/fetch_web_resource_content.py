@@ -1,10 +1,10 @@
 import logging
-from typing import Optional
+from typing import Optional, Annotated
 
 from haystack import Document
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations, TextResourceContents
-from pydantic import AnyUrl
+from pydantic import AnyUrl, Field
 
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server import get_server_context, mcp_instance, log_tool_history
@@ -34,13 +34,15 @@ async def _find_document_by_type_and_id(doc_type: str, doc_id: str) -> Optional[
         readOnlyHint=True,
         openWorldHint=False),
 )
-async def fetch_web_resource_content(ctx: Context, uri: str) -> Optional[TextResourceContents]:
-    """Fetch the content of a web resource that has already been indexed. The URI argument takes one of two forms.
-
-    The URI may be a http:// or https:// URI of a website that has been indexed.
+async def fetch_web_resource_content(
+        ctx: Context,
+        uri: Annotated[str, Field(description="""The URI may be a http:// or https:// URI of a website that has been indexed.
 
     The URI may be a web://{doc_type}/{doc_id} URI supplied by the
     find_web_resources tool. The URI can be found in the resource_link JSON object.
+""")]
+) -> Optional[TextResourceContents]:
+    """Fetch the content of a web resource that has already been indexed.
 
     Invoke this tool when the user requests analysis of resource content that has already been indexed, spidered or scanned.
     """

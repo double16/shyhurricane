@@ -1,7 +1,7 @@
 import asyncio
 import json
 import logging
-from typing import List, Optional
+from typing import List, Optional, Annotated
 
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
@@ -37,29 +37,29 @@ class SaveFindingResult(BaseModel):
         idempotentHint=False,
         openWorldHint=False),
 )
-async def save_finding(ctx: Context, target: str, markdown: str, title: Optional[str]) -> SaveFindingResult:
+async def save_finding(
+        ctx: Context,
+        target: Annotated[str, Field(description="""
+- Must be a URL, IP address, domain name, or hostname.
+- Port numbers may be included using a colon suffix (e.g. `target.local:8080`).
+""")],
+        markdown: Annotated[str, Field(description="""
+- The full body of the finding in **Markdown format**.
+- Each finding must include all the following sections:
+    - **Title** – A concise, descriptive heading.
+    - **Issue Summary** – What is wrong and why it is important.
+    - **Discovery Method** – How the issue was found (tool or technique used).
+    - **Reproduction Steps** – Step-by-step instructions to reproduce the issue.
+    - **PoC** – Exploit code, request sample, or screenshot (if applicable).
+    - **Fix** – Recommended remediation or mitigation.
+    - **References** – Relevant CVEs, OWASP links, research articles, etc.
+""")],
+        title: Annotated[
+            Optional[str], Field(description="""A short, descriptive summary of the issue (one line max).""")],
+) -> SaveFindingResult:
     """
     Use this tool to save **every finding** associated with the current target.
     A finding must be saved as soon as it is identified.
-
-    #### Target:
-    - Must be a URL, IP address, domain name, or hostname.
-    - Port numbers may be included using a colon suffix (e.g. `target.local:8080`).
-
-    #### Title:
-    - A short, descriptive summary of the issue (one line max).
-
-    #### Markdown:
-    - The full body of the finding in **Markdown format**.
-    - Each finding must include all the following sections:
-
-      - **Title** – A concise, descriptive heading.
-      - **Issue Summary** – What is wrong and why it is important.
-      - **Discovery Method** – How the issue was found (tool or technique used).
-      - **Reproduction Steps** – Step-by-step instructions to reproduce the issue.
-      - **PoC** – Exploit code, request sample, or screenshot (if applicable).
-      - **Fix** – Recommended remediation or mitigation.
-      - **References** – Relevant CVEs, OWASP links, research articles, etc.
 
     Do not skip or omit this tool. **All findings must be saved.**
     """
@@ -107,14 +107,16 @@ class QueryFindingsResult(BaseModel):
         readOnlyHint=True,
         openWorldHint=False),
 )
-async def query_findings(ctx: Context, target: str, limit: int = 100) -> QueryFindingsResult:
+async def query_findings(
+        ctx: Context,
+        target: Annotated[str, Field(description="URL, host name, IP address, or domain name")],
+        limit: Annotated[int, Field(100, ge=10, le=1000, description="The maximum number of findings to return")] = 100
+) -> QueryFindingsResult:
     """
     Query for previous findings for the target. The findings provide a good starting place to continue testing.
 
     Invoke this tool when the user asks for existing vulnerabilities or is looking for a direction for testing a target.
     Include findings when developing your test plan.
-
-    The target must be a URL, host name, IP address, or domain name.
     """
     await log_tool_history(ctx, "query_findings", target=target, limit=limit)
     server_ctx = await get_server_context()

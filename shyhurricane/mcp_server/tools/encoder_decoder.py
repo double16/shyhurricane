@@ -1,4 +1,4 @@
-from typing import List, Optional
+from typing import List, Optional, Annotated
 
 from pydantic import BaseModel, Field
 from mcp.server.fastmcp import Context
@@ -20,13 +20,12 @@ class EncoderDecoderResult(BaseModel):
         readOnlyHint=True,
         openWorldHint=False),
 )
-async def encoder_decoder(ctx: Context, operations: List[str], input_str: str) -> EncoderDecoderResult:
-    """
-    Transforms the input_str by applying the operations in the specified order.
-
-    Invoke this tool when the user needs to transform data from one form to another.
-
-    The operations parameter is a list of operations from the following list. The values must only be from this. Operations
+async def encoder_decoder(
+        ctx: Context,
+        operations: Annotated[
+            List[str],
+            Field(description="""
+    List of operations from the following list. The values must only be from this list. Operations
     are applied in the order specified by sending the output of on operation into the next.
     Valid operations:
      - "base64_encode", base64 encodes the input_str
@@ -46,6 +45,14 @@ async def encoder_decoder(ctx: Context, operations: List[str], input_str: str) -
      - "unescape_unicode", converts characters from their unicode-escaped notations using a backslash, examples: "\u03C3%u03BFU+03C5" becomes "σου"
      - "to_uppercase", converts characters to their uppercase equivalent, example: "abc123" becomes "ABC123"
      - "to_lowercase", converts characters to their lowercase equivalent, example: "ABC123" becomes "abc123"
+""")
+        ],
+        input_str: Annotated[str, Field(description="Input to be transformed")]
+) -> EncoderDecoderResult:
+    """
+    Transforms the input_str by applying the operations in the specified order.
+
+    Invoke this tool when the user needs to transform data from one form to another.
     """
     await log_tool_history(ctx, "encoder_decoder", input_str=input_str, operations=operations)
 

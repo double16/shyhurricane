@@ -73,6 +73,7 @@ async def oast_poll(
                     "The number of seconds to wait for interactions. A value of 0 returns immediately with any pending "
                     "interactions."
             ),
+            ge=0.0, le=600.0
         )] = 30.0,
 ) -> PollOutput:
     """
@@ -80,14 +81,14 @@ async def oast_poll(
 
     Invoke this tool when the user wants to check for interactions from the target to the OAST service.
     """
-    await log_tool_history(ctx, "oast.poll", timeout=timeout)
+    await log_tool_history(ctx, "oast_poll", timeout=timeout)
     time_end = time.time() + timeout
     time_step = 3.0
     while time.time() < time_end:
         result = await ctx.request_context.lifespan_context.oast_provider.poll_new()
         if len(result.interactions) > 0:
-            await log_tool_history(ctx, f"oast.poll returned {len(result.interactions)} interactions", timeout=timeout)
+            await log_tool_history(ctx, f"oast_poll returned {len(result.interactions)} interactions", timeout=timeout)
             return result
         await asyncio.sleep(min(time_step, time_end - time.time()))
-    await log_tool_history(ctx, "oast.poll returned 0 interactions", timeout=timeout)
+    await log_tool_history(ctx, "oast_poll returned 0 interactions", timeout=timeout)
     return PollOutput()

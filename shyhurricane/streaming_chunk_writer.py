@@ -42,7 +42,7 @@ class StreamingChunkWriter:
         self.tool_call_str = ""
         self.tool_call_index = -1
         self.processes: Dict[int, ToolProcess] = {}
-        self.on_newline = False
+        self.on_newline = True
 
     def output(self, content: str, force_newline: bool = False):
         if not content:

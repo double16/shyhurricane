@@ -4,7 +4,7 @@ import logging
 import queue
 import time
 from multiprocessing import Queue
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Annotated
 
 import chromadb
 from chromadb.api.models import AsyncCollection
@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, AnyUrl
 
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server import get_server_context, mcp_instance, log_tool_history, assert_elicitation, \
-    ServerContext, get_additional_hosts
+    ServerContext, get_additional_hosts, AdditionalHostsField, CookiesField, UserAgentField, RequestHeadersField
 from shyhurricane.mcp_server.tools.find_indexed_metadata import find_netloc
 from shyhurricane.target_info import parse_target_info, TargetInfo
 from shyhurricane.task_queue import SpiderQueueItem
@@ -238,8 +238,11 @@ def find_web_resources_result(
 async def find_web_resources(
         ctx: Context,
         query: str,
-        limit: int = 100,
-        http_methods: Optional[List[str]] = None,
+        limit: Annotated[int, Field(100, description="Limit how many results are returned", ge=10, le=1000)] = 100,
+        http_methods: Annotated[
+            Optional[List[str]],
+            Field(description="Limit results to requests made with the listed HTTP methods. If not specified all methods will be considered.")
+        ] = None,
 ) -> FindWebResourcesResult:
     """Query indexed resources about a website using natural language and return the URL, request and response bodies,
     request and response headers, HTTP method, MIME type, HTTP status code, technologies found. This tool will
@@ -268,11 +271,6 @@ async def find_web_resources(
         7. http://target.local/account/dashboard?page=account
 
     A target URL or hostname is required. Always include your target URLs. http://target.local is only an example, do not use it as a URL.
-
-    The http_methods parameter can be used to limit results to requests made with the listed methods. If not specified
-    all methods will be considered.
-
-    The limit parameter is used to limit how many results are returned. The default is 100. The value must range between 10 and 1000.
     """
     await log_tool_history(ctx, "find_web_resources", query=query, limit=limit)
     server_ctx = await get_server_context()
@@ -542,11 +540,17 @@ async def is_spider_time_recent(server_ctx: ServerContext, url: str) -> Optional
 async def spider_website(
         ctx: Context,
         url: str,
-        additional_hosts: Optional[Dict[str, str]] = None,
-        user_agent: Optional[str] = None,
-        request_headers: Optional[Dict[str, str]] = None,
-        cookies: Optional[Dict[str, str]] = None,
-        timeout_seconds: Optional[int] = None,
+        additional_hosts: AdditionalHostsField = None,
+        user_agent: UserAgentField = None,
+        request_headers: RequestHeadersField = None,
+        cookies: CookiesField = None,
+        timeout_seconds: Annotated[
+            Optional[int],
+            Field(120,
+                description="How long to wait, in seconds, for responses before returning. Spidering will continue after returning.",
+                ge=30, le=600,
+            )
+        ] = None,
 ) -> SpiderResults:
     """
     Spider the website at the url and index the results for further analysis. The find_web_resources
@@ -554,20 +558,6 @@ async def spider_website(
     a website has already been spidered.
 
     Invoke this tool when the user specifically asks to spider a URL or when the user wants to examine or analyze a site for which nothing has been indexed.
-
-    The additional_hosts parameter is a dictionary of host name (the key) to IP address (the value) for hosts that do not have DNS records. This also includes CTF targets or web server virtual hosts found during other scans. If you
-    know the IP address for a host, be sure to include these in the additional_hosts parameter for
-    commands to run properly in a containerized environment.
-
-    The user_agent can be used to specify the "User-Agent" request header. This is useful if a particular browser needs
-    to be spoofed or the user requests extra information in the user agent header to identify themselves as a bug bounty hunter.
-
-    The request_headers map is extra request headers sent with the request.
-
-    The cookies parameter is name, value pairs for cookies to send with each request.
-
-    The timeout_seconds parameter specifies how long to wait for responses before returning. Spidering will
-    continue after returning.
 
     Returns a list of resources found, including URL, response code, content type, and content length. Indexes each URL that can be queried using the find_web_resources tool. URL content can be returned using the fetch_web_resource_content tool.
     """
