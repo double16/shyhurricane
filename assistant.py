@@ -9,12 +9,12 @@ import logging
 import os
 import sys
 from pathlib import Path
-from typing import Iterable, Callable, Tuple
+from typing import Iterable, Tuple
 
 from haystack import Pipeline
 from haystack.core.component import Component
 from haystack.core.errors import PipelineRuntimeError
-from haystack.dataclasses import ChatMessage, StreamingChunk
+from haystack.dataclasses import ChatMessage
 from haystack.tools import Toolset
 from haystack_integrations.tools.mcp import MCPToolset
 from prompt_toolkit import PromptSession
@@ -26,6 +26,7 @@ from shyhurricane.config import configure
 from shyhurricane.generator_config import GeneratorConfig, add_generator_args
 from shyhurricane.mcp_server.generator_config import set_generator_config
 from shyhurricane.retrieval_pipeline import build_chat_pipeline, build_agent_pipeline, create_tools
+from shyhurricane.streaming_chunk_writer import StreamingChunkWriter
 
 logger = logging.getLogger(__name__)
 
@@ -36,37 +37,6 @@ console = get_console()
 
 def configure_logging(level=logging.CRITICAL):
     logging.getLogger().setLevel(level)
-
-
-def streaming_chunk_callback(verbose: bool = False, chat_logger: Callable[[str], None] = None):
-    def callback(chunk: StreamingChunk):
-        content = ' '.join(filter(bool, [chunk.content, chunk.meta.get("thinking", None)]))
-        if content:
-            console.print(content, end="")
-            if chat_logger:
-                chat_logger(content)
-        if verbose:
-            if chunk.tool_calls:
-                for tool_call in chunk.tool_calls:
-                    if tool_call.tool_name:
-                        console.print(f"{tool_call.tool_name}({tool_call.arguments or ""})")
-                if chunk.tool_call_result:
-                    if chunk.tool_call_result.origin:
-                        console.print(
-                            f"{chunk.tool_call_result.origin.tool_name}({chunk.tool_call_result.origin.arguments or ""})")
-                    console.print(f"{chunk.tool_call_result.result}")
-            if chunk.finish_reason:
-                msg = f"\n🛑 {chunk.finish_reason}"
-                console.print(msg)
-                if chat_logger:
-                    chat_logger(msg)
-        else:
-            if chunk.finish_reason not in [None, '', 'tool_calls']:
-                console.print("\n")
-                if chat_logger:
-                    chat_logger("\n")
-
-    return callback
 
 
 def prompt_multiline(session: PromptSession) -> str:
@@ -147,6 +117,10 @@ def main():
                 f.write("`\n\n")
             f.write(line)
 
+    def streaming_chunk_printer(line: str):
+        console.print(line, end="")
+        chat_logger(line, output_timestamp=True)
+
     def create_pipeline(system_prompt: str, tools: Toolset) -> Tuple[Pipeline, Component, Toolset]:
         system_prompt_lower = system_prompt.lower()
         if "autonomous" in system_prompt_lower or "automated" in system_prompt_lower:
@@ -157,7 +131,8 @@ def main():
             pipe, generator, _ = build_chat_pipeline(generator_config, system_prompt, args.mcp_url, tools)
 
         if args.stream and generator is not None:
-            generator.streaming_callback = streaming_chunk_callback(verbose=bool(args.verbose), chat_logger=chat_logger)
+            generator.streaming_callback = StreamingChunkWriter(printer=streaming_chunk_printer,
+                                                                verbose=bool(args.verbose)).callback
 
         return pipe, generator, tools
 
