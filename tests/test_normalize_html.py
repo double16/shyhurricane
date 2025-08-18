@@ -31,7 +31,6 @@ class TestNormalizeHtml(unittest.TestCase):
 
     def test_with_doctype(self):
         with open(os.path.join(os.path.dirname(__file__), f"fixtures/with_doctype.html"), "rt") as f:
-            jsonl = f.readlines()
-        for line in jsonl:
-            cleaned = normalize_html(line)
-            self.assertEqual("<html><head></head><body> </body></html>", cleaned)
+            html = f.read()
+        cleaned = normalize_html(html)
+        self.assertEqual("<html><head></head><body> </body></html>", cleaned)
