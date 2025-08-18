@@ -3,7 +3,7 @@ import logging
 
 from lxml import etree
 import re, html
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Doctype
 from collections import OrderedDict
 import json5
 
@@ -30,6 +30,10 @@ def normalize_html(raw: str) -> str:
     # for c in soup.find_all(string=lambda s: isinstance(s, type(soup.comment))):
     #     c.extract()
     #
+
+    for el in soup.contents:
+        if isinstance(el, Doctype):
+            el.extract()
 
     for tag in soup.find_all(True):
         tag.name = tag.name.lower()

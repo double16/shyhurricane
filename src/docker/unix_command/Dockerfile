@@ -18,7 +18,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_CACHE_DIR=/usr/local/share/pip-cache
 
 RUN apt-get update &&\
-    apt-get install -y --install-recommends ruby nmap sqlmap curl wget dirb ffuf wfuzz hydra netcat-openbsd git pipx iputils-ping nodejs npm mitmproxy python3-pip python3-virtualenv jq exploitdb nuclei ftp sshpass tshark &&\
+    apt-get install -y --install-recommends ruby nmap sqlmap curl wget dirb ffuf wfuzz hydra netcat-openbsd git pipx iputils-ping nodejs npm mitmproxy python3-pip python3-virtualenv jq exploitdb nuclei ftp sshpass tshark sqlite3 &&\
     apt-get clean
 RUN pipx install impacket git-dumper
 RUN gem install evil-winrm

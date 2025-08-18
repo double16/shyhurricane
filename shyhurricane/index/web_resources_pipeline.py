@@ -5,7 +5,7 @@ import logging
 import subprocess
 import sys
 from math import floor
-from typing import List, Optional, Dict, Any, Tuple, Set
+from typing import List, Optional, Dict, Any, Set
 
 from bs4 import SoupStrainer
 from haystack import component, Document, Pipeline
@@ -622,6 +622,16 @@ def build_ingest_pipeline(db: str) -> Pipeline:
     return pipe
 
 
+def new_doc_cleaner() -> DocumentCleaner:
+    return DocumentCleaner(
+        keep_id=True,
+        remove_empty_lines=True,
+        remove_extra_whitespaces=True,
+        unicode_normalization='NFKC',
+        # ascii_only=True,
+    )
+
+
 def build_doc_type_pipeline(
         db: str,
         generator_config: GeneratorConfig,
@@ -629,13 +639,7 @@ def build_doc_type_pipeline(
     stores = build_stores(db)
     embedders = build_embedders()
 
-    doc_cleaner = DocumentCleaner(
-        keep_id=True,
-        remove_empty_lines=True,
-        remove_extra_whitespaces=True,
-        unicode_normalization='NFKC',
-        # ascii_only=True,
-    )
+    doc_cleaner = new_doc_cleaner()
 
     pipe = Pipeline()
 

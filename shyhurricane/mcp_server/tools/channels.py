@@ -113,14 +113,41 @@ async def channel_create_forward(
         additional_hosts: AdditionalHostsField = None,
 ) -> CreateForwardResult:
     """
-    Create a new channel backed by a local subprocess. Output is stdout+stderr merged.
-    Usage:
-    1) channel_create_forward(cmd=['nc','target.local','8080']) → channel_id
-    2) channel_status(channel_id)  # optional, check readiness
-    3) channel_poll(channel_id, timeout=5, min_events=1)
-    4) channel_send(channel_id, mode='text', data='help', append_newline=True)
-    5) channel_close(channel_id)
-    """
+  You are an MCP agent.
+  You do not write code.
+  You must accomplish tasks by invoking the available MCP tools exactly as documented.
+
+  ## Forward Channel Instructions
+
+  To create and use a forward channel backed by a local subprocess (stdout and stderr merged), follow this sequence of MCP tool calls:
+
+  1. **Create forward channel**
+     - Tool: `channel_create_forward`
+     - Args: `cmd=['nc','target.local','8080']`
+     - Response: use the returned `channel_id`.
+
+  2. **Check status (optional)**
+     - Tool: `channel_status`
+     - Args: `channel_id`
+     - Use to confirm readiness if needed.
+
+  3. **Receive output**
+     - Tool: `channel_poll`
+     - Args: `channel_id`, `timeout=5`, `min_events=1`
+
+  4. **Send data**
+     - Tool: `channel_send`
+     - Args: `channel_id`, `mode='text'`, `data='help'`, `append_newline=True`
+
+  5. **Close channel**
+     - Tool: `channel_close`
+     - Args: `channel_id`
+
+  ## Important
+  - Never output example code.
+  - Always use tool calls directly.
+  - Treat the above as a required sequence of MCP operations, not programming tasks.
+"""
     await log_tool_history(ctx, "channel_create_forward", command=command, env=env, additional_hosts=additional_hosts)
     server_ctx = await get_server_context()
 
@@ -202,15 +229,46 @@ async def channel_create_reverse(
                                                description="The address of the target that will help in choosing the listener host")] = None,
 ) -> CreateReverseResult:
     """
-    Create a reverse channel that listens on a single TCP port for one duplex client.
-    Usage:
-    1) r = channel_create_reverse(listener_host='0.0.0.0', listener_port=0) → port in r.listen_port
-    2) channel_status(channel_id)  # check listening/connected
-    3) Remote connects to listener_host:listener_port; poll until status 'client_connected'
-    4) channel_send(channel_id, mode='text', data='ping', append_newline=True)
-    5) channel_poll(channel_id, timeout=5, min_events=1) → 'output' events
-    6) channel_close(channel_id)
-    """
+  You are an MCP agent.
+  You do not write code.
+  You must accomplish tasks by invoking the available MCP tools exactly as documented.
+
+  ## Channel Management Instructions
+
+  To create and use a reverse channel for one duplex client, follow this sequence of MCP tool calls:
+
+  1. **Create reverse channel**
+     - Tool: `channel_create_reverse`
+     - Args: `listener_host='0.0.0.0'`, `listener_port=0`
+     - Response: use `listen_port` from the result.
+
+  2. **Check status**
+     - Tool: `channel_status`
+     - Args: `channel_id`
+     - Use this to confirm if the channel is listening or connected.
+
+  3. **Wait for client**
+     - The remote connects to `listener_host:listen_port`.
+     - Keep polling status until it equals `"client_connected"`.
+
+  4. **Send data**
+     - Tool: `channel_send`
+     - Args: `channel_id`, `mode='text'`, `data='ping'`, `append_newline=True`
+
+  5. **Receive data**
+     - Tool: `channel_poll`
+     - Args: `channel_id`, `timeout=5`, `min_events=1`
+     - Look for `"output"` events in the response.
+
+  6. **Close channel**
+     - Tool: `channel_close`
+     - Args: `channel_id`
+
+  ## Important
+  - Never output example code.
+  - Always use tool calls directly.
+  - Treat the above as a required sequence of MCP operations, not programming tasks.
+"""
     await log_tool_history(ctx, "channel_create_reverse", listener_host=listener_host, listener_port=listener_port,
                            target=target)
 

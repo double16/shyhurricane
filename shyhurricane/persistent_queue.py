@@ -40,7 +40,7 @@ def persistent_queue_get(queue: persistqueue.SQLiteAckQueue, shrink_count: int =
             last_shrink = time.time()
 
         try:
-            item = queue.get(block=False, timeout=2)
+            item = queue.get(block=True, timeout=60)
         except Empty:
             if count > 0 and (time.time() - last_shrink) > shrink_idle_timeout:
                 _shrink_persistent_queue(queue, name)
