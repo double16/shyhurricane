@@ -456,13 +456,18 @@ def unix_command_image() -> str:
     return "ghcr.io/double16/shyhurricane_unix_command:main"
 
 
-def get_log_path(db: str, log_name: str) -> Path:
+def get_state_path(db: str, state_name: str) -> Path:
     if os.path.exists("/data"):
         # Running inside a container
-        path = Path("/data", "logs", log_name)
+        path = Path("/data", state_name)
     else:
-        path = Path(Path.home(), ".local", "state", "shyhurricane", re.sub(r'[^A-Za-z0-9_.-]', '_', db), log_name)
-    os.makedirs(path.parent, mode=0o755, exist_ok=True)
+        path = Path(Path.home(), ".local", "state", "shyhurricane", re.sub(r'[^A-Za-z0-9_.-]', '_', db), state_name)
+    os.makedirs(path, mode=0o755, exist_ok=True)
+    return path
+
+
+def get_log_path(db: str, log_name: str) -> Path:
+    path = Path(get_state_path(db, "logs"), log_name)
     return path
 
 

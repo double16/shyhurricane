@@ -76,6 +76,7 @@ services:
     shm_size: "2g"
     ports:
       - "8000:8000"
+      - "8010:8010"
     volumes:
       - "data:/data"
       - "tool_cache:/tool_cache"

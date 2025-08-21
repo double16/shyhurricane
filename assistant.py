@@ -1,7 +1,4 @@
 #!/usr/bin/env python3
-"""
-Cybersecurity offense assistant.
-"""
 import argparse
 import datetime
 import json

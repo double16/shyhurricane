@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import contextlib
 import logging
 import os
+import signal
 import sys
 
 import torch
+from uvicorn import Config, Server
 
 from shyhurricane.config import configure
 from shyhurricane.generator_config import GeneratorConfig, add_generator_args
 from shyhurricane.mcp_server import mcp_instance, get_server_context
 from shyhurricane.mcp_server.generator_config import set_generator_config
+from shyhurricane.proxy_server.proxy_server import run_proxy_server
 from shyhurricane.server_config import ServerConfig, set_server_config, add_oast_args, OASTConfig
 
 import shyhurricane.mcp_server.prompts  # noqa: F401
@@ -31,6 +35,7 @@ import shyhurricane.mcp_server.tools.register_hostname_address  # noqa: F401
 import shyhurricane.mcp_server.tools.run_unix_command  # noqa: F401
 import shyhurricane.mcp_server.tools.status  # noqa: F401
 import shyhurricane.mcp_server.tools.web_search  # noqa: F401
+from shyhurricane.utils import get_state_path
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +48,7 @@ def _str_to_bool(bool_as_str: str) -> bool:
     return True
 
 
-def main():
+async def main():
     open_world_default = os.environ.get("OPEN_WORLD", "True")
 
     if torch.accelerator.device_count() == 0:
@@ -55,12 +60,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--transport",
-        choices=["stdio", "sse", "streamable-http"],
+        choices=["streamable-http", "sse"],
         default="streamable-http",
-        help="Transport method to use: stdio, sse, or streamable-http"
+        help="Transport method to use: streamable-http or sse"
     )
     ap.add_argument("--host", default="127.0.0.1", help="Host to listen on")
-    ap.add_argument("--port", type=int, default=8000, help="Port to listen on")
+    ap.add_argument("--port", type=int, default=8000, help="Port to listen on for MCP")
+    ap.add_argument("--proxy-port", type=int, default=8010, help="Port to listen on for HTTP/HTTPS proxy")
     ap.add_argument("--task-pool-size", type=int, default=3, help="The number of processes in the task pool")
     ap.add_argument("--index-pool-size", type=int, default=1, help="The number of processes in the indexing pool")
     ap.add_argument("--open-world", type=str, default=open_world_default,
@@ -78,15 +84,52 @@ def main():
         low_power=_str_to_bool(args.low_power),
         oast=OASTConfig.from_args(args),
     ))
-    asyncio.run(get_server_context())
-    mcp_instance.settings.host = args.host
-    mcp_instance.settings.port = args.port
+    server_context = await get_server_context()
+
+    #
+    # MCP Server
+    #
     mcp_instance.open_world = _str_to_bool(args.open_world)
-    mcp_instance.run(transport=args.transport)
+
+    match args.transport:
+        case "sse":
+            mcp_app = mcp_instance.sse_app(None)
+        case "streamable-http":
+            mcp_app = mcp_instance.streamable_http_app()
+
+    uv_cfg = Config(app=mcp_app, host=args.host, port=args.port, loop="asyncio", lifespan="on", log_level="info")
+    uv_server = Server(uv_cfg)
+    uv_task = asyncio.create_task(uv_server.serve())
+
+    #
+    # Proxy Server
+    #
+    proxy_server = run_proxy_server(server_context.db, args.host, args.proxy_port,
+                                    get_state_path(server_context.db, "certs"))
+    proxy_task = asyncio.create_task(proxy_server)
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:
+            # Windows: no add_signal_handler for SIGTERM; fall back to Ctrl+C only
+            pass
+
+    await stop.wait()
+
+    proxy_server.close()
+
+    uv_server.should_exit = True
+    await uv_task
+    proxy_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await proxy_task
 
 
 if __name__ == "__main__":
     try:
-        main()
+        asyncio.run(main())
     except KeyboardInterrupt:
         sys.exit(130)

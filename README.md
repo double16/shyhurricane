@@ -34,6 +34,18 @@ The following tools are provided:
 | deobfuscate_javascript     | De-obfuscate a JavaScript file (automatically done during indexing)                                 | No          |
 | prompt_chooser             | Chooses the best prompt for an offensive security operation.                                        | No          |
 | prompt_list                | Provides a list of available prompt titles for offensive security operations.                       | No          |
+| encoder_decoder            | Transforms the input by applying common operations.                                                 | No          |
+| channel_create_forward     | Create a forward channel backed by a local subprocess.                                              | Yes         |
+| channel_create_reverse     | Create a reverse channel for one duplex client                                                      | Yes         |
+| channel_poll               | Long-poll for events from a channel                                                                 | Yes         |
+| channel_send               | Write bytes to a channel's stdin                                                                    | Yes         |
+| channel_status             | Check whether a channel is established and ready for send/receive.                                  | Yes         |
+| channel_close              | Close a specific channel                                                                            | Yes         |
+| channel_close_all          | Close all channels                                                                                  | Yes         |
+| oast_health                | Check the health/reachability of the currently configured OAST provider.                            | Yes         |
+| oast_endpoints             | Get the endpoints that can be used to test out-of-band interactions from the target.                | Yes         |
+| oast_poll                  | Retrieve new interactions with the OAST service since the last poll.                                | Yes         |
+
 
 ## GPU
 
@@ -291,4 +303,20 @@ OAST_PROVIDER=interactsh
 INTERACT_SERVER=oast.pro
 # optional
 INTERACT_TOKEN=
+```
+
+## Proxy Serving Indexed Content
+
+The MCP server exposes a proxy port, `8010` by default, that serves the indexed content. The intent is use tools on
+the indexed content after the fact. For example, to run `nuclei` and feed the findings into the MCP server.
+
+The proxy supports HTTP and HTTPS with self-signed certs. Look for a log line like the following to find the CA cert:
+
+```
+replay proxy listening on ('127.0.0.1', 8010), CA cert is at /home/user/.local/state/shyhurricane/127.0.0.1_8200/certs/ca.pem (CONNECT→TLS ALPN: h2/http1.1)
+```
+
+An example `curl` call:
+```shell
+curl -x 127.0.0.1:8010 -k https://example.com
 ```
