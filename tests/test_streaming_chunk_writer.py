@@ -238,4 +238,56 @@ class StreamingChunkWriterTest(unittest.TestCase):
         for chunk in chunks:
             self.callback(chunk)
         self.assertEqual("""I will begin by enumerating open ports and services on 10.129.231.188.
+
 🔄 port_scan({"timeout_seconds": 600, "ip_addresses": ["10.129.231.188"]})\n""", self.output)
+
+    def test_content_tool_call_alternate(self):
+        call_chunks = [StreamingChunk(content='Registering the hostname.', index=0, tool_calls=None,
+                                      tool_call_result=None, start=True, finish_reason=None),
+                       StreamingChunk(content='', index=0, tool_calls=[
+                           ToolCallDelta(index=0, tool_name='register_hostname_address',
+                                         arguments='{"address": "10.129.231.188", "host": "alert.htb"}', id=None)],
+                                      tool_call_result=None, start=True, finish_reason='stop')]
+        for chunk in call_chunks:
+            self.callback(chunk)
+        self.assertEqual("""Registering the hostname.
+
+🔄 register_hostname_address({"address": "10.129.231.188", "host": "alert.htb"})\n""",
+                         self.output)
+
+        result_chunks = [
+            StreamingChunk(content='Hostname registered.', index=0, tool_calls=None,
+                           tool_call_result=None, start=True, finish_reason=None),
+            StreamingChunk(
+                content='', index=0, tool_calls=None,
+                tool_call_result=ToolCallResult(result='',
+                                                origin=ToolCall(
+                                                    tool_name='register_hostname_address',
+                                                    arguments={
+                                                        'address': '10.129.231.188',
+                                                        'host': 'alert.htb'},
+                                                    id=''),
+                                                error=False),
+                start=True, finish_reason=None)]
+        for chunk in result_chunks:
+            self.callback(chunk)
+        self.assertEqual("""Registering the hostname.
+
+🔄 register_hostname_address({"address": "10.129.231.188", "host": "alert.htb"})
+
+Hostname registered.
+
+✅ register_hostname_address({"address": "10.129.231.188", "host": "alert.htb"})\n""", self.output)
+
+    def test_content_multiple_chunks(self):
+        chunks = [
+            StreamingChunk(content='I will begin by enumerating ', index=0,
+                           tool_calls=[], tool_call_result=None, start=True, finish_reason=None),
+            StreamingChunk(content='open ports and services', index=0,
+                           tool_calls=[], tool_call_result=None, start=False, finish_reason=None),
+            StreamingChunk(content=' on 10.129.231.188.', index=0,
+                           tool_calls=[], tool_call_result=None, start=False, finish_reason=None),
+        ]
+        for chunk in chunks:
+            self.callback(chunk)
+        self.assertEqual("""I will begin by enumerating open ports and services on 10.129.231.188.""", self.output)
