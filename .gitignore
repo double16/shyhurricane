@@ -166,3 +166,4 @@ cython_debug/
 *_store/
 *history.md
 node_modules/
+.DS_Store

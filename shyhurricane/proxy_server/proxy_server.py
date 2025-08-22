@@ -172,8 +172,8 @@ class CertAuthority:
         # ALPN: offer h2 first, then http/1.1
         try:
             ctx.set_alpn_protocols(["h2", "http/1.1"])
-        except NotImplementedError:
-            print("h2 not supported", file=sys.stderr)
+        except NotImplementedError as e:
+            logger.error("h2 not supported", exc_info=e)
             pass  # ALPN not available; HTTP/2 won't be negotiated
 
         # Misc hardening / compatibility
@@ -480,19 +480,23 @@ class ReplayProxy:
 
                             res = await store.lookup(url, method=method)
                             if not res:
-                                print(f"HTTP/2 404 {url}")
+                                logger.info(f"proxy HTTP/2 404 {url}")
                                 not_found_body = ReplayProxy.not_found_html(url, await store.recommend_urls(url))
                                 not_found_body_bytes = not_found_body.encode("iso-8859-1")
                                 await ReplayProxy._h2_send_response(conn, reader, transport, event.stream_id, 404,
                                                                     {"content-type": "text/html"}, not_found_body_bytes)
                             else:
                                 status, h, b = res
-                                print(f"HTTP/2 {status} {url}")
+                                logger.info(f"proxy HTTP/2 {status} {url}")
                                 await ReplayProxy._h2_send_response(conn, reader, transport, event.stream_id, status, h,
                                                                     b)
+                        except ConnectionResetError:
+                            pass
+                        except TimeoutError:
+                            pass
                         except Exception as e:
                             error_body = f"proxy error: {e}\n".encode()
-                            print(f"HTTP/2 500 {error_body.decode()}")
+                            logger.info(f"proxy HTTP/2 500 {error_body.decode()}")
                             await ReplayProxy._h2_send_response(conn, reader, transport, event.stream_id, 500,
                                                                 {"content-type": "text/plain"}, error_body)
                             return
@@ -509,7 +513,7 @@ class ReplayProxy:
                 transport.write(conn.data_to_send())
         except Exception as e:
             transport.write(conn.data_to_send())
-            print(e, file=sys.stderr)
+            logger.error(f"proxy {host}", exc_info=e)
 
     @staticmethod
     async def handle_inner_http11(reader: asyncio.StreamReader, writer: asyncio.StreamWriter, host: str,
@@ -540,7 +544,7 @@ class ReplayProxy:
     async def write_http11_response(url: str, method: str, writer: asyncio.StreamWriter, store: ContentStore):
         res = await store.lookup(url, method=method)
         if not res:
-            print(f"HTTP/1.1 404 {url}")
+            logger.info(f"proxy HTTP/1.1 404 {url}")
             await ReplayProxy.send_simple(writer, 404,
                                           ReplayProxy.not_found_html(url, await store.recommend_urls(url)).encode(
                                               "iso-8859-1"))
@@ -563,7 +567,7 @@ class ReplayProxy:
         await ReplayProxy.drain_with_timeout(writer)
         writer.close()
         await writer.wait_closed()
-        print(f"HTTP/1.1 {status} {url}")
+        logger.info(f"proxy HTTP/1.1 {status} {url}")
 
     async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         url = "?"
@@ -613,11 +617,13 @@ class ReplayProxy:
 
         except ConnectionResetError:
             pass
+        except TimeoutError:
+            pass
 
         except Exception as e:
-            print(traceback.format_exc())
+            logger.error(f"proxy {url}", exc_info=e)
             try:
-                print(f"HTTP/1.1 500 {url}")
+                logger.info(f"proxy HTTP/1.1 500 {url}")
                 await ReplayProxy.send_simple(writer, 500, f"proxy error: {e}\n".encode())
             except Exception:
                 pass

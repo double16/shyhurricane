@@ -310,7 +310,8 @@ INTERACT_TOKEN=
 The MCP server exposes a proxy port, `8010` by default, that serves the indexed content. The intent is use tools on
 the indexed content after the fact. For example, to run `nuclei` and feed the findings into the MCP server.
 
-The proxy supports HTTP and HTTPS with self-signed certs. Look for a log line like the following to find the CA cert:
+The proxy supports HTTP and HTTPS with self-signed certs. Look for a log line like the following to find the CA cert. Either
+your tools can be configured to ignore certificate validation or trust this cert.
 
 ```
 replay proxy listening on ('127.0.0.1', 8010), CA cert is at /home/user/.local/state/shyhurricane/127.0.0.1_8200/certs/ca.pem (CONNECT→TLS ALPN: h2/http1.1)
@@ -319,4 +320,9 @@ replay proxy listening on ('127.0.0.1', 8010), CA cert is at /home/user/.local/s
 An example `curl` call:
 ```shell
 curl -x 127.0.0.1:8010 -k https://example.com
+```
+
+Here is an example of using Nuclei on indexed content to submit findings passively:
+```shell
+nuclei -proxy http://127.0.0.1:8010 -target https://example.com -j | curl http://127.0.0.1:8000/findings -H "Content-Type: text/json" --data-binary @-
 ```
