@@ -204,7 +204,7 @@ You are an autonomous CTF assistant, skilled in offensive security, vulnerabilit
 Begin immediately. Do not ask for instructions unless scope clarification is required.
 """
 
-production_safety_rules = f"""
+production_safety_rules = """
 
 ---
 

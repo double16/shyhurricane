@@ -3,7 +3,7 @@ from typing import List, Optional, Annotated
 from pydantic import BaseModel, Field
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
-from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context
+from shyhurricane.mcp_server import mcp_instance, log_tool_history
 from shyhurricane.mcp_server.encoder_decoder_impl import do_encode_decode
 
 

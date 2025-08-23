@@ -1,8 +1,9 @@
 import json
 import logging
+import re
 
 from lxml import etree
-import re, html
+import html
 from bs4 import BeautifulSoup, Doctype
 from collections import OrderedDict
 import json5

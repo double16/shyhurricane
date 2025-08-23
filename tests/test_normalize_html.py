@@ -30,7 +30,7 @@ class TestNormalizeHtml(unittest.TestCase):
             self.assertFalse(cleaned.startswith("html"))
 
     def test_with_doctype(self):
-        with open(os.path.join(os.path.dirname(__file__), f"fixtures/with_doctype.html"), "rt") as f:
+        with open(os.path.join(os.path.dirname(__file__), "fixtures/with_doctype.html"), "rt") as f:
             html = f.read()
         cleaned = normalize_html(html)
         self.assertEqual("<html><head></head><body> </body></html>", cleaned)

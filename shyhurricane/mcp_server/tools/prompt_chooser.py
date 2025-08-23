@@ -153,7 +153,7 @@ async def prompt_chooser(ctx: Context, query: str) -> str:
         targets = filter_targets_query(query)
 
     if not targets:
-        return f"At least one target is required. Specify as a host name, IP address, IP subnet, or URL."
+        return "At least one target is required. Specify as a host name, IP address, IP subnet, or URL."
 
     await log_tool_history(ctx, "prompt_chooser: result", query=query, prompt_title=prompt_title, targets=targets)
 

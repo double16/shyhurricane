@@ -1,4 +1,3 @@
-import re
 from typing import List
 
 from base64 import b64encode, b64decode

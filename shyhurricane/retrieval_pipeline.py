@@ -79,7 +79,7 @@ class TraceDocs:
     def run(self, query: str, expanded_queries: List[str], documents: List[Document]):
         with open(self.file, "a", encoding="utf-8") as f:
             f.write(f"# Q: {query}\n\n")
-            f.write(f"## Q expanded:\n")
+            f.write("## Q expanded:\n")
             for eq in expanded_queries:
                 f.write(f"- {eq}\n")
             f.write("\n")
@@ -87,8 +87,8 @@ class TraceDocs:
                 f.write(f"## {doc.meta["url"]}\n")
                 f.write(f"Score: {doc.score}\n\n")
                 f.write(doc.content[0:1024])
-                f.write(f"\n\n")
-            f.write(f"\n\n---\n\n")
+                f.write("\n\n")
+            f.write("\n\n---\n\n")
         return {}
 
 
@@ -459,7 +459,7 @@ class ChatMessageLogger:
     @component.output_types()
     def run(self, messages: List[ChatMessage]):
         if not messages:
-            logger.debug(f"No messages received")
+            logger.debug("No messages received")
         for message in messages:
             logger.debug(f"Message: {message.role}: {message.texts}")
         return {}

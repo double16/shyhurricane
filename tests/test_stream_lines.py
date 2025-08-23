@@ -27,7 +27,7 @@ class TestStreamLines(unittest.TestCase):
         self.assertEqual(["abc"], lines)
 
     def test_stream_lines_two(self):
-        lines = asyncio.run(collect_lines(stream_lines(mock_bytes_stream(f"a\nb\n"))))
+        lines = asyncio.run(collect_lines(stream_lines(mock_bytes_stream("a\nb\n"))))
         self.assertEqual(["a", "b"], lines)
         l1 = "a" * 64
         l2 = "b" * 64

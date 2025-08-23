@@ -3,6 +3,13 @@ import asyncio
 import ssl
 import contextlib
 import pytest
+import tempfile
+import shutil
+
+# Minimal async h2 client using hyper-h2 over asyncio streams
+from h2.connection import H2Connection
+from h2.config import H2Configuration
+from h2.events import ResponseReceived, DataReceived, StreamEnded
 
 from shyhurricane.proxy_server import proxy_server as srv  # noqa: F401
 
@@ -58,8 +65,8 @@ async def connect_tunnel(loop: asyncio.AbstractEventLoop, proxy_host, proxy_port
     assert line.startswith(b"HTTP/1.1 200"), f"CONNECT failed: {line!r}"
     # Drain headers
     while True:
-        l = await reader.readline()
-        if not l or l == b"\r\n":
+        line = await reader.readline()
+        if not line or line == b"\r\n":
             break
 
     # 2) Upgrade this transport to TLS (client side)
@@ -106,7 +113,6 @@ async def proxy_server():
     }
     store = DummyStore(mapping)
 
-    import tempfile, shutil
     temp_dir = tempfile.mkdtemp(prefix="replay-ca-test-")
     ca = srv.CertAuthority(cert_dir=temp_dir)
     proxy = srv.ReplayProxy(store, ca)
@@ -181,11 +187,6 @@ async def test_connect_https_h2_big_body(proxy_server):
         loop, host, port, "example.com", 443, alpn=["h2", "http/1.1"]
     )
     assert selected == "h2", f"ALPN failed, got {selected!r}"
-
-    # Minimal async h2 client using hyper-h2 over asyncio streams
-    from h2.connection import H2Connection
-    from h2.config import H2Configuration
-    from h2.events import ResponseReceived, DataReceived, StreamEnded
 
     conn = H2Connection(H2Configuration(client_side=True, header_encoding="utf-8"))
     conn.initiate_connection()

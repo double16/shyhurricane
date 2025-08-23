@@ -49,7 +49,7 @@ def save_finding_worker(ctx: FindingContext, item: SaveFindingQueueItem):
 
     try:
         target_info = parse_target_info(item.target)
-    except ValueError as e:
+    except ValueError:
         logger.error(f"Finding has invalid target: {item.target}")
         return
 

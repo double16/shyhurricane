@@ -1,4 +1,8 @@
-import base64, json, os, random, string
+import base64
+import json
+import os
+import random
+import string
 import logging
 from typing import Any, Dict, List
 
@@ -83,7 +87,8 @@ class InteractProvider(OASTProvider):
         public_pem = key.publickey().export_key("PEM")
 
         headers = {"Accept": "application/json"}
-        if token: headers["Authorization"] = f"Bearer {token}"
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
         async with httpx.AsyncClient() as client:
             r = await client.post(f"{self._server_url(server)}/register", headers=headers, json={
                 "public-key": b64(public_pem),
@@ -158,4 +163,4 @@ class InteractProvider(OASTProvider):
             url = f"{self._server_url(self.server)}/deregister"
             params = {"correlation_id": self.correlation_id, "secret": self.secret}
             logger.info("Deregistering %s with params %s and headers %s", url, params, headers)
-            r = await client.post(url, params=params, headers=headers, timeout=20)
+            await client.post(url, params=params, headers=headers, timeout=20)

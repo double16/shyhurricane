@@ -75,8 +75,10 @@ class WebhookSiteProvider(OASTProvider):
         seen: set[str] = self.seen_ids
         for it in items:
             uid = it.get("uuid")
-            if uid and uid in seen: continue
-            if uid: seen.add(uid)
+            if uid and uid in seen:
+                continue
+            if uid:
+                seen.add(uid)
             out.append(it)
         self.seen_ids = seen
         return PollOutput(interactions=out)

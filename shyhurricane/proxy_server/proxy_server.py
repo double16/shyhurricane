@@ -5,11 +5,12 @@
 # - HTTP/1.1 (inside TLS): handles GET/HEAD/POST/PUT (reads/ignores body)
 # - Per-host leaf certs minted from an in-memory CA (cryptography)
 #
-import asyncio, base64, json, os, ssl
+import asyncio
+import base64
+import json
+import ssl
 import contextlib
 import logging
-import sys
-import traceback
 from asyncio import Server
 from http import HTTPStatus
 from os import PathLike
@@ -217,8 +218,10 @@ class CertAuthority:
         import datetime
         cert_path = Path(self.cert_dir, f"{host}.pem")
         key_path = Path(self.cert_dir, f"{host}.key")
-        with open(self.ca_key, "rb") as f: ca_key = load_pem_private_key(f.read(), password=None)
-        with open(self.ca_cert, "rb") as f: ca_cert = x509.load_pem_x509_certificate(f.read())
+        with open(self.ca_key, "rb") as f:
+            ca_key = load_pem_private_key(f.read(), password=None)
+        with open(self.ca_cert, "rb") as f:
+            ca_cert = x509.load_pem_x509_certificate(f.read())
 
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         now = datetime.datetime.now(datetime.UTC)
@@ -557,13 +560,16 @@ class ReplayProxy:
         sent = set()
         for k, v in hdrs.items():
             lk = k.lower()
-            if lk in HOP or lk in "content-encoding": continue
-            if lk == "content-type": sent.add(lk)
+            if lk in HOP or lk in "content-encoding":
+                continue
+            if lk == "content-type":
+                sent.add(lk)
             writer.write(f"{k}: {v}\r\n".encode("iso-8859-1"))
         if "content-type" not in sent:
             writer.write(b"Content-Type: application/octet-stream\r\n")
         writer.write(f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode("ascii"))
-        if body: writer.write(body)
+        if body:
+            writer.write(body)
         await ReplayProxy.drain_with_timeout(writer)
         writer.close()
         await writer.wait_closed()

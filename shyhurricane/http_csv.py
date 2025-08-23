@@ -77,7 +77,7 @@ def http_csv_generator(iterable) -> Generator[IngestableRequestResponse, None, N
                     pass
                 continue
 
-            if url is None and '://' in column and not '\n' in column:
+            if url is None and '://' in column and '\n' not in column:
                 try:
                     urlparse_ext(column)
                     url = column.strip()

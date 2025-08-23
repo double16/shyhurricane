@@ -1,7 +1,7 @@
 import json
 import logging
 from datetime import datetime
-from typing import Optional, Dict, Annotated
+from typing import Optional, Annotated
 
 import httpx
 import persistqueue

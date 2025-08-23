@@ -31,13 +31,13 @@ class ToolProcess:
     def function_call(self) -> str:
         result = f"{self.tool_name}({self.arguments})"
         if self.state == ToolProcessState.PENDING:
-            result = f"🕰 " + result
+            result = "🕰 " + result
         elif self.state == ToolProcessState.RUNNING:
-            result = f"🔄 " + result
+            result = "🔄 " + result
         elif self.state == ToolProcessState.FINISHED:
-            result = f"✅ " + result
+            result = "✅ " + result
         elif self.state == ToolProcessState.FAILED:
-            result = f"❌ " + result
+            result = "❌ " + result
 
         return result
 

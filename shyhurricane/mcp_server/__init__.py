@@ -16,7 +16,6 @@ from mcp.server.fastmcp import Context
 from mcp.types import INVALID_REQUEST, Tool
 from pydantic import ValidationError, Field
 
-import shyhurricane.mcp_server.server_context
 from shyhurricane.mcp_server.app_context import AppContext
 from shyhurricane.server_config import get_server_config
 from shyhurricane.mcp_server.server_context import get_server_context, ServerContext
@@ -124,7 +123,7 @@ class ShyHurricaneFastMCP(FastMCP):
         if not self.open_world:
             logger.info("Filtering tools for open_world = False")
             tools = list(
-                filter(lambda tool: tool.annotations is not None and tool.annotations.openWorldHint == False, tools))
+                filter(lambda tool: tool.annotations is not None and tool.annotations.openWorldHint == False, tools))  # noqa: E712
         return tools
 
 
@@ -167,7 +166,7 @@ def get_additional_hosts(ctx: Context, additional_hosts: Dict[str, str] = None) 
     validated: Dict[str, str] = {}
     for host, ip in (additional_hosts or {}).items():
         try:
-            if validators.domain(host) == True and ipaddress.ip_address(ip):
+            if validators.domain(host) == True and ipaddress.ip_address(ip):  # noqa: E712
                 validated[host] = ip
                 cached_get_additional_hosts[host] = ip
         except (ValueError, ValidationError):

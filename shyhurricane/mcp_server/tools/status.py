@@ -1,4 +1,5 @@
 import json
+import os
 from typing import Dict
 
 import chromadb
@@ -62,3 +63,13 @@ async def status(request: Request) -> Response:
             "type_specific_index_active": doc_type_queue.active_size(),
         })
     )
+
+
+@mcp_instance.custom_route('/favicon.ico', methods=['GET'])
+async def favicon(request: Request) -> Response:
+    with open(os.path.join(os.path.dirname(__file__), "../../assets/favicon.ico"), "rb") as f:
+        return Response(
+            status_code=200,
+            media_type="image/x-icon",
+            content=f.read(),
+        )

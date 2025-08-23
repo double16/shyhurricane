@@ -8,7 +8,7 @@ from shyhurricane.target_info import filter_targets_str
 
 class TestNucleiFindings(unittest.TestCase):
     def test_nuclei_findings(self):
-        with open(os.path.join(os.path.dirname(__file__), f"fixtures/juice-shop-nuclei.jsonl"), "rt") as f:
+        with open(os.path.join(os.path.dirname(__file__), "fixtures/juice-shop-nuclei.jsonl"), "rt") as f:
             jsonl = f.readlines()
         for line in jsonl:
             parsed = json.loads(line)

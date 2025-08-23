@@ -1,5 +1,7 @@
 # shyhurricane
 
+<img src="shyhurricane/assets/shyhurricane.png" alt="Hurricane picking padlock logo" width="150" style="float: left; margin-right:10px;" />
+
 ShyHurricane is an MCP server to assist AI in offensive security testing. It aims to solve a few problems observed with
 AI using a single tool to execute commands:
 

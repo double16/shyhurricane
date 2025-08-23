@@ -368,7 +368,7 @@ def filter_hosts_and_addresses(input: Optional[List[str]] = None) -> List[str]:
     result = []
     for e in input:
         try:
-            if e == "localhost" or validators.domain(e) == True or ipaddress.ip_address(e):
+            if e == "localhost" or validators.domain(e) == True or ipaddress.ip_address(e):  # noqa: E712
                 result.append(e)
         except (ValueError, ValidationError):
             pass
@@ -414,7 +414,7 @@ def query_to_netloc(query: str) -> Tuple[str | None, int | None]:
             try:
                 query, _, port_str = query.partition(":")
                 try:
-                    if validators.domain(query) == False and not ipaddress.ip_address(query):
+                    if validators.domain(query) == False and not ipaddress.ip_address(query):  # noqa: E712
                         query = None
                 except (ValueError, ValidationError):
                     query = None

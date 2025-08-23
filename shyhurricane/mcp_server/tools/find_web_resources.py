@@ -331,7 +331,7 @@ async def find_web_resources(
             logger.info("Asking user for URL(s)")
             assert_elicitation(server_ctx)
             target_elicit_result = await ctx.elicit(
-                message=f"What URL(s) should we look for?", schema=RequestTargetUrl
+                message="What URL(s) should we look for?", schema=RequestTargetUrl
             )
             match target_elicit_result:
                 case AcceptedElicitation(data=data):
@@ -407,7 +407,7 @@ async def find_web_resources(
                         http_methods=http_methods,
                         limit=limit,
                     )
-        except McpError as e:
+        except McpError:
             await ctx.info(f"Spidering {missing_targets_str}")
             logger.warning("elicit not supported, starting spider")
             for target in missing_targets:

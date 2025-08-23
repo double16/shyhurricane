@@ -178,13 +178,13 @@ async def test_init_and_endpoints(monkeypatch):
     assert isinstance(p.domain, str) and p.domain.endswith(".oast.init")
 
     # endpoints consistency
-    ep = await p.endpoints()
-    # dns is domain without port
-    assert ep.dns == p.domain.split(":", 1)[0]
-    assert ep.http == f"http://{p.domain}"
-    assert ep.https == f"https://{p.domain}"
-    assert ep.smtp.endswith("@" + ep.smtp_domain)
-    assert ep.ldap == f"ldap://{ep.smtp_domain}"
+    for ep in [endpoints, await p.endpoints()]:
+        # dns is domain without port
+        assert ep.dns == p.domain.split(":", 1)[0]
+        assert ep.http == f"http://{p.domain}"
+        assert ep.https == f"https://{p.domain}"
+        assert ep.smtp.endswith("@" + ep.smtp_domain)
+        assert ep.ldap == f"ldap://{ep.smtp_domain}"
 
 
 @pytest.mark.asyncio

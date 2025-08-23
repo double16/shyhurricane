@@ -101,7 +101,7 @@ When generating Linux commands for execution in a containerized environment, fol
                 result.error += "\nThe available commands are: " + ", ".join(server_ctx.commands)
 
         return result
-    except Exception as e:
+    except Exception:
         exc_type, exc_value, exc_tb = sys.exc_info()
         return RunUnixCommand(
             command=command,
@@ -138,7 +138,7 @@ async def _run_unix_command(ctx: Context, command: str, additional_hosts: Option
                 return None
             case CancelledElicitation():
                 return None
-    except McpError as e:
+    except McpError:
         logger.warning("elicit not supported, continuing")
 
     async with aiofiles.tempfile.TemporaryFile(mode="w+b") as stdout_file:
