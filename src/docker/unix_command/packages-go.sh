@@ -7,7 +7,7 @@
 
 set -e
 
-FAILURE_CMD="${FAILURE_CMD:-true}"
+FAILURE_CMD="${FAILURE_CMD:-false}"
 export GOPATH=/usr/local/share/go
 export TARGET_DIR=/usr/local/bin
 mkdir -p "${TARGET_DIR}"
