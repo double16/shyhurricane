@@ -8,7 +8,7 @@
 set -e
 
 ALL_CARGOS="rustscan feroxbuster"
-FAILURE_CMD="${FAILURE_CMD:-true}"
+FAILURE_CMD="${FAILURE_CMD:-false}"
 
 # won't compile on arm64
 #    https://github.com/microsoft/rusty-radamsa.git
