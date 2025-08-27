@@ -1,13 +1,11 @@
 FROM --platform=$BUILDPLATFORM golang:1.24 AS gobuild
 ARG TARGETARCH
 ENV DEBIAN_FRONTEND=noninteractive
-ENV FAILURE_CMD="true"
 ENV GOOS=linux GOARCH=$TARGETARCH
 ADD packages-go.sh /tmp
 RUN /tmp/packages-go.sh
 
 FROM --platform=$BUILDPLATFORM ghcr.io/double16/cargobuild:latest AS cargobuild
-ENV FAILURE_CMD="true"
 ADD packages-cargo.sh /tmp
 RUN /tmp/packages-cargo.sh
 

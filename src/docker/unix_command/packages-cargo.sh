@@ -1,14 +1,8 @@
 #!/usr/bin/env bash
 
-#
-# cargo (rust)
-# installs from source can be fragile, so don't exit on failure
-#
-
-set -e
+set -xe
 
 ALL_CARGOS="rustscan feroxbuster"
-FAILURE_CMD="${FAILURE_CMD:-false}"
 
 # won't compile on arm64
 #    https://github.com/microsoft/rusty-radamsa.git
@@ -25,15 +19,17 @@ else
   export CARGO_HOME=/usr/local/share/cargo
 fi
 
-if command -v cargo; then
-  echo "Building rust apps for target ${TARGET}"
+echo "Building rust apps for target ${TARGET}"
 
-  for CARGO in ${ALL_CARGOS}; do
-    cargo install --root /usr/local ${TARGET:+--target ${TARGET}} "${CARGO}" || ${FAILURE_CMD}
-  done
-  for REPO in \
-    https://gitlab.com/dee-see/graphql-path-enum \
-    ; do
-    cargo install --root /usr/local ${TARGET:+--target ${TARGET}} --git "${REPO}" || ${FAILURE_CMD}
-  done
-fi
+for CARGO in ${ALL_CARGOS}; do
+  cargo install --root /usr/local ${TARGET:+--target ${TARGET}} "${CARGO}"
+done
+for REPO in \
+  https://gitlab.com/dee-see/graphql-path-enum \
+  ; do
+  cargo install --root /usr/local ${TARGET:+--target ${TARGET}} --git "${REPO}"
+done
+
+test -x /usr/local/bin/feroxbuster
+test -x /usr/local/bin/rustscan
+test -x /usr/local/bin/graphql-path-enum
