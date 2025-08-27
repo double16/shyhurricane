@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import sys
+import traceback
 from pathlib import Path
 from typing import Iterable, Tuple
 
@@ -81,6 +82,7 @@ def main():
     ap.add_argument("--stream", action="store_true", help="Stream messages, always on for agent mode")
     ap.add_argument("--no-stream", action="store_true", help="Force disabling of streaming messages")
     ap.add_argument("--history", default=chat_history_default)
+    ap.add_argument("--run-and-exit", required=False, nargs="+", type=str, help="Run the prompts and exit (intended for demos)")
     args = ap.parse_args()
 
     if args.verbose:
@@ -91,14 +93,18 @@ def main():
     generator_config = GeneratorConfig.from_args(args).apply_reasoning_default().check()
     set_generator_config(generator_config)
 
-    tools = create_tools(args.mcp_url)
+    raw_tools = create_tools(args.mcp_url)
+    tools = []
     prompt_chooser_tool = None
     prompt_titles = []
-    for tool in tools:
+    for tool in raw_tools:
         if tool.name == "prompt_chooser":
             prompt_chooser_tool = tool
-        if tool.name == "prompt_list":
+        elif tool.name == "prompt_list":
             prompt_titles = json.loads(tool.invoke()).get("structuredContent", {}).get("titles", [])
+        else:
+            # filter out the prompt tools because some LLMs aren't smart enough to ignore them
+            tools.append(tool)
     if not prompt_chooser_tool:
         console.print("[red]No prompt_chooser tool found[/red]")
         sys.exit(1)
@@ -151,10 +157,19 @@ This is a penetration test assistant using {generator_config.describe()}. You ca
 
     chat_logger(f"Assistant Info\n\n{generator_config.describe()}", output_timestamp=True)
 
+    if args.run_and_exit:
+        prompt_queue = list(args.run_and_exit)
+    else:
+        prompt_queue = None
+
     try:
-        while True:
+        while prompt_queue is None or len(prompt_queue) > 0:
             try:
-                user_in = prompt_multiline(sess)
+                if prompt_queue is not None:
+                    user_in = prompt_queue.pop(0)
+                    console.print("💬 "+user_in)
+                else:
+                    user_in = prompt_multiline(sess)
                 if not user_in.strip():
                     continue
                 if user_in.lower() in {"/exit", "/quit"}:
@@ -211,6 +226,8 @@ This is a penetration test assistant using {generator_config.describe()}. You ca
                     res = pipe.run(run_input)
                 except PipelineRuntimeError as e:
                     print(str(e), file=sys.stderr)
+                    tb = traceback.TracebackException.from_exception(e)
+                    print(''.join(tb.format()), file=sys.stderr)
                     continue
 
                 # Process the output

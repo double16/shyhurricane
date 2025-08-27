@@ -142,8 +142,9 @@ async def prompt_chooser(ctx: Context, query: str) -> str:
 
     if not prompt_title or prompt_title not in titles:
         prompt_title = ""
+        query_lower = query.lower()
         for title in titles.keys():
-            if title in query:
+            if title.lower() in query_lower:
                 prompt_title = title
                 break
         if not prompt_title:

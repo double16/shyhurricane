@@ -1,7 +1,7 @@
-haystack-ai~=2.16.1
+haystack-ai~=2.17.1
 chroma-haystack~=3.3.0
 numpy<2
-ollama-haystack~=4.1.0
+ollama-haystack~=5.0.0
 google-genai-haystack~=2.1.1
 mcp-haystack~=0.5.0
 chardet~=5.2.0
@@ -16,7 +16,7 @@ more-itertools~=10.7.0
 requests~=2.32.4
 beautifulsoup4~=4.13.4
 aiofiles~=24.1.0
-bitarray~=3.6.0
+bitarray~=3.7.0
 persist-queue~=1.0.0
 mitmproxy~=12.1.1
 lxml~=6.0.0

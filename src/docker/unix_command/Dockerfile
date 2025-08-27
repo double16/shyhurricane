@@ -5,7 +5,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV GOOS=linux GOARCH=$TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config git ca-certificates &&\
     if [ "$BUILDPLATFORM" = "linux/amd64" ]; then apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross; fi &&\
-    if [ "$BUILDPLATFORM" = "linux/arm64" ]; then apt-get install -y --no-install-recommends gcc-x86-64-linux-gnu libc6-dev-amd64-cross; fi
+    if [ "$BUILDPLATFORM" = "linux/arm64" ]; then apt-get install -y --no-install-recommends gcc-x86-64-linux-gnu g++-x86-64-linux-gnu libc6-dev-amd64-cross; fi
 ENV CGO_ENABLED=1
 ADD packages-go.sh /tmp
 RUN /tmp/packages-go.sh

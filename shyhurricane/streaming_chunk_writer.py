@@ -88,10 +88,14 @@ class StreamingChunkWriter:
     def _running(self, tool: ToolCallDelta) -> ToolProcess:
         return self.processes.setdefault(tool.index, ToolProcess(tool.tool_name, tool.index))
 
-    def _finished(self, index: int, tool: ToolCallResult) -> Optional[ToolProcess]:
+    def _finished(self, index: int, result: Optional[ToolCallResult]) -> Optional[ToolProcess]:
         try:
             return self.processes.pop(index)
         except KeyError:
+            if result.origin is not None:
+                tool_process = ToolProcess(result.origin.tool_name, index)
+                tool_process.arguments = str(result.origin.arguments)
+                return tool_process
             return None
 
     def callback(self, chunk: StreamingChunk):
@@ -115,12 +119,13 @@ class StreamingChunkWriter:
 
         if chunk.tool_call_result:
             tool_process = self._finished(chunk.index, chunk.tool_call_result)
-            if chunk.tool_call_result.error:
-                tool_process.state = ToolProcessState.FAILED
-            else:
-                tool_process.state = ToolProcessState.FINISHED
-            self.double_space(LastOutputSource.TOOL)
-            self.output(f"{tool_process.function_call()}\n", force_newline=True)
+            if tool_process is not None:
+                if chunk.tool_call_result.error:
+                    tool_process.state = ToolProcessState.FAILED
+                else:
+                    tool_process.state = ToolProcessState.FINISHED
+                self.double_space(LastOutputSource.TOOL)
+                self.output(f"{tool_process.function_call()}\n", force_newline=True)
 
         if chunk.finish_reason in ["tool_calls", "stop"]:
             for tool_process in self.processes.values():

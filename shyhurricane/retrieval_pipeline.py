@@ -578,6 +578,8 @@ def build_agent_pipeline(
     pipeline.connect("memory_joiner", "memory_writer")
     pipeline.connect("memory_retriever", "prompt_builder.memories")
 
+    pipeline.warm_up()
+
     return pipeline, assistant, tools
 
 
