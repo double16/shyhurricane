@@ -1,7 +1,12 @@
-FROM --platform=$BUILDPLATFORM golang:1.24 AS gobuild
+FROM --platform=$BUILDPLATFORM golang:1.25 AS gobuild
 ARG TARGETARCH
+ARG BUILDPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive
 ENV GOOS=linux GOARCH=$TARGETARCH
+RUN apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config git ca-certificates &&\
+    if [ "$BUILDPLATFORM" = "linux/amd64" ]; then apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross; fi &&\
+    if [ "$BUILDPLATFORM" = "linux/arm64" ]; then apt-get install -y --no-install-recommends gcc-x86-64-linux-gnu libc6-dev-amd64-cross; fi
+ENV CGO_ENABLED=1
 ADD packages-go.sh /tmp
 RUN /tmp/packages-go.sh
 
@@ -37,7 +42,7 @@ COPY --from=cargobuild /usr/local/bin/* /usr/local/bin/
 
 RUN useradd -u 2000 --home-dir /work --create-home --shell /bin/bash runner
 USER 2000
-RUN nuclei -update-templates
+#RUN nuclei -update-templates
 WORKDIR /work
 
 VOLUME /work
