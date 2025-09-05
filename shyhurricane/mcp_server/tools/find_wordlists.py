@@ -18,7 +18,8 @@ from shyhurricane.mcp_server.tools.run_unix_command import RunUnixCommand, _run_
 )
 async def find_wordlists(
         ctx: Context,
-        query: Annotated[str, Field(description="""Substring search of the path. Examples: Web, DNS, LFI, etc.""")]
+        query: Annotated[str, Field(description="""Substring search of the path. Examples: Web, DNS, LFI""")],
+        limit: Annotated[int, Field(20, description="The maximum number of results to return", ge=1, le=1000)] = 20
 ) -> List[str]:
     """
     Find available word lists. The results can be used with other commands that have options to
@@ -34,4 +35,4 @@ async def find_wordlists(
     result: RunUnixCommand = await _run_unix_command(ctx, command, None)
     if result.return_code != 0:
         raise McpError(ErrorData(code=INTERNAL_ERROR, message=f"Failed to find word lists: {result.error}"))
-    return result.output.splitlines()
+    return result.output.splitlines()[:limit]

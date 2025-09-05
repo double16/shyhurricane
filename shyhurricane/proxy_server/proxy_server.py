@@ -27,6 +27,7 @@ from h2.events import RequestReceived, DataReceived, StreamEnded, ConnectionTerm
 import chromadb
 
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
+from shyhurricane.mcp_server import ServerContext
 from shyhurricane.target_info import parse_target_info
 from shyhurricane.utils import urlparse_ext
 
@@ -639,7 +640,7 @@ class ReplayProxy:
                 await ReplayProxy._safe_close(writer)
 
 
-async def run_proxy_server(db: str, host: str, port: int, cert_dir: PathLike) -> Server:
+async def run_proxy_server(db: str, host: str, port: int, cert_dir: PathLike, server_context: ServerContext) -> Server:
     db_host, db_port_s = db.split(":", 1)
     client = await chromadb.AsyncHttpClient(host=db_host, port=int(db_port_s))
     collection = await client.get_or_create_collection(name="content")
@@ -650,4 +651,10 @@ async def run_proxy_server(db: str, host: str, port: int, cert_dir: PathLike) ->
     server = await asyncio.start_server(proxy.handle, host, port, start_serving=True)
     addrs = ", ".join(str(s.getsockname()) for s in server.sockets)
     logger.info(f"replay proxy listening on {addrs}, CA cert is at {ca.ca_cert} (CONNECT→TLS ALPN: h2/http1.1)")
+
+    # TODO: allow for randomly chosen port, get host and port from server.sockets
+    server_context.proxy_host = host
+    server_context.proxy_port = port
+    server_context.proxy_ca_cert_path = ca.ca_cert
+
     return server

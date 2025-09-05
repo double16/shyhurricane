@@ -184,6 +184,7 @@ class GeneratorConfig(BaseModel):
                 return OllamaChatGenerator(
                     url="http://" + self.ollama_host,
                     model=self.ollama_model,
+                    timeout=300,
                     generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
                     tools=tools,
                     think=True,
@@ -192,6 +193,7 @@ class GeneratorConfig(BaseModel):
                 logger.info("Using Ollama chat with model %s", self.ollama_model)
                 return OllamaChatGenerator(
                     model=self.ollama_model,
+                    timeout=300,
                     generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
                     tools=tools,
                     think=True,

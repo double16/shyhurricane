@@ -168,3 +168,4 @@ cython_debug/
 shyhurricane_demo*json
 node_modules/
 .DS_Store
+docs/demos/*.chroma

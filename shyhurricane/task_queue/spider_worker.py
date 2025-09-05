@@ -56,6 +56,7 @@ def _katana_ingest(
     proc = subprocess.Popen(docker_command, universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     katana_component = KatanaDocument()
     soup_extractor = BeautifulSoupExtractor()
+    result_count = [0]
 
     def process_stdout(data: str):
         if not data or '"request"' not in data:
@@ -99,6 +100,7 @@ def _katana_ingest(
                                 contents=None,
                             )
                             result_queue.put_nowait(http_resource)
+                            result_count[0] += 1
                         except Exception as e:
                             logger.warning(f"Queueing spider results: {e}", exc_info=e)
                             pass
@@ -123,7 +125,7 @@ def _katana_ingest(
 
     return_code = proc.wait()
     if return_code in [0, 124, 125, 137]:
-        logger.info("Spider for %s completed", item.uri)
+        logger.info("Spider for %s completed with (at least) %d results", item.uri, result_count[0])
     else:
         logger.error("Spider for %s returned exit code %d", item.uri, return_code)
 

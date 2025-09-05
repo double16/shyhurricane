@@ -45,7 +45,7 @@ async def port_scan(
         ctx: Context,
         hostnames: Optional[List[str]] = None,
         ip_addresses: Optional[List[str]] = None,
-        ip_subnets: Optional[str] = None,
+        ip_subnets: Optional[List[str]] = None,
         ports: Annotated[
             Optional[List[int]],
             Field(None, description="List of individual ports to scan, leave empty for all ports")

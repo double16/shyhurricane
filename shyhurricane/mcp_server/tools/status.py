@@ -52,6 +52,11 @@ async def status(request: Request) -> Response:
                     else:
                         host_counts[host] = 1
 
+    if server_ctx.proxy_ca_cert_path:
+        with open(server_ctx.proxy_ca_cert_path) as f:
+            ca_cert_str = f.read()
+    else:
+        ca_cert_str = None
     return Response(
         status_code=200,
         media_type="application/json",
@@ -61,6 +66,9 @@ async def status(request: Request) -> Response:
             "host_counts": host_counts,
             "index_active": server_ctx.ingest_queue.active_size(),
             "type_specific_index_active": doc_type_queue.active_size(),
+            "proxy_host": server_ctx.proxy_host,
+            "proxy_port": server_ctx.proxy_port,
+            "proxy_ca_cert": ca_cert_str,
         })
     )
 

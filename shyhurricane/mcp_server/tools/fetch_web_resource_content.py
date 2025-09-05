@@ -36,27 +36,29 @@ async def _find_document_by_type_and_id(doc_type: str, doc_id: str) -> Optional[
 )
 async def fetch_web_resource_content(
         ctx: Context,
-        uri: Annotated[str, Field(description="""The URI may be a http:// or https:// URI of a website that has been indexed.
+        url: Annotated[str, Field(description="""The URL may be a http:// or https:// URL of a website that has been indexed, spidered or scanned.
 
-    The URI may be a web://{doc_type}/{doc_id} URI supplied by the
-    find_web_resources tool. The URI can be found in the resource_link JSON object.
+    The URL may be a web://{doc_type}/{doc_id} URL supplied by the
+    find_web_resources tool. The URL can be found in the resource_link JSON object.
 """)]
 ) -> Optional[TextResourceContents]:
     """Fetch the content of a web resource that has already been indexed.
 
-    Invoke this tool when the user requests analysis of resource content that has already been indexed, spidered or scanned.
+    Invoke this tool when:
+     - the user requests analysis of resource content that has already been indexed, spidered or scanned
+     - the user requests content with a URL that starts with "web://"
     """
-    await log_tool_history(ctx, "fetch_web_resource_content", uri=uri)
+    await log_tool_history(ctx, "fetch_web_resource_content", url=url)
     server_ctx = await get_server_context()
     doc_type: Optional[str] = None
     doc_id: Optional[str] = None
     doc: Optional[Document] = None
-    logger.info("Fetching web resource %s", uri)
+    logger.info("Fetching web resource %s", url)
     try_http_url = False
-    if uri.startswith("web://"):
-        doc_type, doc_id = uri.replace("web://", "").split("/", maxsplit=1)
+    if url.startswith("web://"):
+        doc_type, doc_id = url.replace("web://", "").split("/", maxsplit=1)
         if "://" in doc_id:
-            uri = doc_id
+            url = doc_id
             try_http_url = True
         else:
             doc = await _find_document_by_type_and_id(doc_type, doc_id)
@@ -67,12 +69,12 @@ async def fetch_web_resource_content(
         filters = {"operator": "AND",
                    "conditions": [
                        {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
-                       {"field": "meta.url", "operator": "==", "value": uri},
+                       {"field": "meta.url", "operator": "==", "value": url},
                    ]}
         store = server_ctx.stores["content"]
         docs = store.filter_documents(filters=filters)
         if docs:
-            logger.info("Found indexed web resource %s", uri)
+            logger.info("Found indexed web resource %s", url)
             doc = docs[0]
             doc_type = "content"
             doc_id = doc.id
@@ -80,7 +82,7 @@ async def fetch_web_resource_content(
         return None
     logger.info("Returning %d bytes for %s/%s", len(doc.content), doc_type, doc_id)
     return TextResourceContents(
-        uri=AnyUrl(uri),
+        uri=AnyUrl(url),
         mimeType=doc.meta.get('content_type', None),
         text=doc.content,
     )

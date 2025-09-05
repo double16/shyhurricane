@@ -559,7 +559,7 @@ async def spider_website(
 
     Invoke this tool when the user specifically asks to spider a URL or when the user wants to examine or analyze a site for which nothing has been indexed.
 
-    Returns a list of resources found, including URL, response code, content type, and content length. Indexes each URL that can be queried using the find_web_resources tool. URL content can be returned using the fetch_web_resource_content tool.
+    Returns a list of resources found, including URL, response code, content type, and content length. All resources are indexed and can be queried using the find_web_resources tool. Content can be returned using the returned URL and the fetch_web_resource_content tool.
     """
     await log_tool_history(ctx, "spider_website", url=url, additional_hosts=additional_hosts, user_agent=user_agent,
                            request_headers=request_headers)

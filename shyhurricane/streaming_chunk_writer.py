@@ -52,6 +52,7 @@ class StreamingChunkWriter:
         self.on_newline = True
         self.on_doublespace = False
         self.last_output_source: LastOutputSource = LastOutputSource.NONE
+        self.token_count: int = 0
 
     def output(self, content: str, force_newline: bool = False):
         if not content:
@@ -103,10 +104,18 @@ class StreamingChunkWriter:
         #     f.write(repr(chunk))
         #     f.write("\n")
 
-        content = ' '.join(filter(bool, [chunk.content, chunk.meta.get("thinking", None)]))
+        prompt_eval_count: Optional[int] = chunk.meta.get('prompt_eval_count', None)
+        if prompt_eval_count is not None:
+            if prompt_eval_count < self.token_count:
+                self.double_space(LastOutputSource.SYSTEM)
+                context_decreased_message = f"model context decreased from {self.token_count} to {prompt_eval_count}"
+                self.output(f"🛑 {context_decreased_message}\n", force_newline=True)
+            self.token_count = prompt_eval_count
+
+        content = ' '.join(filter(bool, [chunk.content, chunk.meta.get("thinking", None), chunk.meta.get("reasoning", None)]))
         if content:
             self.double_space(LastOutputSource.CONTENT)
-            self.output(content)
+            self.output(content, force_newline=chunk.start)
 
         for tool_call in (chunk.tool_calls or []):
             if chunk.start:
@@ -134,8 +143,15 @@ class StreamingChunkWriter:
                 self.output(f"{tool_process.function_call()}\n", force_newline=True)
 
         if chunk.finish_reason == "stop":
-            self.output("\n")
+            if self.verbose and prompt_eval_count is not None:
+                self.double_space(LastOutputSource.SYSTEM)
+                self.output(f"{prompt_eval_count} tokens\n", force_newline=True)
+            else:
+                self.output("\n")
 
         if chunk.finish_reason == "length":
             self.double_space(LastOutputSource.SYSTEM)
-            self.output("🛑 run out of model context\n", force_newline=True)
+            out_of_context_message = "run out of model context"
+            if prompt_eval_count is not None:
+                out_of_context_message += f", {prompt_eval_count} tokens"
+            self.output(f"🛑 {out_of_context_message}\n", force_newline=True)

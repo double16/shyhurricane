@@ -147,6 +147,7 @@ async def channel_create_forward(
   - Never output example code.
   - Always use tool calls directly.
   - Treat the above as a required sequence of MCP operations, not programming tasks.
+  - Commands are run on the local machine, not the target. Only use commands that will connect to the target such as ssh, nc, etc.
 """
     await log_tool_history(ctx, "channel_create_forward", command=command, env=env, additional_hosts=additional_hosts)
     server_ctx = await get_server_context()

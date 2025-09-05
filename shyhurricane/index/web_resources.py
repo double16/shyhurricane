@@ -36,7 +36,7 @@ def _ingest_worker(db: str):
         index_log_path = get_log_path(db, "index.txt")
 
         pipeline: Pipeline = build_ingest_pipeline(db=db)
-        logger.info(f"Index worker ready in PID {os.getpid()}")
+        logger.info(f"Index worker ready in PID {os.getpid()}, logging to {index_log_path}")
         for item in persistent_queue_get(queue, shrink_count=1000):
             logger.info(f"Processing {item[0:128]} in PID {os.getpid()}")
 
@@ -44,7 +44,8 @@ def _ingest_worker(db: str):
                 try:
                     with open(index_log_path, "a") as index_log:
                         index_log.write(item)
-                        index_log.write("\n")
+                        if not item.endswith("\n"):
+                            index_log.write("\n")
                 except Exception as e:
                     logger.error("Failed to write index log at %s: %s", index_log_path, e)
                     index_log_path = None

@@ -104,8 +104,11 @@ async def main():
     #
     # Proxy Server
     #
-    proxy_server = run_proxy_server(server_context.db, args.host, args.proxy_port,
-                                    get_state_path(server_context.db, "certs"))
+    proxy_server = run_proxy_server(
+        server_context.db, args.host, args.proxy_port,
+        get_state_path(server_context.db, "certs"),
+        server_context,
+    )
     proxy_task = asyncio.create_task(proxy_server)
 
     stop = asyncio.Event()
@@ -116,11 +119,12 @@ async def main():
         except NotImplementedError:
             # Windows: no add_signal_handler for SIGTERM; fall back to Ctrl+C only
             pass
-
     await stop.wait()
-
     proxy_server.close()
 
+    #
+    # MCP Server
+    #
     uv_server.should_exit = True
     await uv_task
     proxy_task.cancel()

@@ -120,7 +120,7 @@ async def directory_buster(
     if wordlist:
         wordlist_filename = os.path.split(wordlist)[-1]
         try:
-            wordlist_results = await find_wordlists(ctx, wordlist_filename)
+            wordlist_results = await find_wordlists(ctx, wordlist_filename, 1000)
             if len(wordlist_results) == 0:
                 logger.warning("No wordlists found for %s, using default", wordlist_filename)
                 wordlist = None

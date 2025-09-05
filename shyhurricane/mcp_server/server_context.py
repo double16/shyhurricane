@@ -13,12 +13,13 @@ import persistqueue
 from haystack import Pipeline
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 
+from shyhurricane.doc_type_model_map import doc_type_to_model
 from shyhurricane.index.web_resources_pipeline import build_stores
 from shyhurricane.server_config import get_server_config
 from shyhurricane.index.web_resources import start_ingest_worker
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.retrieval_pipeline import create_chroma_client, build_document_pipeline, \
-    build_website_context_pipeline
+    build_website_context_pipeline, create_chrome_document_store
 from shyhurricane.task_queue import start_task_worker, TaskPool
 from shyhurricane.utils import unix_command_image
 
@@ -51,6 +52,9 @@ class ServerContext:
     open_world: bool = True
     commands: Optional[List[str]] = None
     disable_elicitation: bool = False
+    proxy_host: Optional[str] = None
+    proxy_port: Optional[int] = None
+    proxy_ca_cert_path: Optional[os.PathLike] = None
 
     def close(self):
         logger.info("Terminating task pool")
@@ -74,8 +78,18 @@ async def get_server_context() -> ServerContext:
     global _server_context
     if _server_context is None:
         server_config = get_server_config()
+
         db = os.environ.get('CHROMA', '127.0.0.1:8200')
         logger.info("Using chroma database at %s", db)
+        # ensure collections are created
+        for doc_type_model in doc_type_to_model().values():
+            for col in doc_type_model.get_chroma_collections():
+                document_store = create_chrome_document_store(
+                    db=db,
+                    collection_name=col,
+                )
+                document_store.count_documents()
+
         cache_path: str = os.path.join(os.environ.get('TOOL_CACHE', os.environ.get('TMPDIR', '/tmp')), 'tool_cache')
         os.makedirs(cache_path, exist_ok=True)
         disable_elicitation = bool(os.environ.get('DISABLE_ELICITATION', 'False'))

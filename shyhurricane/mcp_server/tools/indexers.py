@@ -96,7 +96,7 @@ async def index_http_url(
 
     Invoke this tool when the user needs the content of one specific URL.
 
-    The content is optional request body content.
+    The content is the request body, it is optional.
 
     If follow_redirects is true, redirects will be followed and the result is the destination of the redirect.
     """
