@@ -165,7 +165,6 @@ cython_debug/
 
 *_store/
 *history.md
-shyhurricane_demo*json
 node_modules/
 .DS_Store
 docs/demos/*.chroma

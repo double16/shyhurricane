@@ -138,9 +138,10 @@ class StreamingChunkWriter:
 
         if chunk.finish_reason in ["tool_calls", "stop"]:
             for tool_process in self.processes.values():
-                tool_process.state = ToolProcessState.RUNNING
-                self.double_space(LastOutputSource.TOOL)
-                self.output(f"{tool_process.function_call()}\n", force_newline=True)
+                if tool_process.state == ToolProcessState.PENDING:
+                    tool_process.state = ToolProcessState.RUNNING
+                    self.double_space(LastOutputSource.TOOL)
+                    self.output(f"{tool_process.function_call()}\n", force_newline=True)
 
         if chunk.finish_reason == "stop":
             if self.verbose and prompt_eval_count is not None:

@@ -5,8 +5,9 @@
 # pane and the assistant in the bottom pane.
 #
 # The arguments are:
-#   1: The prompt, such as "Solve the CTF challenge at 10.10.14.10"
-#   2*: Arguments to the assistant, such as
+#   1: The target, such as "Web CTF LFI"
+#   2: The prompt, such as "Solve the CTF challenge at 10.10.14.10"
+#   3*: Arguments to the assistant, such as
 #      -- gemini-model=gemini-2.5-flash
 #
 # Environment variables are inherited. Models and API keys can be set without being present in the recording:
@@ -16,6 +17,8 @@
 set -euo pipefail
 
 TARGET="$1"
+PROMPT="$2"
+shift
 shift
 SESSION="cast$$"
 
@@ -109,7 +112,7 @@ PANE_ASSIST="$SESSION:0.1"
     sleep 3s
   done
 
-  type_cmd "$PANE_ASSIST" "python3 assistant.py $* --run-and-exit \"${TARGET}\""
+  type_cmd "$PANE_ASSIST" "python3 assistant.py $* --run-and-exit \"${PROMPT}\""
   while pgrep -f assistant.py >/dev/null 2>/dev/null; do
     sleep 3s
   done
@@ -140,4 +143,5 @@ rm "${OUTFILE}.tmp"
 
 echo "Saved to ${OUTFILE}"
 echo "Play it with: asciinema play ${OUTFILE}"
+echo "Inspect it with: asciinema cat ${OUTFILE}"
 echo "Convert to a GIF with: agg --idle-time-limit ${IDLE_LIMIT} --no-loop ${OUTFILE} ${DEMO_DIR}/${BASENAME}.gif"

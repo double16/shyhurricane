@@ -6,7 +6,7 @@ python3 virtualenv:
 $(command -v python3.12) -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-pip install -r dev_requirements.txt
+pip install -r tests/requirements.txt
 ```
 
 Start chroma:

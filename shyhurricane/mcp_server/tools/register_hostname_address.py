@@ -35,13 +35,12 @@ async def register_hostname_address(
         address: Annotated[str, Field(description="The IPv4 or IPv6 address")],
 ) -> str:
     """
-    Registers a hostname with an IP address. This is useful when a hostname has no DNS entry
+    Registers a hostname with an IP address. This is useful when a hostname has no DNS entry,
     and we know the IP address by other means. Especially useful in CTF or private networks.
 
-    Invoke this tool when another tool has found an additional host name for a target in-scope.
-
+    Invoke this tool when another tool has found an additional host name or virtual host name for a target IP address in-scope.
+    Invoke this tool when a web server accessed by IP address redirects to a host name and DNS lookup fails for the host name.
     Invoke this tool when the user asks to register a hostname with an IP address.
-
     Invoke this tool instead of adding a hostname to the /etc/hosts file.
     """
     await log_tool_history(ctx, "register_hostname_address", host=host, address=address)

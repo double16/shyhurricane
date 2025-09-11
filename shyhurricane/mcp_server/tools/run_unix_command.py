@@ -56,10 +56,6 @@ DumpNTLMInfo.py, Get,GPPPassword.py, GetADComputers.py, GetADUsers.py, GetLAPSPa
 
 The command 'sudo' is not available.
 
-The additional_hosts parameter is a dictionary of host name (the key) to IP address (the value) for hosts that do not have DNS records. This also includes CTF targets or web server virtual hosts found during other scans. If you
-know the IP address for a host, be sure to include these in the additional_hosts parameter for
-commands to run properly in a containerized environment.
-
 The SecLists word lists repository is installed at /usr/share/seclists
 
 Commands may take a long time to run, so be patient.
@@ -75,13 +71,13 @@ When generating Linux commands for execution in a containerized environment, fol
 - Always set a timeout for potentially blocking commands (e.g., timeout 10s nmap ...). Use a timeout value appropriate for the command. For example, directory busting with a large word list may take 10 minutes, whereas a short wordlist may be 2 minutes.
 - Ensure commands can be complete without user interaction before execution.
 - The directly accessible filesystem is part of the containerized environment, not the target. Commands such as find, cat, etc. are not enumerating the target unless they are part of a command that connects to the target, such as ssh.
+- Files in the current working directory will persist across calls. Do not write to /tmp or /var/tmp. Do not save output to files outside of the current working directory.
 """
     await log_tool_history(ctx, title="run_unix_command", command=command, additional_hosts=additional_hosts, env=env)
     server_ctx = await get_server_context()
     assert server_ctx.open_world
 
     # TODO: check for nmap command and see if we can redirect to port_scan
-    # TODO: check for curl command and see if we can redirect to index_http_url
     try:
         result = await _run_unix_command(ctx, command=command, additional_hosts=additional_hosts, env=env)
 

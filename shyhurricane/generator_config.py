@@ -13,6 +13,7 @@ from haystack import component
 from haystack.dataclasses import ChatMessage, StreamingCallbackT
 from haystack_integrations.components.generators.google_genai.chat.chat_generator import GoogleGenAIChatGenerator
 from haystack_integrations.components.generators.ollama import OllamaChatGenerator, OllamaGenerator
+import haystack_integrations.components.generators.ollama.chat.chat_generator as ollama_cg
 from mcp import Tool
 from pydantic import BaseModel, Field
 
@@ -82,6 +83,64 @@ class GoogleGenAIGeneratorWithRetry:
         return {"replies": text_result}
 
 
+# Monkey patch fix for OllamaChatGenerator, ollama-haystack==5.1.0
+def _safe_convert_ollama_meta_to_openai_format(input_response_dict: Dict) -> Dict[str, Any]:
+    """
+    Map Ollama metadata keys onto the OpenAI-compatible names Haystack expects.
+    All fields that are not part of the OpenAI metadata are left unchanged in the returned dict.
+
+    Example Ollama metadata:
+    {
+        'model': 'phi4:14b-q4_K_M',
+        'created_at': '2025-03-09T18:38:33.004185821Z',
+        'done': True,
+        'done_reason': 'stop',
+        'total_duration': 86627206961,
+        'load_duration': 23585622554,
+        'prompt_eval_count': 26,
+        'prompt_eval_duration': 3426000000,
+        'eval_count': 298,
+        'eval_duration': 4799921000
+    }
+    Example OpenAI metadata:
+    {
+        'model': 'phi4:14b-q4_K_M',
+        'finish_reason': 'stop',
+        'usage': {
+            'completion_tokens': 298,
+            'prompt_tokens': 26,
+            'total_tokens': 324,
+        }
+        'completion_start_time': '2025-03-09T18:38:33.004185821Z',
+        'done': True,
+        'total_duration': 86627206961,
+        'load_duration': 23585622554,
+        'prompt_eval_duration': 3426000000,
+        'eval_duration': 4799921000,
+    }
+    """
+    meta = {key: value for key, value in input_response_dict.items() if key != "message"}
+
+    if "done_reason" in meta:
+        meta["finish_reason"] = ollama_cg.FINISH_REASON_MAPPING.get(meta.pop("done_reason") or "")
+    if "created_at" in meta:
+        meta["completion_start_time"] = meta.pop("created_at")
+    if "eval_count" in meta and "prompt_eval_count" in meta:
+        eval_count = meta.pop("eval_count")
+        prompt_eval_count = meta.pop("prompt_eval_count")
+        # The following line is the fix for eval_count or prompt_eval_count == None
+        if isinstance(eval_count, int) and isinstance(prompt_eval_count, int):
+            meta["usage"] = {
+                "completion_tokens": eval_count,
+                "prompt_tokens": prompt_eval_count,
+                "total_tokens": eval_count + prompt_eval_count,
+            }
+    return meta
+
+
+ollama_cg._convert_ollama_meta_to_openai_format = _safe_convert_ollama_meta_to_openai_format
+
+
 class GeneratorConfig(BaseModel):
     ollama_host: Optional[str] = Field(description="The location of the Ollama server", default=None)
     ollama_model: Optional[str] = Field(description="The name of the Ollama model", default=None)
@@ -117,20 +176,21 @@ class GeneratorConfig(BaseModel):
         if os.environ.get("GEMINI_API_KEY", None) or os.environ.get("GOOGLE_API_KEY", None):
             self.gemini_model = "gemini-2.5-flash"
         elif os.environ.get("OPENAI_API_KEY", None):
-            self.openai_model = "o4-mini"
+            self.openai_model = "gpt-5-turbo"
         else:
-            self.ollama_model = "qwen3:8b"
+            self.ollama_model = "gpt-oss:20b"
         return self
 
     def apply_summarizing_default(self):
         if self.ollama_model or self.gemini_model or self.openai_model:
             return self
-        if os.environ.get("GEMINI_API_KEY", None) or os.environ.get("GOOGLE_API_KEY", None):
-            self.gemini_model = "gemini-2.0-flash-lite"
-        elif os.environ.get("OPENAI_API_KEY", None):
-            self.openai_model = "gpt-4-turbo"
-        else:
-            self.ollama_model = "llama3.2:3b"
+        self.ollama_model = "llama3.2:3b"
+        # We have tested query extenders and the prompt chooser with "llama3.2:3b".
+        # These others don't always perform as expected:
+        # if os.environ.get("GEMINI_API_KEY", None) or os.environ.get("GOOGLE_API_KEY", None):
+        #     self.gemini_model = "gemini-2.5-flash-lite"
+        # elif os.environ.get("OPENAI_API_KEY", None):
+        #     self.openai_model = "gpt-5-nano"
         return self
 
     def check(self):
@@ -176,15 +236,20 @@ class GeneratorConfig(BaseModel):
                 tools=tools
             )
         elif self.ollama_model:
-            _generation_kwargs = {
+            _generation_kwargs: Dict[str, Any] = {
                 "temperature": temperature or self.temperature,
             }
+            ollama_timeout = int(os.environ.get("OLLAMA_TIMEOUT", "300"))
+            if self.ollama_model.startswith("gpt-oss"):
+                # OllamaChatGenerator docs say the think parameter can be a bool or "low", "medium", "high", but the client only supports bool
+                # https://huggingface.co/docs/inference-providers/guides/gpt-oss
+                _generation_kwargs["effort"] = "high"
             if self.ollama_host:
                 logger.info("Using Ollama chat with model %s at %s", self.ollama_model, self.ollama_host)
                 return OllamaChatGenerator(
                     url="http://" + self.ollama_host,
                     model=self.ollama_model,
-                    timeout=300,
+                    timeout=ollama_timeout,
                     generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
                     tools=tools,
                     think=True,
@@ -193,7 +258,7 @@ class GeneratorConfig(BaseModel):
                 logger.info("Using Ollama chat with model %s", self.ollama_model)
                 return OllamaChatGenerator(
                     model=self.ollama_model,
-                    timeout=300,
+                    timeout=ollama_timeout,
                     generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
                     tools=tools,
                     think=True,

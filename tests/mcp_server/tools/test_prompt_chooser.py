@@ -25,15 +25,23 @@ class PromptChooserTest(unittest.TestCase):
         set_generator_config(GeneratorConfig().apply_summarizing_default())
 
     def test_extract_targets_and_prompt_title_ctf(self):
-        targets, prompt_title = asyncio.run(extract_targets_and_prompt_title("Solve the CTF challenge at 192.168.1.1",
-                                                                             self.titles))
+        targets, prompt_title = asyncio.run(extract_targets_and_prompt_title(
+            "Solve the CTF challenge at 192.168.1.1",
+            self.titles))
         self.assertEqual(["192.168.1.1"], targets)
         self.assertEqual("Automated CTF Solver", prompt_title)
 
     def test_extract_targets_and_prompt_title_htb(self):
-        targets, prompt_title = asyncio.run(extract_targets_and_prompt_title("Solve the HTB challenge at 192.168.1.1",
-                                                                             self.titles))
+        targets, prompt_title = asyncio.run(extract_targets_and_prompt_title(
+            "Solve the HTB challenge at 192.168.1.1",
+            self.titles))
         self.assertEqual(["192.168.1.1"], targets)
+        self.assertEqual("Automated Hack-the-Box (HTB) CTF Solver", prompt_title)
+
+        targets, prompt_title = asyncio.run(extract_targets_and_prompt_title(
+            "Solve the HTB web challenge at http://192.168.1.1:8000. There is only one flag.",
+            self.titles))
+        self.assertEqual(["http://192.168.1.1:8000"], targets)
         self.assertEqual("Automated Hack-the-Box (HTB) CTF Solver", prompt_title)
 
     def test_extract_targets_and_prompt_title_pentest_agent(self):

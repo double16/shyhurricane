@@ -33,10 +33,11 @@ class RequestTargetUrl(BaseModel):
 
 
 def _append_in_filter(conditions: List[Dict[str, Any]], field: str, values: List[str]):
-    if len(values) == 1:
-        conditions.append({"field": field, "operator": "==", "value": values[0]})
-    elif len(values) > 1:
-        conditions.append({"field": field, "operator": "in", "value": values})
+    values2 = list(filter(lambda e: e is not None, values))
+    if len(values2) == 1:
+        conditions.append({"field": field, "operator": "==", "value": values2[0]})
+    elif len(values2) > 1:
+        conditions.append({"field": field, "operator": "in", "value": values2})
 
 
 def _documents_to_http_resources(documents: List[Document]) -> List[HttpResource]:

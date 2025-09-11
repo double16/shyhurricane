@@ -21,7 +21,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_CACHE_DIR=/usr/local/share/pip-cache
 
 RUN apt-get update &&\
-    apt-get install -y --install-recommends ruby nmap sqlmap curl wget dirb ffuf wfuzz hydra netcat-openbsd git pipx iputils-ping nodejs npm mitmproxy python3-pip python3-virtualenv jq exploitdb nuclei ftp sshpass tshark sqlite3 &&\
+    apt-get install -y --install-recommends rsync ruby nmap sqlmap curl wget dirb ffuf wfuzz hydra netcat-openbsd git pipx iputils-ping nodejs npm mitmproxy python3-pip python3-virtualenv jq exploitdb nuclei ftp sshpass tshark sqlite3 &&\
     apt-get clean
 RUN pipx install impacket git-dumper
 RUN gem install evil-winrm
@@ -42,8 +42,12 @@ COPY --from=cargobuild /usr/local/bin/* /usr/local/bin/
 
 RUN useradd -u 2000 --home-dir /work --create-home --shell /bin/bash runner
 USER 2000
-#RUN nuclei -update-templates
 WORKDIR /work
+#RUN nuclei -update-templates
+RUN mkdir -m 0700 ".ssh" && touch ".ssh/config" && chmod 0600 ".ssh/config" &&\
+    echo -e "StrictHostKeyChecking no\nUserKnownHostsFile /dev/null\nBatchMode yes\n" >> ".ssh/config"
+COPY --chown=0:0 --chmod=0755 entrypoint.sh /
+ENTRYPOINT ["/entrypoint.sh"]
 
 VOLUME /work
 VOLUME /usr/share/seclists

@@ -81,7 +81,9 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     proc = await asyncio.create_subprocess_exec("docker", "run", "--rm",
                                                 "-v", f"{server_ctx.mcp_session_volume}:/work",
                                                 unix_command_image(),
-                                                "mkdir", "-p", work_path,
+                                                # we're going to keep /tmp and /var/tmp in the volume because LLMs keep storing stuff there
+                                                "mkdir", "-p", work_path, work_path + "/.private/tmp",
+                                                work_path + "/.private/var/tmp",
                                                 stdout=asyncio.subprocess.DEVNULL,
                                                 stderr=asyncio.subprocess.DEVNULL,
                                                 )

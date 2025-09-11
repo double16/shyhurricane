@@ -274,11 +274,17 @@ tail -f LoggerPlusPlus.csv | python3 ingest.py --mcp-url http://127.0.0.1:8000/ 
 
 ### Extensions
 
-Extensions are available at the following GitHub repos:
-- https://github.com/double16/shyhurricane-burpsuite
-- https://github.com/double16/shyhurricane-zap
+Browser and intercepting proxy extensions are available at the following GitHub repos:
 - https://github.com/double16/shyhurricane-chrome
 - https://github.com/double16/shyhurricane-firefox
+- https://github.com/double16/shyhurricane-burpsuite
+- https://github.com/double16/shyhurricane-zap
+
+The browser extensions will forward requests and responses made in Chrome and Firefox to the MCP server for indexing. There
+are controls for setting in-scope domains.
+
+The Burp Suite and ZAP extensions will forward both requests/responses and alerts/findings. The alerts are used by the LLM
+to improve effectiveness.
 
 ## OAST
 
@@ -286,7 +292,8 @@ Out-of-band Application Security Testing allows for callbacks from various paylo
 
 ### webhook_site
 
-This is the default.
+The default OAST provider is webhook.site without authentication. There is a limit of 100 requests sent to a single
+webhook.site URL. Authentication is also supported.
 
 ```shell
 # webhook.site (unauthenticated)
@@ -299,6 +306,8 @@ WEBHOOK_API_KEY=xxxxxxxx-xxxx-...
 
 ### interact.sh
 
+interactsh is supported, but doesn't work so well. Interactions seem to get lost. YMMV.
+
 ```shell
 OAST_PROVIDER=interactsh
 # optional, randomly chosen if not specified
@@ -309,11 +318,11 @@ INTERACT_TOKEN=
 
 ## Proxy Serving Indexed Content
 
-The MCP server exposes a proxy port, `8010` by default, that serves the indexed content. The intent is use tools on
+The MCP server exposes a proxy port, `8010` by default, that serves the indexed content. The intent is to use tools on
 the indexed content after the fact. For example, to run `nuclei` and feed the findings into the MCP server.
 
-The proxy supports HTTP and HTTPS with self-signed certs. Look for a log line like the following to find the CA cert. Either
-your tools can be configured to ignore certificate validation or trust this cert.
+The proxy supports HTTP and HTTPS with self-signed certs. Look for a log line like the following to find the CA cert or
+POST an empty body to `/status`. Either your tools can be configured to ignore certificate validation or trust this cert.
 
 ```
 replay proxy listening on ('127.0.0.1', 8010), CA cert is at /home/user/.local/state/shyhurricane/127.0.0.1_8200/certs/ca.pem (CONNECT→TLS ALPN: h2/http1.1)
@@ -328,3 +337,6 @@ Here is an example of using Nuclei on indexed content to submit findings passive
 ```shell
 nuclei -proxy http://127.0.0.1:8010 -target https://example.com -j | curl http://127.0.0.1:8000/findings -H "Content-Type: text/json" --data-binary @-
 ```
+
+If a URL or domain isn't indexed, the 404 page will include links to URLs that have been indexed. A tool that spiders
+links may use this to find the indexed content.

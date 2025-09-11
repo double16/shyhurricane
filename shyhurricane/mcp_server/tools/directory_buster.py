@@ -140,6 +140,9 @@ async def directory_buster(
     if extensions:
         extensions = list(map(lambda e: e[1:] if len(e) > 1 and e[0] == '.' else e, extensions))
 
+    if user_agent is not None:
+        user_agent = user_agent.strip()
+
     task_queue: Queue = server_ctx.task_queue
     dir_busting_result_queue: Queue = server_ctx.dir_busting_result_queue
     queue_item = DirBustingQueueItem(

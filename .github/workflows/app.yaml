@@ -69,7 +69,7 @@ jobs:
       - name: test
         run: |
           pip install -r requirements.txt
-          pip install -r dev_requirements.txt
+          pip install -r tests/requirements.txt
           RESULT_DIR="test-results/${{ matrix.python-version }}"
           mkdir -p "${RESULT_DIR}"
           PYTHONPATH=$(pwd) pytest tests --junitxml=${RESULT_DIR}/test-results.xml --cov=shyhurricane --cov-branch --cov-report=xml:${RESULT_DIR}/coverage.xml --cov-report=html:${RESULT_DIR}/htmlcov --cov-report=term-missing

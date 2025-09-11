@@ -190,6 +190,7 @@ def _build_feroxbuster_command(
 
     if item.user_agent:
         command.extend(["--user-agent", item.user_agent])
+
     if item.request_headers:
         for k, v in item.request_headers.items():
             command.extend(["-H", f"{k}: {v}"])
@@ -232,6 +233,10 @@ def _build_ffuf_command(
 
     if item.ignored_response_codes:
         command.extend(["-fc", ",".join(map(str, item.ignored_response_codes))])
+
+    if item.extensions:
+        command.append("-e")
+        command.append(",".join(item.extensions))
 
     if item.user_agent:
         command.extend(["-H", f"User-Agent: {item.user_agent}"])

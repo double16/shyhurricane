@@ -2,7 +2,7 @@
 import logging
 import os
 import re
-from typing import Dict, List, Optional, Any, Tuple, Iterable, Callable
+from typing import Dict, List, Optional, Any, Tuple, Iterable, Callable, Union
 
 import chromadb
 from chromadb import AsyncClientAPI
@@ -417,7 +417,7 @@ class MultiQueryChromaRetriever:
                         ids.add(doc.id)
                 logger.info(f"Query for {self.name}: {query} found {found_count} documents")
             except Exception as e:
-                logger.error(f"Exception querying chroma database: {str(e)}", exc_info=e)
+                logger.error(f"Exception querying chroma database: {str(e)}, filters={filters}", exc_info=e)
 
         unique_docs = documents_sort_unique(results)
 
@@ -469,7 +469,7 @@ def build_chat_pipeline(
         generator_config: GeneratorConfig,
         prompt: Optional[str] = pentester_chat_system_prompt,
         mcp_urls: Optional[List[str]] = None,
-        tools: Toolset = None,
+        tools: Optional[Union[list[Tool], Toolset]] = None,
 ) -> Tuple[Pipeline, Component, Toolset]:
     """
     Builds a pipeline for a cyber-security chat.
@@ -531,7 +531,7 @@ def build_agent_pipeline(
         generator_config: GeneratorConfig,
         prompt: Optional[str] = pentester_agent_system_prompt,
         mcp_urls: Optional[List[str]] = None,
-        tools: Toolset = None,
+        tools: Optional[Union[list[Tool], Toolset]] = None,
 ) -> Tuple[Pipeline, Component, Toolset]:
     """
     Builds a pipeline for a cyber-security agent.

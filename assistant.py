@@ -7,13 +7,13 @@ import os
 import sys
 import traceback
 from pathlib import Path
-from typing import Iterable, Tuple
+from typing import Iterable, Tuple, List
 
 from haystack import Pipeline
 from haystack.core.component import Component
 from haystack.core.errors import PipelineRuntimeError
 from haystack.dataclasses import ChatMessage
-from haystack.tools import Toolset
+from haystack.tools import Tool
 from haystack_integrations.tools.mcp import MCPToolset
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
@@ -79,7 +79,6 @@ def main():
     add_generator_args(ap)
     ap.add_argument("--mcp-url", nargs="+", required=False,
                     help="URL for the MCP server, i.e. http://127.0.0.1:8000/mcp/")
-    ap.add_argument("--stream", action="store_true", help="Stream messages, always on for agent mode")
     ap.add_argument("--no-stream", action="store_true", help="Force disabling of streaming messages")
     ap.add_argument("--history", default=chat_history_default)
     ap.add_argument("--run-and-exit", required=False, nargs="+", type=str, help="Run the prompts and exit (intended for demos)")
@@ -94,7 +93,7 @@ def main():
     set_generator_config(generator_config)
 
     raw_tools = create_tools(args.mcp_url)
-    tools = []
+    tools: List[Tool] = []
     prompt_chooser_tool = None
     prompt_titles = []
     for tool in raw_tools:
@@ -124,16 +123,14 @@ def main():
         console.print(line, end="")
         chat_logger(line, output_timestamp=True)
 
-    def create_pipeline(system_prompt: str, tools: Toolset) -> Tuple[Pipeline, Component, Toolset]:
+    def create_pipeline(system_prompt: str, tools: List[Tool]) -> Tuple[Pipeline, Component, List[Tool]]:
         system_prompt_lower = system_prompt.lower()
         if "autonomous" in system_prompt_lower or "automated" in system_prompt_lower:
-            if not args.no_stream:
-                args.stream = True
             pipe, generator, _ = build_agent_pipeline(generator_config, system_prompt, args.mcp_url, tools)
         else:
             pipe, generator, _ = build_chat_pipeline(generator_config, system_prompt, args.mcp_url, tools)
 
-        if args.stream and generator is not None:
+        if not args.no_stream and generator is not None:
             generator.streaming_callback = StreamingChunkWriter(printer=streaming_chunk_printer,
                                                                 verbose=bool(args.verbose)).callback
 
@@ -153,7 +150,7 @@ This is a penetration test assistant using {generator_config.describe()}. You ca
 - Multi-line prompts can be entered by starting and ending with \"\"\"
 - Available prompts (chosen automatically): {", ".join(prompt_titles)}
 """)
-    console.print("🛡️  Ready. Commands: /show • /exit\n")
+    console.print("🛡️  Ready. Commands: /show • /tools • /exit\n")
 
     chat_logger(f"Assistant Info\n\n{generator_config.describe()}", output_timestamp=True)
 
@@ -184,7 +181,10 @@ This is a penetration test assistant using {generator_config.describe()}. You ca
 
 ## Prompts
 {"\n".join(['- ' + title for title in prompt_titles])}
-
+"""))
+                    continue
+                if user_in.startswith("/tools"):
+                    console.print(Markdown(f"""
 ## Tools
 {"\n".join(['- **' + tool.name + '(' + ', '.join(tool.parameters.keys()) + ')**: ' + tool.description for tool in tools])}
 """))
@@ -229,19 +229,22 @@ This is a penetration test assistant using {generator_config.describe()}. You ca
                     tb = traceback.TracebackException.from_exception(e)
                     print(''.join(tb.format()), file=sys.stderr)
                     continue
+                except KeyboardInterrupt:
+                    console.print("[red]\nUser stopped the current agent run, Ctrl-C again to exit or continue with more instructions.")
+                    continue
 
                 # Process the output
                 if "response_llm" in res:
-                    replies = [user_in_message] + res["response_llm"]["replies"]
+                    replies = res["response_llm"]["replies"]
                 elif "agent" in res:
                     replies = res["agent"]["messages"]
                 else:
                     replies = []
 
-                ans_md = "\n".join(replies[-1].texts)
+                ans_md = "\n".join([text for reply in replies for text in reply.texts])
                 console.print("")
                 console.print("")
-                if not args.stream:
+                if args.no_stream:
                     console.print(Markdown(ans_md))
                 chat_logger(ans_md, output_timestamp=True)
             except (KeyboardInterrupt, EOFError):
