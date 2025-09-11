@@ -36,13 +36,15 @@ def _do_busting(
     if item.ignored_response_codes:
         replay_codes.intersection_update(item.ignored_response_codes)
 
-    if "FUZZ" in item.uri or (item.user_agent and "FUZZ" in item.user_agent) or (
+    if ("FUZZ" in item.uri and not item.uri.endswith("/FUZZ")) or (item.user_agent and "FUZZ" in item.user_agent) or (
             item.request_headers and "FUZZ" in json.dumps(item.request_headers)):
         buster_command = _build_ffuf_command(
             item=item,
             replay_codes=replay_codes,
         )
     else:
+        if item.uri.endswith("/FUZZ"):
+            item.uri = item.uri[:-4]
         buster_command = _build_feroxbuster_command(
             item=item,
             replay_codes=replay_codes,
@@ -103,11 +105,15 @@ def _do_busting(
         katana_component = KatanaDocument()
 
         def process_stdout(data: str):
+            if data.count("\n") > 1:
+                logger.warning("Output from mitmdump has %d lines", data.count("\n"))
+            else:
+                logger.info("Processing line from mitmdump: %d bytes", len(data))
             data = remove_unencodable(data)
             try:
                 json.loads(data)
             except json.decoder.JSONDecodeError:
-                logger.warning("katana result is unparseable, possibly due to incorrect utf-8 encoding, skipping")
+                logger.warning("katana JSON is unparseable, possibly due to incorrect utf-8 encoding, skipping")
                 return
 
             ingest_queue.put(data)
@@ -119,6 +125,7 @@ def _do_busting(
                         return
                     parsed = katana_results[0]
                     url = parsed.url
+                    logger.info("Sending URL to result_queue: %s", url)
                     result_queue.put_nowait(url)
                 except Exception as e:
                     logger.warning(f"Queueing dir busting results: {e}", exc_info=e)

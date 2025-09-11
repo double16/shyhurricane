@@ -163,6 +163,7 @@ async def directory_buster(
     results: List[str] = []
     has_more = True
     time_limit = time.time() + min(600, max(30, timeout_seconds or 120))
+    found_url_check = url.split("FUZZ")[0]
     while time.time() < time_limit:
         try:
             found_url: str = await asyncio.to_thread(
@@ -174,9 +175,9 @@ async def directory_buster(
             has_more = False
             break
         logger.debug(f"{found_url} has been retrieved")
-        if not found_url.startswith(url):
+        if not found_url.startswith(found_url_check):
             logger.debug(
-                f"Dir buster queued {found_url}, expecting {url}*")
+                f"Dir buster queued {found_url}, expecting {found_url_check}*")
             continue
         results.append(found_url)
         await ctx.info(f"Found: {found_url}")
