@@ -71,6 +71,17 @@ def prompt_multiline(session: PromptSession) -> str:
         session.history = history
 
 
+class StreamingOutputHolder:
+    def __init__(self):
+        self.last_output = ""
+
+    def append(self, output):
+        self.last_output += output
+
+    def clear(self):
+        self.last_output = ""
+
+
 def main():
     chat_history_default = datetime.date.today().isoformat() + "_history.md"
 
@@ -92,74 +103,78 @@ def main():
     generator_config = GeneratorConfig.from_args(args).apply_reasoning_default().check()
     set_generator_config(generator_config)
 
-    raw_tools = create_tools(args.mcp_url)
-    tools: List[Tool] = []
-    prompt_chooser_tool = None
-    prompt_titles = []
-    for tool in raw_tools:
-        if tool.name == "prompt_chooser":
-            prompt_chooser_tool = tool
-        elif tool.name == "prompt_list":
-            prompt_titles = json.loads(tool.invoke()).get("structuredContent", {}).get("titles", [])
-        else:
-            # filter out the prompt tools because some LLMs aren't smart enough to ignore them
-            tools.append(tool)
-    if not prompt_chooser_tool:
-        console.print("[red]No prompt_chooser tool found[/red]")
-        sys.exit(1)
-
-    def chat_logger(line, output_timestamp: bool = False):
-        if not line:
-            return
-        Path(args.history).touch(mode=0o644, exist_ok=True)
-        with open(args.history, "a", encoding="utf-8") as f:
-            if output_timestamp:
-                f.write("\n`")
-                f.write(datetime.datetime.now().astimezone().isoformat())
-                f.write("`\n\n")
-            f.write(line)
-
-    def streaming_chunk_printer(line: str):
-        console.print(line, end="")
-        chat_logger(line, output_timestamp=True)
-
-    def create_pipeline(system_prompt: str, tools: List[Tool]) -> Tuple[Pipeline, Component, List[Tool]]:
-        system_prompt_lower = system_prompt.lower()
-        if "autonomous" in system_prompt_lower or "automated" in system_prompt_lower:
-            pipe, generator, _ = build_agent_pipeline(generator_config, system_prompt, args.mcp_url, tools)
-        else:
-            pipe, generator, _ = build_chat_pipeline(generator_config, system_prompt, args.mcp_url, tools)
-
-        if not args.no_stream and generator is not None:
-            generator.streaming_callback = StreamingChunkWriter(printer=streaming_chunk_printer,
-                                                                verbose=bool(args.verbose)).callback
-
-        return pipe, generator, tools
-
-    pipe = None
-
-    prompt_history_path = Path(Path.home(), ".local", "state", "shyhurricane", "prompt_history")
-    os.makedirs(prompt_history_path.parent, mode=0o755, exist_ok=True)
-    sess = PromptSession(history=FileHistory(os.fspath(prompt_history_path)),
-                         # completer=WordCompleter(["/set","/show","/reload","/exit","/quit"], ignore_case=True)
-                         )
-    console.print(f"""
-This is a penetration test assistant using {generator_config.describe()}. You can say things like:
-- Solve the CTF challenge on 192.168.1.1
-- Look for vulnerabilities on http://192.168.1.1
-- Multi-line prompts can be entered by starting and ending with \"\"\"
-- Available prompts (chosen automatically): {", ".join(prompt_titles)}
-""")
-    console.print("🛡️  Ready. Commands: /show • /tools • /exit\n")
-
-    chat_logger(f"Assistant Info\n\n{generator_config.describe()}", output_timestamp=True)
-
-    if args.run_and_exit:
-        prompt_queue = list(args.run_and_exit)
-    else:
-        prompt_queue = None
-
+    mcp_toolsets = []
     try:
+        raw_tools, mcp_toolsets = create_tools(args.mcp_url)
+        tools: List[Tool] = []
+        prompt_chooser_tool = None
+        prompt_titles = []
+        for tool in raw_tools:
+            if tool.name == "prompt_chooser":
+                prompt_chooser_tool = tool
+            elif tool.name == "prompt_list":
+                prompt_titles = json.loads(tool.invoke()).get("structuredContent", {}).get("titles", [])
+            else:
+                # filter out the prompt tools because some LLMs aren't smart enough to ignore them
+                tools.append(tool)
+        if not prompt_chooser_tool:
+            console.print("[red]No prompt_chooser tool found[/red]")
+            sys.exit(1)
+
+        def chat_logger(line, output_timestamp: bool = False):
+            if not line:
+                return
+            Path(args.history).touch(mode=0o644, exist_ok=True)
+            with open(args.history, "a", encoding="utf-8") as f:
+                if output_timestamp:
+                    f.write("\n`")
+                    f.write(datetime.datetime.now().astimezone().isoformat())
+                    f.write("`\n\n")
+                f.write(line)
+
+        streaming_output_holder = StreamingOutputHolder()
+
+        def streaming_chunk_printer(line: str):
+            console.print(line, end="")
+            chat_logger(line, output_timestamp=True)
+            streaming_output_holder.append(line)
+
+        def create_pipeline(system_prompt: List[ChatMessage], tools: List[Tool]) -> Tuple[Pipeline, Component, List[Tool]]:
+            system_prompt_lower = "\n".join(map(lambda m: m.text, system_prompt))
+            if "autonomous" in system_prompt_lower or "automated" in system_prompt_lower:
+                pipe, generator, _ = build_agent_pipeline(generator_config, system_prompt, args.mcp_url, tools)
+            else:
+                pipe, generator, _ = build_chat_pipeline(generator_config, system_prompt, args.mcp_url, tools)
+
+            if not args.no_stream and generator is not None:
+                generator.streaming_callback = StreamingChunkWriter(printer=streaming_chunk_printer,
+                                                                    verbose=bool(args.verbose)).callback
+
+            return pipe, generator, tools
+
+        pipe = None
+
+        prompt_history_path = Path(Path.home(), ".local", "state", "shyhurricane", "prompt_history")
+        os.makedirs(prompt_history_path.parent, mode=0o755, exist_ok=True)
+        sess = PromptSession(history=FileHistory(os.fspath(prompt_history_path)),
+                             # completer=WordCompleter(["/set","/show","/reload","/exit","/quit"], ignore_case=True)
+                             )
+        console.print(f"""
+    This is a penetration test assistant using {generator_config.describe()}. You can say things like:
+    - Solve the CTF challenge on 192.168.1.1
+    - Look for vulnerabilities on http://192.168.1.1
+    - Multi-line prompts can be entered by starting and ending with \"\"\"
+    - Available prompts (chosen automatically): {", ".join(prompt_titles)}
+    """)
+        console.print("🛡️  Ready. Commands: /show • /tools • /exit\n")
+
+        chat_logger(f"Assistant Info\n\n{generator_config.describe()}", output_timestamp=True)
+
+        if args.run_and_exit:
+            prompt_queue = list(args.run_and_exit)
+        else:
+            prompt_queue = None
+
         while prompt_queue is None or len(prompt_queue) > 0:
             try:
                 if prompt_queue is not None:
@@ -193,37 +208,34 @@ This is a penetration test assistant using {generator_config.describe()}. You ca
                 chat_logger(f"\n\n---\n\n# {datetime.datetime.now().isoformat()} Q: {user_in}\n\n",
                             output_timestamp=True)
 
-                # special case of needing to bootstrap the pipeline with the correct prompt
+                streaming_output_holder.clear()
                 if pipe is None:
-                    prompt = "\n".join(map(lambda e: e.get("text", ""),
-                                           json.loads(prompt_chooser_tool.invoke(query=user_in)).get("content", [])))
-                    if len(prompt) < 100:
+                    # special case of needing to bootstrap the pipeline with the correct prompt
+                    prompt: List[ChatMessage] = []
+                    prompt_result_str = prompt_chooser_tool.invoke(query=user_in)
+                    for prompt_result in json.loads(prompt_result_str)["structuredContent"]["result"]:
+                        if prompt_result["role"] == "assistant":
+                            prompt.append(ChatMessage.from_system(prompt_result["content"]["text"]))
+                        else:
+                            prompt.append(ChatMessage.from_user(prompt_result["content"]["text"]))
+                    prompt_str = "\n".join(map(lambda m: m.text, prompt))
+                    if len(prompt_str) < 100:
                         # indicates an error because there should be a lot more text
-                        console.print("🤖 " + prompt)
+                        console.print("🤖 " + prompt_str)
                         continue
-                    console.print(Markdown(prompt))
+                    console.print(Markdown(prompt_str))
                     console.print()
                     pipe, *_ = create_pipeline(prompt, tools)
+                    run_input = {"query": {"values": []}}
+                else:
+                    user_in_message = ChatMessage.from_user(user_in)
+                    run_input = {"query": {"values": [user_in_message]}}
 
                 console.print("🤖 ", end="")
 
-                # Build the pipeline input
-                user_in_message = ChatMessage.from_user(user_in)
-                run_input = {}
-                try:
-                    pipe.get_component("prompt_builder")
-                    run_input["prompt_builder"] = {"query": [user_in_message]}
-                except ValueError:
-                    pass
-                try:
-                    pipe.get_component("memory_joiner")
-                    run_input["memory_joiner"] = {"values": [user_in_message]}
-                except ValueError:
-                    pass
-
                 # Run the pipeline
                 try:
-                    res = pipe.run(run_input)
+                    res = pipe.run(run_input, include_outputs_from={"response_llm", "agent"})
                 except PipelineRuntimeError as e:
                     print(str(e), file=sys.stderr)
                     tb = traceback.TracebackException.from_exception(e)
@@ -241,24 +253,25 @@ This is a penetration test assistant using {generator_config.describe()}. You ca
                 else:
                     replies = []
 
-                ans_md = "\n".join([text for reply in replies for text in reply.texts])
+                non_streamed_replies = []
+                for reply in replies:
+                    for text in reply.texts:
+                        if not text or text not in streaming_output_holder.last_output:
+                            non_streamed_replies.append(text)
+                ans_md = "\n".join(non_streamed_replies)
                 console.print("")
                 console.print("")
-                if args.no_stream:
+                if ans_md:
                     console.print(Markdown(ans_md))
-                chat_logger(ans_md, output_timestamp=True)
+                    chat_logger(ans_md, output_timestamp=True)
             except (KeyboardInterrupt, EOFError):
                 break
             # except Exception as e:
             #     console.print(f"[red]Error: {e}")
     finally:
         console.print("[green]\n🧹 Cleaning up ...")
-        if isinstance(tools, MCPToolset):
-            tools.close()
-        elif isinstance(tools, Iterable):
-            for tool in tools:
-                if hasattr(tool, "close"):
-                    tool.close()
+        for mcp_toolset in mcp_toolsets:
+            mcp_toolset.close()
         console.print(f"[green]\n📜 History has been written to {args.history}")
 
 

@@ -10,11 +10,12 @@ from haystack.components.generators.chat import OpenAIChatGenerator
 from haystack.tools import Toolset
 from haystack.utils import Secret
 from haystack import component
-from haystack.dataclasses import ChatMessage, StreamingCallbackT
+from haystack.dataclasses import ChatMessage, StreamingCallbackT, ToolCall
 from haystack_integrations.components.generators.google_genai.chat.chat_generator import GoogleGenAIChatGenerator
 from haystack_integrations.components.generators.ollama import OllamaChatGenerator, OllamaGenerator
 import haystack_integrations.components.generators.ollama.chat.chat_generator as ollama_cg
 from mcp import Tool
+from ollama import ChatResponse
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -138,7 +139,38 @@ def _safe_convert_ollama_meta_to_openai_format(input_response_dict: Dict) -> Dic
     return meta
 
 
+# Monkey patch fix for OllamaChatGenerator, ollama-haystack==5.1.0
+def _thinking_convert_ollama_response_to_chatmessage(ollama_response: ChatResponse) -> ChatMessage:
+    """
+    Convert non-streaming Ollama Chat API response to Haystack ChatMessage with the assistant role.
+    """
+    response_dict = ollama_response.model_dump()
+    ollama_message = response_dict["message"]
+    text = ollama_message["content"]
+    reasoning = ollama_message.get("thinking", None)
+    if not text and reasoning:
+        text = reasoning
+        reasoning = None
+
+    tool_calls: List[ToolCall] = []
+
+    if ollama_tool_calls := ollama_message.get("tool_calls"):
+        for ollama_tc in ollama_tool_calls:
+            tool_calls.append(
+                ToolCall(
+                    tool_name=ollama_tc["function"]["name"],
+                    arguments=ollama_tc["function"]["arguments"],
+                )
+            )
+
+    chat_msg = ChatMessage.from_assistant(text=text or None, tool_calls=tool_calls, reasoning=reasoning)
+
+    chat_msg._meta = _safe_convert_ollama_meta_to_openai_format(response_dict)
+
+    return chat_msg
+
 ollama_cg._convert_ollama_meta_to_openai_format = _safe_convert_ollama_meta_to_openai_format
+ollama_cg._convert_ollama_response_to_chatmessage = _thinking_convert_ollama_response_to_chatmessage
 
 
 class GeneratorConfig(BaseModel):

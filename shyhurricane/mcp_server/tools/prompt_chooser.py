@@ -6,7 +6,7 @@ from typing import Dict, List, Tuple, Iterable
 
 from haystack.dataclasses import ChatMessage
 from mcp.server.fastmcp import Context
-from mcp.types import ToolAnnotations, TextContent
+from mcp.types import ToolAnnotations, TextContent, PromptMessage
 from mcp.types import Prompt as MCPPrompt
 from pydantic import BaseModel, Field
 
@@ -109,7 +109,7 @@ async def extract_targets_and_prompt_title(query: str, titles: Iterable[str]) ->
         openWorldHint=False,
     )
 )
-async def prompt_chooser(ctx: Context, query: str) -> str:
+async def prompt_chooser(ctx: Context, query: str) -> List[PromptMessage]:
     """
     Chooses the best prompt for an offensive security operation.
 
@@ -148,13 +148,21 @@ async def prompt_chooser(ctx: Context, query: str) -> str:
                 prompt_title = title
                 break
         if not prompt_title:
-            return f"Choose a prompt title from: {', '.join(titles.keys())}"
+            return [PromptMessage(
+                role="assistant",
+                content=TextContent(
+                    type="text",
+                    text=f"Choose a prompt title from: {', '.join(titles.keys())}"))]
 
     if not targets:
         targets = filter_targets_query(query)
 
     if not targets:
-        return "At least one target is required. Specify as a host name, IP address, IP subnet, or URL."
+        return [PromptMessage(
+            role="assistant",
+            content=TextContent(
+                type="text",
+                text="At least one target is required. Specify as a host name, IP address, IP subnet, or URL."))]
 
     await log_tool_history(ctx, "prompt_chooser: result", query=query, prompt_title=prompt_title, targets=targets)
 
@@ -162,12 +170,7 @@ async def prompt_chooser(ctx: Context, query: str) -> str:
     messages = (await mcp_instance.get_prompt(name=mcp_prompt.name,
                                               arguments={"target": ', '.join(targets), "query": query})).messages
 
-    text = []
-    for msg in messages:
-        if isinstance(msg.content, TextContent):
-            text.append(msg.content.text)
-
-    return "\n".join(text)
+    return messages
 
 
 class PromptListResult(BaseModel):

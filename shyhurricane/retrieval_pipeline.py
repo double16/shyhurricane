@@ -13,7 +13,7 @@ from haystack.components.embedders import SentenceTransformersTextEmbedder
 from haystack.components.joiners import ListJoiner
 from haystack.components.tools import ToolInvoker
 from haystack.core.component import Component
-from haystack.dataclasses import ChatMessage
+from haystack.dataclasses import ChatMessage, ChatRole
 from haystack.tools import Toolset
 from haystack_experimental.chat_message_stores import InMemoryChatMessageStore
 from haystack_experimental.components.retrievers import ChatMessageRetriever
@@ -424,65 +424,77 @@ class MultiQueryChromaRetriever:
         return {"documents": unique_docs}
 
 
-def create_tools(mcp_urls: Optional[List[str]] = None, shim: Callable[[Tool], Tool] = None) -> Toolset:
+def create_tools(mcp_urls: Optional[List[str]] = None, shim: Callable[[Tool], Tool] = None) -> Tuple[
+    Toolset, List[MCPToolset]]:
     if mcp_urls is None:
         mcp_urls = ["http://127.0.0.1:8000/mcp/"]
+    mcp_toolsets = []
     tools = []
     for mcp_url in mcp_urls:
         toolset = MCPToolset(
             server_info=StreamableHttpServerInfo(url=mcp_url),
             invocation_timeout=600.0
         )
+        mcp_toolsets.append(toolset)
         if shim is not None:
             tools.extend(list(map(lambda t: shim(t), toolset)))
         else:
             if len(mcp_urls) == 1:
-                return toolset
+                return toolset, mcp_toolsets
             tools.extend(list(toolset))
-    return Toolset(tools=tools)
-
-
-user_chat_message_template = """Given the conversation history, complete the task requested.
-
-    Conversation history: {% for memory in memories %}
-      From {{ memory.role.value }} : {% for text in memory.texts %} {{ text }}
-{% endfor %} {% endfor %}
-
-    Task: {% for query_el in query %} {% for text in query_el.texts %}
-      {{ text }}
-{% endfor %} {% endfor %}
-"""
+    return Toolset(tools=tools), mcp_toolsets
 
 
 @component
 class ChatMessageLogger:
+    def __init__(self, label: str):
+        self.label = label
+
     @component.output_types()
     def run(self, messages: List[ChatMessage]):
         if not messages:
-            logger.debug("No messages received")
-        for message in messages:
-            logger.debug(f"Message: {message.role}: {message.texts}")
+            logger.debug(f"{self.label}: No messages received")
+            # print(f"{self.label}: No messages received")
+        for idx, message in enumerate(messages):
+            if message.tool_call_results:
+                msg = f"{self.label}: Message {idx}: {message.role}: {"\\n".join(map(lambda r: r.result, message.tool_call_results))}"
+            else:
+                msg = f"{self.label}: Message {idx}: {message.role}: {message.texts}"
+            logger.debug(msg)
+            # print(msg.replace("\\n", "\n"))
         return {}
+
+
+@component
+class ChatPromptTemplateBuilder:
+    def __init__(self, system_prompt: List[ChatMessage]):
+        self.system_prompt = system_prompt
+
+    @component.output_types(messages=List[ChatMessage])
+    def run(self, memories: List[ChatMessage], query: List[ChatMessage]):
+        messages = []
+        messages.extend(self.system_prompt)
+        messages.extend(memories)
+        messages.extend(query)
+        return {"messages": messages}
 
 
 def build_chat_pipeline(
         generator_config: GeneratorConfig,
-        prompt: Optional[str] = pentester_chat_system_prompt,
+        prompt: Optional[List[ChatMessage]] = None,
         mcp_urls: Optional[List[str]] = None,
         tools: Optional[Union[list[Tool], Toolset]] = None,
 ) -> Tuple[Pipeline, Component, Toolset]:
     """
-    Builds a pipeline for a cyber-security chat.
+    Builds a pipeline for an offensive security assistant chat.
     :return: Pipeline, generator component
     """
 
+    if not prompt:
+        prompt = [ChatMessage.from_system(pentester_chat_system_prompt)]
+
     tools = tools or create_tools(mcp_urls)
-    prompt_builder = ChatPromptBuilder(
-        template=[ChatMessage.from_system(prompt),
-                  ChatMessage.from_user(user_chat_message_template)],
-        variables=["query", "memories"],
-        required_variables=["query", "memories"]
-    )
+    prompt_builder = ChatPromptBuilder()
     chat_generator = generator_config.create_chat_generator(
         tools=tools,
         generation_kwargs={}
@@ -496,6 +508,8 @@ def build_chat_pipeline(
     memory_writer = ChatMessageWriter(memory_store)
 
     pipeline = Pipeline()
+    pipeline.add_component("query", ListJoiner(List[ChatMessage]))
+    pipeline.add_component("template_builder", ChatPromptTemplateBuilder(prompt))
     pipeline.add_component("prompt_builder", prompt_builder)
     pipeline.add_component("llm", chat_generator)
     pipeline.add_component("tool_invoker", ToolInvoker(tools=tools))
@@ -504,18 +518,30 @@ def build_chat_pipeline(
     pipeline.add_component("memory_writer", memory_writer)
     pipeline.add_component("memory_joiner", ListJoiner(List[ChatMessage]))
     pipeline.add_component("response_llm", response_chat_generator)
-    pipeline.add_component("chat_message_logger", ChatMessageLogger())
+    pipeline.add_component("query_chat_message_logger", ChatMessageLogger("query"))
+    pipeline.add_component("prompt_chat_message_logger", ChatMessageLogger("prompt"))
+    pipeline.add_component("tool_invoker_chat_message_logger", ChatMessageLogger("tool_invoker"))
+    pipeline.add_component("llm_chat_message_logger", ChatMessageLogger("llm"))
+    pipeline.add_component("response_llm_chat_message_logger", ChatMessageLogger("response_llm"))
 
+    pipeline.connect("query", "template_builder.query")
+    pipeline.connect("query", "memory_joiner.values")
+    pipeline.connect("query", "query_chat_message_logger")
+    pipeline.connect("memory_retriever", "template_builder.memories")
+    pipeline.connect("template_builder", "prompt_builder.template")
     pipeline.connect("prompt_builder.prompt", "llm.messages")
-    pipeline.connect("prompt_builder.prompt", "chat_message_logger.messages")
+    pipeline.connect("prompt_builder.prompt", "prompt_chat_message_logger.messages")
     pipeline.connect("llm.replies", "tool_invoker.messages")
     pipeline.connect("llm.replies", "list_joiner")
     pipeline.connect("llm.replies", "memory_joiner")
+    pipeline.connect("llm.replies", "llm_chat_message_logger")
     pipeline.connect("tool_invoker.tool_messages", "list_joiner")
+    pipeline.connect("tool_invoker.tool_messages", "memory_joiner")
+    pipeline.connect("tool_invoker.tool_messages", "tool_invoker_chat_message_logger")
     pipeline.connect("list_joiner.values", "response_llm.messages")
-
+    pipeline.connect("response_llm.replies", "memory_joiner")
+    pipeline.connect("response_llm.replies", "response_llm_chat_message_logger")
     pipeline.connect("memory_joiner", "memory_writer")
-    pipeline.connect("memory_retriever", "prompt_builder.memories")
 
     return pipeline, response_chat_generator, tools
 
@@ -529,20 +555,24 @@ class ChatMessageToListAdapter:
 
 def build_agent_pipeline(
         generator_config: GeneratorConfig,
-        prompt: Optional[str] = pentester_agent_system_prompt,
+        prompt: Optional[List[ChatMessage]] = None,
         mcp_urls: Optional[List[str]] = None,
         tools: Optional[Union[list[Tool], Toolset]] = None,
 ) -> Tuple[Pipeline, Component, Toolset]:
     """
-    Builds a pipeline for a cyber-security agent.
+    Builds a pipeline for an offensive security agent.
     :return: Pipeline
     """
 
+    if not prompt:
+        prompt = [ChatMessage.from_system(pentester_agent_system_prompt)]
+
+    system_prompt = "\n".join(map(lambda m: m.text, filter(lambda m: m.is_from(ChatRole.SYSTEM), prompt)))
+
     tools = tools or create_tools(mcp_urls)
-    prompt_builder = ChatPromptBuilder(
-        template=[ChatMessage.from_user(user_chat_message_template)],
-        variables=["query", "memories"],
-        required_variables=["query", "memories"]
+    prompt_builder = ChatPromptBuilder()
+    template_builder = ChatPromptTemplateBuilder(
+        list(filter(lambda m: not m.is_from(ChatRole.SYSTEM), prompt)),
     )
     chat_generator = generator_config.create_chat_generator(
         tools=tools,
@@ -551,7 +581,7 @@ def build_agent_pipeline(
     assistant = Agent(
         chat_generator=chat_generator,
         tools=tools,
-        system_prompt=prompt,
+        system_prompt=system_prompt,
         exit_conditions=["text"],
         max_agent_steps=1000,
         raise_on_tool_invocation_failure=False
@@ -562,21 +592,26 @@ def build_agent_pipeline(
     memory_writer = ChatMessageWriter(memory_store)
 
     pipeline = Pipeline()
+    pipeline.add_component("query", ListJoiner(List[ChatMessage]))
+    pipeline.add_component("template_builder", template_builder)
     pipeline.add_component("prompt_builder", prompt_builder)
     pipeline.add_component("agent", assistant)
     pipeline.add_component("memory_retriever", memory_retriever)
     pipeline.add_component("memory_writer", memory_writer)
     pipeline.add_component("memory_joiner", ListJoiner(List[ChatMessage]))
     pipeline.add_component("str_to_list", ChatMessageToListAdapter())
-    pipeline.add_component("chat_message_logger", ChatMessageLogger())
+    pipeline.add_component("chat_message_logger", ChatMessageLogger("prompt"))
 
+    pipeline.connect("query", "template_builder.query")
+    pipeline.connect("query", "memory_joiner.values")
+    pipeline.connect("memory_retriever", "template_builder.memories")
+    pipeline.connect("template_builder", "prompt_builder.template")
     pipeline.connect("prompt_builder", "agent")
     pipeline.connect("prompt_builder.prompt", "chat_message_logger.messages")
 
     pipeline.connect("agent.last_message", "str_to_list")
     pipeline.connect("str_to_list", "memory_joiner")
     pipeline.connect("memory_joiner", "memory_writer")
-    pipeline.connect("memory_retriever", "prompt_builder.memories")
 
     pipeline.warm_up()
 
