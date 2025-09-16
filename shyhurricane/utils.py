@@ -31,9 +31,9 @@ class HttpResource(BaseModel):
     """
     score: Optional[float] = Field(description="Matching score, higher is better")
     url: str = Field(description="The URL for the HTTP resource")
-    host: str = Field(description="The host name of the HTTP server")
+    host: str = Field(description="The hostname of the HTTP server")
     port: int = Field(description="The port of the HTTP server")
-    domain: str = Field(description="The domain name of the HTTP server, built from the host name")
+    domain: str = Field(description="The domain name of the HTTP server, built from the hostname")
     status_code: int = Field(description="The HTTP status code for the response")
     method: str = Field(description="The HTTP method that was used to request the resource")
     resource: Optional[Resource] = Field(description="A link to the resource content")

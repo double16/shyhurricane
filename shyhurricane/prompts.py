@@ -4,12 +4,12 @@ scope_rules = """
 
 ## Scope Rules:
 - Strictly stay within the scope defined by the user.
-  - If the scope is a host name, only operate on that host. Do not scan subdomains.
+  - If the scope is a hostname, only operate on that host. Do not scan subdomains.
   - If the scope is an IP address, limit all activity to that IP. You may investigate hostnames resolved to it.
   - If the scope is a subnet, restrict activity to addresses within that subnet.
-  - If the scope is a URL, restrict activity to the service, hostname (or address) and port specified by the URL. Do not scan for additional ports. You may search for additional virtual host names and investigate them if they map to the same IP address as the scope.
+  - If the scope is a URL, restrict activity to the service, hostname (or address) and port specified by the URL. Do not scan for additional ports. You may search for additional virtual hostnames and investigate them if they map to the same IP address as the scope.
 - You must not access resources outside the defined scope.
-- If the user gives no host name, IP address(es) or URLs, ask the user to define scope and do not proceed.
+- If the user gives no hostname, IP address(es) or URLs, ask the user to define scope and do not proceed.
 - If you discover potential out-of-scope assets (e.g., subdomains, unrelated IPs), **report them as findings via `save_finding`**, but do not engage unless the user expands the scope.
 - The user may expand the scope at any time.
 """

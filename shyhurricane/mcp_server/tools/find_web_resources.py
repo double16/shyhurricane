@@ -211,8 +211,8 @@ class FindWebResourcesResult(BaseModel):
 
 find_web_resources_instructions = "These resources were found by searching the indexed resources using the given query."
 find_web_resources_instructions_not_found = "No indexed resources were found using the query. Use the spider_website, directory_buster or index_http_url tools to populate the index."
-find_web_resources_instructions_need_target = "Include a target URL, IP address or host name in query."
-find_web_resources_instructions_low_power = "No indexed resources were considered due to low power mode. Include only host names, IP addresses or URLs in the query."
+find_web_resources_instructions_need_target = "Include a target URL, IP address or hostname in query."
+find_web_resources_instructions_low_power = "No indexed resources were considered due to low power mode. Include only hostnames, IP addresses or URLs in the query."
 
 
 def find_web_resources_result(

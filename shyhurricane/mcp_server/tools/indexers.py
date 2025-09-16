@@ -13,6 +13,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from shyhurricane.doc_type_model_map import map_mime_to_type
+from shyhurricane.index.web_resources_pipeline import is_binary
 from shyhurricane.mcp_server import mcp_instance, get_server_context, log_tool_history, get_additional_hosts, \
     UserAgentField, CookiesField, RequestHeadersField, AdditionalHostsField, RequestParamsField
 from shyhurricane.mcp_server.tools.deobfuscate_javascript import deobfuscate_javascript
@@ -90,11 +91,13 @@ async def index_http_url(
         params: RequestParamsField = None,
         content: Optional[str] = None,
         follow_redirects: Optional[bool] = None,
+        content_length_limit: Annotated[int, Field(200*1024, description="Content length limit, do not return content if over this length", ge=1, le=4*1024*1024)] = 200*1024,
 ) -> Optional[HttpResource]:
     """
     Index an HTTP URL to allow for further analysis and return the context, response code, response headers.
 
-    Invoke this tool when the user needs the content of one specific URL.
+    Invoke this tool when the user needs the content of one specific URL. If the content type is binary or over
+    the content_length_limit, content will not be returned. Get the content by running curl with the run_unix_command tool.
 
     The content is the request body, it is optional.
 
@@ -141,7 +144,14 @@ async def index_http_url(
             )
         status_code = response.status_code
         response_headers = dict(response.headers)
-        body = response.text
+
+        # check for binary content or large size
+        body = None
+        if not is_binary(None, response.headers.get("Content-Type")):
+            if response.headers.get("Content-Length"):
+                content_length = int(response.headers.get("Content-Length"))
+                if content_length < content_length_limit:
+                    body = response.text
 
         ingest_queue.put(json.dumps({
             "timestamp": datetime.now().isoformat(),
@@ -160,11 +170,14 @@ async def index_http_url(
         if map_mime_to_type(response.headers.get("Content-Type")) == "javascript":
             body = await deobfuscate_javascript(ctx, body)
 
-        resource = TextResourceContents(
-            uri=AnyUrl(url),
-            mimeType=response.headers.get("Content-Type", ""),
-            text=body,
-        )
+        if body:
+            contents = TextResourceContents(
+                uri=AnyUrl(url),
+                mimeType=response.headers.get("Content-Type", ""),
+                text=body,
+            )
+        else:
+            contents = None
         return HttpResource(
             score=100,
             url=url,
@@ -174,7 +187,7 @@ async def index_http_url(
             status_code=status_code,
             method=method,
             resource=None,
-            contents=resource,
+            contents=contents,
             response_headers=response_headers,
         )
     except requests.exceptions.RequestException as e:

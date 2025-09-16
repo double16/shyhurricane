@@ -12,7 +12,7 @@
 #
 # Environment variables are inherited. Models and API keys can be set without being present in the recording:
 #   export OPENAI_API_KEY=xxxxx
-#   export OPENAI_MODEL=gpt-5-turbo
+#   export OPENAI_MODEL=gpt-5-mini
 
 set -euo pipefail
 
@@ -112,11 +112,15 @@ PANE_ASSIST="$SESSION:0.1"
     sleep 3s
   done
 
-  type_cmd "$PANE_ASSIST" "python3 assistant.py $* --run-and-exit \"${PROMPT}\""
+  if [ -n "${PROMPT}" ]; then
+    type_cmd "$PANE_ASSIST" "python3 assistant.py $* --run-and-exit \"${PROMPT}\""
+  else
+    type_cmd "$PANE_ASSIST" "python3 assistant.py $*"
+  fi
   while pgrep -f assistant.py >/dev/null 2>/dev/null; do
     sleep 3s
   done
-  # add end of demo marker
+  # add "end of demo" marker
   tmux send-keys -t "$PANE_ASSIST" -l "## _____ END OF LINE _____"
   tmux send-keys -t "$PANE_ASSIST" C-m
   tmux wait-for -S done-bot
@@ -138,7 +142,7 @@ asciinema rec -t "$TITLE" -i "$IDLE_LIMIT" --cols=${COLS} --rows=${ROWS} -c "tmu
 # cleanup server after recording has ended
 tmux kill-session -t "$SESSION" >/dev/null 2>&1 || true
 
-sed '/____ END OF LINE _/q' "${OUTFILE}.tmp" > "${OUTFILE}"
+sed -e '/"## ____/q' "${OUTFILE}.tmp" > "${OUTFILE}"
 rm "${OUTFILE}.tmp"
 
 echo "Saved to ${OUTFILE}"

@@ -175,6 +175,7 @@ def main():
         else:
             prompt_queue = None
 
+        prompt: List[ChatMessage] = []
         while prompt_queue is None or len(prompt_queue) > 0:
             try:
                 if prompt_queue is not None:
@@ -211,7 +212,7 @@ def main():
                 streaming_output_holder.clear()
                 if pipe is None:
                     # special case of needing to bootstrap the pipeline with the correct prompt
-                    prompt: List[ChatMessage] = []
+                    prompt.clear()
                     prompt_result_str = prompt_chooser_tool.invoke(query=user_in)
                     for prompt_result in json.loads(prompt_result_str)["structuredContent"]["result"]:
                         if prompt_result["role"] == "assistant":
@@ -224,7 +225,7 @@ def main():
                         console.print("🤖 " + prompt_str)
                         continue
                     console.print(Markdown(prompt_str))
-                    console.print()
+                    console.print("")
                     pipe, *_ = create_pipeline(prompt, tools)
                     run_input = {"query": {"values": []}}
                 else:
@@ -253,17 +254,20 @@ def main():
                 else:
                     replies = []
 
+                # If the replies have already been output, either as the system prompt or by streaming, don't output again
                 non_streamed_replies = []
                 for reply in replies:
+                    if reply in prompt:
+                        continue
                     for text in reply.texts:
                         if not text or text not in streaming_output_holder.last_output:
                             non_streamed_replies.append(text)
-                ans_md = "\n".join(non_streamed_replies)
                 console.print("")
                 console.print("")
-                if ans_md:
-                    console.print(Markdown(ans_md))
-                    chat_logger(ans_md, output_timestamp=True)
+                if non_streamed_replies:
+                    answer_md = "\n".join(non_streamed_replies)
+                    console.print(Markdown(answer_md))
+                    chat_logger(answer_md, output_timestamp=True)
             except (KeyboardInterrupt, EOFError):
                 break
             # except Exception as e:

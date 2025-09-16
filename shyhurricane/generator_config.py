@@ -208,7 +208,7 @@ class GeneratorConfig(BaseModel):
         if os.environ.get("GEMINI_API_KEY", None) or os.environ.get("GOOGLE_API_KEY", None):
             self.gemini_model = "gemini-2.5-flash"
         elif os.environ.get("OPENAI_API_KEY", None):
-            self.openai_model = "gpt-5-turbo"
+            self.openai_model = "gpt-5-mini"
         else:
             self.ollama_model = "gpt-oss:20b"
         return self
@@ -341,3 +341,14 @@ class GeneratorConfig(BaseModel):
                 )
         else:
             raise NotImplementedError
+
+    @property
+    def chat_message_retriever_last_k(self):
+        if self.openai_model:
+            return 50
+        elif self.gemini_model:
+            return 100
+        elif self.ollama_model:
+            if self.ollama_model.startswith("gpt-oss"):
+                return 30
+        return 20

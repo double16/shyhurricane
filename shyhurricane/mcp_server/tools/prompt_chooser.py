@@ -25,7 +25,7 @@ async def extract_targets_and_prompt_title(query: str, titles: Iterable[str]) ->
       
       You determine the intent of a test and choose an appropriate agent or chat prompt based on the user query.
     
-      You determine the target host name, IP address(es), site url(s) and ports the user is interested in. If the user specifies
+      You determine the target hostname, IP address(es), site url(s) and ports the user is interested in. If the user specifies
       a scheme do not change it. Never suggest targets. Only accept explicit targets given by the user.
 
       The prompt is chosen from a fixed set of titles. The following are valid prompt titles:
@@ -117,7 +117,7 @@ async def prompt_chooser(ctx: Context, query: str) -> List[PromptMessage]:
     given concerning methodology, execution rules, or output format. The result of this tool should be taken as a system
     prompt or assistant instructions.
 
-    Targets must be given in the form of a URL, host name, IP address, IP subnet or domain name.
+    Targets must be given in the form of a URL, hostname, IP address, IP subnet or domain name.
 
     A specific prompt title may be given and will be something like "Penetration Tester Assistant". If an appropriate prompt cannot be found,
     this tool will return the list of available prompts.
@@ -162,7 +162,7 @@ async def prompt_chooser(ctx: Context, query: str) -> List[PromptMessage]:
             role="assistant",
             content=TextContent(
                 type="text",
-                text="At least one target is required. Specify as a host name, IP address, IP subnet, or URL."))]
+                text="At least one target is required. Specify as a hostname, IP address, IP subnet, or URL."))]
 
     await log_tool_history(ctx, "prompt_chooser: result", query=query, prompt_title=prompt_title, targets=targets)
 

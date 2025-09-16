@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 WEB_RESOURCE_VERSION = 1
 
 
-def is_binary(content: str, mime_type: str) -> bool:
+def is_binary(content: Optional[str], mime_type: str) -> bool:
     """
     Detect if the content is binary based on the raw MIME type and content.
     """
@@ -62,6 +62,8 @@ def is_binary(content: str, mime_type: str) -> bool:
     ]:
         return True
     if mime_type.endswith("+json") or mime_type.endswith("+xml"):
+        return False
+    if content is None:
         return False
     if not content.strip():
         return False

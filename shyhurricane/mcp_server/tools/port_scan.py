@@ -81,7 +81,7 @@ async def port_scan(
     a list of IPv4 or IPv6 addresses. The ip_subnets parameter is a list of IPv4 or IPv6 subnets in CIDR notation, such
     as "192.168.1.0/24".
 
-    If the port scan reveals additional host names, virtual hosts or redirects, use the `register_hostname_address` tool to register them.
+    If the port scan reveals additional hostnames, virtual hosts or redirects, use the `register_hostname_address` tool to register them.
 
     The port scan may take a long time, and this tool may return before the scan is finished.
     If a timeout occurs, call this tool again with the same parameters, and it will return indexed results.

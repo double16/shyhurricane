@@ -19,7 +19,7 @@ from shyhurricane.utils import munge_urls, stream_lines
 
 logger = logging.getLogger(__name__)
 
-finding_target_invalid_instructions = "Target must be a valid URL, host name, IP address, host:port or ip:port. Retry with a corrected target."
+finding_target_invalid_instructions = "Target must be a valid URL, hostname, IP address, host:port or ip:port. Retry with a corrected target."
 finding_not_found_instructions = "No findings found for the target. Expand the target or hack more!"
 finding_instructions = "These findings were found for the target. They provide a good starting place to continue testing."
 
@@ -110,7 +110,7 @@ class QueryFindingsResult(BaseModel):
 )
 async def query_findings(
         ctx: Context,
-        target: Annotated[str, Field(description="URL, host name, IP address, or domain name")],
+        target: Annotated[str, Field(description="URL, hostname, IP address, or domain name")],
         limit: Annotated[int, Field(100, ge=10, le=1000, description="The maximum number of findings to return")] = 100
 ) -> QueryFindingsResult:
     """

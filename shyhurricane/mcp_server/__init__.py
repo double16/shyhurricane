@@ -31,12 +31,12 @@ AdditionalHostsField: TypeAlias = Annotated[
     Field(
         None,
         description=(
-            "The additional_hosts parameter is a dictionary of host name (the key) "
+            "The additional_hosts parameter is a dictionary of hostname (the key) "
             "to IP address (the value) for hosts that do not have DNS records. "
-            "This also includes CTF targets or web server virtual hosts found during "
+            "This includes CTF targets or web server virtual hosts found during "
             "other scans. If you know the IP address for a host, be sure to include "
-            "these in the additional_hosts parameter for commands to run properly "
-            "in a containerized environment."
+            "these in the additional_hosts parameter. If a hostname does not resolve "
+            "try using the additional_hosts parameter with the target IP address."
         )
     )
 ]

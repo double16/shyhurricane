@@ -504,7 +504,7 @@ def build_chat_pipeline(
     )
 
     memory_store = InMemoryChatMessageStore()
-    memory_retriever = ChatMessageRetriever(memory_store, last_k=15)
+    memory_retriever = ChatMessageRetriever(memory_store, last_k=generator_config.chat_message_retriever_last_k)
     memory_writer = ChatMessageWriter(memory_store)
 
     pipeline = Pipeline()
@@ -588,7 +588,7 @@ def build_agent_pipeline(
     )
 
     memory_store = InMemoryChatMessageStore()
-    memory_retriever = ChatMessageRetriever(memory_store)
+    memory_retriever = ChatMessageRetriever(memory_store, last_k=generator_config.chat_message_retriever_last_k)
     memory_writer = ChatMessageWriter(memory_store)
 
     pipeline = Pipeline()
@@ -709,19 +709,19 @@ def build_website_context_pipeline(generator_config: GeneratorConfig) -> Pipelin
     prompt = """
       You are a cybersecurity search assistant that processes users queries for websites.
 
-      You determine the target host name, IP address(es), site url(s) and ports the user is interested in. If the user specifies
+      You determine the target hostname, IP address(es), site url(s) and ports the user is interested in. If the user specifies
       a scheme do not change it. Never add a scheme the user did not provide. Never suggest targets. Only accept explicit targets given by the user.
       Follow these rules when determining the targets:
-       - Multiple sites may be specified, preserve the host name and IP addresses.
+       - Multiple sites may be specified, preserve the hostname and IP addresses.
          Example: http://example.com and http://sub1.example.com are two targets, http://example.com and http://sub1.example.com
        - The hostname may include several components in dot-notation.
          Example: web01.internal.example.com is one target, web01.internal.example.com
        - If the user specifies a protocol, keep it.
          Example: http://example.com is exactly one target, http://example.com
          Example: https://example.com is exactly one target, https://example.com
-       - A host name or IP address is permitted without a protocol and without a port, such as target.local
+       - A hostname or IP address is permitted without a protocol and without a port, such as target.local
          Example: target.local is one target, target.local
-       - A host name or IP address is permitted without a protocol but with a port, such as target.local:443
+       - A hostname or IP address is permitted without a protocol but with a port, such as target.local:443
          Example: example.com:443 is one target, example.com:443
          Example: example.com:80 is one target, example.com:80
 
