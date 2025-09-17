@@ -89,7 +89,7 @@ async def index_http_url(
         request_headers: RequestHeadersField = None,
         cookies: CookiesField = None,
         params: RequestParamsField = None,
-        content: Optional[str] = None,
+        request_body: Optional[str] = None,
         follow_redirects: Optional[bool] = None,
         content_length_limit: Annotated[int, Field(200*1024, description="Content length limit, do not return content if over this length", ge=1, le=4*1024*1024)] = 200*1024,
 ) -> Optional[HttpResource]:
@@ -98,8 +98,6 @@ async def index_http_url(
 
     Invoke this tool when the user needs the content of one specific URL. If the content type is binary or over
     the content_length_limit, content will not be returned. Get the content by running curl with the run_unix_command tool.
-
-    The content is the request body, it is optional.
 
     If follow_redirects is true, redirects will be followed and the result is the destination of the redirect.
     """
@@ -111,7 +109,7 @@ async def index_http_url(
                            cookies=cookies,
                            params=params,
                            follow_redirects=follow_redirects,
-                           content=bool(content is not None),
+                           request_body=bool(request_body is not None),
                            additional_hosts=additional_hosts,
                            )
     server_ctx = await get_server_context()
@@ -139,7 +137,7 @@ async def index_http_url(
                 headers=the_headers,
                 cookies=cookies,
                 params=params,
-                content=content,
+                content=request_body,
                 follow_redirects=follow_redirects,
             )
         status_code = response.status_code
@@ -159,6 +157,7 @@ async def index_http_url(
                 "endpoint": url,
                 "method": method,
                 "headers": the_headers,
+                "body": request_body,
             },
             "response": {
                 "status_code": status_code,

@@ -2,7 +2,7 @@ import asyncio
 import logging
 import sys
 import traceback
-from typing import Optional, Dict
+from typing import Optional, Dict, Annotated
 
 import aiofiles
 from mcp import McpError, ErrorData
@@ -26,7 +26,9 @@ class RunUnixCommand(BaseModel):
     command: str = Field(description="The command that was run")
     return_code: int = Field(description="Return code of command, 0 usually means successful")
     output: str = Field(description="Output of command as string")
-    error: str = Field(description="Error messages from the command")
+    output_truncated: bool = Field(description="If true, output is truncated")
+    error: str = Field(description="Output of stderr, could be errors or progress information")
+    error_truncated: bool = Field(description="If true, error is truncated")
     notes: Optional[str] = Field(description="Notes for understanding the command output or fixing failed commands")
 
 
@@ -41,6 +43,7 @@ async def run_unix_command(
         command: str,
         additional_hosts: AdditionalHostsField = None,
         env: ProcessEnvField = None,
+        output_length_limit: Annotated[int, Field(200*1024, description="Output and error length limit, truncates output and error text if over this length.", ge=1, le=4*1024*1024)] = 200*1024,
 ) -> RunUnixCommand:
     """
 Run a Linux or macOS command and return its output. The command is run in a containerized environment for safety.
@@ -50,7 +53,7 @@ Invoke this tool when the user request can be fulfilled by a known Linux or macO
 program and the request can't be fulfilled by other MCP tools. Invoke this tool when the user
 asks to run a specific command. Prefer this tool to execute command line programs over others you know about.
 
-The following commands are available: curl, wget, grep, awk, printf, base64, cut, cp, mv, date, factor, gzip, sha256sum, sha512sum, md5sum, echo, seq, true, false, tee, tar, sort, head, tail, ping, ssh, sqlite3,
+The following commands are available: curl, wget, grep, awk, printf, base64, cut, cp, mv, date, factor, gzip, sha256sum, sha512sum, md5sum, echo, seq, true, false, tee, tar, sort, head, tail, ping, ssh, sqlite3, zip, unzip,
 nmap, rustscan, feroxbuster, gobuster, katana, nuclei, meg, anew, unfurl, gf, gau, 403jump, waybackurls, httpx, subfinder, ffuf, dirb, wfuzz, nc (netcat), graphql-path-enum, evil-winrm, sqlmap, hydra, searchsploit, ftp, sshpass, tshark, git-dumper
 DumpNTLMInfo.py, Get,GPPPassword.py, GetADComputers.py, GetADUsers.py, GetLAPSPassword.py, GetNPUsers.py, GetUserSPNs.py, addcomputer.py, atexec.py, changepasswd.py, dacledit.py, dcomexec.py, describeTicket.py, dpapi.py, esentutl.py, exchanger.py, findDelegation.py, getArch.py, getPac.py, getST.py, getTGT.py, goldenPac.py, karmaSMB.py, keylistattack.py, kintercept.py, lookupsid.py, machine_role.py, mimikatz.py, mqtt_check.py, mssqlclient.py, mssqlinstance.py, net.py, netview.py, ntfs,read.py, ntlmrelayx.py, owneredit.py, ping.py, ping6.py, psexec.py, raiseChild.py, rbcd.py, rdp_check.py, reg.py, registry,read.py, rpcdump.py, rpcmap.py, sambaPipe.py, samrdump.py, secretsdump.py, services.py, smbclient.py, smbexec.py, smbserver.py, sniff.py, sniffer.py, split.py, ticketConverter.py, ticketer.py, tstool.py, wmiexec.py, wmipersist.py, wmiquery.py
 
@@ -77,9 +80,8 @@ When generating Linux commands for execution in a containerized environment, fol
     server_ctx = await get_server_context()
     assert server_ctx.open_world
 
-    # TODO: check for nmap command and see if we can redirect to port_scan
     try:
-        result = await _run_unix_command(ctx, command=command, additional_hosts=additional_hosts, env=env)
+        result = await _run_unix_command(ctx, command=command, additional_hosts=additional_hosts, env=env, output_length_limit=output_length_limit)
 
         if result.return_code != 0 and (
                 "executable file not found" in result.error or "command not found" in result.error):
@@ -103,13 +105,34 @@ When generating Linux commands for execution in a containerized environment, fol
             command=command,
             return_code=-1,
             output="",
+            output_truncated=False,
             error=''.join(traceback.format_exception(exc_type, exc_value, exc_tb)),
+            error_truncated=False,
             notes=None,
         )
 
 
-async def _run_unix_command(ctx: Context, command: str, additional_hosts: Optional[Dict[str, str]],
-                            stdin: Optional[str] = None, env: Optional[Dict[str, str]] = None) -> Optional[
+class OutputLimiter:
+    def __init__(self, limit: Optional[int]):
+        self.limit = limit
+        self.length = 0
+
+    def inc(self, value: int) -> int:
+        self.length += value
+        return self.length
+
+    def is_full(self) -> bool:
+        return self.limit is not None and self.length > self.limit
+
+
+async def _run_unix_command(
+        ctx: Context,
+        command: str,
+        additional_hosts: Optional[Dict[str, str]],
+        stdin: Optional[str] = None,
+        env: Optional[Dict[str, str]] = None,
+        output_length_limit: Optional[int] = None,
+) -> Optional[
     RunUnixCommand]:
     command = command.strip()
     if not command:
@@ -136,6 +159,9 @@ async def _run_unix_command(ctx: Context, command: str, additional_hosts: Option
                 return None
     except McpError:
         logger.warning("elicit not supported, continuing")
+
+    output_limiter = OutputLimiter(output_length_limit)
+    error_limiter = OutputLimiter(output_length_limit)
 
     async with aiofiles.tempfile.TemporaryFile(mode="w+b") as stdout_file:
         async with aiofiles.tempfile.TemporaryFile(mode="w+b") as stderr_file:
@@ -177,13 +203,35 @@ async def _run_unix_command(ctx: Context, command: str, additional_hosts: Option
                 proc.stdin.close()
 
             await asyncio.gather(
-                _write_stream_to_file(proc.stdout, stdout_file),
-                _write_stream_to_file(proc.stderr, stderr_file),
+                _write_stream_to_file(proc.stdout, stdout_file, output_limiter),
+                _write_stream_to_file(proc.stderr, stderr_file, error_limiter),
             )
 
             return_code = await proc.wait()
             output_size = await stdout_file.tell()
+            output_truncated = output_limiter.is_full()
             error_size = await stderr_file.tell()
+            error_truncated = error_limiter.is_full()
+            total_size = output_size + error_size
+
+            # we've truncated the output and error according to the limit each, but combined they need to be under the limit
+            if output_length_limit is not None and total_size > output_length_limit:
+                if return_code == 0:
+                    size_remaining = max(0, output_length_limit - output_size)
+                    if error_size > size_remaining:
+                        await stderr_file.seek(0)
+                        await stderr_file.truncate(size_remaining)
+                        error_size = size_remaining
+                        error_truncated = True
+                else:
+                    # if there was an error, we prefer error text over output text
+                    size_remaining = max(0, output_length_limit - error_size)
+                    if output_size > size_remaining:
+                        await stdout_file.seek(0)
+                        await stdout_file.truncate(size_remaining)
+                        output_size = size_remaining
+                        output_truncated = True
+
             logger.info("Command complete, exit code %d, output size %d, error size %d", return_code,
                         output_size, error_size)
 
@@ -198,7 +246,15 @@ async def _run_unix_command(ctx: Context, command: str, additional_hosts: Option
             await stdout_file.seek(0)
             output = (await stdout_file.read()).decode("utf-8", errors="ignore").strip()
             if return_code == 0:
-                return RunUnixCommand(command=command, return_code=return_code, output=output, error="", notes=None)
+                return RunUnixCommand(
+                    command=command,
+                    return_code=return_code,
+                    output=output,
+                    output_truncated=output_truncated,
+                    error="",
+                    error_truncated=False,
+                    notes=None
+                )
             else:
                 await stderr_file.flush()
                 error_tail = await read_last_text_bytes(stderr_file, max_bytes=1024)
@@ -206,14 +262,18 @@ async def _run_unix_command(ctx: Context, command: str, additional_hosts: Option
                     command=command,
                     return_code=return_code,
                     output=output,
+                    output_truncated=output_truncated,
                     error=error_tail,
+                    error_truncated=error_truncated,
                     notes=None,
                 )
 
 
-async def _write_stream_to_file(stream, file):
+async def _write_stream_to_file(stream, file, output_limiter: OutputLimiter):
     while True:
         line = await stream.readline()
         if not line:
             break
-        await file.write(line)
+        output_limiter.inc(len(line))
+        if not output_limiter.is_full():
+            await file.write(line)

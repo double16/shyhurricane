@@ -176,6 +176,8 @@ def main():
             prompt_queue = None
 
         prompt: List[ChatMessage] = []
+        # If the user cancels the pipeline run, any work captured via streaming will not be included in the history, we'll try to do that here
+        canceled_history: List[ChatMessage] = []
         while prompt_queue is None or len(prompt_queue) > 0:
             try:
                 if prompt_queue is not None:
@@ -229,8 +231,8 @@ def main():
                     pipe, *_ = create_pipeline(prompt, tools)
                     run_input = {"query": {"values": []}}
                 else:
-                    user_in_message = ChatMessage.from_user(user_in)
-                    run_input = {"query": {"values": [user_in_message]}}
+                    run_input = {"query": {"values": canceled_history + [ChatMessage.from_user(user_in)]}}
+                    canceled_history.clear()
 
                 console.print("🤖 ", end="")
 
@@ -244,6 +246,8 @@ def main():
                     continue
                 except KeyboardInterrupt:
                     console.print("[red]\nUser stopped the current agent run, Ctrl-C again to exit or continue with more instructions.")
+                    if streaming_output_holder.last_output.strip():
+                        canceled_history.append(ChatMessage.from_assistant(streaming_output_holder.last_output))
                     continue
 
                 # Process the output
