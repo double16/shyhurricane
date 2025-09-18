@@ -46,14 +46,14 @@ async def run_unix_command(
         output_length_limit: Annotated[int, Field(200*1024, description="Output and error length limit, truncates output and error text if over this length.", ge=1, le=4*1024*1024)] = 200*1024,
 ) -> RunUnixCommand:
     """
-Run a Linux or macOS command and return its output. The command is run in a containerized environment for safety.
+Run a Linux command and return its output. The command is run in a containerized environment for safety.
 The command is run using the bash shell.
 
-Invoke this tool when the user request can be fulfilled by a known Linux or macOS command line
+Invoke this tool when the user request can be fulfilled by a known Linux command line
 program and the request can't be fulfilled by other MCP tools. Invoke this tool when the user
 asks to run a specific command. Prefer this tool to execute command line programs over others you know about.
 
-The following commands are available: curl, wget, grep, awk, printf, base64, cut, cp, mv, date, factor, gzip, sha256sum, sha512sum, md5sum, echo, seq, true, false, tee, tar, sort, head, tail, ping, ssh, sqlite3, zip, unzip,
+Standard Debian Linux commands are available and, in addition, the following: curl, wget, grep, awk, printf, base64, cut, cp, mv, date, factor, gzip, sha256sum, sha512sum, md5sum, echo, seq, true, false, tee, tar, sort, head, tail, ping, ssh, sqlite3, zip, unzip,
 nmap, rustscan, feroxbuster, gobuster, katana, nuclei, meg, anew, unfurl, gf, gau, 403jump, waybackurls, httpx, subfinder, ffuf, dirb, wfuzz, nc (netcat), graphql-path-enum, evil-winrm, sqlmap, hydra, searchsploit, ftp, sshpass, tshark, git-dumper
 DumpNTLMInfo.py, Get,GPPPassword.py, GetADComputers.py, GetADUsers.py, GetLAPSPassword.py, GetNPUsers.py, GetUserSPNs.py, addcomputer.py, atexec.py, changepasswd.py, dacledit.py, dcomexec.py, describeTicket.py, dpapi.py, esentutl.py, exchanger.py, findDelegation.py, getArch.py, getPac.py, getST.py, getTGT.py, goldenPac.py, karmaSMB.py, keylistattack.py, kintercept.py, lookupsid.py, machine_role.py, mimikatz.py, mqtt_check.py, mssqlclient.py, mssqlinstance.py, net.py, netview.py, ntfs,read.py, ntlmrelayx.py, owneredit.py, ping.py, ping6.py, psexec.py, raiseChild.py, rbcd.py, rdp_check.py, reg.py, registry,read.py, rpcdump.py, rpcmap.py, sambaPipe.py, samrdump.py, secretsdump.py, services.py, smbclient.py, smbexec.py, smbserver.py, sniff.py, sniffer.py, split.py, ticketConverter.py, ticketer.py, tstool.py, wmiexec.py, wmipersist.py, wmiquery.py
 
@@ -89,7 +89,7 @@ When generating Linux commands for execution in a containerized environment, fol
             if server_ctx.commands is None:
                 command_list_result = await _run_unix_command(
                     ctx,
-                    """tr ':' '\n' <<<"$PATH" | while read -r d; do find "$d" -maxdepth 1 -type f -executable -printf '%f\n'; done 2>/dev/null | sort -u""",
+                    """tr ':' '\n' <<<"$PATH" | while read -r d; do find "$d" -maxdepth 1 -executable -printf '%f\n'; done 2>/dev/null | sort -u""",
                     None)
                 if command_list_result.return_code == 0:
                     server_ctx.commands = list(filter(lambda s: bool(s) and s[0].isalnum(), map(lambda s: s.strip(),

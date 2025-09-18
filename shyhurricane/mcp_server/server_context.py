@@ -1,3 +1,4 @@
+import asyncio
 import atexit
 import logging
 import os
@@ -76,101 +77,116 @@ _server_context: Optional[ServerContext] = None
 
 async def get_server_context() -> ServerContext:
     global _server_context
-    if _server_context is None:
-        server_config = get_server_config()
+    if _server_context is not None:
+        return _server_context
 
-        db = os.environ.get('CHROMA', '127.0.0.1:8200')
-        logger.info("Using chroma database at %s", db)
-        # ensure collections are created
-        for doc_type_model in doc_type_to_model().values():
-            for col in doc_type_model.get_chroma_collections():
-                document_store = create_chrome_document_store(
-                    db=db,
-                    collection_name=col,
-                )
-                document_store.count_documents()
+    server_config = get_server_config()
 
-        cache_path: str = os.path.join(os.environ.get('TOOL_CACHE', os.environ.get('TMPDIR', '/tmp')), 'tool_cache')
-        os.makedirs(cache_path, exist_ok=True)
-        disable_elicitation = bool(os.environ.get('DISABLE_ELICITATION', 'False'))
-        chroma_client = await create_chroma_client(db=db)
+    db = os.environ.get('CHROMA', '127.0.0.1:8200')
+    logger.info("Using chroma database at %s", db)
+    # ensure collections are created
+    for doc_type_model in doc_type_to_model().values():
+        for col in doc_type_model.get_chroma_collections():
+            document_store = create_chrome_document_store(
+                db=db,
+                collection_name=col,
+            )
+            document_store.count_documents()
 
-        for retry in reversed(range(3)):
-            try:
-                subprocess.check_call(["docker", "volume", "inspect", "mcp_session"],
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except subprocess.CalledProcessError:
-                try:
-                    subprocess.check_call(["docker", "volume", "create", "mcp_session"],
-                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    break
-                except subprocess.CalledProcessError as e:
-                    if retry == 0:
-                        logger.error("Failed to create mcp_session volume", exc_info=e)
-                        sys.exit(1)
-                    else:
-                        time.sleep(5)
+    cache_path: str = os.path.join(os.environ.get('TOOL_CACHE', os.environ.get('TMPDIR', '/tmp')), 'tool_cache')
+    os.makedirs(cache_path, exist_ok=True)
+    disable_elicitation = bool(os.environ.get('DISABLE_ELICITATION', 'False'))
+    chroma_client = await create_chroma_client(db=db)
+
+    mcp_session_volume = "mcp_session"
+
+    for retry in reversed(range(3)):
         try:
-            subprocess.check_call(["docker", "volume", "inspect", "seclists"],
+            subprocess.check_call(["docker", "volume", "inspect", mcp_session_volume],
                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.CalledProcessError:
             try:
-                # make sure the image is available first
-                subprocess.check_call(["docker", "image", "ls", unix_command_image()],
+                subprocess.check_call(["docker", "volume", "create", mcp_session_volume],
                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                # try to create the volume
-                subprocess.check_call(["docker", "volume", "create", "seclists"],
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                logger.info("Populating seclists volume")
-                subprocess.Popen(
-                    ["docker", "run", "--user=0", "--rm", "-d", "-v", "seclists:/usr/share/seclists",
-                     unix_command_image(), "/bin/bash", "-c",
-                     "git clone --depth=1 https://github.com/danielmiessler/SecLists.git /usr/share/seclists && "
-                     "tar -xf /usr/share/seclists/Passwords/Leaked-Databases/rockyou.txt.tar.gz -C /usr/share/seclists/Passwords/Leaked-Databases/ && "
-                     "chmod a+r /usr/share/seclists/Passwords/Leaked-Databases/rockyou.txt",
-                     "/usr/share/seclists"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                break
             except subprocess.CalledProcessError as e:
-                logger.error("Failed to create seclists volume", exc_info=e)
-                sys.exit(1)
+                if retry == 0:
+                    logger.error(f"Failed to create {mcp_session_volume} volume", exc_info=e)
+                    sys.exit(1)
+                else:
+                    time.sleep(5)
 
-        if server_config.low_power:
-            logger.warning("low_power: skipping embedding based retrieval pipelines")
-            document_pipeline = None
-            website_context_pipeline = None
-            stores = build_stores(db)
-        else:
-            document_pipeline, _, stores = await build_document_pipeline(
-                db=db,
-                generator_config=get_generator_config(),
-            )
-            website_context_pipeline = build_website_context_pipeline(
-                generator_config=get_generator_config(),
-            )
+    seclists_volume = "seclists"
+    try:
+        subprocess.check_call(["docker", "volume", "inspect", seclists_volume],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except subprocess.CalledProcessError:
+        try:
+            # make sure the image is available first
+            subprocess.check_call(["docker", "image", "ls", unix_command_image()],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # try to create the volume
+            subprocess.check_call(["docker", "volume", "create", seclists_volume],
+                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            logger.info(f"Populating {seclists_volume} volume")
+            subprocess.Popen(
+                ["docker", "run", "--user=0", "--rm", "-d", "-v", f"{seclists_volume}:/usr/share/seclists",
+                 unix_command_image(), "/bin/bash", "-c",
+                 "git clone --depth=1 https://github.com/danielmiessler/SecLists.git /usr/share/seclists && "
+                 "tar -xf /usr/share/seclists/Passwords/Leaked-Databases/rockyou.txt.tar.gz -C /usr/share/seclists/Passwords/Leaked-Databases/ && "
+                 "chmod a+r /usr/share/seclists/Passwords/Leaked-Databases/rockyou.txt",
+                 "/usr/share/seclists"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Failed to create {seclists_volume} volume", exc_info=e)
+            sys.exit(1)
 
-        ingest_queue, ingest_pool = start_ingest_worker(db=db, generator_config=get_generator_config(),
-                                                        pool_size=server_config.ingest_pool_size)
-        task_worker_ipc = start_task_worker(db, ingest_queue.path, server_config.task_pool_size)
+    await asyncio.create_subprocess_exec(
+        "docker", "run", "--rm",
+        "-v", f"{mcp_session_volume}:/work",
+        unix_command_image(),
+        "find", "/work", "-atime", "+2", "-not", "-ipath", "/work/.*", "-delete",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
 
-        _server_context = ServerContext(
+    if server_config.low_power:
+        logger.warning("low_power: skipping embedding based retrieval pipelines")
+        document_pipeline = None
+        website_context_pipeline = None
+        stores = build_stores(db)
+    else:
+        document_pipeline, _, stores = await build_document_pipeline(
             db=db,
-            cache_path=cache_path,
-            document_pipeline=document_pipeline,
-            website_context_pipeline=website_context_pipeline,
-            ingest_queue=ingest_queue,
-            ingest_pool=ingest_pool,
-            task_queue=task_worker_ipc.task_queue,
-            task_pool=task_worker_ipc.task_pool,
-            spider_result_queue=task_worker_ipc.spider_result_queue,
-            port_scan_result_queue=task_worker_ipc.port_scan_result_queue,
-            dir_busting_result_queue=task_worker_ipc.dir_busting_result_queue,
-            stores=stores,
-            chroma_client=chroma_client,
-            mcp_session_volume="mcp_session",
-            seclists_volume="seclists",
-            disable_elicitation=disable_elicitation,
-            open_world=server_config.open_world,
+            generator_config=get_generator_config(),
         )
+        website_context_pipeline = build_website_context_pipeline(
+            generator_config=get_generator_config(),
+        )
+
+    ingest_queue, ingest_pool = start_ingest_worker(db=db, generator_config=get_generator_config(),
+                                                    pool_size=server_config.ingest_pool_size)
+    task_worker_ipc = start_task_worker(db, ingest_queue.path, server_config.task_pool_size)
+
+    _server_context = ServerContext(
+        db=db,
+        cache_path=cache_path,
+        document_pipeline=document_pipeline,
+        website_context_pipeline=website_context_pipeline,
+        ingest_queue=ingest_queue,
+        ingest_pool=ingest_pool,
+        task_queue=task_worker_ipc.task_queue,
+        task_pool=task_worker_ipc.task_pool,
+        spider_result_queue=task_worker_ipc.spider_result_queue,
+        port_scan_result_queue=task_worker_ipc.port_scan_result_queue,
+        dir_busting_result_queue=task_worker_ipc.dir_busting_result_queue,
+        stores=stores,
+        chroma_client=chroma_client,
+        mcp_session_volume=mcp_session_volume,
+        seclists_volume=seclists_volume,
+        disable_elicitation=disable_elicitation,
+        open_world=server_config.open_world,
+    )
 
     return _server_context
 

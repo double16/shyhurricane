@@ -7,14 +7,13 @@ import os
 import sys
 import traceback
 from pathlib import Path
-from typing import Iterable, Tuple, List
+from typing import Tuple, List
 
 from haystack import Pipeline
 from haystack.core.component import Component
 from haystack.core.errors import PipelineRuntimeError
 from haystack.dataclasses import ChatMessage
 from haystack.tools import Tool
-from haystack_integrations.tools.mcp import MCPToolset
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
 from rich import get_console
@@ -262,6 +261,8 @@ def main():
                 non_streamed_replies = []
                 for reply in replies:
                     if reply in prompt:
+                        continue
+                    if any(filter(lambda p: p.text in "\n".join(reply.texts), prompt)):
                         continue
                     for text in reply.texts:
                         if not text or text not in streaming_output_holder.last_output:

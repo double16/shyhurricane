@@ -4,7 +4,7 @@ import os.path
 import queue
 import time
 from multiprocessing import Queue
-from typing import List, Optional, Dict, Annotated
+from typing import List, Optional, Dict, Annotated, Union
 
 from mcp import McpError
 from mcp.server.fastmcp import Context
@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context, get_additional_hosts, \
     AdditionalHostsField, CookiesField, RequestParamsField
 from shyhurricane.mcp_server.tools.find_wordlists import find_wordlists
+from shyhurricane.mcp_server.tools.run_unix_command import _run_unix_command
 from shyhurricane.task_queue import DirBustingQueueItem
 
 logger = logging.getLogger(__name__)
@@ -116,26 +117,8 @@ async def directory_buster(
     url = url.strip()
     depth = min(5, max(1, depth))
 
-    # validate wordlist
     if wordlist:
-        wordlist_filename = os.path.split(wordlist)[-1]
-        try:
-            wordlist_results = await find_wordlists(ctx, wordlist_filename, 1000)
-            if len(wordlist_results) == 0:
-                logger.warning("No wordlists found for %s, using default", wordlist_filename)
-                wordlist = None
-            elif wordlist in wordlist_results:
-                logger.info("Validated wordlist %s", wordlist)
-            else:
-                original_wordlist = wordlist
-                for found_wordlist in wordlist_results:
-                    wordlist = found_wordlist
-                    if found_wordlist.endswith("/" + wordlist_filename):
-                        # exact filename, different path
-                        break
-                logger.info("Corrected wordlist from %s to %s", original_wordlist, wordlist)
-        except McpError as e:
-            logger.warning("Could not validate wordlist, using as given: %s", e)
+        wordlist = await validate_wordlist(ctx, wordlist)
 
     if extensions:
         extensions = list(map(lambda e: e[1:] if len(e) > 1 and e[0] == '.' else e, extensions))
@@ -158,6 +141,8 @@ async def directory_buster(
         params=params,
         additional_hosts=get_additional_hosts(ctx, additional_hosts),
         seclists_volume=server_ctx.seclists_volume,
+        mcp_session_volume=server_ctx.mcp_session_volume,
+        work_path=ctx.request_context.lifespan_context.work_path,
     )
     await asyncio.to_thread(task_queue.put, queue_item)
     results: List[str] = []
@@ -190,3 +175,30 @@ async def directory_buster(
         urls=results,
         has_more=has_more,
     )
+
+
+async def validate_wordlist(ctx: Context, wordlist: str) -> Union[str, None]:
+    wordlist_filename = os.path.split(wordlist)[-1]
+    try:
+        if wordlist.startswith("/tmp/") or wordlist.startswith("/var/tmp/") or not wordlist.startswith("/"):
+            test_for_file = await _run_unix_command(ctx, "test -s '" + wordlist + "'", additional_hosts=None)
+            if test_for_file.return_code == 0:
+                return wordlist
+
+        wordlist_results = await find_wordlists(ctx, wordlist_filename, 1000)
+        if len(wordlist_results) == 0:
+            logger.warning("No wordlists found for %s, using default", wordlist_filename)
+            return None
+        elif wordlist in wordlist_results:
+            logger.info("Validated wordlist %s", wordlist)
+        else:
+            original_wordlist = wordlist
+            for found_wordlist in wordlist_results:
+                wordlist = found_wordlist
+                if found_wordlist.endswith("/" + wordlist_filename):
+                    # exact filename, different path
+                    break
+            logger.info("Corrected wordlist from %s to %s", original_wordlist, wordlist)
+    except McpError as e:
+        logger.warning("Could not validate wordlist, using as given: %s", e)
+    return wordlist

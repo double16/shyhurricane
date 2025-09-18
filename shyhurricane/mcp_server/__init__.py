@@ -78,15 +78,16 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
     app_context_id = uuid.uuid4().hex
 
     work_path = f"/work/{app_context_id}"
-    proc = await asyncio.create_subprocess_exec("docker", "run", "--rm",
-                                                "-v", f"{server_ctx.mcp_session_volume}:/work",
-                                                unix_command_image(),
-                                                # we're going to keep /tmp and /var/tmp in the volume because LLMs keep storing stuff there
-                                                "mkdir", "-p", work_path, work_path + "/.private/tmp",
-                                                work_path + "/.private/var/tmp",
-                                                stdout=asyncio.subprocess.DEVNULL,
-                                                stderr=asyncio.subprocess.DEVNULL,
-                                                )
+    proc = await asyncio.create_subprocess_exec(
+        "docker", "run", "--rm",
+        "-v", f"{server_ctx.mcp_session_volume}:/work",
+        unix_command_image(),
+        # we're going to keep /tmp and /var/tmp in the volume because LLMs keep storing stuff there
+        "mkdir", "-p", work_path, work_path + "/.private/tmp",
+        work_path + "/.private/var/tmp",
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        )
     return_code = await proc.wait()
     if return_code != 0:
         logger.error("Failed to create MCP session work dir %s", work_path)
@@ -112,6 +113,15 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         if oast_provider.inited:
             await oast_provider.deregister()
         await app_context.channel_manager.cleanup()
+        # clean up work path
+        await asyncio.create_subprocess_exec(
+            "docker", "run", "--rm",
+            "-v", f"{server_ctx.mcp_session_volume}:/work",
+            unix_command_image(),
+            "rm", "-rf", work_path,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            )
 
 
 class ShyHurricaneFastMCP(FastMCP):

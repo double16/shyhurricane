@@ -63,10 +63,15 @@ def _do_busting(
         mitmdump_docker_command.extend(["--add-host", f"{host}:{ip}"])
     if item.seclists_volume:
         mitmdump_docker_command.extend(["-v", f"{item.seclists_volume}:/usr/share/seclists"])
+    if item.mcp_session_volume:
+        mitmdump_docker_command.extend(["-v", f"{item.mcp_session_volume}:/work"])
     mitmdump_docker_command.append(unix_command_image())
     mitmdump_docker_command.extend(mitmdump_command)
 
-    buster_docker_command = ["docker", "exec", container_name, "timeout", "--kill-after=1m", "30m"]
+    buster_docker_command = ["docker", "exec"]
+    if item.work_path:
+        buster_docker_command.extend(["--workdir", item.work_path])
+    buster_docker_command.extend([container_name, "timeout", "--kill-after=1m", "30m"])
     buster_docker_command.extend(buster_command)
 
     logger.info(f"Dir busting with command {' '.join(buster_docker_command)}")

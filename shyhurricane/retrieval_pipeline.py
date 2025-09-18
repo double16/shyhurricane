@@ -479,6 +479,22 @@ class ChatPromptTemplateBuilder:
         return {"messages": messages}
 
 
+@component
+class ChatMessageFilter:
+    @component.output_types(messages=List[ChatMessage])
+    def run(self, messages: List[ChatMessage]):
+        filtered = []
+        for message in messages:
+            # ollama chat generator fails if a ChatMessage has no content
+            text_contents = message.texts
+            tool_calls = message.tool_calls
+            tool_call_results = message.tool_call_results
+            images = message.images
+            if text_contents or tool_calls or tool_call_results or images:
+                filtered.append(message)
+        return {"messages": filtered}
+
+
 def build_chat_pipeline(
         generator_config: GeneratorConfig,
         prompt: Optional[List[ChatMessage]] = None,
@@ -514,6 +530,7 @@ def build_chat_pipeline(
     pipeline.add_component("llm", chat_generator)
     pipeline.add_component("tool_invoker", ToolInvoker(tools=tools))
     pipeline.add_component("list_joiner", ListJoiner(List[ChatMessage]))
+    pipeline.add_component("memory_filter", ChatMessageFilter())
     pipeline.add_component("memory_retriever", memory_retriever)
     pipeline.add_component("memory_writer", memory_writer)
     pipeline.add_component("memory_joiner", ListJoiner(List[ChatMessage]))
@@ -541,7 +558,8 @@ def build_chat_pipeline(
     pipeline.connect("list_joiner.values", "response_llm.messages")
     pipeline.connect("response_llm.replies", "memory_joiner")
     pipeline.connect("response_llm.replies", "response_llm_chat_message_logger")
-    pipeline.connect("memory_joiner", "memory_writer")
+    pipeline.connect("memory_joiner", "memory_filter")
+    pipeline.connect("memory_filter", "memory_writer")
 
     return pipeline, response_chat_generator, tools
 
@@ -567,7 +585,7 @@ def build_agent_pipeline(
     if not prompt:
         prompt = [ChatMessage.from_system(pentester_agent_system_prompt)]
 
-    system_prompt = "\n".join(map(lambda m: m.text, filter(lambda m: m.is_from(ChatRole.SYSTEM), prompt)))
+    system_prompt = "\n".join(map(lambda m: m.text, prompt))
 
     tools = tools or create_tools(mcp_urls)
     prompt_builder = ChatPromptBuilder()
@@ -596,6 +614,7 @@ def build_agent_pipeline(
     pipeline.add_component("template_builder", template_builder)
     pipeline.add_component("prompt_builder", prompt_builder)
     pipeline.add_component("agent", assistant)
+    pipeline.add_component("memory_filter", ChatMessageFilter())
     pipeline.add_component("memory_retriever", memory_retriever)
     pipeline.add_component("memory_writer", memory_writer)
     pipeline.add_component("memory_joiner", ListJoiner(List[ChatMessage]))
@@ -611,7 +630,8 @@ def build_agent_pipeline(
 
     pipeline.connect("agent.last_message", "str_to_list")
     pipeline.connect("str_to_list", "memory_joiner")
-    pipeline.connect("memory_joiner", "memory_writer")
+    pipeline.connect("memory_joiner", "memory_filter")
+    pipeline.connect("memory_filter", "memory_writer")
 
     pipeline.warm_up()
 

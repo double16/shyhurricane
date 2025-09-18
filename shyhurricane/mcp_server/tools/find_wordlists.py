@@ -97,7 +97,7 @@ async def find_wordlists(
     command = "find /usr/share/seclists -type f -not -path '*/.*'"
     query_clean = re.sub(r'[^\w\s\-_.]', '', query.strip()) if query else ""
     if query_clean:
-        command = f"find /usr/share/seclists -type f -not -path '*/.*'"
+        command = "find /usr/share/seclists -type f -not -path '*/.*'"
         for query_part in query_clean.split(maxsplit=10):
             command += f" -ipath '*{query_part}*'"
     result: RunUnixCommand = await _run_unix_command(ctx, command, None)

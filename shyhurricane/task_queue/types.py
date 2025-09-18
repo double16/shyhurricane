@@ -80,6 +80,8 @@ class DirBustingQueueItem:
                  params: Optional[Dict[str, str]] = None,
                  rate_limit_requests_per_second: Optional[int] = None,
                  seclists_volume: Optional[str] = None,
+                 mcp_session_volume: Optional[str] = None,
+                 work_path: Optional[str] = None,
                  ):
         self.uri = uri
         self.depth = depth
@@ -94,6 +96,8 @@ class DirBustingQueueItem:
         self.params = params
         self.rate_limit_requests_per_second = rate_limit_requests_per_second
         self.seclists_volume = seclists_volume
+        self.mcp_session_volume = mcp_session_volume
+        self.work_path = work_path
 
 
 class SaveFindingQueueItem:
