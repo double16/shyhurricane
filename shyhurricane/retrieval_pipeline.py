@@ -3,6 +3,7 @@ import logging
 import os
 import re
 from typing import Dict, List, Optional, Any, Tuple, Iterable, Callable, Union
+from warnings import deprecated
 
 import chromadb
 from chromadb import AsyncClientAPI
@@ -495,6 +496,7 @@ class ChatMessageFilter:
         return {"messages": filtered}
 
 
+@deprecated
 def build_chat_pipeline(
         generator_config: GeneratorConfig,
         prompt: Optional[List[ChatMessage]] = None,
@@ -503,6 +505,9 @@ def build_chat_pipeline(
 ) -> Tuple[Pipeline, Component, Toolset]:
     """
     Builds a pipeline for an offensive security assistant chat.
+
+    Deprecated: The chat function we want is an agent with instructions for chat, not autonomous.
+
     :return: Pipeline, generator component
     """
 

@@ -473,3 +473,42 @@ def get_log_path(db: str, log_name: str) -> Path:
 
 def b64(b: bytes) -> str:
     return base64.b64encode(b).decode("ascii")
+
+
+_word_re = re.compile(r"\w+")
+
+def collapse_first_repeated_sequence(s: str) -> str:
+    # Tokenize words and keep spans into original string
+    words: List[str] = []
+    spans: List[Tuple[int, int]] = []
+    for m in _word_re.finditer(s):
+        words.append(m.group(0))
+        spans.append((m.start(), m.end()))
+    n = len(words)
+    if n < 2:
+        return s
+
+    # Find first immediately repeated block starting at i of size k
+    for i in range(n - 1):
+        max_k = (n - i) // 2
+        for k in range(1, max_k + 1):
+            block = words[i:i+k]
+            # Must repeat immediately
+            if words[i+k:i+2*k] != block:
+                continue
+            # And from i to the end, it must be *only* repetitions of block
+            tail = words[i:]
+            if len(tail) % k != 0:
+                continue
+            reps = len(tail) // k
+            if all(tail[j*k:(j+1)*k] == block for j in range(reps)):
+                # OK to collapse: keep prefix + one copy of the block (+ its trailing punctuation)
+                end = spans[i + k - 1][1]
+                j = end
+                # include trailing punctuation directly after the block (stop at whitespace or word char/_)
+                while j < len(s) and not s[j].isspace() and not s[j].isalnum() and s[j] != '_':
+                    j += 1
+                return s[:j]
+            # Otherwise, unrepeated words exist at the end → do not dedupe
+            return s
+    return s

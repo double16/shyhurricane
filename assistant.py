@@ -24,6 +24,7 @@ from shyhurricane.generator_config import GeneratorConfig, add_generator_args
 from shyhurricane.mcp_server.generator_config import set_generator_config
 from shyhurricane.retrieval_pipeline import build_chat_pipeline, build_agent_pipeline, create_tools
 from shyhurricane.streaming_chunk_writer import StreamingChunkWriter
+from shyhurricane.utils import collapse_first_repeated_sequence
 
 logger = logging.getLogger(__name__)
 
@@ -143,7 +144,7 @@ def main():
             if "autonomous" in system_prompt_lower or "automated" in system_prompt_lower:
                 pipe, generator, _ = build_agent_pipeline(generator_config, system_prompt, args.mcp_url, tools)
             else:
-                pipe, generator, _ = build_chat_pipeline(generator_config, system_prompt, args.mcp_url, tools)
+                pipe, generator, _ = build_agent_pipeline(generator_config, system_prompt, args.mcp_url, tools)
 
             if not args.no_stream and generator is not None:
                 generator.streaming_callback = StreamingChunkWriter(printer=streaming_chunk_printer,
@@ -246,7 +247,8 @@ def main():
                 except KeyboardInterrupt:
                     console.print("[red]\nUser stopped the current agent run, Ctrl-C again to exit or continue with more instructions.")
                     if streaming_output_holder.last_output.strip():
-                        canceled_history.append(ChatMessage.from_assistant(streaming_output_holder.last_output))
+                        # if the user cancels because of looping, clean up the message
+                        canceled_history.append(ChatMessage.from_assistant(collapse_first_repeated_sequence(streaming_output_holder.last_output)+"\n\n"))
                     continue
 
                 # Process the output
@@ -256,6 +258,7 @@ def main():
                     replies = res["agent"]["messages"]
                 else:
                     replies = []
+                replies = replies[-1:]
 
                 # If the replies have already been output, either as the system prompt or by streaming, don't output again
                 non_streamed_replies = []

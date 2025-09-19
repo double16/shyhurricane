@@ -166,7 +166,7 @@ async def index_http_url(
             }
         }))
 
-        if map_mime_to_type(response.headers.get("Content-Type")) == "javascript":
+        if body and map_mime_to_type(response.headers.get("Content-Type")) == "javascript":
             body = await deobfuscate_javascript(ctx, body)
 
         if body:

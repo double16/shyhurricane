@@ -2,6 +2,7 @@ haystack-ai~=2.17.1
 chroma-haystack~=3.3.0
 numpy<2
 ollama-haystack~=5.1.0
+openai~=1.108.0
 google-genai-haystack~=2.1.1
 mcp-haystack~=0.6.0
 chardet~=5.2.0

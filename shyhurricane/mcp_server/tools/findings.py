@@ -188,6 +188,8 @@ async def query_findings(
         if len(findings) >= limit:
             break
 
+    logger.info(f"Found {len(findings)} findings")
+
     return QueryFindingsResult(
         instructions=finding_instructions if len(findings) else finding_not_found_instructions,
         target=target,
