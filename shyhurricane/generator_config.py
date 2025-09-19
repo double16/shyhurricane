@@ -3,6 +3,7 @@ import logging
 import os
 from typing import Optional, Dict, Any, Union, List
 
+import requests
 from google.genai import Client
 from google.genai.types import HttpOptions, HttpRetryOptions
 from haystack.components.generators import OpenAIGenerator
@@ -36,6 +37,7 @@ def add_generator_args(ap: argparse.ArgumentParser):
 
 
 TEMPERATURE_DEFAULT: float = 0.2
+OLLAMA_HOST_DEFAULT = "localhost:11434"
 
 
 class GoogleGenAIChatGeneratorWithRetry(GoogleGenAIChatGenerator):
@@ -173,6 +175,18 @@ ollama_cg._convert_ollama_meta_to_openai_format = _safe_convert_ollama_meta_to_o
 ollama_cg._convert_ollama_response_to_chatmessage = _thinking_convert_ollama_response_to_chatmessage
 
 
+def ollama_model_supports_thinking(ollama_host: str, ollama_model: str) -> bool:
+    r = requests.post(f"http://{ollama_host}/api/chat", json={
+        "model": ollama_model,
+        "messages": [{"role": "user", "content": "ping"}],
+        "think": True,
+        "stream": False
+    })
+    data = r.json()
+    supports_thinking = bool(data.get("message", {}).get("thinking"))
+    return supports_thinking
+
+
 class GeneratorConfig(BaseModel):
     ollama_host: Optional[str] = Field(description="The location of the Ollama server", default=None)
     ollama_model: Optional[str] = Field(description="The name of the Ollama model", default=None)
@@ -203,6 +217,7 @@ class GeneratorConfig(BaseModel):
         return generator_config
 
     def apply_reasoning_default(self):
+        self.ollama_host = self.ollama_host or OLLAMA_HOST_DEFAULT
         if self.ollama_model or self.gemini_model or self.openai_model:
             return self
         if os.environ.get("GEMINI_API_KEY", None) or os.environ.get("GOOGLE_API_KEY", None):
@@ -214,6 +229,7 @@ class GeneratorConfig(BaseModel):
         return self
 
     def apply_summarizing_default(self):
+        self.ollama_host = self.ollama_host or OLLAMA_HOST_DEFAULT
         if self.ollama_model or self.gemini_model or self.openai_model:
             return self
         self.ollama_model = "llama3.2:3b"
@@ -235,10 +251,7 @@ class GeneratorConfig(BaseModel):
         elif self.gemini_model:
             return f"Gemini {self.gemini_model}"
         else:
-            if self.ollama_host:
-                return f"Ollama {self.ollama_model} at {self.ollama_host}"
-            else:
-                return f"Ollama {self.ollama_model}"
+            return f"Ollama {self.ollama_model} at {self.ollama_host}"
 
     def create_chat_generator(self,
                               temperature: Optional[float] = None,
@@ -272,29 +285,20 @@ class GeneratorConfig(BaseModel):
                 "temperature": temperature or self.temperature,
             }
             ollama_timeout = int(os.environ.get("OLLAMA_TIMEOUT", "300"))
-            if self.ollama_model.startswith("gpt-oss"):
+            ollama_think = ollama_model_supports_thinking(self.ollama_host, self.ollama_model)
+            if ollama_think:
                 # OllamaChatGenerator docs say the think parameter can be a bool or "low", "medium", "high", but the client only supports bool
                 # https://huggingface.co/docs/inference-providers/guides/gpt-oss
                 _generation_kwargs["effort"] = "high"
-            if self.ollama_host:
-                logger.info("Using Ollama chat with model %s at %s", self.ollama_model, self.ollama_host)
-                return OllamaChatGenerator(
-                    url="http://" + self.ollama_host,
-                    model=self.ollama_model,
-                    timeout=ollama_timeout,
-                    generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
-                    tools=tools,
-                    think=True,
-                )
-            else:
-                logger.info("Using Ollama chat with model %s", self.ollama_model)
-                return OllamaChatGenerator(
-                    model=self.ollama_model,
-                    timeout=ollama_timeout,
-                    generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
-                    tools=tools,
-                    think=True,
-                )
+            logger.info("Using Ollama chat with model %s at %s", self.ollama_model, self.ollama_host)
+            return OllamaChatGenerator(
+                url="http://" + (self.ollama_host or OLLAMA_HOST_DEFAULT),
+                model=self.ollama_model,
+                timeout=ollama_timeout,
+                generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
+                tools=tools,
+                think=ollama_think,
+            )
         else:
             raise NotImplementedError
 
@@ -326,19 +330,12 @@ class GeneratorConfig(BaseModel):
             _generation_kwargs = {
                 "temperature": temperature or self.temperature,
             }
-            if self.ollama_host:
-                logger.info("Using Ollama generator with model %s at %s", self.ollama_model, self.ollama_host)
-                return OllamaGenerator(
-                    url="http://" + self.ollama_host,
-                    model=self.ollama_model,
-                    generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
-                )
-            else:
-                logger.info("Using Ollama generator with model %s", self.ollama_model)
-                return OllamaGenerator(
-                    model=self.ollama_model,
-                    generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
-                )
+            logger.info("Using Ollama generator with model %s at %s", self.ollama_model, self.ollama_host)
+            return OllamaGenerator(
+                url="http://" + (self.ollama_host or OLLAMA_HOST_DEFAULT),
+                model=self.ollama_model,
+                generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
+            )
         else:
             raise NotImplementedError
 

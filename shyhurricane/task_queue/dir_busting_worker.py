@@ -168,9 +168,10 @@ def _do_busting(
             # logger.error("Dir busting errors %s", buster_proc.stderr.read())
         return None
     finally:
-        mitmdump_proc.terminate()
         if result_queue:
             result_queue.put_nowait(None)
+        subprocess.Popen(["docker", "rm", "-f", container_name], stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
 
 
 def _build_feroxbuster_command(

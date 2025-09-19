@@ -74,7 +74,7 @@ When generating Linux commands for execution in a containerized environment, fol
 - Always set a timeout for potentially blocking commands (e.g., timeout 10s nmap ...). Use a timeout value appropriate for the command. For example, directory busting with a large word list may take 10 minutes, whereas a short wordlist may be 2 minutes.
 - Ensure commands can be complete without user interaction before execution.
 - The directly accessible filesystem is part of the containerized environment, not the target. Commands such as find, cat, etc. are not enumerating the target unless they are part of a command that connects to the target, such as ssh.
-- Files in the current working directory will persist across calls. Do not write to /tmp or /var/tmp. Do not save output to files outside of the current working directory.
+- Files in the current working directory will persist across calls. Prefer writing files to the current working directory.
 """
     await log_tool_history(ctx, title="run_unix_command", command=command, additional_hosts=additional_hosts, env=env)
     server_ctx = await get_server_context()
