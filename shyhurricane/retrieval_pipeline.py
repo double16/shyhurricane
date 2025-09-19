@@ -3,7 +3,6 @@ import logging
 import os
 import re
 from typing import Dict, List, Optional, Any, Tuple, Iterable, Callable, Union
-from warnings import deprecated
 
 import chromadb
 from chromadb import AsyncClientAPI
@@ -496,7 +495,6 @@ class ChatMessageFilter:
         return {"messages": filtered}
 
 
-@deprecated
 def build_chat_pipeline(
         generator_config: GeneratorConfig,
         prompt: Optional[List[ChatMessage]] = None,
