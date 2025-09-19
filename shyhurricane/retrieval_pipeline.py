@@ -167,7 +167,7 @@ Your task:
 1. Analyze the input and **infer all relevant client-side vulnerabilities or risky behaviors**.
 2. For each inferred item, generate **exactly {{ number }} insecure client-side JavaScript code patterns** that represent real-world usage.
 
-🔒 Code Pattern Requirements:
+Code Pattern Requirements:
 - Must be valid client-side JavaScript (ES5/ES6+)
 - Must demonstrate insecure behavior
 - Must not be tied to a specific app or domain
@@ -183,41 +183,29 @@ Your task:
 Examples:
 1. Example Query 1: "What javascript libraries call eval() on example.com" when asked for 10 patterns
     ----
-    function executeCode(code) {
-        eval('return ' + code + ';');
-    }
+    eval('return ' + code + ';');
     ----
-    function getJSON(data) {
-        var json = '{"key": "' + data + '"}';
-        return JSON.parse(eval(json));
-    }
+    var json = '{"key": "' + data + '"}';
+    return JSON.parse(eval(json));
     ----
-    function getHTML(html) {
-        var htmlString = '<div>' + html + '</div>';
-        return eval(htmlString);
-    }
+    var htmlString = '<div>' + html + '</div>';
+    return eval(htmlString);
     ----
     var code = "console.log('Hello World!');";
     executeCode(code);
     ----
-    function getCSS(css) {
-        var cssString = 'body { background-color: ' + css + '; }';
-        return eval(cssString);
-    }
+    var cssString = 'body { background-color: ' + css + '; }';
+    return eval(cssString);
     ----
-    function getScript(script) {
-        var scriptString = 'document.write("' + script + '");';
-        return eval(scriptString);
-    }
+    var scriptString = 'document.write("' + script + '");';
+    return eval(scriptString);
     ----
     var data = "Hello World!";
     var json = '{"key": "' + data + '"}';
     getJSON(json);
     ----
-    function getXML(xml) {
-        var xmlString = '<root>' + xml + '</root>';
-        return eval(xmlString);
-    }
+    var xmlString = '<root>' + xml + '</root>';
+    return eval(xmlString);
     ----
     var html = 'Hello World!';
     var htmlString = '<div>' + html + '</div>';
