@@ -30,3 +30,7 @@ class TestTargetInfo(unittest.TestCase):
     def test_filter_targets_query(self):
         self.assertEqual(["https://example.com"], filter_targets_query("Find vulns on https://example.com"))
         self.assertEqual(["example.com"], filter_targets_query("Find vulns on example.com"))
+
+    def test_with_ports(self):
+        self.assertEqual("example.com:443", parse_target_info("example.com").with_port(443).netloc)
+        self.assertEqual("example.com:443", parse_target_info("example.com:80").with_port(443).netloc)

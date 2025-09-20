@@ -22,7 +22,7 @@ from rich.markdown import Markdown
 from shyhurricane.config import configure
 from shyhurricane.generator_config import GeneratorConfig, add_generator_args
 from shyhurricane.mcp_server.generator_config import set_generator_config
-from shyhurricane.retrieval_pipeline import build_chat_pipeline, build_agent_pipeline, create_tools
+from shyhurricane.retrieval_pipeline import build_agent_pipeline, create_tools
 from shyhurricane.streaming_chunk_writer import StreamingChunkWriter
 from shyhurricane.utils import collapse_first_repeated_sequence
 

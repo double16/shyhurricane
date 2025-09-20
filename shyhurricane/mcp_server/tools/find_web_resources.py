@@ -353,7 +353,12 @@ async def find_web_resources(
     parsed_targets: List[TargetInfo] = []
     for target in targets:
         try:
-            parsed_targets.append(parse_target_info(target))
+            raw_target = parse_target_info(target)
+            if not raw_target.netloc and raw_target.host:
+                parsed_targets.append(raw_target.with_port(80))
+                parsed_targets.append(raw_target.with_port(443))
+            else:
+                parsed_targets.append(raw_target)
         except ValueError:
             pass
     filter_netloc = list(map(lambda t: t.netloc, parsed_targets))
@@ -447,6 +452,7 @@ async def find_web_resources(
 
     res = await asyncio.to_thread(document_pipeline.run,
                                   data={"query": {"text": query, "filters": filters, "max_results": limit,
+                                                  "targets": filter_netloc + list(filter_domain),
                                                   "progress_callback": progress_callback}},
                                   include_outputs_from={"combine"})
 
