@@ -57,10 +57,16 @@ class CombineDocs:
         component.set_input_types(self, **input_types)
 
     @component.output_types(documents=List[Document])
-    def run(self, **kwargs):
+    def run(self, doc_types: Iterable[str], **kwargs):
         merged = []
         for docs in kwargs.values():
             merged.extend(docs)
+
+        # increase score when document is from doc_type
+        if doc_types:
+            for doc in merged:
+                if doc.meta.get("type", None) in doc_types and doc.score:
+                    doc.score *= 10
         merged.sort(key=lambda d: (d.score or 0, d.meta.get("timestamp_float", 0)), reverse=True)
         return {"documents": merged}
 
@@ -93,13 +99,15 @@ class TraceDocs:
 
 @component
 class Query:
-    @component.output_types(text=str, filters=Dict[str, Any], max_results=int, targets=Iterable[str],
+    @component.output_types(text=str, filters=Dict[str, Any], max_results=int,
+                            targets=Iterable[str], doc_types=Iterable[str],
                             progress_callback=Callable[[str], None])
     def run(
             self,
             text: str,
             filters: Optional[Dict[str, Any]] = None,
             targets: Optional[Iterable[str]] = None,
+            doc_types: Optional[Iterable[str]] = None,
             max_results: Optional[int] = None,
             progress_callback: Optional[Callable[[str], None]] = None
     ):
@@ -109,6 +117,7 @@ class Query:
             "text": text,
             "filters": filters or {},
             "targets": targets or [],
+            "doc_types": doc_types or [],
             "max_results": max_results,
             "progress_callback": progress_callback,
         }
@@ -738,6 +747,7 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
     pipe.add_component("query_expander", QueryExpander(generator_config))
     pipe.connect("query.text", "query_expander.query")
     pipe.connect("query.targets", "query_expander.targets")
+    pipe.connect("query.doc_types", "combine.doc_types")
 
     retrievers: Dict[str, MultiQueryChromaRetriever] = {}
     stores: Dict[str, ChromaDocumentStore] = {}

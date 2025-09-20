@@ -453,6 +453,7 @@ async def find_web_resources(
     res = await asyncio.to_thread(document_pipeline.run,
                                   data={"query": {"text": query, "filters": filters, "max_results": limit,
                                                   "targets": filter_netloc + list(filter_domain),
+                                                  "doc_types": doc_types,
                                                   "progress_callback": progress_callback}},
                                   include_outputs_from={"combine"})
 
