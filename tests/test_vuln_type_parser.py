@@ -23,18 +23,18 @@ class VulnTypeParserTest(unittest.TestCase):
 
     def test_empty(self):
         results = self.pipe.run({"query": ""}).get("vuln_type_parser", {}).get("vuln_types", None)
-        self.assertEqual([], results)
+        self.assertEqual(set(), results)
 
     def test_xss(self):
         results = self.pipe.run({"query": "XSS"}).get("vuln_type_parser", {}).get("vuln_types", None)
-        self.assertEqual(["xss"], results)
+        self.assertEqual({"xss"}, results)
 
     def test_authentication(self):
         results = self.pipe.run({"query": "Examine the authentication mechanism"}).get("vuln_type_parser", {}).get(
             "vuln_types", None)
-        self.assertEqual(["weak_authentication"], results)
+        self.assertEqual({"weak_authentication"}, results)
 
     def test_injection(self):
         results = self.pipe.run({"query": "Look for injection vulns"}).get("vuln_type_parser", {}).get("vuln_types",
                                                                                                        None)
-        self.assertEqual(['sql_injection', 'command_injection'], results)
+        self.assertEqual({'sql_injection', 'command_injection'}, results)

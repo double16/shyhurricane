@@ -526,15 +526,15 @@ Now, given a single unstructured user input string, infer the vulnerabilities an
 @component
 class VulnTypeParser:
 
-    @component.output_types(vuln_types=List[str])
+    @component.output_types(vuln_types=Iterable[str])
     def run(self, replies: List[str]):
         logger.debug(f"VulnTypeParser: replies {replies}")
-        vuln_types = []
+        vuln_types: Set[str] = set()
         for reply in replies:
             try:
                 parsed = json.loads(reply)
                 if isinstance(parsed, Iterable):
-                    vuln_types.extend(map(lambda e: str(e).lower().replace(' ', '_'), parsed))
+                    vuln_types.update(map(lambda e: str(e).lower().replace(' ', '_'), parsed))
             except json.decoder.JSONDecodeError:
                 pass
         return {"vuln_types": vuln_types}
