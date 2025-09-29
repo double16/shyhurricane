@@ -128,7 +128,6 @@ Generate a system prompt that takes common vulnerability types and emits 10 HTTP
 ### queries seen from gemini-2.5-flash
 
 ```
-- These are example inputs from the user:
   - example.com "IDOR" OR "access control" OR "unauthorized"
   - example.com "encryption" OR "cryptographic" OR "sensitive data" OR "weak algorithm" OR "key exposure"
   - example.com "SQL injection" OR "XSS" OR "command injection" OR "LDAP injection" OR "NoSQL injection" OR "XPath injection" OR "code injection" OR "template injection"

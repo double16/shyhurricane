@@ -1,0 +1,7 @@
+<input type="text" name="enc_key" value="hunter2">
+----
+<input type="hidden" name="token" value="5f4dcc3b5aa765d61d8327deb882cf99">
+----
+<a href="/download?key=abcdef1234567890">Export</a>
+----
+<script src="/static/js/crypto-bundle.js">

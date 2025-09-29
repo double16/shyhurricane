@@ -1,0 +1,10 @@
+<form autocomplete="on">
+  <input name="username" />
+  <input name="password" type="password" />
+</form>
+----
+<pre>Traceback (most recent call last):</pre>
+----
+<pre>Stack trace</pre>
+----
+<iframe src="https://example.com"></iframe>

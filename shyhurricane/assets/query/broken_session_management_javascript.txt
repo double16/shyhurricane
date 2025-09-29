@@ -1,0 +1,22 @@
+localStorage.setItem("session", token);
+----
+sessionStorage.setItem("token", token);
+----
+window.session = "abc123";
+----
+location.href = "/login?token=" + sessionToken;
+----
+window.location = "/dashboard?session=" + sessionId;
+----
+function getToken() {
+  return localStorage.getItem("jwt");
+}
+----
+const token = localStorage.getItem("jwt");
+fetch("/api/me", { headers: { Authorization: `Bearer ${token}` } });
+----
+const sessionId = "abc123xyz";
+----
+console.log("Auth token:", token);
+----
+const jwt = atob(token.split('.')[1]);

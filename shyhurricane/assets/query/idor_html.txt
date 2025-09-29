@@ -1,0 +1,8 @@
+<img src="/invoices/2023/00021343.pdf" />
+----
+<select>
+  <option value="user_1">User 1</option>
+  <option value="user_2">User 2</option>
+</select>
+----
+<input type="hidden" name="doc_id" value="883">

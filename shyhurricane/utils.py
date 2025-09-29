@@ -41,6 +41,25 @@ class HttpResource(BaseModel):
     response_headers: Optional[Dict[str, str]] = Field(description="The HTTP response headers")
 
 
+SCHEME_TO_PORT = {
+    "http": 80,
+    "https": 443,
+    "ws": 80,
+    "wss": 443,
+    "ftp": 21,
+    "ftps": 990,
+    "ssh": 22,
+    "sftp": 22,
+    "ldap": 389,
+    "ldaps": 636,
+    "smtp": 25,
+    "smtps": 465,
+    "imap": 143,
+    "imaps": 993,
+    "pop3": 110,
+    "pop3s": 995,
+}
+
 def urlparse_ext(url: str) -> ParseResult:
     # urlparse does not do validation, so we need to add our own
     url = url.strip()
@@ -58,19 +77,22 @@ def urlparse_ext(url: str) -> ParseResult:
         raise ValueError(ve)
 
     url_parsed = urlparse(url, 'http')
-    if not all([url_parsed.scheme in ("http", "https"), url_parsed.netloc]):
+    if not url_parsed.netloc:
         raise ValueError()
     if url_parsed.port:
         port = url_parsed.port
-    elif url_parsed.scheme == "http":
-        port = 80
-    elif url_parsed.scheme == "https":
-        port = 443
     else:
-        port = -1
+        port = SCHEME_TO_PORT.get(url_parsed.scheme, -1)
+    if port < 0 or port > 65535:
+        netloc = url_parsed.hostname
+    elif "://[" in url:
+        # IPv6 address
+        netloc = f"[{url_parsed.hostname}]:{port}"
+    else:
+        netloc = f"{url_parsed.hostname}:{port}"
     return ParseResult(
         scheme=url_parsed.scheme,
-        netloc=f"{url_parsed.hostname}:{port}",
+        netloc=netloc,
         params=url_parsed.params,
         path=url_parsed.path,
         query=url_parsed.query,
@@ -409,19 +431,24 @@ def query_to_netloc(query: str) -> Tuple[str | None, int | None]:
                 query = parsed.hostname
                 port = parsed.port
             except Exception:
-                pass
+                query = None
         elif ":" in query:
             try:
-                query, _, port_str = query.partition(":")
+                query, _, port_str = query.rpartition(":")
+                if query.startswith("[") and query.endswith("]"):
+                    query = query[1:-1]
                 try:
                     if validators.domain(query) == False and not ipaddress.ip_address(query):  # noqa: E712
                         query = None
+                    else:
+                        port = int(port_str)
+                        if port < 0 or port > 65535:
+                            port = None
                 except (ValueError, ValidationError):
                     query = None
 
-                port = int(port_str)
             except Exception:
-                pass
+                query = None
     return query, port
 
 

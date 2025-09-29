@@ -1,0 +1,34 @@
+eval(userInput);
+----
+const f = new Function("return " + userInput);
+f();
+----
+setTimeout(userInput, 1000);
+----
+document.write(userInput);
+----
+element.innerHTML = userInput;
+----
+iframe.srcdoc = userInput;
+----
+window.open("javascript:" + userInput);
+----
+img.src = userInput;
+----
+let result = `${userInput}`;
+----
+template.replace(/\{\{(.*?)\}\}/g, (_, expr) => eval(expr));
+----
+<div dangerouslySetInnerHTML={{ __html: userInput }} />
+----
+const mod = require(userInput);
+----
+with(userInput) {
+----
+element.setAttribute("onclick", userInput);
+----
+webview.injectJavaScript(userInput);
+----
+const obj = JSON.parse(userInput);
+obj.fn();
+----

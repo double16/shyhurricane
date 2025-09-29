@@ -135,12 +135,12 @@ The security engineer is helping customers secure their web applications.
 Output format:
  - JSON array of strings, where each string is the name of a supported vulnerability type.
  - Only output the list.
- - Do not include any other text except the list of  vulnerability types.
+ - Do not include any other text except the list of vulnerability types.
  - Do not include any explanation or commentary.
  - Do not format using markdown or other markup language.
  - Avoid duplicating patterns.
 
-Supported Vulnerability Types:
+The list must only include vulnerability from this list of supported vulnerability types:
  - XSS
  - CSRF
  - SSRF
@@ -156,14 +156,11 @@ Supported Vulnerability Types:
  - Template Injection
  - Weak Authentication
  - Secrets Disclosure
- - Insecure Direct Object Reference
  - Broken Access Control
  - Sensitive Data Exposure
  - Security Misconfiguration
- - Default Credentials
  - Unpatched Software
  - Business Logic Flaw
- - Insecure Design
  - Clickjacking
  - Open Redirect
  - Directory Traversal
@@ -172,6 +169,7 @@ Supported Vulnerability Types:
  - Broken Session Management
  - Information Disclosure
  - Unvalidated Redirects and Forwards
+ - Cryptographic Misuse
 
 If no vulnerabilities are found or inferred, return an empty list.
 
@@ -185,7 +183,7 @@ Output:
 Input:
 Is the authentication mechanism secure?
 Output:
-["Weak Authentication"]
+["Weak Authentication", "Broken Access Control"]
 
 Input:
 Can users access other users' invoices?
@@ -208,11 +206,17 @@ Output:
 ["SSRF"]
 
 Input:
+Are there vulnerable cookies?
+Output:
+["Broken Access Control", "Sensitive Data Exposure"]
+
+Input:
 Scan for common web app issues
 Output:
 ["XSS", "CSRF", "SSRF", "IDOR", "XXE", "SQL Injection", "Weak Authentication", "Security Misconfiguration"]
 
-Now, given the following query, output 
+Now, given the following query, output the list.
+
 Query:
 \"{{ query }}\"
 """
@@ -492,19 +496,6 @@ query_expander_network = """
 You are a static code and traffic analysis assistant that receives queries describing potential web application vulnerabilities. From the user query, infer one or more common vulnerability types (e.g., XSS, SQLi, IDOR, SSRF, weak authentication, insecure deserialization, etc.), and generate {{ number }} HTTP header name/value combinations likely to indicate these vulnerabilities.
 Think about it 100 times to get {{ number }} unique patterns.
 
-Examples of inferred vulnerability types and sample pattern directions:
-
-|Inferred Vulnerability | Example Pattern Direction                                   |
-|-----------------------|-------------------------------------------------------------|
-| Cookies               | Set-Cookie: sessionid=abc123 (no Secure/HttpOnly/ SameSite) |
-| Cookies               | Cookie: session=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9        |
-| XSS                   | Content-Security-Policy: default-src *                      |
-| XSS                   | Content-Security-Policy: script-src 'unsafe-inline'         |
-| Weak Authentication   | Authorization: Basic dXNlcjpwYXNz                           |
-| Weak Authentication   | WWW-Authenticate: Digest realm="example"                    |
-| Info Leakage          | X-Powered-By:                                               |
-| Unvalidated Redirects | Location: //evil.com                                        |
-
 Capabilities:
  - Handle multiple vulnerability types in a single input.
  - Recognize synonyms and related keywords.
@@ -512,10 +503,47 @@ Capabilities:
  - Recognize both code-level and logic-level vulnerabilities.
 
 """ + query_expander_structure.replace("expanded queries", "patterns") + """
-- Each string must be a generic HTTP header line formatted as:
-  Header-Name: header value
+ - Each string must be an HTTP header name and header value separated by ": ".
+ - Only include HTTP header names and header values, do not include explanation or vulnerability types.
  - Header values may be exact, partial, or suggestive of vulnerability conditions.
  - Ensure outputs span both request and response headers where applicable.
+
+Examples of inferred vulnerability types and sample pattern directions:
+
+Inferred Vulnerability: Cookies
+Output:
+----
+Set-Cookie: sessionid=abc123
+----
+Cookie: session=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9
+----
+
+Inferred Vulnerability: XSS
+Output:
+----
+Content-Security-Policy: default-src *
+----
+Content-Security-Policy: script-src 'unsafe-inline'
+----
+
+Inferred Vulnerability: Weak Authentication
+Output:
+----
+Authorization: Basic dXNlcjpwYXNz
+----
+WWW-Authenticate: Digest realm="example"
+----
+
+Inferred Vulnerability: Info Leakage
+----
+X-Powered-By:
+----
+
+Inferred Vulnerability: Unvalidated Redirects
+----
+Location: //evil.com
+----
+
 
 Now, given a single unstructured user input string, infer the vulnerabilities and generate {{ number }} insecure HTTP headers and values for each one:
 
@@ -537,6 +565,7 @@ class VulnTypeParser:
                     vuln_types.update(map(lambda e: str(e).lower().replace(' ', '_'), parsed))
             except json.decoder.JSONDecodeError:
                 pass
+        logger.info(f"VulnTypeParser: {vuln_types}")
         return {"vuln_types": vuln_types}
 
 
@@ -575,20 +604,20 @@ class QueryExpander:
             head_match = self.split_head.match(line)
             if head_match:
                 line = head_match.group(1).strip()
-                if collected.strip():
-                    expanded_set.add(collected.strip())
+                if collected_strip := collected.strip():
+                    expanded_set.add(collected_strip)
                     collected = ""
             tail_match = self.split_tail.match(line)
             if tail_match:
                 line = tail_match.group(1).strip()
                 collected = '\n'.join([collected, line])
-                if collected.strip():
-                    expanded_set.add(collected.strip())
+                if collected_strip := collected.strip():
+                    expanded_set.add(collected_strip)
                     collected = ""
             if line:
                 collected = '\n'.join([collected, line])
-        if collected.strip():
-            expanded_set.add(collected.strip())
+        if collected_strip := collected.strip():
+            expanded_set.add(collected_strip)
         return expanded_set
 
     @component.output_types(queries=List[str])
@@ -602,19 +631,23 @@ class QueryExpander:
         if vuln_types:
             for vuln_type in vuln_types:
                 vuln_query_path = os.path.join(os.path.dirname(__file__),
-                                               "assets/" + vuln_type + "_" + self.doc_type + ".txt")
-                logger.info(f"checking {vuln_query_path} for static expanded queries")
+                                               "assets/query/" + vuln_type + "_" + self.doc_type + ".txt")
+                logger.debug(f"checking {vuln_query_path} for static expanded queries")
                 if os.path.exists(vuln_query_path):
-                    logger.debug("Reading expanded queries from %s", vuln_query_path)
+                    logger.info("Reading expanded queries from %s", vuln_query_path)
                     with open(vuln_query_path, "r") as f:
                         expanded_set.update(self._split_results(f.read()))
         logger.debug(f"static expanded queries: {expanded_set}")
 
-        retry = 2
-        while retry > 0 and len(expanded_set) < self.number:
-            retry -= 1
+        # If there are static queries, make sure the LLM has a chance to add something
+        expanded_set_number = max(self.number, len(expanded_set) + 3)
 
-            run_result = self.pipeline.run({'builder': {'query': query, 'number': self.number}})
+        retry = 2
+        while retry > 0 and len(expanded_set) < expanded_set_number:
+            retry -= 1
+            number_left = expanded_set_number - len(expanded_set)
+
+            run_result = self.pipeline.run({'builder': {'query': query, 'number': number_left}})
             replies: List[str] = run_result.get('llm', {}).get('replies', [])
             if not replies:
                 continue
@@ -623,9 +656,12 @@ class QueryExpander:
             if not result:
                 continue
 
-            expanded_set.update(self._split_results(result))
+            results = self._split_results(result)
+            while len(results) > number_left:
+                results.pop()
+            expanded_set.update(results)
 
-        expanded_list: List[str] = list(expanded_set)[:self.number]
+        expanded_list: List[str] = list(expanded_set)[:expanded_set_number]
         if self.include_original_query:
             expanded_list.insert(0, query)
 

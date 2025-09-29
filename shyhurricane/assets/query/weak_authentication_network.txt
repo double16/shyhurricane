@@ -1,0 +1,13 @@
+WWW-Authenticate: Basic
+----
+WWW-Authenticate: Digest
+----
+Authorization: Basic
+----
+Authorization: Bearer
+----
+Set-Cookie:
+----
+X-API-Key:
+----
+Access-Control-Allow-Origin:

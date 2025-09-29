@@ -1,0 +1,11 @@
+<a href="/redirect?url=https://evil.com">Click here</a>
+----
+<form action="/login">
+  <input type="hidden" name="next" value="https://malicious.site">
+</form>
+----
+<meta http-equiv="refresh" content="0;url=https://evil.com">
+----
+<a href="/go?target=https://attacker.net">Continue</a>
+----
+<iframe src="/forward?to=https://phish.me/login"></iframe>

@@ -1,0 +1,11 @@
+<input type="hidden" name="path" value="../data.json" />
+----
+<a href="/view?file=../../index.js">Click to view</a>
+----
+<iframe src="/media/.."></iframe>
+----
+<img src="/files/../../../logo.png" />
+----
+<script src="/assets/../js/app.js"></script>
+----
+<link rel="stylesheet" href="/styles/../../../admin.css" />

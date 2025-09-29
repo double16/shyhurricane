@@ -1,0 +1,18 @@
+if (top !== self) {
+  top.location = self.location;
+}
+----
+document.domain = "example.com";
+----
+document.querySelector("meta[http-equiv='Content-Security-Policy']")
+.setAttribute("content", "frame-ancestors *");
+----
+if (window.top !== window.self) window.top.location = window.self.location;
+----
+window.onload = () => {
+  initApp();
+};
+----
+window.addEventListener("message", (e) => {
+  if (e.data === "loadApp") load();
+});

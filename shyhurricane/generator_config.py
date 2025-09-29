@@ -232,13 +232,12 @@ class GeneratorConfig(BaseModel):
         self.ollama_host = self.ollama_host or OLLAMA_HOST_DEFAULT
         if self.ollama_model or self.gemini_model or self.openai_model:
             return self
-        self.ollama_model = "llama3.2:3b"
-        # We have tested query extenders and the prompt chooser with "llama3.2:3b".
-        # These others don't always perform as expected:
-        # if os.environ.get("GEMINI_API_KEY", None) or os.environ.get("GOOGLE_API_KEY", None):
-        #     self.gemini_model = "gemini-2.5-flash-lite"
-        # elif os.environ.get("OPENAI_API_KEY", None):
-        #     self.openai_model = "gpt-5-nano"
+        if os.environ.get("GEMINI_API_KEY", None) or os.environ.get("GOOGLE_API_KEY", None):
+            self.gemini_model = "gemini-2.5-flash-lite"
+        elif os.environ.get("OPENAI_API_KEY", None):
+            self.openai_model = "gpt-5-nano"
+        else:
+            self.ollama_model = "llama3.2:3b"
         return self
 
     def check(self):

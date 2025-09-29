@@ -1,0 +1,5 @@
+<a href="/admin/dashboard">Admin Panel</a>
+----
+<input type="hidden" name="role" value="admin">
+----
+<button style="display: none" onclick="deleteAccount()">Delete</button>

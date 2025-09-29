@@ -1,6 +1,9 @@
 import unittest
 
+import pytest
+
 from shyhurricane.target_info import parse_target_info, filter_targets_query
+from shyhurricane.utils import query_to_netloc
 
 
 class TestTargetInfo(unittest.TestCase):
@@ -34,3 +37,29 @@ class TestTargetInfo(unittest.TestCase):
     def test_with_ports(self):
         self.assertEqual("example.com:443", parse_target_info("example.com").with_port(443).netloc)
         self.assertEqual("example.com:443", parse_target_info("example.com:80").with_port(443).netloc)
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("http://Example.COM:8080/path", ("example.com", 8080)),
+        ("HTTPS://sub.Example.com", ("sub.example.com", 443)),
+        ("example.com:443", ("example.com", 443)),
+        ("example.com:-1", ("example.com", None)),
+        ("192.168.0.1:22", ("192.168.0.1", 22)),
+        ("ftp://192.168.0.1:21", ("192.168.0.1", 21)),
+        ("[2001:db8::1]:443", ("2001:db8::1", 443)),
+        ("https://[2001:db8::1]:443", ("2001:db8::1", 443)),
+        ("https://[2001:db8::1]", ("2001:db8::1", 443)),
+        ("http://[2001:db8::1]", ("2001:db8::1", 80)),
+        ("bad_domain:80", ("bad_domain", 80)),
+        ("example.com:notaport", (None, None)),
+        ("999.999.999.999:80", ("999.999.999.999", 80)),
+        ("FooBAR", ("foobar", None)),
+        ("https://", (None, None)),
+        ("192.168.0.1:22 idor or ssrf", (None, None)),
+        ("", ("", None)),
+    ],
+)
+def test_query_to_netloc(raw, expected):
+    assert query_to_netloc(raw) == expected

@@ -1,5 +1,5 @@
 
-These are the CTFs that have been solved by shyhurricane and the models used.
+These are the CTFs that have been solved, or close to solved by shyhurricane and the models used.
 
 # Hack-the-Box
 

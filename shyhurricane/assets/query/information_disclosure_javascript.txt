@@ -1,0 +1,22 @@
+localStorage.setItem("user", JSON.stringify({ ssn: "123-45-6789" }));
+----
+window.userData = { name: "Alice", phone: "555-123-4567" };
+----
+location.href = "/?email=alice@example.com";
+location.hash = "#ssn=123456789";
+----
+window.currentPatient = {
+  name: "John Doe",
+  diagnosis: "",
+  meds: []
+};
+----
+const lastSubmission = {
+  email: "alice@example.com",
+  dob: "1990-01-01",
+  insurance_number: "ABC123456"
+};
+----
+analytics.track("UserRegistered", { name: "Bob", phone: "555-..." });
+----
+fetch("/user/123/profile")

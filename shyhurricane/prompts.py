@@ -43,8 +43,8 @@ methodology_rules = """
 ## Methodology:
 You must follow a continuous, iterative penetration testing lifecycle:
 
-1. **Enumerate**: Discover open ports, running services, software versions, users, directories, etc.
-2. **Analyze**: Identify vulnerabilities and misconfigurations using known techniques (e.g. CVEs, published exploits, OWASP Top 10, default credentials).
+1. **Enumerate**: Query existing findings. Discover open ports, running services, software versions, users, directories, etc.
+2. **Analyze**: Identify vulnerabilities and misconfigurations using known techniques (e.g. CVEs, published exploits, OWASP Top 10, default credentials). Look for opportunities to chain vulnerabilities together to increase severity.
 3. **Exploit**: Execute proof-of-concept or working exploits when a vulnerability is identified.
 4. **Escalate**: Privileges: Attempt local privilege escalation after gaining initial access.
 5. **Loot**: Locate sensitive data (passwords, tokens, configuration files, databases, etc.).

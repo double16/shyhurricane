@@ -1,0 +1,9 @@
+<script src="https://cdn.jsdelivr.net/npm/jquery@1.11.1/dist/jquery.min.js"></script>
+----
+<meta name="generator" content="Drupal 7.58">
+----
+<script src="/assets/jquery-1.7.2.min.js"></script>
+----
+<link href="/css/bootstrap-3.0.0.css" rel="stylesheet">
+----
+<meta name="app-version" content="1.0.0-beta">

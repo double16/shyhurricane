@@ -1,0 +1,23 @@
+console.log(config);
+----
+window.ENV = { stage: "dev", internalUrl: "http://10.0.0.1" };
+----
+fetch("http://dev-api.example.com/users");
+----
+fetch("http://stage-api.example.com/users");
+----
+document.querySelector("meta[http-equiv='Content-Security-Policy']");
+----
+fetch("http://example.com/api", {
+  headers: { Authorization: "Bearer token" }
+});
+----
+<script src="http://cdn.example.com/lib.js"></script>
+----
+document.cookie = "session=abc123";
+----
+const creds = { user: "admin", pass: "password" };
+----
+if (window.DEBUG) console.debug("Debug mode on");
+----
+fetch("/api/test").then(r => r.text()).then(console.log);

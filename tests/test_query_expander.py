@@ -55,19 +55,36 @@ class QueryExpanderBase(unittest.TestCase):
         return self._base_test("What javascript libraries call eval() on vulernablesite.net?")
 
     def test_csp(self) -> List[str]:
-        return self._base_test("Examine the content security policy on notarealsite.com")
+        return self._base_test("Examine the content security policy on notarealsite.com",
+                               vuln_types=["security_misconfiguration"])
 
     def test_cookie(self) -> List[str]:
-        return self._base_test("Look for vulnerable cookie settings on notarealsite.com")
+        return self._base_test("Look for vulnerable cookie settings on notarealsite.com",
+                               vuln_types=["broken_access_control"])
 
     def test_idor(self) -> List[str]:
-        return self._base_test("IDOR")
+        return self._base_test("IDOR", vuln_types=["idor"])
 
     def test_xss(self) -> List[str]:
-        return self._base_test("XSS")
+        return self._base_test("XSS", vuln_types=["xss"])
 
     def test_weak_auth(self) -> List[str]:
         return self._base_test("weak authentication", vuln_types=["weak_authentication"])
+
+    def test_idor_or_access_control_or_unauthorized(self) -> List[str]:
+        return self._base_test('"IDOR" OR "access control" OR "unauthorized"')
+
+    def test_api(self) -> List[str]:
+        return self._base_test('example.com api')
+
+    def test_error(self) -> List[str]:
+        return self._base_test('example.com error')
+
+    def test_admin(self) -> List[str]:
+        return self._base_test('example.com admin')
+
+    def test_env(self) -> List[str]:
+        return self._base_test('example.com .env')
 
 
 class TestQueryExpanderNaturalLanguage(QueryExpanderBase):
@@ -98,6 +115,18 @@ class TestQueryExpanderJavascript(QueryExpanderBase):
     def __init__(self, methodName: str = ...):
         super().__init__(query_expander_javascript, "javascript", 10, False, methodName)
 
+    def test_xss(self):
+        expanded = super().test_xss()
+        self.assertTrue(any(filter(lambda e: "eval(userInput);" in e, expanded)), "static patterns missing")
+        self.assertTrue(any(filter(lambda e: "element.innerHTML = userInput;" in e, expanded)),
+                        "static patterns missing")
+
+    def test_weak_auth(self):
+        expanded = super().test_weak_auth()
+        self.assertTrue(any(filter(lambda e: "localStorage.getItem('session')" in e, expanded)),
+                        "static patterns missing")
+        self.assertTrue(any(filter(lambda e: "const creds = atob(encoded);" in e, expanded)), "static patterns missing")
+
 
 class TestQueryExpanderCSS(QueryExpanderBase):
     __test__ = True
@@ -121,11 +150,11 @@ class TestQueryExpanderXML(QueryExpanderBase):
 
     def test_xxe(self):
         query = "Find XML external entity injections"
-        expanded = self._run_pipeline(query)
+        expanded = self._run_pipeline(query, vuln_types=["xxe"])
         self._test_sanity(query, expanded)
         self.assertTrue(any(filter(lambda e: "ENTITY" in e, expanded)))
         query = "XXE"
-        expanded = self._run_pipeline(query)
+        expanded = self._run_pipeline(query, vuln_types=["xxe"])
         self._test_sanity(query, expanded)
         self.assertTrue(any(filter(lambda e: "ENTITY" in e, expanded)))
 
@@ -140,19 +169,25 @@ class TestQueryExpanderNetwork(QueryExpanderBase):
         super()._test_sanity(query, expanded)
         for exp in expanded:
             for header_value in exp.split("\n"):
-                split = header_value.split(": ", 1)
+                if len(header_value) > 3 and header_value.count(":") == 1 and header_value.endswith(":"):
+                    pass
+                split = header_value.split(": ")
                 self.assertLessEqual(len(split), 2, f"Invalid header value: {exp}")
-                self.assertFalse(" " in split[0], f"Invalid header value: {exp}")
+                self.assertFalse(" " in split[0].strip(), f"Invalid header value: {exp}")
 
     def test_csp(self):
         expanded = super().test_csp()
-        self.assertTrue(any(filter(lambda e: "Content-Security-Policy" in e, expanded)))
+        self.assertTrue(any(filter(lambda e: "Content-Security-Policy:" in e, expanded)))
 
     def test_cookie(self):
         expanded = super().test_cookie()
-        self.assertTrue(any(filter(lambda e: "Set-Cookie" in e, expanded)))
+        self.assertTrue(any(filter(lambda e: "Set-Cookie:" in e, expanded)))
+
+    def test_xss(self):
+        expanded = super().test_xss()
+        self.assertTrue(any(filter(lambda e: "Content-Security-Policy:" in e, expanded)), "static patterns missing")
 
     def test_weak_auth(self):
-        expanded = super().test_cookie()
-        self.assertTrue(any(filter(lambda e: "Authorization:" in e, expanded)))
-        self.assertTrue(any(filter(lambda e: "Set-Cookie:" in e, expanded)))
+        expanded = super().test_weak_auth()
+        self.assertTrue(any(filter(lambda e: "Authorization:" in e, expanded)), "static patterns missing")
+        self.assertTrue(any(filter(lambda e: "Set-Cookie:" in e, expanded)), "static patterns missing")

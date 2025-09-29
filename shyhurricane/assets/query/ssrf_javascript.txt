@@ -1,0 +1,18 @@
+require('http').get(userInputUrl);
+----
+axios.get(req.query.url);
+----
+await fetch(req.body.url);
+----
+axios.post(`http://${req.query.service}/health`);
+----
+const got = require("got");
+got(req.query.url);
+----
+app.get("/proxy", (req, res) => {
+  request.get(req.query.img).pipe(res);
+});
+----
+if (!url.includes("localhost")) fetch(url);
+----
+axios.post(req.body.webhook, data);
