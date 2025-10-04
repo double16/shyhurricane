@@ -8,6 +8,8 @@ from pydantic import AnyUrl, Field
 
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server import get_server_context, mcp_instance, log_tool_history
+from shyhurricane.mcp_server.tools.run_unix_command import _run_unix_command
+from shyhurricane.utils import HttpResource, TextResourcePartialContents, validate_container_file_path
 
 logger = logging.getLogger(__name__)
 
@@ -40,15 +42,31 @@ async def fetch_web_resource_content(
 
     The URL may be a web://{doc_type}/{doc_id} URL supplied by the
     find_web_resources tool. The URL can be found in the resource_link JSON object.
-""")]
-) -> Optional[TextResourceContents]:
+""")],
+        output_start_position: Annotated[
+            int, Field(0, description="The character position in the resource to start output", ge=0)] = 0,
+        output_length_limit: Annotated[
+            int, Field(4096, description="Output length limit, truncates output if over this length.", ge=1,
+                       le=4 * 1024 * 1024)] = 4096,
+        save_path: Annotated[Optional[str], Field(
+            description="Optional path for saving the content for further processing by the run_unix_command tool.")] = None,
+) -> Optional[HttpResource]:
     """Fetch the content of a web resource that has already been indexed.
 
     Invoke this tool when:
      - the user requests analysis of resource content that has already been indexed, spidered or scanned
      - the user requests content with a URL that starts with "web://"
+
+    If save_path is specified, the content will be available for further processing by the run_unix_command tool. After
+    running this tool, use commands with run_unix_command to operate on the value of save_path.
+
+    Javascript will have already been de-obfuscated when indexed.
     """
-    await log_tool_history(ctx, "fetch_web_resource_content", url=url)
+    await log_tool_history(ctx, "fetch_web_resource_content", url=url, save_path=save_path,
+                           output_start_position=output_start_position, output_length_limit=output_length_limit)
+    if save_path:
+        validate_container_file_path(save_path, "save_path invalid")
+
     server_ctx = await get_server_context()
     doc_type: Optional[str] = None
     doc_id: Optional[str] = None
@@ -78,14 +96,29 @@ async def fetch_web_resource_content(
             doc = docs[0]
             doc_type = "content"
             doc_id = doc.id
-    if not doc:
+    if not doc or not doc.content:
         return None
-    logger.info("Returning %d bytes for %s/%s", len(doc.content), doc_type, doc_id)
-    return TextResourceContents(
+
+    if save_path:
+        await _run_unix_command(ctx, f"cat > '{save_path}'", None, stdin=doc.content)
+
+    if output_start_position >= len(doc.content):
+        text = ""
+    else:
+        text = doc.content[output_start_position:output_start_position + output_length_limit]
+
+    logger.info("Returning %d/%d @ %d bytes for %s/%s", output_length_limit, len(doc.content), output_start_position,
+                doc_type, doc_id)
+
+    contents = TextResourcePartialContents(
         uri=AnyUrl(url),
         mimeType=doc.meta.get('content_type', None),
-        text=doc.content,
+        text=text,
+        total_length=len(doc.content),
+        offset=output_start_position,
+        has_more=(output_start_position + output_length_limit < len(doc.content)),
     )
+    return HttpResource.from_doc(doc, contents=contents)
 
 
 @mcp_instance.resource("web://{doc_type}/{doc_id}", title="Web Resource")

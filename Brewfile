@@ -1,6 +1,7 @@
 brew "python@3.12"
 brew "virtualenv"
 brew "docker"
+brew "docker-buildx"
 brew "docker-compose"
 
 # colima has better networking than podman when used with qemu

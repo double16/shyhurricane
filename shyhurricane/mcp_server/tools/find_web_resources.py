@@ -54,22 +54,8 @@ def _documents_to_http_resources(documents: List[Document]) -> List[HttpResource
             )
         else:
             resource = None
-        try:
-            response_headers = json.loads(doc.meta.get("response_headers", "{}"))
-        except json.decoder.JSONDecodeError:
-            response_headers = None
-        https_resources.append(HttpResource(
-            score=doc.score or 100,
-            url=doc.meta['url'],
-            host=doc.meta.get('host', ''),
-            port=doc.meta.get('port', 0),
-            domain=doc.meta.get('domain', ''),
-            status_code=doc.meta.get('status_code', 200),
-            method=doc.meta.get('http_method', ''),
-            resource=resource,
-            contents=None,
-            response_headers=response_headers,
-        ))
+
+        https_resources.append(HttpResource.from_doc(doc, resource=resource))
     return https_resources
 
 

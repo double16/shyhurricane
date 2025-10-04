@@ -8,6 +8,7 @@ from math import floor
 from typing import List, Optional, Dict, Any, Set
 
 from bs4 import SoupStrainer
+from cachetools import LRUCache
 from haystack import component, Document, Pipeline
 from haystack.components.embedders import SentenceTransformersDocumentEmbedder
 from haystack.components.joiners import ListJoiner
@@ -25,7 +26,7 @@ from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.index.input_documents import HarDocument, HttpRawDocument, KatanaDocument, IngestableRequestResponse
 from shyhurricane.retrieval_pipeline import create_chrome_document_store
 from shyhurricane.utils import urlparse_ext, BeautifulSoupExtractor, extract_domain, \
-    parse_to_iso8601, remove_unencodable, is_katana_jsonl, is_har_json, is_http_raw, unix_command_image
+    parse_to_iso8601, remove_unencodable, is_katana_jsonl, is_har_json, is_http_raw, unix_command_image, batch_iterable
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +84,7 @@ def _deobfuscate_javascript(content: str) -> str:
         return content
 
     docker_command = ["docker", "run", "--rm", "-i", unix_command_image(), 'timeout', '--preserve-status',
-                      '--kill-after=1m', '90s', '/usr/share/wakaru/wakaru.cjs']
+                      '--kill-after=1m', '30m', '/usr/local/bin/jsdeobf.sh']
     logger.info(f"Deobfuscating javascript with command {' '.join(docker_command)}")
     proc = subprocess.Popen(docker_command, universal_newlines=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL)
@@ -164,6 +165,11 @@ def build_splitters(embedders: Dict[str, SentenceTransformersDocumentEmbedder]):
 
 @component
 class RequestResponseToDocument:
+    """
+    IngestableRequestResponse is the common object for request/response data that can be indexed. This component takes
+    IngestableRequestResponse and produces Document(s) for storage.
+    """
+
     def __init__(self, embedders: Dict[str, Any]):
         self.embedders = embedders
         self._soup_extractor = BeautifulSoupExtractor()
@@ -238,7 +244,7 @@ class RequestResponseToDocument:
 
         documents = []
 
-        # ─ Content Document (if body is present)
+        # Content Document (if body is present)
         if response_body and not is_binary(response_body, raw_mime):
             content_sha256 = hashlib.sha256(response_body.encode("utf-8", errors="ignore")).hexdigest()
             doc = Document(
@@ -254,7 +260,7 @@ class RequestResponseToDocument:
             )
             documents.append(self._embed_single(doc))
 
-        # ─ Network Document (always)
+        # Network Document (always)
         sorted_request_headers = "\n".join(
             f"{k}: {v}" for k, v in sorted(request_headers.items())
         )
@@ -282,7 +288,7 @@ class RequestResponseToDocument:
         )
         documents.append(self._embed_single(net_doc))
 
-        # ─ HTML forms
+        # HTML forms
         if request_response.forms:
             sorted_forms = sorted(request_response.forms,
                                   key=lambda f: f.get("method", "GET") + "." + f.get("action", ""))
@@ -302,7 +308,118 @@ class RequestResponseToDocument:
 
 
 @component
-class FilterExistingDocuments:
+class NormalizeDocuments:
+    """
+    Normalize document content for better results from embedding and make it easier for LLMs to analyze the content.
+    """
+
+    def __init__(self, doc_cleaner: DocumentCleaner, stores: Dict[str, ChromaDocumentStore]) -> None:
+        self.doc_cleaner = doc_cleaner
+        self.store = stores.get("content")
+
+    def _query_normalized_content(self, doc: Document) -> Optional[str]:
+        content_sha256 = doc.meta.get("content_sha256", "")
+        if not content_sha256:
+            return None
+        filters = {
+            "operator": "AND",
+            "conditions": [
+                {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
+                {"field": "meta.normalized", "operator": "==", "value": True},
+                {"field": "meta.content_sha256", "operator": "==", "value": content_sha256},
+            ]}
+        logger.info("Checking for existing normalized document: filters %s", filters)
+        existing = self.store.filter_documents(filters=filters)
+        if not existing:
+            return None
+        return existing[0].content
+
+    @component.output_types(documents=List[Document])
+    def run(self, documents: List[Document]):
+        for doc in filter(lambda d: d.meta.get("type", "") == "content" and not d.meta.get("normalized", False),
+                          documents):
+            raw_mime = doc.meta.get("content_type", "")
+            if not raw_mime:
+                logger.warning(f"NormalizeDocuments: No content_type for {doc}")
+                continue
+
+            if is_binary(doc.content, raw_mime):
+                logger.info(f"NormalizeDocuments: Skipping ({raw_mime}) binary content")
+                continue
+
+            # Map MIME to a logical doc type
+            doc_type = map_mime_to_type(raw_mime)
+
+            normalized_content = doc.content
+            try:
+                if doc_type == "javascript":
+                    if existing_normalized_content := self._query_normalized_content(doc):
+                        normalized_content = existing_normalized_content
+                    else:
+                        normalized_content = _deobfuscate_javascript(normalized_content)
+                elif doc_type == "html":
+                    normalized_content = normalize_html(normalized_content)
+                elif doc_type == "xml":
+                    normalized_content = normalize_xml(normalized_content)
+                elif doc_type == "json":
+                    normalized_content = normalize_json(normalized_content)
+                elif doc_type == "css":
+                    normalized_content = normalize_css(normalized_content)
+                else:
+                    normalized_content = \
+                        self.doc_cleaner.run(documents=[Document(content=normalized_content)])["documents"][0].content
+            except Exception as e:
+                logger.warning(f"Normalizing content failed, continuing with original content: {e}")
+
+            if normalized_content != doc.content:
+                if len(normalized_content) < len(doc.content) / 2:
+                    logger.warning(
+                        f"Normalized content for {doc_type} reduced {len(doc.content)} bytes to {len(normalized_content)} bytes")
+                else:
+                    logger.info(
+                        f"Normalized {doc_type} content of {len(doc.content)} bytes to {len(normalized_content)} bytes")
+                doc.content = normalized_content
+                doc.meta["normalized"] = True
+                response_headers = json.loads(doc.meta.get("response_headers", "{}"))
+                response_headers["Content-Length"] = str(len(normalized_content))
+                doc.meta["response_headers"] = json.dumps(response_headers)
+
+        return {"documents": documents}
+
+
+@component
+class FilterExistingDocumentsById:
+    def __init__(self, stores: Dict[str, ChromaDocumentStore]):
+        self.stores = stores
+
+    @component.output_types(documents=List[Document])
+    def run(self, documents: List[Document]):
+        new_documents = []
+        for doc in documents:
+            if not doc.id:
+                new_documents.append(doc)
+                continue
+            collection_name: Optional[str] = doc.meta.get("type", None)
+            if not collection_name:
+                logger.warning(f"No chroma collection found for {doc}")
+                new_documents.append(doc)
+                continue
+            store = self.stores.get(collection_name)
+            if store is None:
+                logger.warning(f"No chroma collection '{collection_name}' found for {doc}")
+                new_documents.append(doc)
+                continue
+
+            if store.filter_documents({"field": "id", "operator": "==", "value": doc.id}):
+                logger.info(f"Skipping existing document {collection_name} {doc.id}")
+            else:
+                new_documents.append(doc)
+
+        return {"documents": new_documents}
+
+
+@component
+class FilterExistingDocumentsByDocType:
     def __init__(self, stores: Dict[str, ChromaDocumentStore]):
         self.stores = stores
 
@@ -357,21 +474,24 @@ class FilterExistingDocuments:
 
 @component
 class IndexDocTypeDocuments:
+    """
+    Embed documents into type specific stores.
+    """
+
     def __init__(
             self,
             embedders: Dict[str, Any],
-            doc_cleaner: DocumentCleaner
+            multi_store: "IngestMultiStore",
     ) -> None:
         self.embedders = embedders
-        self.doc_cleaner = doc_cleaner
         self._doc_type_to_model = doc_type_to_model()
         self.splitters: Dict[str, SuffixIdSplitter] = dict()
+        self.multi_store = multi_store
 
     def warm_up(self):
         if not self.splitters:
             self.splitters = build_splitters(self.embedders)
 
-    @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]):
         results: List[Document] = []
 
@@ -385,43 +505,16 @@ class IndexDocTypeDocuments:
             raw_mime = doc.meta.get("content_type", "")
             timestamp_for_id = _quantize_timestamp(doc.meta.get("timestamp", ""))
             if not url or not raw_mime or not timestamp_for_id:
-                logger.info(f"Skipping {doc.id} for missing url, raw_mime, or timestamp_for_id")
+                logger.info(f"Skipping {doc.id} for missing url, content_type, or timestamp")
                 continue
 
             if is_binary(doc.content, raw_mime):
                 logger.info(f"Skipping {url} ({raw_mime}) binary content")
                 continue
 
-            # Map MIME to a logical doc type
             doc_type = map_mime_to_type(raw_mime)
 
-            normalized_content = doc.content
-            try:
-                if doc_type == "javascript":
-                    normalized_content = _deobfuscate_javascript(normalized_content)
-                elif doc_type == "html":
-                    normalized_content = normalize_html(normalized_content)
-                elif doc_type == "xml":
-                    normalized_content = normalize_xml(normalized_content)
-                elif doc_type == "json":
-                    normalized_content = normalize_json(normalized_content)
-                elif doc_type == "css":
-                    normalized_content = normalize_css(normalized_content)
-                else:
-                    normalized_content = \
-                        self.doc_cleaner.run(documents=[Document(content=normalized_content)])["documents"][0].content
-            except Exception as e:
-                logger.warning(f"Normalizing content failed, continuing with original content: {e}")
-
-            if normalized_content != doc.content:
-                if len(normalized_content) < len(doc.content) / 2:
-                    logger.warning(
-                        f"Normalized content for {doc_type} reduced {len(doc.content)} bytes to {len(normalized_content)} bytes")
-                doc.content = normalized_content
-                response_headers = json.loads(doc.meta.get("response_headers", "{}"))
-                response_headers["Content-Length"] = str(len(normalized_content))
-                doc.meta["response_headers"] = json.dumps(response_headers)
-
+            embedder = self.embedders.get(doc_type, self.embedders["default"])
             for token_length in (self._doc_type_to_model.get(doc_type).token_lengths or [sys.maxsize]):
                 # create docs per token_length
                 new_doc = Document(
@@ -431,10 +524,11 @@ class IndexDocTypeDocuments:
                 )
                 collection_name = get_chroma_collection_name_by_doc_type_token_length(doc_type, token_length)
                 split_docs = self.splitters[collection_name].run(documents=[new_doc])["documents"]
-                embedder = self.embedders.get(doc_type, self.embedders["default"])
-                results.extend(embedder.run(documents=split_docs)["documents"])
+                for docs_batch in batch_iterable(split_docs, embedder.batch_size):
+                    embedded_docs = embedder.run(documents=docs_batch)["documents"]
+                    self.multi_store.run(embedded_docs)
 
-        return {"documents": results}
+        return {}
 
 
 @component
@@ -465,7 +559,10 @@ class IngestMultiStore:
                 elif self.should_update and self.should_update(doc):
                     self._update_document(doc, store)
                 else:
-                    store.write_documents([doc], policy=DuplicatePolicy.OVERWRITE)
+                    # 2025-10-02 ChromaDocumentStore doesn't support DuplicatePolicy, it always adds a new document
+                    if not store.filter_documents({"field": "id", "operator": "==", "value": doc.id}):
+                        logger.info(f"Writing new document {collection_name} {doc.id}")
+                        store.write_documents([doc], policy=DuplicatePolicy.OVERWRITE)
             except Exception as e:
                 logger.warning(f"Document {doc_type} {doc.id} not written to the store: {e}", e)
 
@@ -494,11 +591,11 @@ class GenerateTitleAndDescription:
 
     def __init__(self, generator_config: GeneratorConfig):
         self.generator = generator_config.create_generator()
+        self.cached_title = LRUCache(maxsize=128)
+        self.cached_description = LRUCache(maxsize=128)
 
     @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]):
-        cached_title = {}
-        cached_description = {}
         for doc in documents:
             if doc.meta.get("status_code", 0) != 200:
                 continue
@@ -507,10 +604,10 @@ class GenerateTitleAndDescription:
             url = None
             if 'url' in doc.meta:
                 url = doc.meta["url"]
-                if url in cached_title and "title" not in doc.meta:
-                    doc.meta["title"] = cached_title[url]
-                if url in cached_description and "description" not in doc.meta:
-                    doc.meta["description"] = cached_description[url]
+                if url in self.cached_title and "title" not in doc.meta:
+                    doc.meta["title"] = self.cached_title[url]
+                if url in self.cached_description and "description" not in doc.meta:
+                    doc.meta["description"] = self.cached_description[url]
             if doc.content and "title" not in doc.meta or "description" not in doc.meta:
                 try:
                     result = self.generator.run(prompt=self.prompt % (doc.content[0:2048])).get("replies", ["{}"])[-1]
@@ -519,11 +616,11 @@ class GenerateTitleAndDescription:
                     if "title" in parsed and "title" not in doc.meta:
                         doc.meta["title"] = str(parsed["title"])
                         if url:
-                            cached_title[url] = doc.meta["title"]
+                            self.cached_title[url] = doc.meta["title"]
                     if "description" in parsed and "description" not in doc.meta:
                         doc.meta["description"] = str(parsed["description"])
                         if url:
-                            cached_description[url] = doc.meta["description"]
+                            self.cached_description[url] = doc.meta["description"]
                 except Exception:
                     pass
 
@@ -564,6 +661,7 @@ def build_embedders(
 def build_ingest_pipeline(db: str) -> Pipeline:
     stores = build_stores(db)
     embedders = build_embedders()
+    doc_cleaner = new_doc_cleaner()
 
     pipe = Pipeline()
 
@@ -607,6 +705,8 @@ def build_ingest_pipeline(db: str) -> Pipeline:
 
     pipe.add_component("rr_joiner", ListJoiner(List[IngestableRequestResponse]))
     pipe.add_component("request_response_to_document", RequestResponseToDocument(embedders=embedders))
+    pipe.add_component("normalize_document", NormalizeDocuments(doc_cleaner=doc_cleaner, stores=stores))
+    pipe.add_component("filter_doc_by_id", FilterExistingDocumentsById(stores=stores))
 
     pipe.add_component("output", IngestMultiStore(stores))
 
@@ -619,7 +719,9 @@ def build_ingest_pipeline(db: str) -> Pipeline:
     pipe.connect("har_document", "rr_joiner")
 
     pipe.connect("rr_joiner", "request_response_to_document")
-    pipe.connect("request_response_to_document", "output")
+    pipe.connect("request_response_to_document", "filter_doc_by_id")
+    pipe.connect("filter_doc_by_id", "normalize_document")
+    pipe.connect("normalize_document", "output")
 
     return pipe
 
@@ -640,18 +742,15 @@ def build_doc_type_pipeline(
 ) -> Pipeline:
     stores = build_stores(db)
     embedders = build_embedders()
-
-    doc_cleaner = new_doc_cleaner()
+    multi_store = IngestMultiStore(stores, should_update=lambda d: d.meta.get("type") == "content")
 
     pipe = Pipeline()
 
-    pipe.add_component("input", FilterExistingDocuments(stores=stores))
+    pipe.add_component("input", FilterExistingDocumentsByDocType(stores=stores))
     pipe.add_component("gen_title", GenerateTitleAndDescription(generator_config))
-    pipe.add_component("gen_doc_type", IndexDocTypeDocuments(embedders=embedders, doc_cleaner=doc_cleaner))
-    pipe.add_component("store", IngestMultiStore(stores, should_update=lambda d: d.meta.get("type") == "content"))
+    pipe.add_component("gen_doc_type", IndexDocTypeDocuments(embedders=embedders, multi_store=multi_store))
 
     pipe.connect("input", "gen_title")
     pipe.connect("gen_title", "gen_doc_type")
-    pipe.connect("gen_doc_type", "store")
 
     return pipe

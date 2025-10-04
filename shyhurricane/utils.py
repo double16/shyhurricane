@@ -5,11 +5,13 @@ import json
 import logging
 import os
 import re
+from itertools import islice
 from pathlib import Path
 from typing import Optional, Dict, Union, List, Tuple, AsyncGenerator
 from urllib.parse import ParseResult, urlparse
 from zoneinfo import ZoneInfo
 
+import torch
 import validators
 from bs4 import SoupStrainer, BeautifulSoup
 from haystack import Document
@@ -19,6 +21,12 @@ from pydantic import BaseModel, Field, ValidationError
 from tldextract import tldextract
 
 logger = logging.getLogger(__name__)
+
+
+class TextResourcePartialContents(TextResourceContents):
+    total_length: int = Field(description="The total length of the resource")
+    offset: int = Field(description="Offset into the resource of this content")
+    has_more: bool = Field(description="Whether there is more content after this")
 
 
 class HttpResource(BaseModel):
@@ -39,6 +47,26 @@ class HttpResource(BaseModel):
     resource: Optional[Resource] = Field(description="A link to the resource content")
     contents: Optional[TextResourceContents] = Field(description="The resource content")
     response_headers: Optional[Dict[str, str]] = Field(description="The HTTP response headers")
+
+    @staticmethod
+    def from_doc(doc: Document, resource: Optional[Resource] = None, contents: Optional[TextResourceContents] = None) -> "HttpResource":
+        try:
+            response_headers = json.loads(doc.meta.get("response_headers", "{}"))
+        except json.decoder.JSONDecodeError:
+            response_headers = None
+
+        return HttpResource(
+            score=doc.score or 100,
+            url=doc.meta['url'],
+            host=doc.meta.get('host', ''),
+            port=doc.meta.get('port', 0),
+            domain=doc.meta.get('domain', ''),
+            status_code=doc.meta.get('status_code', 200),
+            method=doc.meta.get('http_method', ''),
+            resource=resource,
+            contents=contents,
+            response_headers=response_headers,
+        )
 
 
 SCHEME_TO_PORT = {
@@ -539,3 +567,88 @@ def collapse_first_repeated_sequence(s: str) -> str:
             # Otherwise, unrepeated words exist at the end → do not dedupe
             return s
     return s
+
+
+def validate_container_file_path(path: str, message: Optional[str] = None):
+    """
+    Validates file paths for use in the unix_command container.
+    :param path: the path to validate
+    :param message: the message to include in the ValueError if validation fails
+    :raise ValueError:
+    """
+    if not path or "../" in path or "/.." in path or path.startswith(".."):
+        raise ValueError(message)
+    if not path.startswith("/"):
+        return
+    if path.startswith("/tmp/") or path.startswith("/var/tmp/"):
+        return
+    raise ValueError(message)
+
+
+def log_heap_stats():
+    try:
+        from guppy import hpy
+        h=hpy()
+        logger.info(h.heap()[0:12])
+    except ImportError:
+        logger.debug("Install guppy3 for heap analysis")
+
+
+def log_gpu_memory_summary():
+    msg = []
+    # CUDA (NVIDIA)
+    if torch.cuda.is_available():
+        msg.append("--- CUDA Devices ---")
+        for i in range(torch.cuda.device_count()):
+            name = torch.cuda.get_device_name(i)
+            total, free = torch.cuda.mem_get_info(i)
+            allocated = torch.cuda.memory_allocated(i)
+            reserved = torch.cuda.memory_reserved(i)
+            msg.append(f"GPU {i}: {name}")
+            msg.append(f"  Free/Total: {free/1024**2:.2f} / {total/1024**2:.2f} MB")
+            msg.append(f"  Allocated:  {allocated/1024**2:.2f} MB")
+            msg.append(f"  Reserved:   {reserved/1024**2:.2f} MB")
+
+    # MPS (Apple Silicon)
+    elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        msg.append("--- MPS Device ---")
+        try:
+            stats = torch.mps.current_allocated_memory()
+            driver = torch.mps.driver_allocated_memory()
+            recommended_max = torch.mps.recommended_max_memory()
+            msg.append(f"Allocated:        {stats/1024**2:.2f} MB")
+            msg.append(f"Driver Allocated: {driver/1024**2:.2f} MB")
+            msg.append(f"Recommended Max:  {recommended_max/1024**2:.2f} MB")
+        except AttributeError:
+            msg.append("PyTorch MPS backend available, but memory APIs unsupported in this version.")
+
+    # XPU (Intel GPUs, via oneAPI)
+    elif hasattr(torch, "xpu") and torch.xpu.is_available():
+        msg.append("--- XPU Devices ---")
+        for i in range(torch.xpu.device_count()):
+            name = torch.xpu.get_device_name(i)
+            allocated = torch.xpu.memory_allocated(i)
+            reserved = torch.xpu.memory_reserved(i)
+            msg.append(f"XPU {i}: {name}")
+            msg.append(f"  Allocated: {allocated/1024**2:.2f} MB")
+            msg.append(f"  Reserved:  {reserved/1024**2:.2f} MB")
+
+    # DirectML (Windows)
+    elif hasattr(torch, "directml") and torch.directml.is_available():
+        msg.append("--- DirectML Devices ---")
+        for i in range(torch.directml.device_count()):
+            name = torch.directml.get_device_name(i)
+            msg.append(f"DirectML {i}: {name}")
+            # No standard memory query API yet
+            msg.append("  (Memory statistics not available via PyTorch API)")
+
+    else:
+        msg.append("\nNo GPU or accelerator backend detected.")
+
+    logger.info("\n".join(msg))
+
+
+def batch_iterable(iterable, batch_size):
+    it = iter(iterable)
+    while batch := list(islice(it, batch_size)):
+        yield batch

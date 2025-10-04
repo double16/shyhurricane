@@ -2,63 +2,77 @@ from typing import List, Optional
 
 from mcp.server.fastmcp.prompts.base import Message, AssistantMessage, UserMessage
 
-from shyhurricane.mcp_server import mcp_instance
+from shyhurricane.mcp_server import mcp_instance, get_server_context
 from shyhurricane.prompts import ctf_agent_system_prompt, bug_bounty_agent_system_prompt, bug_bounty_chat_system_prompt, \
     pentester_agent_system_prompt, pentester_chat_system_prompt, htb_ctf_agent_system_prompt
 
 
+open_world_disable_notes = "Network access has been disabled. Rely on indexed content."
+
+
 @mcp_instance.prompt(title="Automated CTF Solver")
-def ctf_agent_prompt(target: str, query: Optional[str] = None) -> List[Message]:
-    return [
-        AssistantMessage(ctf_agent_system_prompt),
-        UserMessage(query or f"Find the CTF flags on {target}."),
-    ]
+async def ctf_agent_prompt(target: str, query: Optional[str] = None) -> List[Message]:
+    server_ctx = await get_server_context()
+    messages: List[Message] = [AssistantMessage(ctf_agent_system_prompt)]
+    if not server_ctx.open_world:
+        messages.append(AssistantMessage(open_world_disable_notes))
+    messages.append(UserMessage(query or f"Find the CTF flags on {target}."))
+    return messages
 
 
 @mcp_instance.prompt(title="Automated Hack-the-Box (HTB) CTF Solver")
-def htb_ctf_agent_prompt(target: str, query: Optional[str] = None) -> List[Message]:
-    return [
-        AssistantMessage(htb_ctf_agent_system_prompt),
-        UserMessage(query or f"Find the CTF flags on {target}."),
-    ]
+async def htb_ctf_agent_prompt(target: str, query: Optional[str] = None) -> List[Message]:
+    server_ctx = await get_server_context()
+    messages: List[Message] = [AssistantMessage(htb_ctf_agent_system_prompt)]
+    if not server_ctx.open_world:
+        messages.append(AssistantMessage(open_world_disable_notes))
+    messages.append(UserMessage(query or f"Find the CTF flags on {target}."))
+    return messages
 
 
 @mcp_instance.prompt(title="Automated Bug Bounty Hunter")
-def bug_bounty_agent_prompt(target: str, query: Optional[str] = None) -> List[Message]:
-    return [
-        AssistantMessage(bug_bounty_agent_system_prompt),
-        UserMessage(query or f"Conduct a penetration test on {target}."),
-    ]
+async def bug_bounty_agent_prompt(target: str, query: Optional[str] = None) -> List[Message]:
+    server_ctx = await get_server_context()
+    messages: List[Message] = [AssistantMessage(bug_bounty_agent_system_prompt)]
+    if not server_ctx.open_world:
+        messages.append(AssistantMessage(open_world_disable_notes))
+    messages.append(UserMessage(query or f"Conduct a penetration test on {target}."))
+    return messages
 
 
 @mcp_instance.prompt(title="Bug Bounty Hunter Assistant")
-def bug_bounty_assistant_prompt(target: str, query: Optional[str] = None) -> List[Message]:
-    return [
-        AssistantMessage(bug_bounty_chat_system_prompt),
-        UserMessage(query or f"Examine {target} for vulnerabilities."),
-    ]
+async def bug_bounty_assistant_prompt(target: str, query: Optional[str] = None) -> List[Message]:
+    server_ctx = await get_server_context()
+    messages: List[Message] = [AssistantMessage(bug_bounty_chat_system_prompt)]
+    if not server_ctx.open_world:
+        messages.append(AssistantMessage(open_world_disable_notes))
+    messages.append(UserMessage(query or f"Examine {target} for vulnerabilities."))
+    return messages
 
 
 @mcp_instance.prompt(title="Automated Penetration Tester")
-def pentest_agent_prompt(target: str, query: Optional[str] = None) -> List[Message]:
-    return [
-        AssistantMessage(pentester_agent_system_prompt),
-        UserMessage(query or f"Conduct a penetration test on {target}."),
-    ]
+async def pentest_agent_prompt(target: str, query: Optional[str] = None) -> List[Message]:
+    server_ctx = await get_server_context()
+    messages: List[Message] = [AssistantMessage(pentester_agent_system_prompt)]
+    if not server_ctx.open_world:
+        messages.append(AssistantMessage(open_world_disable_notes))
+    messages.append(UserMessage(query or f"Conduct a penetration test on {target}."))
+    return messages
 
 
 @mcp_instance.prompt(title="Penetration Tester Assistant")
-def pentest_assistant_prompt(target: str, query: Optional[str] = None) -> List[Message]:
-    return [
-        AssistantMessage(pentester_chat_system_prompt),
-        UserMessage(query or f"Examine {target} for vulnerabilities."),
-    ]
+async def pentest_assistant_prompt(target: str, query: Optional[str] = None) -> List[Message]:
+    server_ctx = await get_server_context()
+    messages: List[Message] = [AssistantMessage(pentester_chat_system_prompt)]
+    if not server_ctx.open_world:
+        messages.append(AssistantMessage(open_world_disable_notes))
+    messages.append(UserMessage(query or f"Examine {target} for vulnerabilities."))
+    return messages
 
 
 @mcp_instance.prompt(title="Penetration Test Auditor")
-def pentest_audit_prompt(target: str, query: Optional[str] = None) -> List[Message]:
-    return [
-        AssistantMessage("""
+async def pentest_audit_prompt(target: str, query: Optional[str] = None) -> List[Message]:
+    auditor_message = AssistantMessage("""
 You are **Pentest Audit Bot**, an independent security auditor.  
 Your job is to grade how thoroughly the test team examined the target **using only the documents stored in the retrieval system.**  
 You **must not** collect new data from the internet or from the live target.
@@ -113,6 +127,10 @@ Report template (Markdown to return after DONE)
 - **Reference**: [CVE-2023-1234](…), [OWASP A03](…)
 
 DONE
-"""),
-        UserMessage(query or f"Examine {target} for test coverage."),
-    ]
+""")
+    server_ctx = await get_server_context()
+    messages: List[Message] = [auditor_message]
+    if not server_ctx.open_world:
+        messages.append(AssistantMessage(open_world_disable_notes))
+    messages.append(UserMessage(query or f"Examine {target} for test coverage."))
+    return messages

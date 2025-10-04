@@ -28,7 +28,8 @@ RUN gem install evil-winrm
 RUN mkdir /usr/share/wakaru/ && chown 0:0 /usr/share/wakaru/ && chmod 0755 /usr/share/wakaru/
 COPY --chown=0:0 --chmod=644 package.json package-lock.json /usr/share/wakaru/
 COPY --chown=0:0 --chmod=755 wakaru.cjs /usr/share/wakaru/
-RUN cd /usr/share/wakaru/ && npm install && chmod +x /usr/share/wakaru/wakaru.cjs
+COPY --chown=0:0 --chmod=755 jsdeobf.sh /usr/local/bin/
+RUN cd /usr/share/wakaru/ && npm install
 
 RUN mkdir /usr/share/mitm_to_katana/ && chown 0:0 /usr/share/mitm_to_katana/ && chmod 0755 /usr/share/mitm_to_katana/
 COPY --chown=0:0 --chmod=644 requirements.txt mitm_to_katana.py /usr/share/mitm_to_katana/

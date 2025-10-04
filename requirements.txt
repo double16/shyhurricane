@@ -28,3 +28,4 @@ optimum~=1.27.0
 ddgs~=9.5.2
 pycryptodome~=3.23.0
 psutil~=7.1.0
+guppy3~=3.1.5

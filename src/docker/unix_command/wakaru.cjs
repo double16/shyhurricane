@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env node --max-old-space-size=4096
 const {unpack, detect} = require("unpacker");
 const {unpack: wakaru_unpack} = require("@wakaru/unpacker");
 const {runDefaultTransformationRules, runTransformationRules} = require("@wakaru/unminify");
@@ -14,9 +14,12 @@ const rules = [
     wakaru_1_prettify_rules + wakaru_2_prepare_rules + wakaru_3_tranform_no_lebab_rules + wakaru_4_advanced_rules + ['prettier'],
     wakaru_1_prettify_rules + wakaru_2_prepare_rules + wakaru_3_tranform_no_lebab_rules + ['prettier'],
     wakaru_1_prettify_rules + wakaru_2_prepare_rules + ['prettier'],
-    wakaru_1_prettify_rules + ['prettier'], // prettify
+    wakaru_1_prettify_rules + ['prettier'],
     ['prettier'],
 ];
+
+const ruleIndex = parseInt(process.argv[1], 10);
+const selectedRules = Number.isInteger(ruleIndex) && rules[ruleIndex] !== undefined ? [rules[ruleIndex]] : rules;
 
 let data = "";
 process.stdin.setEncoding("utf8");
@@ -60,8 +63,6 @@ process.stdin.on("end", async () => {
                 // try the next rule
             }
         }
-
-        // TODO: use webcrack once it installs again
 
         console.log(unminified);
     } catch (err) {
