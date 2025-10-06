@@ -221,7 +221,7 @@ class GeneratorConfig(BaseModel):
         if self.ollama_model or self.gemini_model or self.openai_model:
             return self
         if os.environ.get("GEMINI_API_KEY", None) or os.environ.get("GOOGLE_API_KEY", None):
-            self.gemini_model = "gemini-2.5-flash"
+            self.gemini_model = "gemini-flash-latest"
         elif os.environ.get("OPENAI_API_KEY", None):
             self.openai_model = "gpt-5-mini"
         else:
@@ -233,7 +233,7 @@ class GeneratorConfig(BaseModel):
         if self.ollama_model or self.gemini_model or self.openai_model:
             return self
         if os.environ.get("GEMINI_API_KEY", None) or os.environ.get("GOOGLE_API_KEY", None):
-            self.gemini_model = "gemini-2.5-flash-lite"
+            self.gemini_model = "gemini-flash-lite-latest"
         elif os.environ.get("OPENAI_API_KEY", None):
             self.openai_model = "gpt-5-nano"
         else:

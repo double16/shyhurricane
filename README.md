@@ -232,7 +232,7 @@ python3 assistant.py --ollama-model qwen3:30b --ollama-host 192.168.100.100:1143
 
 ```shell
 export GOOGLE_API_KEY=xxxx
-python3 assistant.py --gemini-model gemini-2.5-flash
+python3 assistant.py --gemini-model gemini-flash-latest
 ```
 
 ### OpenAI

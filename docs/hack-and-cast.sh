@@ -8,7 +8,7 @@
 #   1: The target, such as "Web CTF LFI"
 #   2: The prompt, such as "Solve the CTF challenge at 10.10.14.10"
 #   3*: Arguments to the assistant, such as
-#      -- gemini-model=gemini-2.5-flash
+#      -- gemini-model=gemini-flash-latest
 #
 # Environment variables are inherited. Models and API keys can be set without being present in the recording:
 #   export OPENAI_API_KEY=xxxxx

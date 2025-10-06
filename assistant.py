@@ -136,7 +136,7 @@ def main():
 
         def streaming_chunk_printer(line: str):
             console.print(line, end="")
-            chat_logger(line, output_timestamp=True)
+            chat_logger(line, output_timestamp=False)
             streaming_output_holder.append(line)
 
         def create_pipeline(system_prompt: List[ChatMessage], tools: List[Tool]) -> Tuple[Pipeline, Component, List[Tool]]:
