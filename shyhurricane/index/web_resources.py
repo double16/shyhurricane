@@ -5,9 +5,10 @@ import logging
 import multiprocessing
 import os
 import signal
-from typing import Tuple
+from typing import Tuple, Optional
 
 import persistqueue
+import torch
 from haystack import Pipeline
 
 from shyhurricane.generator_config import GeneratorConfig
@@ -72,7 +73,26 @@ def _ingest_worker(db: str):
     logger.info(f"Index worker finished in PID {os.getpid()}")
 
 
+def is_current_process_in_bad_state() -> bool:
+    """
+    Determine if this process is in a bad state. In an unified memory architecture, allocating GPU memory beyond a
+    certain amount is considered a bad state.
+    """
+    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        try:
+            driver = torch.mps.driver_allocated_memory()
+            recommended_max = torch.mps.recommended_max_memory()
+            if driver > recommended_max:
+                logger.warning(f"MPS driver memory {driver} exceeds recommended max {recommended_max}")
+                return True
+        except AttributeError:
+            logger.debug("PyTorch MPS backend available, but memory APIs unsupported in this version.")
+
+    return False
+
+
 def _doc_type_worker(db: str, generator_config: GeneratorConfig):
+    exit_code = -1
     try:
         faulthandler.register(signal.SIGUSR1)
         logger.info(f"Document specific index worker starting in PID {os.getpid()}")
@@ -91,18 +111,56 @@ def _doc_type_worker(db: str, generator_config: GeneratorConfig):
                 doc_type_queue.ack(item)
                 log_heap_stats()
                 log_gpu_memory_summary()
+                if is_current_process_in_bad_state():
+                    logger.info(f"Document specific index worker exiting PID {os.getpid()}")
+                    return 0
             except Exception as e:
                 doc_type_queue.ack_failed(item)
                 url = item.meta.get("url", "???")
                 logger.error(f"Error in document specific pipeline for {url}, {item.id}, {e}", exc_info=e)
     except KeyboardInterrupt:
-        pass
+        exit_code = 137
+
     logger.info(f"Document specific index worker finished in PID {os.getpid()}")
+    return exit_code
+
+
+def _doc_type_watcher(db: str, generator_config: GeneratorConfig):
+    """
+    The watcher process maintains a doc type index process. It will start a new one if the process exits successfully,
+    indicating it exited due to excessive memory usage.
+    """
+    process: Optional[multiprocessing.Process] = None
+    try:
+        faulthandler.register(signal.SIGUSR1)
+        logger.info(f"Document specific index watcher starting in PID {os.getpid()}")
+
+        while True:
+            process = multiprocessing.Process(target=_doc_type_worker, args=(db, generator_config))
+            process.start()
+            process.join()
+            if process.exitcode != 0:
+                process.close()
+                process = None
+                break
+
+    except KeyboardInterrupt:
+        pass
+
+    finally:
+        if process is not None:
+            try:
+                process.terminate()
+                process.join()
+                process.close()
+            except Exception:
+                pass
+
+    logger.info(f"Document specific index watcher finished in PID {os.getpid()}")
 
 
 def start_ingest_worker(db: str, generator_config: GeneratorConfig, pool_size: int = 1) -> Tuple[
     persistqueue.SQLiteAckQueue, TaskPool]:
-
     processes = []
 
     if get_server_config().low_power:
@@ -111,7 +169,7 @@ def start_ingest_worker(db: str, generator_config: GeneratorConfig, pool_size: i
     else:
         for idx in range(pool_size):
             # these processes are heavy-weight
-            process = multiprocessing.Process(target=_doc_type_worker, args=(db, generator_config))
+            process = multiprocessing.Process(target=_doc_type_watcher, args=(db, generator_config))
             process.start()
             processes.append(process)
 
