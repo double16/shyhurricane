@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=80.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shyhurricane"
+version = "0.1.0"
+description = "MCP server to assist AI in offensive security testing"
+authors = [
+    { name = "Patrick Double", email = "pat@patdouble.com" }
+]
+readme = "README.md"
+license = { text = "GPL-3.0-or-later" }
+requires-python = ">=3.12"
+# see requirements.txt
+dependencies = []

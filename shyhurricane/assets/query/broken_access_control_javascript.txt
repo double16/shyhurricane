@@ -1,0 +1,15 @@
+if (user.role === "admin") showDeleteButton();
+----
+if (!isAdmin) deleteButton.style.display = "none";
+----
+window.user = { role: "user", isAdmin: false };
+----
+window.user.isAdmin = true;
+----
+if (getParam("debug") === "1")
+----
+localStorage.setItem("role", "admin");
+----
+const jwtPayload = JSON.parse(atob(token.split('.')[1]));
+----
+if (!user || !user.role) user = { role: "guest" };

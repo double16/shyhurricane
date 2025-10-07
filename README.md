@@ -15,38 +15,39 @@ An important feature of the server is the indexing of website content using LLM 
 
 The following tools are provided:
 
-| Tool                       | Description                                                                                         | Open World? |
-|----------------------------|-----------------------------------------------------------------------------------------------------|-------------|
-| run_unix_command           | Run a Linux or macOS command and return its output.                                                 | Yes         |
-| port_scan                  | Performs a port scan and service identification on the target(s), similar to the functions of nmap. | Yes         |
-| spider_website             | Spider the website at the url and index the results for further analysis                            | Yes         |
-| directory_buster           | Search a website for hidden directories and files.                                                  | Yes         |
-| index_http_url             | Index an HTTP URL to allow for further analysis. (aka curl)                                         | Yes         |
-| find_wordlists             | Find available word lists for spidering and `run_unix_command`                                      | No          |
-| find_web_resources         | Query indexed resources about a website using natural language .                                    | No          |
-| fetch_web_resource_content | Fetch the content of a web resource that has already been indexed.                                  | No          |
-| find_domains               | Query indexed resources for a list of domains.                                                      | No          |
-| find_hosts                 | Query indexed resources for a list of hosts for the given domain.                                   | No          |
-| find_netloc                | Query indexed resources for a list of network locations, i.e. host:port, for a given domain.        | No          |
-| find_urls                  | Query indexed resources for a list of URLs for the given host or domain.                            | No          |
-| register_hostname_address  | Registers a hostname with an IP address.                                                            | No          |
-| save_finding               | Save findings as a markdown.                                                                        | No          |
-| query_findings             | Query for previous findings for a target.                                                           | No          |
-| web_search                 | Searches the web with the provided query.                                                           | Yes         |
-| deobfuscate_javascript     | De-obfuscate a JavaScript file (automatically done during indexing)                                 | No          |
-| prompt_chooser             | Chooses the best prompt for an offensive security operation.                                        | No          |
-| prompt_list                | Provides a list of available prompt titles for offensive security operations.                       | No          |
-| encoder_decoder            | Transforms the input by applying common operations.                                                 | No          |
-| channel_create_forward     | Create a forward channel backed by a local subprocess.                                              | Yes         |
-| channel_create_reverse     | Create a reverse channel for one duplex client                                                      | Yes         |
-| channel_poll               | Long-poll for events from a channel                                                                 | Yes         |
-| channel_send               | Write bytes to a channel's stdin                                                                    | Yes         |
-| channel_status             | Check whether a channel is established and ready for send/receive.                                  | Yes         |
-| channel_close              | Close a specific channel                                                                            | Yes         |
-| channel_close_all          | Close all channels                                                                                  | Yes         |
-| oast_health                | Check the health/reachability of the currently configured OAST provider.                            | Yes         |
-| oast_endpoints             | Get the endpoints that can be used to test out-of-band interactions from the target.                | Yes         |
-| oast_poll                  | Retrieve new interactions with the OAST service since the last poll.                                | Yes         |
+| Tool                        | Description                                                                                         | Open World? |
+|-----------------------------|-----------------------------------------------------------------------------------------------------|-------------|
+| run_unix_command            | Run a Linux or macOS command and return its output.                                                 | No          |
+| port_scan                   | Performs a port scan and service identification on the target(s), similar to the functions of nmap. | Yes         |
+| spider_website              | Spider the website at the url and index the results for further analysis                            | Yes         |
+| directory_buster            | Search a website for hidden directories and files.                                                  | Yes         |
+| index_http_url              | Index an HTTP URL to allow for further analysis. (aka curl)                                         | Yes         |
+| find_wordlists              | Find available word lists for spidering and `run_unix_command`                                      | No          |
+| find_web_resources          | Query indexed resources about a website using natural language .                                    | No          |
+| fetch_web_resource_content  | Fetch the content of a web resource that has already been indexed.                                  | No          |
+| find_domains                | Query indexed resources for a list of domains.                                                      | No          |
+| find_hosts                  | Query indexed resources for a list of hosts for the given domain.                                   | No          |
+| find_netloc                 | Query indexed resources for a list of network locations, i.e. host:port, for a given domain.        | No          |
+| find_urls                   | Query indexed resources for a list of URLs for the given host or domain.                            | No          |
+| register_hostname_address   | Registers a hostname with an IP address.                                                            | No          |
+| save_finding                | Save findings as a markdown.                                                                        | No          |
+| query_findings              | Query for previous findings for a target.                                                           | No          |
+| web_search                  | Searches the web with the provided query.                                                           | Yes         |
+| deobfuscate_javascript      | De-obfuscate JavaScript content (automatically done during indexing)                                | No          |
+| deobfuscate_javascript_file | De-obfuscate a JavaScript file (automatically done during indexing)                                 | No          |
+| prompt_chooser              | Chooses the best prompt for an offensive security operation.                                        | No          |
+| prompt_list                 | Provides a list of available prompt titles for offensive security operations.                       | No          |
+| encoder_decoder             | Transforms the input by applying common operations.                                                 | No          |
+| channel_create_forward      | Create a forward channel backed by a local subprocess.                                              | Yes         |
+| channel_create_reverse      | Create a reverse channel for one duplex client                                                      | Yes         |
+| channel_poll                | Long-poll for events from a channel                                                                 | Yes         |
+| channel_send                | Write bytes to a channel's stdin                                                                    | Yes         |
+| channel_status              | Check whether a channel is established and ready for send/receive.                                  | Yes         |
+| channel_close               | Close a specific channel                                                                            | Yes         |
+| channel_close_all           | Close all channels                                                                                  | Yes         |
+| oast_health                 | Check the health/reachability of the currently configured OAST provider.                            | Yes         |
+| oast_endpoints              | Get the endpoints that can be used to test out-of-band interactions from the target.                | Yes         |
+| oast_poll                   | Retrieve new interactions with the OAST service since the last poll.                                | Yes         |
 
 
 ## GPU
@@ -231,7 +232,7 @@ python3 assistant.py --ollama-model qwen3:30b --ollama-host 192.168.100.100:1143
 
 ```shell
 export GOOGLE_API_KEY=xxxx
-python3 assistant.py --gemini-model gemini-2.5-flash
+python3 assistant.py --gemini-model gemini-flash-latest
 ```
 
 ### OpenAI

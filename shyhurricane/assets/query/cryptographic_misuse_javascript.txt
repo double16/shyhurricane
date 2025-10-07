@@ -1,0 +1,28 @@
+const hash = CryptoJS.MD5(password);
+----
+const hash = sha1(password);
+----
+const key = "mysecretkey123456";
+----
+CryptoJS.AES.encrypt(data, key, { mode: CryptoJS.mode.ECB });
+----
+localStorage.setItem("encryption_key", key);
+----
+CryptoJS.AES.encrypt("message", key);
+----
+function xorEncrypt(str, key) { ... }
+----
+const rsa = new JSEncrypt();
+rsa.setPublicKey(shortKey);
+----
+fetch("/api/submit", {
+  method: "POST",
+  body: JSON.stringify({ encrypted: encryptedData, key: rawKey })
+});
+----
+window.crypto.subtle.deriveKey({
+  name: "PBKDF2",
+  salt: salt,
+  iterations: 100,
+  hash: "SHA-1"
+}, baseKey, ...);

@@ -100,3 +100,11 @@ class WebsiteContextPipelineTest(unittest.TestCase):
         self.assertEqual(["POST"], methods)
         self.assertIn(500, response_codes)
         self.assertTrue(all(filter(lambda code: 500 <= code < 600, response_codes)))
+
+    def test_single_netloc_with_query(self):
+        doc_types, targets, methods, response_codes = self._run_pipeline(
+            '94.237.55.43:53590 "IDOR" OR "access control" OR "unauthorized"')
+        # self.assertIn("network", doc_types)
+        self.assertEqual(["94.237.55.43:53590"], targets)
+        # self._assert_empty_list(methods)
+        self.assertIn(403, response_codes)

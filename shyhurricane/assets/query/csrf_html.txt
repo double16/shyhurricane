@@ -1,0 +1,5 @@
+<form action="/signup" method="POST" id="auto">
+  <input name="email" value="test@example.com" />
+</form>
+<script>document.forms[0].submit();</script>
+----

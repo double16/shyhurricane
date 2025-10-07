@@ -7,6 +7,8 @@ from pathlib import Path
 import persistqueue
 from persistqueue import Empty
 
+from shyhurricane.utils import log_heap_stats, log_gpu_memory_summary
+
 logger = logging.getLogger(__name__)
 
 
@@ -27,6 +29,8 @@ def _shrink_persistent_queue(queue: persistqueue.SQLiteAckQueue, name: str):
         queue.shrink_disk_usage()
     except Exception as e:
         logger.debug("Shrinking queue %s failed: %s", name, e)
+    log_heap_stats()
+    log_gpu_memory_summary()
 
 
 def persistent_queue_get(queue: persistqueue.SQLiteAckQueue, shrink_count: int = 1000,

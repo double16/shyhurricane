@@ -54,22 +54,8 @@ def _documents_to_http_resources(documents: List[Document]) -> List[HttpResource
             )
         else:
             resource = None
-        try:
-            response_headers = json.loads(doc.meta.get("response_headers", "{}"))
-        except json.decoder.JSONDecodeError:
-            response_headers = None
-        https_resources.append(HttpResource(
-            score=doc.score or 100,
-            url=doc.meta['url'],
-            host=doc.meta.get('host', ''),
-            port=doc.meta.get('port', 0),
-            domain=doc.meta.get('domain', ''),
-            status_code=doc.meta.get('status_code', 200),
-            method=doc.meta.get('http_method', ''),
-            resource=resource,
-            contents=None,
-            response_headers=response_headers,
-        ))
+
+        https_resources.append(HttpResource.from_doc(doc, resource=resource))
     return https_resources
 
 
@@ -353,7 +339,12 @@ async def find_web_resources(
     parsed_targets: List[TargetInfo] = []
     for target in targets:
         try:
-            parsed_targets.append(parse_target_info(target))
+            raw_target = parse_target_info(target)
+            if not raw_target.netloc and raw_target.host:
+                parsed_targets.append(raw_target.with_port(80))
+                parsed_targets.append(raw_target.with_port(443))
+            else:
+                parsed_targets.append(raw_target)
         except ValueError:
             pass
     filter_netloc = list(map(lambda t: t.netloc, parsed_targets))
@@ -447,6 +438,8 @@ async def find_web_resources(
 
     res = await asyncio.to_thread(document_pipeline.run,
                                   data={"query": {"text": query, "filters": filters, "max_results": limit,
+                                                  "targets": filter_netloc + list(filter_domain),
+                                                  "doc_types": doc_types,
                                                   "progress_callback": progress_callback}},
                                   include_outputs_from={"combine"})
 

@@ -167,4 +167,4 @@ cython_debug/
 *history.md
 node_modules/
 .DS_Store
-docs/demos/*.chroma
+*.chroma

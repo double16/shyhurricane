@@ -1,0 +1,10 @@
+<iframe src="/settings/account"></iframe>
+----
+<button onclick="deleteAccount()">Delete</button>
+----
+<form action="/login" method="POST">
+  <input type="text" name="user">
+  <input type="password" name="pass">
+</form>
+----
+<iframe src="https://example.com/profile"></iframe>

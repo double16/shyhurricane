@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 finding_target_invalid_instructions = "Target must be a valid URL, hostname, IP address, host:port or ip:port. Retry with a corrected target."
 finding_not_found_instructions = "No findings found for the target. Expand the target or hack more!"
-finding_instructions = "These findings were found for the target. They provide a good starting place to continue testing."
+finding_instructions = "These are findings from previous scans for the target (they do not need to be saved again). They provide a good starting place to continue testing. Chaining findings together may produce higher severity findings."
 
 
 class SaveFindingResult(BaseModel):
@@ -100,6 +100,7 @@ class QueryFindingsResult(BaseModel):
     target: str = Field(description="Target of the findings")
     limit: int = Field(description="Limit for the number of results")
     findings: List[Finding] = Field(default=[], description="Findings associated with the target")
+    has_more: bool = Field(False, description="Whether there are more results")
 
 
 @mcp_instance.tool(
@@ -130,6 +131,7 @@ async def query_findings(
             instructions=finding_target_invalid_instructions,
             target=target,
             limit=limit,
+            has_more=False,
         )
 
     store = server_ctx.stores["finding"]
@@ -179,6 +181,7 @@ async def query_findings(
             docs.extend(await store.filter_documents_async(filters=filters))
 
     findings = []
+    has_more = False
     for doc in docs:
         findings.append(Finding(
             target=doc.meta.get("url", doc.meta.get("netloc", doc.meta.get("host", doc.meta.get("domain", target)))),
@@ -186,6 +189,7 @@ async def query_findings(
             markdown=doc.content,
         ))
         if len(findings) >= limit:
+            has_more = True
             break
 
     logger.info(f"Found {len(findings)} findings")
@@ -195,6 +199,7 @@ async def query_findings(
         target=target,
         limit=limit,
         findings=findings,
+        has_more=has_more,
     )
 
 

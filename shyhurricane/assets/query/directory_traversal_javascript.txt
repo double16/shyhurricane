@@ -1,0 +1,13 @@
+fetch(`/assets/${userInput}`)
+----
+img.src = `/images/${userPath}`;
+----
+xhr.open("GET", "docs/" + location.hash.slice(1));
+----
+iframe.src = `/media/${file}`;
+----
+fetch("/api/read?file=" + userInput);
+----
+import(`/modules/${userChoice}.js`);
+----
+const url = "/downloads/" + userInput + ".pdf";

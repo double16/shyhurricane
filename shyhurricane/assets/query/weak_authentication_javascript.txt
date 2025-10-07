@@ -1,0 +1,16 @@
+localStorage.getItem('session')
+----
+localStorage.getItem('token')
+----
+localStorage.setItem("token",
+----
+localStorage.setItem("session",
+----
+if (username === "
+----
+const creds = atob(encoded);
+----
+jwt_decode(token);
+----
+const apiKey =
+----

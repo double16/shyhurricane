@@ -26,6 +26,15 @@ class TargetInfo(BaseModel):
             scheme = "http"
         return f"{scheme}://{host}"
 
+    def with_port(self, new_port: int) -> "TargetInfo":
+        return TargetInfo(
+            url=self.url,
+            netloc=f"{self.host}:{new_port}" if self.host else None,
+            host=self.host,
+            port=new_port,
+            domain=self.domain,
+        )
+
 
 def parse_target_info(target: str) -> TargetInfo:
     """

@@ -1,0 +1,21 @@
+location.href = getParam("next");
+----
+window.location.replace(userInput);
+----
+location.assign(query.redirect);
+----
+location.href = decodeURIComponent(location.hash.slice(1));
+----
+window.open(getParam("url"));
+----
+const target = new URLSearchParams(location.search).get("to");
+const link = document.createElement("a");
+link.href = target;
+----
+button.onclick = () => location = input.value;
+----
+document.location = userProvidedUrl;
+----
+if (userPath.startsWith("http")) router.navigate(userPath);
+----
+document.head.innerHTML += `<meta http-equiv="refresh" content="0;url=${userURL}">`;

@@ -1,0 +1,10 @@
+<input type="hidden" name="email" value="jane@example.com">
+<input type="hidden" name="dob" value="1990-04-12">
+----
+<div id="patient-card" data-name="Bob Smith" data-diagnosis="Diabetes"></div>
+----
+<a href="/records/download?user=bob@example.com">Download</a>
+----
+<span id="patient-name">Alice Smith</span>
+----
+<meta name="author" content="ssn=123-45-6789">

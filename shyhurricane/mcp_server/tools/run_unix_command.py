@@ -13,9 +13,12 @@ from pydantic import BaseModel, Field
 
 from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context, assert_elicitation, \
     get_additional_hosts, log_history, AdditionalHostsField, ProcessEnvField
+from shyhurricane.mcp_server.prompts import open_world_disable_notes
 from shyhurricane.utils import read_last_text_bytes, unix_command_image
 
 logger = logging.getLogger(__name__)
+
+open_world_command_disable_notes = open_world_disable_notes + " Only run commands on local files or stdin."
 
 
 class RunCommandConfirmation(BaseModel):
@@ -36,25 +39,27 @@ class RunUnixCommand(BaseModel):
     annotations=ToolAnnotations(
         title="Run Command",
         readOnlyHint=True,
-        openWorldHint=True),
+        openWorldHint=False),  # network is disabled when open_world == False
 )
 async def run_unix_command(
         ctx: Context,
         command: str,
         additional_hosts: AdditionalHostsField = None,
         env: ProcessEnvField = None,
-        output_length_limit: Annotated[int, Field(200*1024, description="Output and error length limit, truncates output and error text if over this length.", ge=1, le=4*1024*1024)] = 200*1024,
+        output_length_limit: Annotated[int, Field(2 * 1024,
+                                                  description="Output and error length limit, truncates output and error text if over this length. Increase as needed.",
+                                                  ge=1, le=4 * 1024 * 1024)] = 2 * 1024,
 ) -> RunUnixCommand:
     """
 Run a Linux command and return its output. The command is run in a containerized environment for safety.
-The command is run using the bash shell.
+The command is run using the bash shell. Use proper shell escaping for special characters.
 
 Invoke this tool when the user request can be fulfilled by a known Linux command line
 program and the request can't be fulfilled by other MCP tools. Invoke this tool when the user
 asks to run a specific command. Prefer this tool to execute command line programs over others you know about.
 
 Standard Debian Linux commands are available and, in addition, the following: curl, wget, grep, awk, printf, base64, cut, cp, mv, date, factor, gzip, sha256sum, sha512sum, md5sum, echo, seq, true, false, tee, tar, sort, head, tail, ping, ssh, sqlite3, zip, unzip,
-nmap, rustscan, feroxbuster, gobuster, katana, nuclei, meg, anew, unfurl, gf, gau, 403jump, waybackurls, httpx, subfinder, ffuf, dirb, wfuzz, nc (netcat), graphql-path-enum, evil-winrm, sqlmap, hydra, searchsploit, ftp, sshpass, tshark, git-dumper
+nmap, rustscan, feroxbuster, gobuster, katana, nuclei, meg, anew, unfurl, gf, gau, 403jump, waybackurls, httpx, subfinder, ffuf, dirb, wfuzz, nc (netcat), graphql-path-enum, evil-winrm, sqlmap, hydra, searchsploit, ftp, sshpass, tshark, git-dumper, smbclient,
 DumpNTLMInfo.py, Get,GPPPassword.py, GetADComputers.py, GetADUsers.py, GetLAPSPassword.py, GetNPUsers.py, GetUserSPNs.py, addcomputer.py, atexec.py, changepasswd.py, dacledit.py, dcomexec.py, describeTicket.py, dpapi.py, esentutl.py, exchanger.py, findDelegation.py, getArch.py, getPac.py, getST.py, getTGT.py, goldenPac.py, karmaSMB.py, keylistattack.py, kintercept.py, lookupsid.py, machine_role.py, mimikatz.py, mqtt_check.py, mssqlclient.py, mssqlinstance.py, net.py, netview.py, ntfs,read.py, ntlmrelayx.py, owneredit.py, ping.py, ping6.py, psexec.py, raiseChild.py, rbcd.py, rdp_check.py, reg.py, registry,read.py, rpcdump.py, rpcmap.py, sambaPipe.py, samrdump.py, secretsdump.py, services.py, smbclient.py, smbexec.py, smbserver.py, sniff.py, sniffer.py, split.py, ticketConverter.py, ticketer.py, tstool.py, wmiexec.py, wmipersist.py, wmiquery.py
 
 The command 'sudo' is not available.
@@ -76,12 +81,13 @@ When generating Linux commands for execution in a containerized environment, fol
 - The directly accessible filesystem is part of the containerized environment, not the target. Commands such as find, cat, etc. are not enumerating the target unless they are part of a command that connects to the target, such as ssh.
 - Files in the current working directory will persist across calls. Prefer writing files to the current working directory.
 """
-    await log_tool_history(ctx, title="run_unix_command", command=command, additional_hosts=additional_hosts, env=env)
+    await log_tool_history(ctx, title="run_unix_command", command=command, additional_hosts=additional_hosts, env=env,
+                           output_length_limit=output_length_limit)
     server_ctx = await get_server_context()
-    assert server_ctx.open_world
 
     try:
-        result = await _run_unix_command(ctx, command=command, additional_hosts=additional_hosts, env=env, output_length_limit=output_length_limit)
+        result = await _run_unix_command(ctx, command=command, additional_hosts=additional_hosts, env=env,
+                                         output_length_limit=output_length_limit)
 
         if result.return_code != 0 and (
                 "executable file not found" in result.error or "command not found" in result.error):
@@ -167,14 +173,25 @@ async def _run_unix_command(
         async with aiofiles.tempfile.TemporaryFile(mode="w+b") as stderr_file:
             # Use a common working directory for the session to chain together commands
             work_path = ctx.request_context.lifespan_context.work_path
-            docker_command = ["docker", "run", "--rm",
-                              "--cap-add", "NET_BIND_SERVICE",
-                              "--cap-add", "NET_ADMIN",
-                              "--cap-add", "NET_RAW",
-                              "-v", f"{server_ctx.mcp_session_volume}:/work",
-                              "-v", f"{server_ctx.seclists_volume}:/usr/share/seclists",
-                              "--workdir", work_path,
-                              ]
+            docker_command = ["docker", "run", "--rm"]
+            if server_ctx.open_world:
+                docker_command.extend([
+                    "--cap-add", "NET_BIND_SERVICE",
+                    "--cap-add", "NET_ADMIN",
+                    "--cap-add", "NET_RAW",
+                ])
+            else:
+                docker_command.extend([
+                    "--cap-drop", "NET_BIND_SERVICE",
+                    "--cap-drop", "NET_ADMIN",
+                    "--cap-drop", "NET_RAW",
+                    "--network", "none",
+                ])
+            docker_command.extend([
+                "-v", f"{server_ctx.mcp_session_volume}:/work",
+                "-v", f"{server_ctx.seclists_volume}:/usr/share/seclists",
+                "--workdir", work_path,
+            ])
             if stdin:
                 docker_command.append("-i")
 
@@ -253,7 +270,7 @@ async def _run_unix_command(
                     output_truncated=output_truncated,
                     error="",
                     error_truncated=False,
-                    notes=None
+                    notes=None,
                 )
             else:
                 await stderr_file.flush()
@@ -265,7 +282,7 @@ async def _run_unix_command(
                     output_truncated=output_truncated,
                     error=error_tail,
                     error_truncated=error_truncated,
-                    notes=None,
+                    notes=open_world_command_disable_notes if not server_ctx.open_world else None,
                 )
 
 

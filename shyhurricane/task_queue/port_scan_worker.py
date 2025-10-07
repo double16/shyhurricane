@@ -84,6 +84,8 @@ def _do_port_scan(
     else:
         ports_option = "-p-"
     nmap_command = ["nmap", "-sT", "--open", "-sC", "-sV", "-oX", "-", ports_option]
+    if not any(filter(lambda t: "/" in t or t.endswith(".0"), item.targets)):
+        nmap_command.append("-Pn")
     nmap_command.extend(item.targets)
 
     # running nmap inside docker is not always great because of networking, try locally if it's installed
@@ -136,26 +138,7 @@ def _do_port_scan(
             if child.tag == "extrareasons":
                 parent.remove(child)
 
-    nmap_content = ET.tostring(tree.getroot(), encoding="unicode")
-    nmap_doc = Document(
-        content=nmap_content,
-        meta={
-            "version": NMAP_DOCUMENT_VERSION,
-            "targets": ','.join(item.targets),
-            "ports": ','.join(item.ports),
-            "timestamp": timestamp,
-            "timestamp_float": runtime_ts,
-            "runtime_ts": runtime_ts,
-            "content_type": "text/xml",
-            "status_code": 200,
-            # "technologies": technologies_str,
-        }
-    )
-
-    logger.info("Embedding nmap XML")
-    nmap_docs = nmap_embedder.run(documents=[nmap_doc])["documents"]
-    logger.info("Saving nmap XML")
-    nmap_store.write_documents(nmap_docs, policy=DuplicatePolicy.OVERWRITE)
+    any_ports_found = False
 
     logger.info("Parsing nmap XML")
     results = []
@@ -220,23 +203,48 @@ def _do_port_scan(
 
         if ports_found:
             # only add the nmap doc if ports were found in case it's a temporary failure
-            for addr in addrs:
-                host_nmap_doc = Document(
-                    content=ET.tostring(host_el, encoding="unicode"),
-                    meta={
-                        "version": NMAP_DOCUMENT_VERSION,
-                        "targets": addr,
-                        "ports": ','.join(item.ports),
-                        "timestamp": timestamp,
-                        "timestamp_float": runtime_ts,
-                        "runtime_ts": runtime_ts,
-                        "content_type": "text/xml",
-                        "status_code": 200,
-                        # "technologies": technologies_str,
-                    }
-                )
-                nmap_store.write_documents(nmap_embedder.run(documents=[host_nmap_doc])["documents"],
-                                           policy=DuplicatePolicy.OVERWRITE)
+            any_ports_found = True
+            if len(item.targets) > 1 or len(addrs) > 1 or addrs != item.targets:
+                for addr in addrs:
+                    host_nmap_doc = Document(
+                        content=ET.tostring(host_el, encoding="unicode"),
+                        meta={
+                            "version": NMAP_DOCUMENT_VERSION,
+                            "targets": addr,
+                            "ports": ','.join(item.ports),
+                            "timestamp": timestamp,
+                            "timestamp_float": runtime_ts,
+                            "runtime_ts": runtime_ts,
+                            "content_type": "text/xml",
+                            "status_code": 200,
+                            # "technologies": technologies_str,
+                        }
+                    )
+                    nmap_store.write_documents(nmap_embedder.run(documents=[host_nmap_doc])["documents"],
+                                               policy=DuplicatePolicy.OVERWRITE)
+
+    nmap_content = ET.tostring(tree.getroot(), encoding="unicode")
+    if any_ports_found:
+        nmap_doc = Document(
+            content=nmap_content,
+            meta={
+                "version": NMAP_DOCUMENT_VERSION,
+                "targets": ','.join(item.targets),
+                "ports": ','.join(item.ports),
+                "timestamp": timestamp,
+                "timestamp_float": runtime_ts,
+                "runtime_ts": runtime_ts,
+                "content_type": "text/xml",
+                "status_code": 200,
+                # "technologies": technologies_str,
+            }
+        )
+
+        logger.info("Embedding nmap XML")
+        nmap_docs = nmap_embedder.run(documents=[nmap_doc])["documents"]
+        logger.info("Saving nmap XML")
+        nmap_store.write_documents(nmap_docs, policy=DuplicatePolicy.OVERWRITE)
+
 
     logger.info("Queuing results")
     result_queue.put(PortScanResults(

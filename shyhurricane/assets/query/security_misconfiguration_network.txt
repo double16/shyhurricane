@@ -1,0 +1,11 @@
+Content-Security-Policy: default-src *; script-src * 'unsafe-inline'
+----
+Strict-Transport-Security:
+----
+X-Frame-Options:
+----
+Access-Control-Allow-Origin: *
+----
+Server:
+----
+X-Powered-By:

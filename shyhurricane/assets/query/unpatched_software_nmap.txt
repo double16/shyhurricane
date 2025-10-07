@@ -1,0 +1,13 @@
+<service name="http" product="Apache httpd" version="2.2.22" extrainfo="(Debian)" method="probed" conf="10"/>
+----
+<service name="ssh" product="OpenSSH" version="6.6.1p1" extrainfo="Ubuntu 2ubuntu2.13" method="probed" conf="10"/>
+----
+<service name="smtp" product="Postfix smtpd" version="2.9.6" method="probed" conf="10"/>
+----
+<osmatch name="Linux 3.2 - 4.9" accuracy="100">
+  <osclass type="general purpose" vendor="Linux" osfamily="Linux" osgen="3.X" accuracy="100"/>
+</osmatch>
+----
+<hostscript>
+  <script id="http-server-header" output="Apache/2.4.7 (Ubuntu)"/>
+</hostscript>

@@ -1,0 +1,11 @@
+<input type="hidden" name="session" value="abc123xyz" />
+----
+<form action="/auth">
+  <input type="text" name="token" value="abc123">
+</form>
+----
+<a href="/download?session=abc123">Download</a>
+----
+<meta name="session-token" content="abc123xyz" />
+----
+<div data-session-id="abc123xyz"></div>
