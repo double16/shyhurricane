@@ -46,9 +46,9 @@ async def run_unix_command(
         command: str,
         additional_hosts: AdditionalHostsField = None,
         env: ProcessEnvField = None,
-        output_length_limit: Annotated[int, Field(200 * 1024,
-                                                  description="Output and error length limit, truncates output and error text if over this length.",
-                                                  ge=1, le=4 * 1024 * 1024)] = 200 * 1024,
+        output_length_limit: Annotated[int, Field(2 * 1024,
+                                                  description="Output and error length limit, truncates output and error text if over this length. Increase as needed.",
+                                                  ge=1, le=4 * 1024 * 1024)] = 2 * 1024,
 ) -> RunUnixCommand:
     """
 Run a Linux command and return its output. The command is run in a containerized environment for safety.

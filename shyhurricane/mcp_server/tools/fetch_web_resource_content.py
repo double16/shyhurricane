@@ -60,7 +60,7 @@ async def fetch_web_resource_content(
     If save_path is specified, the content will be available for further processing by the run_unix_command tool. After
     running this tool, use commands with run_unix_command to operate on the value of save_path.
 
-    Javascript will have already been de-obfuscated when indexed.
+    Javascript has already been deobfuscated as well as can be, do not try to deobfuscate or deminify.
     """
     await log_tool_history(ctx, "fetch_web_resource_content", url=url, save_path=save_path,
                            output_start_position=output_start_position, output_length_limit=output_length_limit)
