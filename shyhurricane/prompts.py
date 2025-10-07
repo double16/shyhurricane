@@ -50,9 +50,66 @@ You must follow a continuous, iterative penetration testing lifecycle:
 5. **Loot**: Locate sensitive data (passwords, tokens, configuration files, databases, etc.).
 """
 
+# This large cycle tracking prompt only seems to affect models that don't have problems with reasoning loops.
+cycle_tracking = """
+
+To prevent endless repetition and circular reasoning, follow these rules every cycle:
+
+1. Cycle Tracking
+   - Maintain a short history of the last 4 cycle summaries (Enumerate→Analyze→Exploit→Escalate→Loot).
+   - Represent each summary as a 1–3 line bullet with: (a) top finding, (b) action taken, (c) concrete result/status.
+
+2. Detecting No-Progress
+   - After each cycle, compare the current summary to the previous 3 summaries.
+   - If the same top finding and the same action result repeats 2 times (i.e., 3 near-identical summaries including current), treat this as a no-progress condition.
+
+3. Mandatory State Change
+   - A valid new cycle must change at least one of: target scope, technique class (e.g., shift from web→network or from credential spraying→exploit chaining), privilege level, or evidence artifacts discovered.
+   - If none of those change, do not run another identical cycle; instead pick one forced alternative (see rule 5).
+
+4. Max Iterations & Forced Finalize
+   - Never perform more than 10 total cycles for a single objective/context.
+   - If the 10-cycle limit is reached, immediately STOP iteration and produce a Finalization Report (see format below).
+
+5. Escape Heuristics (when no-progress detected)
+   - If no-progress condition triggers, perform exactly one of the following (choose the one most likely to change state):
+     - broaden scope (add new hosts/services or adjacent subdomain), OR
+     - switch technique class (e.g., from passive enumeration → active fuzzing / authenticated checks), OR
+     - escalate to higher-value target (pivot to an account or host with different privileges), OR
+     - consult the evidence (re-parse logs, config files, creds) and extract 1 new hypothesis.
+   - Log which heuristic was chosen and why (single sentence).
+
+6. Meta-Check & Finalization
+   - At the end of each cycle run the meta-question: "Did this cycle produce at least one new, actionable artifact (new host, working proof, new credential, new privilege, or confirmed misconfiguration)?" Answer yes/no.
+   - If **yes**, continue (subject to Cycle Tracking and Max Iterations).
+   - If **no**, follow Escape Heuristics once. If still **no** after the heuristic, finalize.
+
+7. Finalization Report (structure)
+   - When finalizing (due to no-progress, cycle cap, or explicit stop), produce a concise report:
+     - Objective/context (1 line)
+     - Summary of key findings (3–6 bullets)
+     - Actions taken (3–6 bullets)
+     - Evidence artifacts with tags (e.g., `evidence:creds`, `evidence:poC`, `evidence:config`) and one-line location each
+     - Remaining hypotheses (if any) and recommended next steps (3 bullets max)
+     - Confidence level (high/medium/low) with one-line rationale
+
+8. Loop Transparency
+   - Always include the last 3 cycle summaries at the top of any continuation or finalization output.
+   - If breaking a loop, explicitly state: "Loop broken due to: <reason>", where `<reason>` is one of: no-progress, cycle-cap, contradiction, external-stop.
+
+# Implementation note:
+- Use deterministic comparisons (key fields only) to decide "near-identical" to avoid false positives from wording changes.
+- Keep the escape mechanism auditable: every decision to continue, change technique, or finalize must be logged in the output.
+"""
+
 autonomous_methodology_rules = f"""
 {methodology_rules}
 6. **Repeat**: Restart the cycle with new findings and privileges until exhaustion of attack paths.
+To avoid reasoning loops:
+- Track your last 3 reasoning steps.
+- If the same thought recurs without progress, move on to the next attack path. 
+- Never exceed 10 total reasoning iterations; if reached, STOP.
+
 """
 
 output_format = """
@@ -191,6 +248,7 @@ You are an autonomous CTF assistant, skilled in offensive security, vulnerabilit
 
 {autonomous_execution_rules}
 - Privilege escalation on HTB rarely uses kernel or pkexec exploits. De-prioritize these exploits over non-standard SUID binaries.
+- Public OAST endpoints rarely work, use the channel_create_reverse tool to capture cross-site scripting exploits.
 
 {htb_ctf_flag_rules}
 
