@@ -50,7 +50,6 @@ class EmbeddingModelConfig:
 
 
 # Mapping of document types (collections) to embedding model names
-# TODO: remove some of these for low_power mode
 _doc_type_to_model: Dict[str, EmbeddingModelConfig] = {
     # for any collection that needs full content, do not add token_lengths
     "html": EmbeddingModelConfig("html", CODE_EMBEDDING_MODEL, token_lengths=[sys.maxsize, 256]),

@@ -170,7 +170,7 @@ class RequestResponseToDocument:
     IngestableRequestResponse and produces Document(s) for storage.
     """
 
-    def __init__(self, embedders: Dict[str, Any]):
+    def __init__(self, embedders: Dict[str, SentenceTransformersDocumentEmbedder]):
         self.embedders = embedders
         self._soup_extractor = BeautifulSoupExtractor()
         self._title_soup_strainer = SoupStrainer(['title', 'meta'])
@@ -480,7 +480,7 @@ class IndexDocTypeDocuments:
 
     def __init__(
             self,
-            embedders: Dict[str, Any],
+            embedders: Dict[str, SentenceTransformersDocumentEmbedder],
             multi_store: "IngestMultiStore",
     ) -> None:
         self.embedders = embedders

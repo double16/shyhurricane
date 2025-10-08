@@ -20,8 +20,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIPX_HOME=/usr/local/share \
     PIP_CACHE_DIR=/usr/local/share/pip-cache
 
+RUN echo 'path-exclude=/usr/share/doc/*'        >  /etc/dpkg/dpkg.cfg.d/excludes &&\
+    echo 'path-exclude=/usr/share/man/*'        >> /etc/dpkg/dpkg.cfg.d/excludes &&\
+    echo 'path-exclude=/usr/share/groff/*'      >> /etc/dpkg/dpkg.cfg.d/excludes &&\
+    echo 'path-exclude=/usr/share/info/*'       >> /etc/dpkg/dpkg.cfg.d/excludes &&\
+    echo 'path-exclude=/usr/share/lintian/*'    >> /etc/dpkg/dpkg.cfg.d/excludes &&\
+    echo 'path-include=/usr/share/doc/*/copyright' >> /etc/dpkg/dpkg.cfg.d/excludes
+
 RUN apt-get update &&\
-    apt-get install -y --install-recommends rsync ruby nmap sqlmap curl wget dirb ffuf wfuzz hydra netcat-openbsd git pipx iputils-ping nodejs npm mitmproxy python3-pip python3-virtualenv jq exploitdb nuclei ftp atftp sshpass tshark sqlite3 smbclient &&\
+    apt-get install -y --no-install-recommends rsync ruby nmap sqlmap curl wget dirb ffuf wfuzz hydra netcat-openbsd git pipx iputils-ping nodejs npm mitmproxy python3-pip python3-virtualenv jq exploitdb nuclei ftp atftp sshpass tshark sqlite3 smbclient &&\
     apt-get clean
 RUN pipx install impacket git-dumper
 RUN gem install evil-winrm
