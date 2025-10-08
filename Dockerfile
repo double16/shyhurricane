@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 
 RUN apt-get update &&\
-    apt-get install -y --install-recommends docker.io curl nmap haveged &&\
+    apt-get install -y --no-install-recommends docker.io curl nmap haveged &&\
     apt-get clean
 
 WORKDIR /app
