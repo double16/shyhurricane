@@ -15,7 +15,7 @@ from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_c
     AdditionalHostsField, CookiesField, RequestParamsField
 from shyhurricane.mcp_server.tools.find_wordlists import find_wordlists
 from shyhurricane.mcp_server.tools.run_unix_command import _run_unix_command
-from shyhurricane.task_queue import DirBustingQueueItem
+from shyhurricane.task_queue import DirBustingQueueItem, DirBustingResultItem
 
 logger = logging.getLogger(__name__)
 
@@ -114,6 +114,8 @@ async def directory_buster(
     server_ctx = await get_server_context()
     assert server_ctx.open_world
 
+    context_id = ctx.request_context.lifespan_context.app_context_id
+
     url = url.strip()
     depth = min(5, max(1, depth))
 
@@ -129,6 +131,7 @@ async def directory_buster(
     task_queue: Queue = server_ctx.task_queue
     dir_busting_result_queue: Queue = server_ctx.dir_busting_result_queue
     queue_item = DirBustingQueueItem(
+        context_id=context_id,
         uri=url,
         depth=depth,
         method=method,
@@ -148,25 +151,28 @@ async def directory_buster(
     results: List[str] = []
     has_more = True
     time_limit = time.time() + min(600, max(30, timeout_seconds or 120))
-    found_url_check = url.split("FUZZ")[0]
     while time.time() < time_limit:
         try:
-            found_url: str = await asyncio.to_thread(
+            result_item: DirBustingResultItem = await asyncio.to_thread(
                 dir_busting_result_queue.get,
                 timeout=(max(1.0, time_limit - time.time())))
+            if result_item.context_id != context_id:
+                if not result_item.is_expired():
+                    dir_busting_result_queue.put(result_item, block=False)
+                    # wait so we don't get into a fast loop of putting back an item not for us
+                    await asyncio.sleep(0.5)
+                continue
         except (queue.Empty, TimeoutError):
             break
+        found_url = result_item.url
         if found_url is None:
             has_more = False
             break
         logger.debug(f"{found_url} has been retrieved")
-        if not found_url.startswith(found_url_check):
-            logger.debug(
-                f"Dir buster queued {found_url}, expecting {found_url_check}*")
-            continue
         results.append(found_url)
         await ctx.info(f"Found: {found_url}")
 
+    logger.info(f"directory_buster found {len(results)} results, has_more={has_more}")
     instructions = dirbuster_instructions(results, has_more)
     return DirBusterResults(
         instructions=instructions,

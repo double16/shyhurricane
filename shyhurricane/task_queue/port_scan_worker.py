@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import copy
 import logging
 import shutil
@@ -40,7 +42,7 @@ class PortScanContext:
         self.portscan_embedder.warm_up()
 
 
-def port_scan_worker(ctx: PortScanContext, item: PortScanQueueItem, result_queue: Queue):
+def port_scan_worker(ctx: PortScanContext, item: PortScanQueueItem, result_queue: Queue[PortScanResults]):
     nmap_store = ctx.nmap_store
     nmap_embedder = ctx.nmap_embedder
     portscan_store = ctx.portscan_store
@@ -64,7 +66,7 @@ def port_scan_worker(ctx: PortScanContext, item: PortScanQueueItem, result_queue
 
 
 def _do_port_scan(
-        result_queue: Queue,
+        result_queue: Queue[PortScanResults],
         item: PortScanQueueItem,
         nmap_store: ChromaDocumentStore,
         nmap_embedder: SentenceTransformersDocumentEmbedder,
@@ -248,12 +250,14 @@ def _do_port_scan(
 
     logger.info("Queuing results")
     result_queue.put(PortScanResults(
+        context_id=item.context_id,
         runtime_ts=runtime_ts,
         results=results,
         targets=item.targets,
         ports=item.ports,
         nmap_xml=nmap_content,
         has_more=has_more,
+        timestamp=time.time(),
     ))
 
     return None
@@ -290,12 +294,14 @@ def get_stored_port_scan_results(
         if "ERROR: Script execution failed" in doc.content:
             continue
         results.append(PortScanResults(
+            context_id=item.context_id,
             runtime_ts=doc.meta.get("runtime_ts", 0),
             results=existing_results,
             targets=item.targets,
             ports=item.ports,
             nmap_xml=doc.content,
             has_more=False,
+            timestamp=time.time(),
         ))
     if not results:
         return None

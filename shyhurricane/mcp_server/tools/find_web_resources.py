@@ -22,6 +22,7 @@ from shyhurricane.mcp_server import get_server_context, mcp_instance, log_tool_h
 from shyhurricane.mcp_server.tools.find_indexed_metadata import find_netloc
 from shyhurricane.target_info import parse_target_info, TargetInfo
 from shyhurricane.task_queue import SpiderQueueItem
+from shyhurricane.task_queue.types import SpiderResultItem
 from shyhurricane.utils import HttpResource, urlparse_ext, documents_sort_unique, extract_domain, query_to_netloc, \
     munge_urls, filter_hosts_and_addresses
 
@@ -571,10 +572,11 @@ async def spider_website(
             has_more=False,
         )
 
+    context_id = ctx.request_context.lifespan_context.app_context_id
     spider_queue: Queue = server_ctx.task_queue
     spider_result_queue: Queue = server_ctx.spider_result_queue
-    url_parsed = urlparse_ext(url)
     spider_queue_item = SpiderQueueItem(
+        context_id=context_id,
         uri=url,
         depth=3,
         user_agent=user_agent,
@@ -588,22 +590,26 @@ async def spider_website(
     time_limit = time.time() + min(600, max(30, timeout_seconds or 120))
     while time.time() < time_limit:
         try:
-            http_resource: HttpResource = await asyncio.to_thread(
+            result_item: SpiderResultItem = await asyncio.to_thread(
                 spider_result_queue.get,
                 timeout=(max(1.0, time_limit - time.time())))
+            if result_item.context_id != context_id:
+                if not result_item.is_expired():
+                    spider_result_queue.put(result_item, block=False)
+                    # wait so we don't get into a fast loop of putting back an item not for us
+                    await asyncio.sleep(0.5)
+                continue
         except (queue.Empty, TimeoutError):
             break
+        http_resource = result_item.http_resource
         if http_resource is None:
             has_more = False
             break
         logger.debug(f"{http_resource} has been retrieved")
-        if http_resource.host != url_parsed.hostname or http_resource.port != url_parsed.port:
-            logger.debug(
-                f"Spider queued {http_resource.host}:{http_resource.port}, expecting {url_parsed.hostname}:{url_parsed.port}")
-            continue
         results.append(http_resource)
         await ctx.info(f"Found: {http_resource.url}")
 
+    logger.info(f"spider_website for {url} returned {len(results)} results, has_more={has_more}")
     return SpiderResults(
         url=url,
         instructions=spider_instructions(results, has_more),

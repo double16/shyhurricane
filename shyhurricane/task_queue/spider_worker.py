@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import logging
 import subprocess
@@ -9,14 +11,17 @@ from mcp import Resource
 from pydantic import AnyUrl
 
 from shyhurricane.index.input_documents import KatanaDocument, IngestableRequestResponse
-from shyhurricane.task_queue.types import SpiderQueueItem
+from shyhurricane.task_queue.types import SpiderQueueItem, SpiderResultItem
 from shyhurricane.utils import BeautifulSoupExtractor, urlparse_ext, HttpResource, \
     extract_domain, unix_command_image
 
 logger = logging.getLogger(__name__)
 
 
-def spider_worker(item: SpiderQueueItem, ingest_queue: persistqueue.SQLiteAckQueue, spider_result_queue: Queue):
+def spider_worker(
+        item: SpiderQueueItem,
+        ingest_queue: persistqueue.SQLiteAckQueue,
+        spider_result_queue: Queue[SpiderResultItem]):
     _katana_ingest(
         item=item,
         ingest_queue=ingest_queue,
@@ -27,7 +32,7 @@ def spider_worker(item: SpiderQueueItem, ingest_queue: persistqueue.SQLiteAckQue
 def _katana_ingest(
         item: SpiderQueueItem,
         ingest_queue: persistqueue.SQLiteAckQueue,
-        result_queue: Queue = None,
+        result_queue: Queue[SpiderResultItem] = None,
 ) -> None:
     katana_command = ["katana", "-u", item.uri, "-js-crawl", "-jsluice", "-known-files", "all", "-field-scope", "fqdn",
                       "-form-extraction", "-tech-detect", "-ignore-query-params", "-strategy", "breadth-first",
@@ -99,7 +104,7 @@ def _katana_ingest(
                                 resource=resource,
                                 contents=None,
                             )
-                            result_queue.put_nowait(http_resource)
+                            result_queue.put_nowait(SpiderResultItem(item.context_id, http_resource))
                             result_count[0] += 1
                         except Exception as e:
                             logger.warning(f"Queueing spider results: {e}", exc_info=e)
@@ -130,6 +135,6 @@ def _katana_ingest(
         logger.error("Spider for %s returned exit code %d", item.uri, return_code)
 
     if result_queue:
-        result_queue.put_nowait(None)
+        result_queue.put_nowait(SpiderResultItem(item.context_id, None))
 
     return None

@@ -5,7 +5,7 @@ import logging
 import subprocess
 import sys
 from math import floor
-from typing import List, Optional, Dict, Any, Set
+from typing import List, Optional, Dict, Set
 
 from bs4 import SoupStrainer
 from cachetools import LRUCache

@@ -92,6 +92,7 @@ async def port_scan(
 
     server_ctx = await get_server_context()
     assert server_ctx.open_world
+    context_id = ctx.request_context.lifespan_context.app_context_id
 
     port_scan_queue: Queue = server_ctx.task_queue
     port_scan_result_queue: Queue = server_ctx.port_scan_result_queue
@@ -106,6 +107,7 @@ async def port_scan(
         high_port = min(65535, max(port_range_low or 1, port_range_high or 65535))
         ports_list.append(f"{low_port}-{high_port}")
     port_scan_queue_item = PortScanQueueItem(
+        context_id=context_id,
         targets=(hostnames or []) + (ip_addresses or []) + (ip_subnets or []),
         ports=ports_list,
         additional_hosts=get_additional_hosts(ctx, additional_hosts),
@@ -148,10 +150,14 @@ async def port_scan(
             results_from_queue: PortScanResults = await asyncio.to_thread(
                 port_scan_result_queue.get,
                 timeout=(max(1.0, time_limit - time.time())))
+            if results_from_queue.context_id != context_id:
+                if not results_from_queue.is_expired():
+                    port_scan_result_queue.put(results_from_queue, block=False)
+                    # wait so we don't get into a fast loop of putting back an item not for us
+                    await asyncio.sleep(0.5)
+                continue
         except (queue.Empty, TimeoutError):
             break
-        if results_from_queue is None:
-            continue
         logger.info(f"{results_from_queue.targets}, {results_from_queue.ports} has been retrieved")
         if results_from_queue.targets == port_scan_queue_item.targets:
             results = results_from_queue

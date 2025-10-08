@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import time
 from itertools import islice
 from pathlib import Path
 from typing import Optional, Dict, Union, List, Tuple, AsyncGenerator
@@ -245,12 +246,17 @@ class PortScanResult(BaseModel):
 
 
 class PortScanResults(BaseModel):
+    context_id: str = Field(description="Context ID of calling session")
     results: List[PortScanResult] = Field(description="List of individual port scan results")
     targets: List[str] = Field(description="List of targets")
     ports: List[str] = Field(description="List of ports: individual ports or ranges")
     runtime_ts: float = Field(description="When the scan was run")
     nmap_xml: str = Field(description="NMAP XML output")
     has_more: bool = Field(False, description="Whether there are more results")
+    timestamp: float = Field(description="The time when these results were created")
+
+    def is_expired(self) -> bool:
+        return time.time() - self.timestamp > 1800
 
 
 def is_katana_jsonl(value: str):

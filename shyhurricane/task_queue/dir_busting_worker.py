@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import logging
 import os
@@ -11,13 +13,17 @@ from urllib.parse import urlencode
 import persistqueue
 
 from shyhurricane.index.input_documents import KatanaDocument, IngestableRequestResponse
-from shyhurricane.task_queue.types import DirBustingQueueItem
+from shyhurricane.task_queue.types import DirBustingQueueItem, DirBustingResultItem
 from shyhurricane.utils import unix_command_image, remove_unencodable
 
 logger = logging.getLogger(__name__)
 
 
-def dir_busting_worker(item: DirBustingQueueItem, ingest_queue: persistqueue.SQLiteAckQueue, result_queue: Queue):
+def dir_busting_worker(
+        item: DirBustingQueueItem,
+        ingest_queue: persistqueue.SQLiteAckQueue,
+        result_queue: Queue[DirBustingResultItem],
+):
     logger.info(f"Starting dir busting worker {item.uri}")
     _do_busting(
         ingest_queue=ingest_queue,
@@ -28,7 +34,7 @@ def dir_busting_worker(item: DirBustingQueueItem, ingest_queue: persistqueue.SQL
 
 def _do_busting(
         ingest_queue: persistqueue.SQLiteAckQueue,
-        result_queue: Queue,
+        result_queue: Queue[DirBustingResultItem],
         item: DirBustingQueueItem,
 ) -> None:
     # replay_codes = {200, 201, 302, 400, 401, 402, 403, 405, 500}
@@ -102,7 +108,7 @@ def _do_busting(
         if not buster_proc_succeed:
             logger.error("Dir busting for %s failed to start", item.uri)
             if result_queue:
-                result_queue.put_nowait(None)
+                result_queue.put_nowait(DirBustingResultItem(item.context_id, None))
             return None
 
         logger.info("Dir busting for %s started", item.uri)
@@ -117,8 +123,8 @@ def _do_busting(
             data = remove_unencodable(data)
             try:
                 json.loads(data)
-            except json.decoder.JSONDecodeError:
-                logger.warning("katana JSON is unparseable, possibly due to incorrect utf-8 encoding, skipping")
+            except json.decoder.JSONDecodeError as e:
+                logger.warning("katana JSON is unparseable, possibly due to incorrect utf-8 encoding, skipping: %s", e)
                 return
 
             ingest_queue.put(data)
@@ -131,7 +137,7 @@ def _do_busting(
                     parsed = katana_results[0]
                     url = parsed.url
                     logger.info("Sending URL to result_queue: %s", url)
-                    result_queue.put_nowait(url)
+                    result_queue.put_nowait(DirBustingResultItem(item.context_id, url))
                 except Exception as e:
                     logger.warning(f"Queueing dir busting results: {e}", exc_info=e)
                     pass
@@ -169,7 +175,7 @@ def _do_busting(
         return None
     finally:
         if result_queue:
-            result_queue.put_nowait(None)
+            result_queue.put_nowait(DirBustingResultItem(item.context_id, None))
         subprocess.Popen(["docker", "rm", "-f", container_name], stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL)
 

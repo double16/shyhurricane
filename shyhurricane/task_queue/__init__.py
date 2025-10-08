@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import atexit
 import faulthandler
 import logging
@@ -17,7 +19,8 @@ from shyhurricane.task_queue.finding_worker import save_finding_worker, FindingC
 from shyhurricane.task_queue.port_scan_worker import port_scan_worker, PortScanContext
 from shyhurricane.task_queue.spider_worker import spider_worker
 from shyhurricane.task_queue.types import SpiderQueueItem, PortScanQueueItem, TaskWorkerIPC, DirBustingQueueItem, \
-    TaskPool, SaveFindingQueueItem
+    TaskPool, SaveFindingQueueItem, SpiderResultItem, DirBustingResultItem
+from shyhurricane.utils import PortScanResults
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +56,9 @@ def start_task_worker(db: str, ingest_queue_path: str, pool_size: int = 1) -> Ta
 def _task_router(db: str,
                  ingest_queue_path: str,
                  task_queue: Queue,
-                 spider_result_queue: Queue,
-                 port_scan_result_queue: Queue,
-                 dir_busting_result_queue: Queue,
+                 spider_result_queue: Queue[SpiderResultItem],
+                 port_scan_result_queue: Queue[PortScanResults],
+                 dir_busting_result_queue: Queue[DirBustingResultItem],
                  generator_config: GeneratorConfig,
                  ):
     try:
