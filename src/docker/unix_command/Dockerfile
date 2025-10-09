@@ -42,7 +42,7 @@ RUN mkdir /usr/share/mitm_to_katana/ && chown 0:0 /usr/share/mitm_to_katana/ && 
 COPY --chown=0:0 --chmod=644 requirements.txt mitm_to_katana.py /usr/share/mitm_to_katana/
 RUN virtualenv /usr/share/mitm_to_katana/.venv &&\
     . /usr/share/mitm_to_katana/.venv/bin/activate &&\
-    pip install -r /usr/share/mitm_to_katana/requirements.txt
+    pip install --no-cache-dir --prefer-binary --compile -r /usr/share/mitm_to_katana/requirements.txt
 COPY --chown=0:0 --chmod=755 mitmdump_virtualenv.sh /usr/local/bin/
 
 COPY --from=gobuild /usr/local/bin/* /usr/local/bin/

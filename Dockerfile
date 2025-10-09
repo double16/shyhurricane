@@ -6,7 +6,7 @@ RUN apt-get update &&\
 
 WORKDIR /app
 RUN --mount=type=bind,source=requirements.txt,target=/tmp/requirements.txt \
-    pip install --requirement /tmp/requirements.txt
+    pip install --no-cache-dir --prefer-binary --compile --requirement /tmp/requirements.txt
 COPY *.py /app/
 COPY shyhurricane /app/shyhurricane/
 COPY --chown=0:0 --chmod=755 src/docker/mcp_server/entrypoint.sh /

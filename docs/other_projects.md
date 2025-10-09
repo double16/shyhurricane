@@ -6,20 +6,25 @@ be wrong or missing something important.
 
 ## https://github.com/aliasrobotics/cai
 
-Few tools available. Primary tools is a generic linux command tool.
+Few out-of-the-box tools available, which looks on purpose. The primary tool is a generic linux command tool.
 
-Appears to depend on proprietary alias0 model to get reasonable results.
-
-- Commonly issues multiple nmap commands because the tools times out before the command finishes.
+- Commonly executes multiple `nmap` commands because the tools times out before the command finishes.
 - Command progress isn't controlled causing large outputs overwhelming context or slowing command runtime.
-- Other MCP tools aren't called over the generic linux command.
 - Multiple-agent approach looks promising.
 - Good support for many models.
 
-I'd really like to get shyhurricane working with CAI to leverage the multi-agent support. I probably need to add an agent
-that doesn't direct the model towards `generic_linux_command`.
+CAI looks like a good use case for shyhurricane.  I'd really like to get shyhurricane working with CAI to leverage the
+multi-agent support.
 
 ## https://github.com/0x4m4/hexstrike-ai/tree/master
 
 - Tools are exposed as individual MCP tools, so there are lots of tools.
 - Lots of tools can easily overwhelm local model context sizes, precluding running locally on consumer hardware.
+- In similar fashion, tool arguments are tuned for use by the MCP.
+- I could not see where timeouts and data size were managed. Not having indexed content makes this management difficult. 
+
+## https://github.com/westonbrown/Cyber-AutoAgent
+
+Cyber-AutoAgent looks good. Multi-agent and memory support. Lots of work has gone into deployment scenarios.
+
+ATM, I couldn't find generic support for MCP tools.
