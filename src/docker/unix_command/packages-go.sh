@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+#!/usr/bin/env bash
 
 set -xe
 
@@ -38,6 +38,16 @@ github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest \
 		; do
 		go install ${GOPKG}
 	done
+
+	git clone --depth=1 --single-branch --branch v1.8.2 https://github.com/microsoft/go-sqlcmd.git
+	pushd go-sqlcmd
+	# license copy fails (?)
+	bash ./build/build.sh || true
+	popd
+	if [ -x go-sqlcmd/sqlcmd ]; then
+	  cp go-sqlcmd/sqlcmd "${TARGET_DIR}"
+	fi
+
   if [ -n "$GOARCH" ]; then
 	  find "${GOPATH}/bin" -type f -exec cp {} "${TARGET_DIR}" \;
 	fi
@@ -54,3 +64,4 @@ test -x ${TARGET_DIR}/403jump
 test -x ${TARGET_DIR}/waybackurls
 test -x ${TARGET_DIR}/httpx
 test -x ${TARGET_DIR}/subfinder
+test -x ${TARGET_DIR}/sqlcmd
