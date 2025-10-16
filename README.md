@@ -3,13 +3,13 @@
 <img src="shyhurricane/assets/shyhurricane.png" alt="Hurricane picking padlock logo" width="150" style="float: left; margin-right:10px;" />
 
 ShyHurricane is an MCP server to assist AI in offensive security testing. It aims to solve a few problems observed with
-AI using a single tool to execute commands:
+LLMs executing shell commands:
 
-1. Spidering and directory busting commands can be quite noisy and long-running. AI models will go through a few iterations to pick a suitable command and options. The server provides spidering and busting tools to consistently provide the AI with usable results.
+1. Spidering and directory busting commands can be quite noisy and long-running. LLMs will go through a few iterations to pick a suitable command and options. The server provides spidering and busting tools to consistently provide the LLM with usable results.
 2. Models will also enumerate websites with many curl commands. The server saves and indexes responses to return data without contacting the website repeatedly. Large sites, common with bug bounty programs, are not efficiently enumerated with individual curl commands. 
-3. Port scans may take a long time causing the AI to assume the scan has failed and issue a repeated scan. The port_scan tool provided by the server addresses this.
+3. Port scans may take a long time causing the LLM to assume the scan has failed and issue a repeated scan. The port_scan tool provided by the server addresses this.
 
-An important feature of the server is the indexing of website content using LLM embedding models. The find_web_resources tool uses LLM prompts to find vulnerabilities specific to content type: html, javascript, css, xml, HTTP headers. The content is indexed when found by the tools. Content may also be indexed by feeding external data into the `/index` endpoint. Formats supported are `katana jsonl`, `hal json` and Burp Suite Logger++ CSV. Extensions exist for Burp Suite, ZAP, Firefox and Chrome to send requests to the server as the site is browsed.
+An important feature of the server is the indexing of website content using embedding models. The `find_web_resources` tool uses LLM prompts to find vulnerabilities specific to content type: html, javascript, css, xml, HTTP headers. The content is indexed when found by the tools. Content may also be indexed by feeding external data into the `/index` endpoint. Formats supported are `katana jsonl`, `hal json` and Burp Suite Logger++ CSV. Extensions exist for Burp Suite, ZAP, Firefox and Chrome to send requests to the server as the site is browsed.
 
 ## Tools
 
@@ -72,11 +72,11 @@ python3 mcp_service.py --low-power true
 
 ## Install
 
-The MCP server itself uses an LLM for light tasks such that the `llama3.2:3b` model is sufficient. Ollama is recommended but not required. OpenAI and Google AI models are also supported. Docker is required to run the generic unix commands.
+The MCP server itself uses an LLM for light tasks such that the `llama3.2:3b` model is sufficient. Ollama is recommended but not required. OpenAI and Google AI models are also supported. Docker is required for tool specific commands and the generic unix commands.
 
 ### Docker Desktop or colima
 
-Docker is required and the quality of the networking stack is important. Docker Desktop is accepted.  On macOS, Apple Virtualization networking has issues. Use `colima` with `qemu` virtualization.
+Docker is required and the quality of the networking stack is important. Docker Desktop is accepted. On macOS, Apple Virtualization networking has issues. Use `colima` with `qemu` virtualization for better results.
 
 If you use Homebrew, `brew bundle` may be used for installation. Otherwise, use your operating system to install `colima`, `qemu`, `docker`, and `docker-compose`.
 
@@ -149,7 +149,7 @@ ollama pull llama3.2:3b
 
 #### Chroma Database
 
-Chroma is part of the python environment.
+Chroma is installed as part of the python environment.
 
 ```shell
 chroma run --path chroma_store --host 127.0.0.1 --port 8200 
@@ -182,7 +182,7 @@ python3 mcp_service.py --gemini-model=gemini-2.0-flash
 
 ## Disabling Open World Tools
 
-Open-world tools allow the AI to reach out to the Internet for spidering, directory busting, etc. There are use cases where this is undesired and only indexed content should be used.
+Open-world tools allow the LLM to reach out to the Internet for spidering, directory busting, etc. There are use cases where this is undesired and only indexed content should be used.
 
 Configure `.env`:
 ```shell
@@ -203,15 +203,19 @@ python3 mcp_service.py --open-world false
 
 ## Run the assistant
 
-The assistant provides a command line chat prompt. It isn't elaborate but provides an easy way to use the MCP server. The server prompts MCP prompts for offensive security and the assistant will chose an appropriate system prompt for the first user prompt.
+The assistant provides a command line chat prompt. It isn't elaborate but provides an easy way to use the MCP server. The server queries MCP prompts for offensive security and the assistant will chose an appropriate system prompt using the first user prompt.
 
-The assistant should use a larger reasoning model than the MCP server. This model performs the real work of find vulnerabilities and exploits.
+The assistant should use a larger reasoning model than the MCP server. This model performs the real work of finding vulnerabilities and exploits.
+
+Local models must have a context size of at least 16k tokens. The MCP tools + system prompt currently use around 10k. The Ollama models may advertise
+a large context size but the default pull is usually 4k or so. It is easy to "build" a derived model, only increasing the context size. See
+`src/ollama` for example build scripts.
 
 ```shell
 $(command -v python3.12) -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python3 assistant.py --ollama-model qwen3:30b
+python3 assistant.py --ollama-model gpt-oss-20b:32k
 ```
 
 Give the assistant instructions like:
@@ -220,12 +224,14 @@ Give the assistant instructions like:
 - Help me find vulns at https://example.com  (chat)
 - Find all the vulns at https://example.com  (agent)
 
+The prompts are exposed via the MCP protocol. Clients like [5ire](https://5ire.app/) can use them and the result is the same as using the assistant script.
+
 ### Ollama Remote Server
 
 A remote Ollama server may be used:
 
 ```shell
-python3 assistant.py --ollama-model qwen3:30b --ollama-host 192.168.100.100:11434
+python3 assistant.py --ollama-model gpt-oss-20b:32k --ollama-host 192.168.100.100:11434
 ```
 
 ### Google AI
@@ -246,6 +252,14 @@ python3 assistant.py --openai-model o3
 ```
 
 ## Indexing Data
+
+The MCP tools will index data if appropriate. For example, spidering and directory busting. Data can be indexed by external means using the `/index` endpoint. The endpoint is not part of an MCP tool or protocol.
+
+The `ingest.py` script makes using this endpoint more convenient. It isn't complicated to use directly. The supported data formats are inferred. Katana JSON is the preferred format.
+
+```shell
+curl -X POST -H "Content-Type: application/json" http://127.0.0.1:8000/index @katana.json
+```
 
 ### katana
 
@@ -315,6 +329,14 @@ OAST_PROVIDER=interactsh
 INTERACT_SERVER=oast.pro
 # optional
 INTERACT_TOKEN=
+```
+
+## Status Endpoint
+
+The `/status` endpoint is an HTTP POST endpoint and is not part of the MCP server protocol.
+
+```shell
+curl -X POST http://127.0.0.1:8000/status
 ```
 
 ## Proxy Serving Indexed Content

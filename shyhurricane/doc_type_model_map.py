@@ -57,7 +57,9 @@ _doc_type_to_model: Dict[str, EmbeddingModelConfig] = {
     "javascript": EmbeddingModelConfig("javascript", CODE_EMBEDDING_MODEL, token_lengths=[sys.maxsize, 256]),
     "json": EmbeddingModelConfig("json", CODE_EMBEDDING_MODEL, token_lengths=[sys.maxsize, 256]),
     "css": EmbeddingModelConfig("css", CODE_EMBEDDING_MODEL, token_lengths=[sys.maxsize, 256]),
+    # network data is the HTTP request and response headers in HTTP format, i.e. "Header: Value"
     "network": EmbeddingModelConfig("network", DEFAULT_EMBEDDING_MODEL, token_lengths=[sys.maxsize, 256]),
+    # JSON representation (matching katana) of forms found in HTML documents
     "forms": EmbeddingModelConfig("forms", CODE_EMBEDDING_MODEL, token_lengths=[256]),
     "nmap": EmbeddingModelConfig("nmap", CODE_EMBEDDING_MODEL),  # store raw nmap xml
     "portscan": EmbeddingModelConfig("portscan", CODE_EMBEDDING_MODEL),  # store json port scan model

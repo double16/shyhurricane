@@ -75,8 +75,8 @@ def _ingest_worker(db: str):
 
 def is_current_process_in_bad_state() -> bool:
     """
-    Determine if this process is in a bad state. In an unified memory architecture, allocating GPU memory beyond a
-    certain amount is considered a bad state.
+    Determine if this process is in a bad state. In a unified memory architecture, allocating GPU memory beyond a
+    certain amount is considered a bad state. Other conditions should be added here as needed.
     """
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
         try:
