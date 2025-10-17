@@ -8,6 +8,7 @@ import signal
 import sys
 
 import torch
+from starlette.middleware.cors import CORSMiddleware
 from uvicorn import Config, Server
 
 from shyhurricane.config import configure
@@ -96,6 +97,17 @@ async def main():
             mcp_app = mcp_instance.sse_app(None)
         case "streamable-http":
             mcp_app = mcp_instance.streamable_http_app()
+        case _:
+            print("Unknown transport:", args.transport, file=sys.stderr)
+            sys.exit(1)
+
+    mcp_app = CORSMiddleware(
+        mcp_app,
+        allow_origins=["*"],
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=["*"],
+        expose_headers=["Mcp-Session-Id"],
+    )
 
     uv_cfg = Config(app=mcp_app, host=args.host, port=args.port, loop="asyncio", lifespan="on", log_level="info")
     uv_server = Server(uv_cfg)

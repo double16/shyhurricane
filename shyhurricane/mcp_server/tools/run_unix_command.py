@@ -2,6 +2,7 @@ import asyncio
 import logging
 import sys
 import traceback
+import uuid
 from typing import Optional, Dict, Annotated
 
 import aiofiles
@@ -28,10 +29,12 @@ class RunCommandConfirmation(BaseModel):
 class RunUnixCommand(BaseModel):
     command: str = Field(description="The command that was run")
     return_code: int = Field(description="Return code of command, 0 usually means successful")
+    output_file: Optional[str] = Field(description="Output file location containing all of standard out")
     output: str = Field(description="Output of command as string")
-    output_truncated: bool = Field(description="If true, output is truncated")
+    output_truncated: bool = Field(description="If true, output string is truncated")
+    error_file: Optional[str] = Field(description="Error file location containing all of standard error")
     error: str = Field(description="Output of stderr, could be errors or progress information")
-    error_truncated: bool = Field(description="If true, error is truncated")
+    error_truncated: bool = Field(description="If true, error string is truncated")
     notes: Optional[str] = Field(description="Notes for understanding the command output or fixing failed commands")
 
 
@@ -86,8 +89,24 @@ When generating Linux commands for execution in a containerized environment, fol
     server_ctx = await get_server_context()
 
     try:
+        assert_elicitation(server_ctx)
+        confirm_result = await ctx.elicit(
+            message=f"{command}\nShould I run this command?",
+            schema=RunCommandConfirmation)
+        match confirm_result:
+            case AcceptedElicitation(data=data):
+                if not data.confirm:
+                    return None
+            case DeclinedElicitation():
+                return None
+            case CancelledElicitation():
+                return None
+    except McpError:
+        logger.warning("elicit not supported, continuing")
+
+    try:
         result = await _run_unix_command(ctx, command=command, additional_hosts=additional_hosts, env=env,
-                                         output_length_limit=output_length_limit)
+                                         output_length_limit=output_length_limit, capture_output_to_file=True)
 
         if result.return_code != 0 and (
                 "executable file not found" in result.error or "command not found" in result.error):
@@ -110,8 +129,10 @@ When generating Linux commands for execution in a containerized environment, fol
         return RunUnixCommand(
             command=command,
             return_code=-1,
+            output_file=None,
             output="",
             output_truncated=False,
+            error_file=None,
             error=''.join(traceback.format_exception(exc_type, exc_value, exc_tb)),
             error_truncated=False,
             notes=None,
@@ -138,8 +159,8 @@ async def _run_unix_command(
         stdin: Optional[str] = None,
         env: Optional[Dict[str, str]] = None,
         output_length_limit: Optional[int] = None,
-) -> Optional[
-    RunUnixCommand]:
+        capture_output_to_file: bool = False,
+) -> Optional[RunUnixCommand]:
     command = command.strip()
     if not command:
         raise McpError(ErrorData(code=INVALID_REQUEST, message="command required"))
@@ -150,30 +171,23 @@ async def _run_unix_command(
 
     stdin_bytes = stdin.encode("utf-8") if stdin else None
 
-    try:
-        assert_elicitation(server_ctx)
-        confirm_result = await ctx.elicit(
-            message=f"{command}\nShould I run this command?",
-            schema=RunCommandConfirmation)
-        match confirm_result:
-            case AcceptedElicitation(data=data):
-                if not data.confirm:
-                    return None
-            case DeclinedElicitation():
-                return None
-            case CancelledElicitation():
-                return None
-    except McpError:
-        logger.warning("elicit not supported, continuing")
-
     output_limiter = OutputLimiter(output_length_limit)
     error_limiter = OutputLimiter(output_length_limit)
+
+    if capture_output_to_file:
+        capture_basename = uuid.uuid4().hex
+        capture_output_file = capture_basename + ".out"
+        capture_error_file = capture_basename + ".err"
+    else:
+        capture_output_file = None
+        capture_error_file = None
 
     async with aiofiles.tempfile.TemporaryFile(mode="w+b") as stdout_file:
         async with aiofiles.tempfile.TemporaryFile(mode="w+b") as stderr_file:
             # Use a common working directory for the session to chain together commands
             work_path = ctx.request_context.lifespan_context.work_path
             docker_command = ["docker", "run", "--rm"]
+
             if server_ctx.open_world:
                 docker_command.extend([
                     "--cap-add", "NET_BIND_SERVICE",
@@ -187,6 +201,12 @@ async def _run_unix_command(
                     "--cap-drop", "NET_RAW",
                     "--network", "none",
                 ])
+
+            if capture_output_file:
+                docker_command.extend(["-e", f"STDOUT_LOG={capture_output_file}"])
+            if capture_error_file:
+                docker_command.extend(["-e", f"STDERR_LOG={capture_error_file}"])
+
             docker_command.extend([
                 "-v", f"{server_ctx.mcp_session_volume}:/work",
                 "-v", f"{server_ctx.seclists_volume}:/usr/share/seclists",
@@ -266,8 +286,10 @@ async def _run_unix_command(
                 return RunUnixCommand(
                     command=command,
                     return_code=return_code,
+                    output_file=capture_output_file,
                     output=output,
                     output_truncated=output_truncated,
+                    error_file=capture_error_file,
                     error="",
                     error_truncated=False,
                     notes=None,
@@ -278,8 +300,10 @@ async def _run_unix_command(
                 return RunUnixCommand(
                     command=command,
                     return_code=return_code,
+                    output_file=capture_output_file,
                     output=output,
                     output_truncated=output_truncated,
+                    error_file=capture_error_file,
                     error=error_tail,
                     error_truncated=error_truncated,
                     notes=open_world_command_disable_notes if not server_ctx.open_world else None,
