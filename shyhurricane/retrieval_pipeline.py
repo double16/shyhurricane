@@ -25,6 +25,7 @@ from mcp import Tool
 
 from shyhurricane.doc_type_model_map import doc_type_to_model, get_chroma_collections
 from shyhurricane.generator_config import GeneratorConfig
+from shyhurricane.mcp_client import load_mcp_servers_from_json, create_mcp_toolset
 from shyhurricane.prompts import pentester_agent_system_prompt, pentester_chat_system_prompt
 from shyhurricane.utils import documents_sort_unique
 
@@ -730,23 +731,17 @@ class MultiQueryChromaRetriever:
 
 def create_tools(mcp_urls: Optional[List[str]] = None, shim: Callable[[Tool], Tool] = None) -> Tuple[
     Toolset, List[MCPToolset]]:
+    servers = []
     if mcp_urls is None:
         mcp_urls = ["http://127.0.0.1:8000/mcp/"]
-    mcp_toolsets = []
-    tools = []
     for mcp_url in mcp_urls:
-        toolset = MCPToolset(
-            server_info=StreamableHttpServerInfo(url=mcp_url),
-            invocation_timeout=600.0
-        )
-        mcp_toolsets.append(toolset)
-        if shim is not None:
-            tools.extend(list(map(lambda t: shim(t), toolset)))
+        if mcp_url.startswith("file://"):
+            servers.extend(load_mcp_servers_from_json(mcp_url[7:]))
+        elif "://" in mcp_url:
+            servers.append(StreamableHttpServerInfo(url=mcp_url))
         else:
-            if len(mcp_urls) == 1:
-                return toolset, mcp_toolsets
-            tools.extend(list(toolset))
-    return Toolset(tools=tools), mcp_toolsets
+            servers.extend(load_mcp_servers_from_json(mcp_url))
+    return create_mcp_toolset(servers, shim)
 
 
 @component

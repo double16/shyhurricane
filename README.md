@@ -363,3 +363,32 @@ nuclei -proxy http://127.0.0.1:8010 -target https://example.com -j | curl http:/
 
 If a URL or domain isn't indexed, the 404 page will include links to URLs that have been indexed. A tool that spiders
 links may use this to find the indexed content.
+
+## MCP Servers
+
+The assistant is intended to exercise the shyhurricane MCP server. However, additional MCP servers may be used by configuring them in a JSON file and passing as an argument to `--mcp-url`. Multiple files may be specified.
+
+See the example below. Environment variables are interpolated in `${}`. The `token` field specifies an `Authorization: Bearer` token to include with requests.
+
+```json
+[
+  {
+    "transport": "stdio",
+    "command": "python",
+    "args": ["-m", "othermcp.server"],
+    "env": {"WORKSPACE_PATH": "/home/user/workspace", "API_KEY": "${API_KEY}"},
+    "max_retries": 3
+  },
+  {
+    "transport": "streamable_http",
+    "url": "https://mcp.example.com/mcp",
+    "token": "Bearer ${TOKEN}",
+    "timeout": 60
+  },
+  {
+    "transport": "sse",
+    "url": "https://legacy.example.com/sse",
+    "token": "${SSE_TOKEN}"
+  }
+]
+```
