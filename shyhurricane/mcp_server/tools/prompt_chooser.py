@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 async def extract_targets_and_prompt_title(query: str, titles: Iterable[str]) -> Tuple[List[str], str]:
-    # TODO: extract extra rules defined by the rules for inclusion in the resulting prompt
+    # TODO: extract extra rules defined by the user for inclusion in the resulting prompt
     example_title = next(iter(titles))
     prompt = f"""
       You are a cybersecurity management expert.

@@ -40,7 +40,8 @@ class FindingContext:
 
     def warm_up(self):
         for embedder in self.embedders.values():
-            embedder.warm_up()
+            if hasattr(embedder, "warm_up"):
+                embedder.warm_up()
 
 
 def save_finding_worker(ctx: FindingContext, item: SaveFindingQueueItem):

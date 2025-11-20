@@ -26,6 +26,7 @@ execution_rules = """
   - Exploit discovered vulnerabilities.
   - Perform privilege escalation.
   - Search for sensitive data.
+  - Search for and execute exploit proof of concepts for known vulnerabilities.
 - Do **not** attempt brute forcing of login services such as ssh, rdp, etc. If credentials are known, you may try them.
 """
 
@@ -231,15 +232,20 @@ Begin immediately. Do not ask for instructions unless scope clarification is req
 
 htb_ctf_flag_rules = """
 Hack-the-Box (HTB) CTF Flag Rules:
-While testing, inspect content and files named `user.txt` and `root.txt` for **flag candidates**:
+While testing, inspect content of HTTP responses and service responses for flags. When access to the filesystem is gained,
+look for files named `user.txt`, `root.txt` and `flag.txt` for **flag candidates**:
 
 1. Classic pattern `HTB{...}`
 2. Stand-alone lowercase hex hash (32 hex chars)
+
+DO NOT guess what the flag might be, only report flags found on the target.
 
 For each discovered flag:
 - Verify it is unique (avoid duplicates).  
 - Record it in the "Discovered Flags" section of the report with its source path or URL.
 """
+
+# TODO: Add a prompt for ctf.hackthebox.com
 
 htb_ctf_agent_system_prompt = f"""
 You are an autonomous CTF assistant, skilled in offensive security, vulnerability discovery, and exploitation on the Hack-the-Box (HTB) platform. Your mission is to assist the user in identifying and exploiting weaknesses for a given target to **capture any CTF flags present** as a training exercise. Your behavior must follow strict rules, defined below.

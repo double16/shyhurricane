@@ -12,12 +12,13 @@ from typing import Optional, Set
 from xml.etree import ElementTree as ET
 
 from haystack import Document
-from haystack.components.embedders import SentenceTransformersDocumentEmbedder
+from haystack.core.component import Component
 from haystack.document_stores.types import DuplicatePolicy
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 
 from shyhurricane.doc_type_model_map import doc_type_to_model
 from shyhurricane.embedder_cache import EmbedderCache
+from shyhurricane.generator_config import safe_embedder
 from shyhurricane.ports import parse_ports_spec, bitfield_to_ports, is_subset
 from shyhurricane.retrieval_pipeline import create_chrome_document_store
 from shyhurricane.task_queue.types import PortScanQueueItem
@@ -38,8 +39,10 @@ class PortScanContext:
         self.portscan_embedder = embedder_cache.get(_doc_type_to_model.get("portscan"))
 
     def warm_up(self):
-        self.nmap_embedder.warm_up()
-        self.portscan_embedder.warm_up()
+        if hasattr(self.nmap_embedder, "warm_up"):
+            self.nmap_embedder.warm_up()
+        if hasattr(self.portscan_embedder, "warm_up"):
+            self.portscan_embedder.warm_up()
 
 
 def port_scan_worker(ctx: PortScanContext, item: PortScanQueueItem, result_queue: Queue[PortScanResults]):
@@ -69,9 +72,9 @@ def _do_port_scan(
         result_queue: Queue[PortScanResults],
         item: PortScanQueueItem,
         nmap_store: ChromaDocumentStore,
-        nmap_embedder: SentenceTransformersDocumentEmbedder,
+        nmap_embedder: Component,
         portscan_store: ChromaDocumentStore,
-        portscan_embedder: SentenceTransformersDocumentEmbedder,
+        portscan_embedder: Component,
         has_more: bool = False,
         retry: bool = False,
 ) -> None:
@@ -200,7 +203,7 @@ def _do_port_scan(
                                 # "technologies": technologies_str,
                             }
                         )
-                        portscan_store.write_documents(portscan_embedder.run(documents=[portscan_doc])["documents"],
+                        portscan_store.write_documents(safe_embedder(portscan_embedder, [portscan_doc]),
                                                        policy=DuplicatePolicy.OVERWRITE)
 
         if ports_found:
@@ -222,7 +225,7 @@ def _do_port_scan(
                             # "technologies": technologies_str,
                         }
                     )
-                    nmap_store.write_documents(nmap_embedder.run(documents=[host_nmap_doc])["documents"],
+                    nmap_store.write_documents(safe_embedder(nmap_embedder, [host_nmap_doc]),
                                                policy=DuplicatePolicy.OVERWRITE)
 
     nmap_content = ET.tostring(tree.getroot(), encoding="unicode")
@@ -243,7 +246,7 @@ def _do_port_scan(
         )
 
         logger.info("Embedding nmap XML")
-        nmap_docs = nmap_embedder.run(documents=[nmap_doc])["documents"]
+        nmap_docs = safe_embedder(nmap_embedder, [nmap_doc])
         logger.info("Saving nmap XML")
         nmap_store.write_documents(nmap_docs, policy=DuplicatePolicy.OVERWRITE)
 

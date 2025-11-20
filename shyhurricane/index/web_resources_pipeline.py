@@ -10,10 +10,10 @@ from typing import List, Optional, Dict, Set
 from bs4 import SoupStrainer
 from cachetools import LRUCache
 from haystack import component, Document, Pipeline
-from haystack.components.embedders import SentenceTransformersDocumentEmbedder
 from haystack.components.joiners import ListJoiner
 from haystack.components.preprocessors import DocumentSplitter, DocumentCleaner
 from haystack.components.routers import ConditionalRouter
+from haystack.core.component import Component
 from haystack.document_stores.types import DuplicatePolicy
 from haystack_integrations.document_stores.chroma import ChromaDocumentStore
 
@@ -137,14 +137,13 @@ def _quantize_timestamp(timestamp: str):
     return timestamp[0:11]
 
 
-def build_splitters(embedders: Dict[str, SentenceTransformersDocumentEmbedder]):
+def build_splitters(embedders: Dict[str, Component]):
     splitters: Dict[str, SuffixIdSplitter] = dict()
     _doc_type_to_model = doc_type_to_model()
     for doc_type in embedders.keys():
         doc_type_model = _doc_type_to_model[doc_type]
-        embedder = embedders[doc_type_model.doc_type]
         for token_length in (doc_type_model.token_lengths or [sys.maxsize]):
-            max_model_length = embedder.embedding_backend.model.max_seq_length
+            max_model_length = doc_type_model.model_config.max_token_length
             # treat "infinite" as 512
             if max_model_length > 1_000_000:
                 max_model_length = 512
@@ -170,7 +169,7 @@ class RequestResponseToDocument:
     IngestableRequestResponse and produces Document(s) for storage.
     """
 
-    def __init__(self, embedders: Dict[str, SentenceTransformersDocumentEmbedder]):
+    def __init__(self, embedders: Dict[str, Component]):
         self.embedders = embedders
         self._soup_extractor = BeautifulSoupExtractor()
         self._title_soup_strainer = SoupStrainer(['title', 'meta'])
@@ -480,7 +479,7 @@ class IndexDocTypeDocuments:
 
     def __init__(
             self,
-            embedders: Dict[str, SentenceTransformersDocumentEmbedder],
+            embedders: Dict[str, Component],
             multi_store: "IngestMultiStore",
     ) -> None:
         self.embedders = embedders
@@ -524,7 +523,11 @@ class IndexDocTypeDocuments:
                 )
                 collection_name = get_chroma_collection_name_by_doc_type_token_length(doc_type, token_length)
                 split_docs = self.splitters[collection_name].run(documents=[new_doc])["documents"]
-                for docs_batch in batch_iterable(split_docs, embedder.batch_size):
+                if hasattr(embedder, "to_dict"):
+                    batch_size = embedder.to_dict().get("batch_size", 1)
+                else:
+                    batch_size = 1
+                for docs_batch in batch_iterable(split_docs, batch_size):
                     embedded_docs = embedder.run(documents=docs_batch)["documents"]
                     self.multi_store.run(embedded_docs)
 
@@ -564,7 +567,7 @@ class IngestMultiStore:
                         logger.info(f"Writing new document {collection_name} {doc.id}")
                         store.write_documents([doc], policy=DuplicatePolicy.OVERWRITE)
             except Exception as e:
-                logger.warning(f"Document {doc_type} {doc.id} not written to the store: {e}", e)
+                logger.warning(f"Document {doc_type} {doc.id} not written to the store: {e}", exc_info=e)
 
         return {"documents": documents}
 
@@ -644,12 +647,10 @@ def build_stores(db: str, doc_types: Optional[Set[str]] = None) -> Dict[str, Chr
 
 
 def build_embedders(
+        embedder_cache: EmbedderCache,
         doc_types: Optional[Set[str]] = None,
-        embedder_cache: EmbedderCache = None,
-) -> Dict[str, SentenceTransformersDocumentEmbedder]:
+) -> Dict[str, Component]:
     embedders = {}
-    if embedder_cache is None:
-        embedder_cache = EmbedderCache()
     for doc_type_model in doc_type_to_model().values():
         if doc_types is not None and doc_type_model.doc_type not in doc_types:
             continue
@@ -658,9 +659,9 @@ def build_embedders(
     return embedders
 
 
-def build_ingest_pipeline(db: str) -> Pipeline:
+def build_ingest_pipeline(db: str, generator_config: GeneratorConfig) -> Pipeline:
     stores = build_stores(db)
-    embedders = build_embedders()
+    embedders = build_embedders(embedder_cache=EmbedderCache(generator_config))
     doc_cleaner = new_doc_cleaner()
 
     pipe = Pipeline()
@@ -741,7 +742,7 @@ def build_doc_type_pipeline(
         generator_config: GeneratorConfig,
 ) -> Pipeline:
     stores = build_stores(db)
-    embedders = build_embedders()
+    embedders = build_embedders(embedder_cache=EmbedderCache(generator_config))
     multi_store = IngestMultiStore(stores, should_update=lambda d: d.meta.get("type") == "content")
 
     pipe = Pipeline()
