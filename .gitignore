@@ -163,7 +163,7 @@ cython_debug/
 .idea/
 *.iml
 
-*_store/
+*_store_*/
 *history.md
 node_modules/
 .DS_Store
