@@ -140,19 +140,18 @@ async def prompt_chooser(ctx: Context, query: str) -> List[PromptMessage]:
 
     targets, prompt_title = await extract_targets_and_prompt_title(query, titles.keys())
 
+    query_lower = query.lower()
+    for title in titles.keys():
+        if title.lower() in query_lower:
+            prompt_title = title
+            break
+
     if not prompt_title or prompt_title not in titles:
-        prompt_title = ""
-        query_lower = query.lower()
-        for title in titles.keys():
-            if title.lower() in query_lower:
-                prompt_title = title
-                break
-        if not prompt_title:
-            return [PromptMessage(
-                role="assistant",
-                content=TextContent(
-                    type="text",
-                    text=f"Choose a prompt title from: {', '.join(titles.keys())}"))]
+        return [PromptMessage(
+            role="assistant",
+            content=TextContent(
+                type="text",
+                text=f"Choose a prompt title from: {', '.join(titles.keys())}"))]
 
     if not targets:
         targets = filter_targets_query(query)
