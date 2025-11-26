@@ -31,9 +31,9 @@ async def extract_targets_and_prompt_title(query: str, titles: Iterable[str]) ->
       The prompt is chosen from a fixed set of titles. The following are valid prompt titles:
       {", ".join(map(lambda t: '"' + t + '"', titles))}
       If the user provides an exact match for a prompt title (ignoring case), always use it.
-      If the user is asking you to do something, prefer an agent or automated prompt. If the user is asking for help or
-      research, prefer an assistant prompt. The "auditor" prompts are not for finding vulnerabilities, but instead
-      evaluating the coverage of tests already performed.
+      If the user is asking you to do all the work, prefer a prompt titled with words like "agent" or "automated". If the
+      user is asking for help, assistance or research, prefer a prompt titled with words like "assistant".
+      The "auditor" prompts are not for finding vulnerabilities, but instead evaluating the coverage of tests already performed.
       
       Structure:
       Output the information as a valid JSON object. Only output the JSON. Do not include any other text except the JSON.
@@ -77,7 +77,13 @@ async def extract_targets_and_prompt_title(query: str, titles: Iterable[str]) ->
         reply = None
 
     targets = []
+
     prompt_title = None
+    query_lower = query.lower()
+    for title in titles:
+        if title.lower() in query_lower:
+            prompt_title = title
+            break
 
     if reply:
         try:
@@ -95,7 +101,8 @@ async def extract_targets_and_prompt_title(query: str, titles: Iterable[str]) ->
                 targets.append(parsed_targets)
 
             targets = filter_targets_str(targets)
-            prompt_title = parsed["title"]
+            if not prompt_title:
+                prompt_title = parsed["title"]
         except json.decoder.JSONDecodeError:
             pass
 
@@ -139,12 +146,6 @@ async def prompt_chooser(ctx: Context, query: str) -> List[PromptMessage]:
         titles[mcp_prompt.title] = mcp_prompt
 
     targets, prompt_title = await extract_targets_and_prompt_title(query, titles.keys())
-
-    query_lower = query.lower()
-    for title in titles.keys():
-        if title.lower() in query_lower:
-            prompt_title = title
-            break
 
     if not prompt_title or prompt_title not in titles:
         return [PromptMessage(

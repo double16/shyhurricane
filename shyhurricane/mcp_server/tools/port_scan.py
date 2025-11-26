@@ -66,7 +66,12 @@ async def port_scan(
                   ge=30, le=600,
                   )
         ] = None,
-        retry: bool = False,
+        retry: Annotated[
+            bool,
+            Field(False,
+                  description="Set to true to force retrying the port scan. Only use true if the results are suspected to be invalid, such as a temporary network failure."
+                  )
+        ] = False,
 ) -> PortScanToolResult:
     """
     Performs a port scan and service identification on the target(s), similar to the functions of nmap.

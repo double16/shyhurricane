@@ -618,6 +618,7 @@ class QueryExpander:
                 collected = '\n'.join([collected, line])
         if collected_strip := collected.strip():
             expanded_set.add(collected_strip)
+        logger.debug("split query expanded results from\n%s to \n%s", result, expanded_set)
         return expanded_set
 
     @component.output_types(queries=List[str])
