@@ -22,7 +22,7 @@ from shyhurricane.utils import get_log_path, log_heap_stats, log_gpu_memory_summ
 logger = logging.getLogger(__name__)
 
 
-def _ingest_worker(db: str):
+def _ingest_worker(db: str, generator_config: GeneratorConfig):
     try:
         faulthandler.register(signal.SIGUSR1)
         logger.info(f"Index worker starting in PID {os.getpid()}")
@@ -36,7 +36,7 @@ def _ingest_worker(db: str):
 
         index_log_path = get_log_path(db, "index.txt")
 
-        pipeline: Pipeline = build_ingest_pipeline(db=db)
+        pipeline: Pipeline = build_ingest_pipeline(db=db, generator_config=generator_config)
         logger.info(f"Index worker ready in PID {os.getpid()}, logging to {index_log_path}")
         for item in persistent_queue_get(queue, shrink_count=1000):
             logger.info(f"Processing {item[0:128]} in PID {os.getpid()}")
@@ -174,7 +174,7 @@ def start_ingest_worker(db: str, generator_config: GeneratorConfig, pool_size: i
             processes.append(process)
 
     # this is a light-weight process, we only need one
-    ingest_process = multiprocessing.Process(target=_ingest_worker, args=(db,))
+    ingest_process = multiprocessing.Process(target=_ingest_worker, args=(db, generator_config))
     ingest_process.start()
     processes.append(ingest_process)
 

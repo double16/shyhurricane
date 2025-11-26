@@ -65,7 +65,7 @@ def _task_router(db: str,
         faulthandler.register(signal.SIGUSR1)
         logger.info(f"Starting task router in PID {os.getpid()}")
 
-        embedder_cache = EmbedderCache()
+        embedder_cache = EmbedderCache(generator_config=generator_config)
 
         ingest_queue = persistqueue.SQLiteAckQueue(path=ingest_queue_path, auto_commit=True)
         atexit.register(ingest_queue.close)

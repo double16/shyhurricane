@@ -222,7 +222,7 @@ def main():
                         else:
                             prompt.append(ChatMessage.from_user(prompt_result["content"]["text"]))
                     prompt_str = "\n".join(map(lambda m: m.text, prompt))
-                    if len(prompt_str) < 100:
+                    if not prompt or len(prompt_str) < 100:
                         # indicates an error because there should be a lot more text
                         console.print("🤖 " + prompt_str)
                         continue

@@ -98,10 +98,16 @@ Configure your desired provider and model in `.env`:
 ```shell
 OLLAMA_MODEL=llama3.2:3b
 OLLAMA_HOST=192.168.100.100:11434
+
 GEMINI_API_KEY=
 GEMINI_MODEL=
+
 OPENAI_MODEL=
 OPENAI_API_KEY=
+
+BEDROCK_MODEL=
+AWS_ACCESS_KEY_ID=
+AWS_SECRET_ACCESS_KEY=
 ```
 
 Run the MCP server:
@@ -171,13 +177,18 @@ python3 mcp_service.py
 OpenAI:
 ```shell
 export OPENAI_API_KEY=xxxx
-python3 mcp_service.py --openai-model=gpt-4-turbo
+python3 mcp_service.py --openai-model gpt-4-turbo
 ```
 
 Google AI:
 ```shell
 export GOOGLE_API_KEY=xxxx
-python3 mcp_service.py --gemini-model=gemini-2.0-flash
+python3 mcp_service.py --gemini-model gemini-2.0-flash
+```
+
+AWS Bedrock:
+```shell
+python3 mcp_service.py --bedrock-model us.meta.llama3-2-3b-instruct-v1:0
 ```
 
 ## Disabling Open World Tools
@@ -249,6 +260,12 @@ model may be set using `--openai-model`. The API key must be an environment vari
 ```shell
 export OPENAI_API_KEY=xxxx
 python3 assistant.py --openai-model o3
+```
+
+### AWS Bedrock
+
+```shell
+python3 assistant.py --bedrock-model global.anthropic.claude-sonnet-4-5-20250929-v1:0
 ```
 
 ## Indexing Data

@@ -9,7 +9,6 @@ from chromadb import AsyncClientAPI
 from haystack import Pipeline, component, Document
 from haystack.components.agents import Agent
 from haystack.components.builders import PromptBuilder, ChatPromptBuilder
-from haystack.components.embedders import SentenceTransformersTextEmbedder
 from haystack.components.joiners import ListJoiner
 from haystack.components.tools import ToolInvoker
 from haystack.core.component import Component
@@ -619,6 +618,7 @@ class QueryExpander:
                 collected = '\n'.join([collected, line])
         if collected_strip := collected.strip():
             expanded_set.add(collected_strip)
+        logger.debug("split query expanded results from\n%s to \n%s", result, expanded_set)
         return expanded_set
 
     @component.output_types(queries=List[str])
@@ -687,13 +687,14 @@ class QueryExpander:
 
 @component
 class MultiQueryChromaRetriever:
-    def __init__(self, name: str, embedder: SentenceTransformersTextEmbedder, retriever: ChromaEmbeddingRetriever):
+    def __init__(self, name: str, embedder: Component, retriever: ChromaEmbeddingRetriever):
         self.name = name
         self.embedder = embedder
         self.retriever = retriever
 
     def warm_up(self):
-        self.embedder.warm_up()
+        if hasattr(self.embedder, "warm_up"):
+            self.embedder.warm_up()
 
     @component.output_types(documents=List[Document])
     def run(self,
@@ -968,22 +969,14 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
 
     embedder_cache = dict()
     for doc_type_model in doc_type_to_model().values():
-        model_name = doc_type_model.model_name
+        model_name = doc_type_model.model_config
 
         if model_name in embedder_cache:
             embedder = embedder_cache[model_name]
         else:
-            embedder = SentenceTransformersTextEmbedder(
-                model=model_name,
-                batch_size=1,
-                normalize_embeddings=True,
-                trust_remote_code=True,
-                progress_bar=False,
-                model_kwargs={
-                    "attn_implementation": "eager",
-                },
-            )
-            embedder.warm_up()
+            embedder = generator_config.create_text_embedder(doc_type_model.model_config)
+            if hasattr(embedder, "warm_up"):
+                embedder.warm_up()
             embedder_cache[model_name] = embedder
 
         custom_query_expander = None

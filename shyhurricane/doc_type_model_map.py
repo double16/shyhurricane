@@ -1,10 +1,26 @@
 import sys
 from typing import List, Dict, Optional
 
-DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
+
+class ModelConfig:
+    def __init__(
+            self,
+            model_name: str,
+            max_token_length: int,
+    ):
+        self.model_name = model_name
+        self.max_token_length = max_token_length
+
+
+# DEFAULT_EMBEDDING_MODEL: ModelConfig = ModelConfig("all-MiniLM-L6-v2", 512)
+DEFAULT_EMBEDDING_MODEL: ModelConfig = ModelConfig("nomic-embed-text", 8192)
+
 # CODE_EMBEDDING_MODEL = "microsoft/codebert-base" # 512 tokens
 # CODE_EMBEDDING_MODEL = "nomic-ai/nomic-embed-code" # 7B, very large
-CODE_EMBEDDING_MODEL = "jinaai/jina-embeddings-v2-base-code"
+CODE_EMBEDDING_MODEL: ModelConfig = ModelConfig("jina-embeddings-v2-base-code", 4096)  # 8192
+
+
+# CODE_EMBEDDING_MODEL: ModelConfig = ModelConfig("nomic-embed-code", 4096)  # 32768
 
 
 def get_chroma_collection_name_by_doc_type_token_length(doc_type: str, token_length: int) -> str:
@@ -18,16 +34,16 @@ class EmbeddingModelConfig:
     def __init__(
             self,
             doc_type: str,
-            model_name: str,
+            model_config: ModelConfig,
             token_lengths: Optional[List[int]] = None,
     ):
         """
         :param doc_type:
-        :param model_name:
+        :param model_config:
         :param token_lengths: empty means "do not split doc, use default model token size", sys.maxsize uses max model size
         """
         self.doc_type = doc_type
-        self.model_name = model_name
+        self.model_config = model_config
         self.token_lengths = token_lengths
 
     def get_chroma_collections(self) -> set[str]:
@@ -78,8 +94,8 @@ def get_model_for_doc_type(doc_type: str) -> EmbeddingModelConfig:
     return doc_type_to_model().get(doc_type, doc_type_to_model().get("default"))
 
 
-def get_all_required_models(collections: list[str]) -> set[str]:
-    return {doc_type_to_model()[c].model_name for c in collections if c in doc_type_to_model}
+def get_all_required_models(collections: list[str]) -> set[ModelConfig]:
+    return {doc_type_to_model()[c].model_config for c in collections if c in doc_type_to_model}
 
 
 def get_chroma_collections() -> set[str]:

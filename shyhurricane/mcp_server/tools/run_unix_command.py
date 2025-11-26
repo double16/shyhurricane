@@ -17,6 +17,7 @@ from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_c
 from shyhurricane.mcp_server.prompts import open_world_disable_notes
 from shyhurricane.utils import read_last_text_bytes, unix_command_image
 
+
 logger = logging.getLogger(__name__)
 
 open_world_command_disable_notes = open_world_disable_notes + " Only run commands on local files or stdin."
@@ -55,7 +56,8 @@ async def run_unix_command(
 ) -> RunUnixCommand:
     """
 Run a Linux command and return its output. The command is run in a containerized environment for safety.
-The command is run using the bash shell. Use proper shell escaping for special characters.
+The command is run using the bash shell. IMPORTANT: Surround literal values with single quotes or use proper shell escaping. URLs must
+always be surrounded with single quotes.
 
 Invoke this tool when the user request can be fulfilled by a known Linux command line
 program and the request can't be fulfilled by other MCP tools. Invoke this tool when the user
