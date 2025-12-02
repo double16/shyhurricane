@@ -51,6 +51,7 @@ def _str_to_bool(bool_as_str: str) -> bool:
 
 async def main():
     open_world_default = os.environ.get("OPEN_WORLD", "True")
+    assistant_tools_default = os.environ.get("ASSISTANT_TOOLS", "True")
 
     if torch.accelerator.device_count() == 0:
         logger.info("low_power: CPU is the default pytorch device, defaulting to low power mode")
@@ -72,6 +73,8 @@ async def main():
     ap.add_argument("--index-pool-size", type=int, default=1, help="The number of processes in the indexing pool")
     ap.add_argument("--open-world", type=str, default=open_world_default,
                     help="If true, the server is allowed to reach out to hosts. If false, only tools using indexed content are advertised.")
+    ap.add_argument("--assistant-tools", type=str, default=assistant_tools_default,
+                    help="If true, tools specific to supporting an assistant are enabled. Set to false when used with a framework that manages it's own prompts, memory, etc.")
     ap.add_argument("--low-power", type=str, default=low_power_default,
                     help="If true, disables compute intensive features and those requiring GPU.")
     add_generator_args(ap)
@@ -91,6 +94,7 @@ async def main():
     # MCP Server
     #
     mcp_instance.open_world = _str_to_bool(args.open_world)
+    mcp_instance.assistant_tools = _str_to_bool(args.assistant_tools)
 
     match args.transport:
         case "sse":

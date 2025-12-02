@@ -128,14 +128,26 @@ class ShyHurricaneFastMCP(FastMCP):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.open_world = True
+        self.assistant_tools = True
 
     async def list_tools(self) -> list[Tool]:
         logger.info("Listing tools")
         tools = await super().list_tools()
-        if not self.open_world:
-            logger.info("Filtering tools for open_world = False")
-            tools = list(
-                filter(lambda tool: tool.annotations is not None and tool.annotations.openWorldHint == False, tools))  # noqa: E712
+        if not self.open_world or not self.assistant_tools:
+            logger.info(f"Filtering tools for open_world = {self.open_world}, assistant_tools = {self.assistant_tools}")
+
+            def tool_filter(tool: Tool) -> bool:
+                if not self.assistant_tools:
+                    if 'prompt' in tool.name:
+                        return False
+                if tool.annotations is None:
+                    return True
+                if not self.open_world:
+                    if tool.annotations.openWorldHint:
+                        return False
+                return True
+
+            tools = list(filter(tool_filter, tools))
         return tools
 
 

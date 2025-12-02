@@ -212,6 +212,29 @@ Start the MCP server with `--open-world false`:
 python3 mcp_service.py --open-world false
 ```
 
+## Disabling "Assistant" Tools
+
+Some tools are intended to augment a simple assistant, such as choosing a prompt or saving and querying findings. Sophisticated
+frameworks have their own prompts and memory. The assistant tools in this MCP should be disabled when used with these
+frameworks.
+
+Configure `.env`:
+```shell
+ASSISTANT_TOOLS=false
+```
+
+Restart Docker:
+```shell
+docker compose up -d
+```
+
+OR
+
+Start the MCP server with `--assistant-tools false`:
+```shell
+python3 mcp_service.py --assistant-tools false
+```
+
 ## Run the assistant
 
 The assistant provides a command line chat prompt. It isn't elaborate but provides an easy way to use the MCP server. The server queries MCP prompts for offensive security and the assistant will chose an appropriate system prompt using the first user prompt.

@@ -391,6 +391,11 @@ class GeneratorConfig(BaseModel):
                 return 30
         return 20
 
+    @staticmethod
+    def _embedder_enable_ollama() -> bool:
+        # v0.12.11, v0.13.0 - macos has use after free failures
+        return False
+
     def _embedder_model_name_to_path(self, model_name: str) -> str:
         """
         This is a hack. We should have a fixed set of model_purpose like Literal["text","code"], then map to models. This
@@ -410,20 +415,18 @@ class GeneratorConfig(BaseModel):
                     return "text-embedding-004"
         elif self.bedrock_model:
             return "amazon.titan-embed-text-v2:0"
-        elif self.ollama_model:
-            # v0.12.11 - macos has use after free failures
-            pass
-            # match model_name:
-            #     case "all-MiniLM-L6-v2":
-            #         return "mahonzhan/all-MiniLM-L6-v2:latest"
-            #     case "nomic-embed-text":
-            #         return "nomic-embed-text:latest"
-            #     case "jina-embeddings-v2-base-code":
-            #         return "unclemusclez/jina-embeddings-v2-base-code:latest"
-            #     case "nomic-embed-code":
-            #         return "manutic/nomic-embed-code:latest"
-            #     case _:
-            #         return model_name
+        elif self.ollama_model and self._embedder_enable_ollama():
+            match model_name:
+                case "all-MiniLM-L6-v2":
+                    return "mahonzhan/all-MiniLM-L6-v2:latest"
+                case "nomic-embed-text":
+                    return "nomic-embed-text:latest"
+                case "jina-embeddings-v2-base-code":
+                    return "unclemusclez/jina-embeddings-v2-base-code:latest"
+                case "nomic-embed-code":
+                    return "manutic/nomic-embed-code:latest"
+                case _:
+                    return model_name
 
         match model_name:
             case "all-MiniLM-L6-v2":
@@ -453,15 +456,13 @@ class GeneratorConfig(BaseModel):
                 model="amazon.titan-embed-text-v2:0",
                 progress_bar=False,
             )
-        elif self.ollama_model:
-            # v0.12.11 - macos has use after free failures
-            pass
-            # logger.info("Using Ollama document embedder with model %s at %s", model_path, self.ollama_host)
-            # return OllamaDocumentEmbedder(
-            #     model=model_path,
-            #     url="http://" + (self.ollama_host or OLLAMA_HOST_DEFAULT),
-            #     progress_bar=False,
-            # )
+        elif self.ollama_model and self._embedder_enable_ollama():
+            logger.info("Using Ollama document embedder with model %s at %s", model_path, self.ollama_host)
+            return OllamaDocumentEmbedder(
+                model=model_path,
+                url="http://" + (self.ollama_host or OLLAMA_HOST_DEFAULT),
+                progress_bar=False,
+            )
 
         logger.info("Using local document embedder with model %s", model_path)
         embedder = SentenceTransformersDocumentEmbedder(
@@ -490,14 +491,12 @@ class GeneratorConfig(BaseModel):
             return AmazonBedrockTextEmbedder(
                 model="amazon.titan-embed-text-v2:0",
             )
-        elif self.ollama_model:
-            # v0.12.11 - macos has use after free failures
-            pass
-            # logger.info("Using Ollama text embedder with model %s at %s", model_path, self.ollama_host)
-            # return OllamaTextEmbedder(
-            #     model=model_path,
-            #     url="http://" + (self.ollama_host or OLLAMA_HOST_DEFAULT),
-            # )
+        elif self.ollama_model and self._embedder_enable_ollama():
+            logger.info("Using Ollama text embedder with model %s at %s", model_path, self.ollama_host)
+            return OllamaTextEmbedder(
+                model=model_path,
+                url="http://" + (self.ollama_host or OLLAMA_HOST_DEFAULT),
+            )
 
         logger.info("Using local text embedder with model %s", model_path)
         embedder = SentenceTransformersTextEmbedder(
