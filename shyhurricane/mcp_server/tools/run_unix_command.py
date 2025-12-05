@@ -15,8 +15,7 @@ from pydantic import BaseModel, Field
 from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context, assert_elicitation, \
     get_additional_hosts, log_history, AdditionalHostsField, ProcessEnvField
 from shyhurricane.mcp_server.prompts import open_world_disable_notes
-from shyhurricane.utils import read_last_text_bytes, unix_command_image
-
+from shyhurricane.utils import read_last_text_bytes, unix_command_image, coerce_to_dict
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +85,11 @@ When generating Linux commands for execution in a containerized environment, fol
 - The directly accessible filesystem is part of the containerized environment, not the target. Commands such as find, cat, etc. are not enumerating the target unless they are part of a command that connects to the target, such as ssh.
 - Files in the current working directory will persist across calls. Prefer writing files to the current working directory.
 """
+
+    # coerce types
+    additional_hosts = coerce_to_dict(additional_hosts)
+    env = coerce_to_dict(env)
+
     await log_tool_history(ctx, title="run_unix_command", command=command, additional_hosts=additional_hosts, env=env,
                            output_length_limit=output_length_limit)
     server_ctx = await get_server_context()

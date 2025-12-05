@@ -6,9 +6,9 @@ import logging
 import os
 import re
 import time
-from itertools import islice
+from itertools import islice, zip_longest
 from pathlib import Path
-from typing import Optional, Dict, Union, List, Tuple, AsyncGenerator
+from typing import Optional, Dict, Union, List, Tuple, AsyncGenerator, Any, Iterable, Type
 from urllib.parse import ParseResult, urlparse
 from zoneinfo import ZoneInfo
 
@@ -539,6 +539,13 @@ def b64(b: bytes) -> str:
 _word_re = re.compile(r"\w+")
 
 def collapse_first_repeated_sequence(s: str) -> str:
+    """
+    Remove duplicate sequences at the beginning of a string.
+    Example:
+        This is a duplicate. This is a duplicate. This is a duplicate. This is a duplicate.
+        ->
+        This is a duplicate.
+    """
     # Tokenize words and keep spans into original string
     words: List[str] = []
     spans: List[Tuple[int, int]] = []
@@ -658,3 +665,59 @@ def batch_iterable(iterable, batch_size):
     it = iter(iterable)
     while batch := list(islice(it, batch_size)):
         yield batch
+
+
+def coerce_to_list(value: Any, element_type: Type = str) -> List[Any]:
+    """
+    Coerce a value to a list of elements, optionally coercing the values to the given type.
+    1. Falsey values return [].
+    2. Lists and Iterables are returned as lists, element types are unchanged.
+    3. JSON array, i.e. "[1,2,3]", is parsed and returned, element types are unchanged.
+    4. Comma-separated strings are split, element types are coerced.
+    5. Other types are stringified and treated as a comma-separated list.
+    """
+    if not value:
+        return []
+
+    # Already a list: leave as-is (assume caller gave correct element types)
+    if isinstance(value, list):
+        return value
+
+    # Strings get special handling
+    if isinstance(value, str):
+        # JSON-style list string: parse and return as-is
+        if value.startswith("[") and value.endswith("]"):
+            return json.loads(value)
+
+        # Comma-separated string: split and coerce each element
+        parts = value.split(",")
+        return [element_type(part) for part in parts]
+
+    # Any other iterable: just turn into list
+    if isinstance(value, Iterable):
+        return list(value)
+
+    # Fallback: stringify, split on commas, coerce each element
+    return [element_type(part) for part in str(value).split(",")]
+
+
+def coerce_to_dict(value: Any, kv_sep: str = None, element_sep: str = None) -> Dict[str, Any]:
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        if value.startswith("{") and value.endswith("}"):
+            return json.loads(value)
+        for seps in [(kv_sep, element_sep), ("=", ","), (":", ",")]:
+            if seps[0] and seps[1] and seps[0] in value:
+                return {
+                    k.strip(): v.strip()
+                    for part in value.split(seps[1])
+                    if part.strip()
+                    for k, v in [part.split(seps[0], 1)]
+                }
+    if isinstance(value, Iterable):
+        it = iter(value)
+        return dict(zip_longest(it, it, fillvalue=None))
+    return {str(value): ""}

@@ -12,7 +12,7 @@ from shyhurricane.channels import PollEvent, Channel, ChannelManager
 from shyhurricane.mcp_server import mcp_instance, log_tool_history, AdditionalHostsField, get_server_context, \
     get_additional_hosts, ProcessEnvField
 from shyhurricane.pick_nic import pick_local_addr
-from shyhurricane.utils import b64, unix_command_image
+from shyhurricane.utils import b64, unix_command_image, coerce_to_dict
 
 logger = logging.getLogger(__name__)
 
@@ -113,10 +113,6 @@ async def channel_create_forward(
         additional_hosts: AdditionalHostsField = None,
 ) -> CreateForwardResult:
     """
-  You are an MCP agent.
-  You do not write code.
-  You must accomplish tasks by invoking the available MCP tools exactly as documented.
-
   ## Forward Channel Instructions
 
   To create and use a forward channel backed by a local subprocess (stdout and stderr merged), follow this sequence of MCP tool calls:
@@ -149,6 +145,11 @@ async def channel_create_forward(
   - Treat the above as a required sequence of MCP operations, not programming tasks.
   - Commands are run on the local machine, not the target. Only use commands that will connect to the target such as ssh, nc, etc.
 """
+
+    # coerce types
+    additional_hosts = coerce_to_dict(additional_hosts)
+    env = coerce_to_dict(env)
+
     await log_tool_history(ctx, "channel_create_forward", command=command, env=env, additional_hosts=additional_hosts)
     server_ctx = await get_server_context()
 
@@ -230,10 +231,6 @@ async def channel_create_reverse(
                                                description="The address of the target that will help in choosing the listener host")] = None,
 ) -> CreateReverseResult:
     """
-  You are an MCP agent.
-  You do not write code.
-  You must accomplish tasks by invoking the available MCP tools exactly as documented.
-
   ## Channel Management Instructions
 
   To create and use a reverse channel for one duplex client, follow this sequence of MCP tool calls:

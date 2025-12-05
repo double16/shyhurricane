@@ -6,13 +6,14 @@ import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Dict, AsyncIterator, Any, Annotated, Optional, TypeAlias
+from typing import Dict, AsyncIterator, Any, Annotated, Optional, TypeAlias, Union
 
 import aiofiles
 import validators
 from mcp import McpError, ErrorData
 from mcp.server import FastMCP
 from mcp.server.fastmcp import Context
+from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import INVALID_REQUEST, Tool
 from pydantic import ValidationError, Field
 
@@ -27,7 +28,7 @@ from shyhurricane.utils import unix_command_image
 logger = logging.getLogger(__name__)
 
 AdditionalHostsField: TypeAlias = Annotated[
-    Optional[Dict[str, str]],
+    Optional[Union[Dict[str, str], str]],
     Field(
         None,
         description=(
@@ -41,13 +42,13 @@ AdditionalHostsField: TypeAlias = Annotated[
     )
 ]
 
-ProcessEnvField: TypeAlias = Annotated[Optional[Dict[str, str]], Field(
+ProcessEnvField: TypeAlias = Annotated[Optional[Union[Dict[str, str], str]], Field(
     None,
     description="Environment variables to set for the process."
 )]
 
 CookiesField: TypeAlias = Annotated[
-    Optional[Dict[str, str]], Field(description="Name, value pairs for cookies to send with each request.")
+    Optional[Union[Dict[str, str], str]], Field(description="Name, value pairs for cookies to send with each request.")
 ]
 
 UserAgentField: TypeAlias = Annotated[
@@ -59,12 +60,12 @@ UserAgentField: TypeAlias = Annotated[
     ))]
 
 RequestHeadersField: TypeAlias = Annotated[
-    Optional[Dict[str, str]],
+    Optional[Union[Dict[str, str], str]],
     Field(None, description="Extra HTTP headers sent with the request.")
 ]
 
 RequestParamsField: TypeAlias = Annotated[
-    Optional[Dict[str, str]], Field(),
+    Optional[Union[Dict[str, str], str]], Field(),
     Field(description="name, value pairs for GET or POST parameters")
 ]
 
@@ -151,7 +152,26 @@ class ShyHurricaneFastMCP(FastMCP):
         return tools
 
 
-mcp_instance = ShyHurricaneFastMCP("shyhurricane", lifespan=app_lifespan, instructions=mcp_server_instructions)
+mcp_instance = ShyHurricaneFastMCP(
+    "shyhurricane",
+    lifespan=app_lifespan,
+    instructions=mcp_server_instructions,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=False,
+    )
+    # transport_security=TransportSecuritySettings(
+    #     enable_dns_rebinding_protection=True,
+    #     # allow localhost + your LAN IP on any port
+    #     allowed_hosts=[
+    #         "localhost:*",
+    #         "127.0.0.1:*",
+    #         "192.168.1.225:*",
+    #     ],
+    #     # optional: allowed_origins if you’re calling from a browser;
+    #     # for non-browser agents you can usually leave this empty.
+    #     allowed_origins=[],
+    # ),
+)
 
 
 def assert_elicitation(ctx: ServerContext):

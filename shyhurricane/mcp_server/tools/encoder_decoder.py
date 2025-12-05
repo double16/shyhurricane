@@ -1,10 +1,11 @@
-from typing import List, Optional, Annotated
+from typing import List, Optional, Annotated, Union
 
 from pydantic import BaseModel, Field
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
 from shyhurricane.mcp_server import mcp_instance, log_tool_history
 from shyhurricane.mcp_server.encoder_decoder_impl import do_encode_decode
+from shyhurricane.utils import coerce_to_list
 
 
 class EncoderDecoderResult(BaseModel):
@@ -23,7 +24,7 @@ class EncoderDecoderResult(BaseModel):
 async def encoder_decoder(
         ctx: Context,
         operations: Annotated[
-            List[str],
+            Union[List[str], str],
             Field(description="""
     List of operations from the following list. The values must only be from this list. Operations
     are applied in the order specified by sending the output of on operation into the next.
@@ -54,6 +55,10 @@ async def encoder_decoder(
 
     Invoke this tool when the user needs to transform data from one form to another.
     """
+
+    # coerce types
+    operations = coerce_to_list(operations)
+
     await log_tool_history(ctx, "encoder_decoder", input_str=input_str, operations=operations)
 
     try:

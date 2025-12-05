@@ -16,6 +16,7 @@ from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_c
 from shyhurricane.mcp_server.tools.find_wordlists import find_wordlists
 from shyhurricane.mcp_server.tools.run_unix_command import _run_unix_command
 from shyhurricane.task_queue import DirBustingQueueItem, DirBustingResultItem
+from shyhurricane.utils import coerce_to_list, coerce_to_dict
 
 logger = logging.getLogger(__name__)
 
@@ -66,12 +67,12 @@ async def directory_buster(
         cookies: CookiesField = None,
         params: RequestParamsField = None,
         extensions: Annotated[
-            Optional[List[str]],
+            Optional[Union[List[str], str]],
             Field(
                 description="Specify file extensions to search for such as pdf, php, etc. Do not include a leading period.")
         ] = None,
         ignored_response_codes: Annotated[
-            Optional[List[int]], Field(description="List of HTTP response codes to ignore")] = None,
+            Optional[Union[List[int], str]], Field(description="List of HTTP response codes to ignore")] = None,
         additional_hosts: AdditionalHostsField = None,
         user_agent: Annotated[
             Optional[str],
@@ -82,7 +83,7 @@ async def directory_buster(
                     "keyword that will be replaced with values from the wordlist."
             ))] = None,
         request_headers: Annotated[
-            Optional[Dict[str, str]],
+            Optional[Union[Dict[str, str], str]],
             Field(description=(
                     "The request_headers map is extra request headers sent with the request. "
                     "The request_headers key and/or values may contain the FUZZ keyword that will be replaced with "
@@ -106,6 +107,15 @@ async def directory_buster(
 
     Returns a list of URLs found. Indexes each URL that can be queried using the find_web_resources and find_urls tools. URL content can be returned using the fetch_web_resource_content tool.
     """
+
+    # coerce types
+    extensions = coerce_to_list(extensions)
+    ignored_response_codes = coerce_to_list(ignored_response_codes, int)
+    additional_hosts = coerce_to_dict(additional_hosts)
+    cookies = coerce_to_dict(cookies, '=', ';')
+    params = coerce_to_dict(params, '=', '&')
+    request_headers = coerce_to_dict(request_headers, ':', '\n')
+
     await log_tool_history(ctx, "directory_buster", url=url, depth=depth, method=method, wordlist=wordlist,
                            extensions=extensions,
                            ignored_response_codes=ignored_response_codes, additional_hosts=additional_hosts,
@@ -122,6 +132,7 @@ async def directory_buster(
     if wordlist:
         wordlist = await validate_wordlist(ctx, wordlist)
 
+    # remove leading period in extensions
     if extensions:
         extensions = list(map(lambda e: e[1:] if len(e) > 1 and e[0] == '.' else e, extensions))
 

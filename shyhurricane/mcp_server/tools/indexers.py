@@ -18,7 +18,7 @@ from shyhurricane.mcp_server import mcp_instance, get_server_context, log_tool_h
     UserAgentField, CookiesField, RequestHeadersField, AdditionalHostsField, RequestParamsField
 from shyhurricane.mcp_server.tools.deobfuscate_javascript import deobfuscate_javascript
 from shyhurricane.utils import stream_lines, is_katana_jsonl, HttpResource, urlparse_ext, \
-    extract_domain
+    extract_domain, coerce_to_dict
 from shyhurricane.http_csv import is_http_csv, http_csv_generator
 
 logger = logging.getLogger(__name__)
@@ -101,6 +101,13 @@ async def index_http_url(
 
     If follow_redirects is true, redirects will be followed and the result is the destination of the redirect.
     """
+
+    # coerce types
+    additional_hosts = coerce_to_dict(additional_hosts)
+    cookies = coerce_to_dict(cookies, '=', ';')
+    request_headers = coerce_to_dict(request_headers, ':', '\n')
+    params = coerce_to_dict(params, '=', '&')
+
     await log_tool_history(ctx, "index_http_url",
                            url=url,
                            method=method,

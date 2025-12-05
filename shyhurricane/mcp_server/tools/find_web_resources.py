@@ -4,7 +4,7 @@ import logging
 import queue
 import time
 from multiprocessing import Queue
-from typing import List, Dict, Any, Optional, Annotated
+from typing import List, Dict, Any, Optional, Annotated, Union
 
 import chromadb
 from chromadb.api.models import AsyncCollection
@@ -24,7 +24,7 @@ from shyhurricane.target_info import parse_target_info, TargetInfo
 from shyhurricane.task_queue import SpiderQueueItem
 from shyhurricane.task_queue.types import SpiderResultItem
 from shyhurricane.utils import HttpResource, urlparse_ext, documents_sort_unique, extract_domain, query_to_netloc, \
-    munge_urls, filter_hosts_and_addresses
+    munge_urls, filter_hosts_and_addresses, coerce_to_list, coerce_to_dict
 
 logger = logging.getLogger(__name__)
 
@@ -228,7 +228,7 @@ async def find_web_resources(
         query: str,
         limit: Annotated[int, Field(100, description="Limit how many results are returned", ge=10, le=1000)] = 100,
         http_methods: Annotated[
-            Optional[List[str]],
+            Optional[Union[List[str], str]],
             Field(description="Limit results to requests made with the listed HTTP methods. If not specified all methods will be considered.")
         ] = None,
 ) -> FindWebResourcesResult:
@@ -260,6 +260,10 @@ async def find_web_resources(
 
     A target URL or hostname is required. Always include your target URLs. http://target.local is only an example, do not use it as a URL.
     """
+
+    # coerce types
+    http_methods = coerce_to_list(http_methods)
+
     await log_tool_history(ctx, "find_web_resources", query=query, limit=limit)
     server_ctx = await get_server_context()
     query = query.strip()
@@ -556,6 +560,12 @@ async def spider_website(
 
     Returns a list of resources found, including URL, response code, content type, and content length. All resources are indexed and can be queried using the find_web_resources tool. Content can be returned using the returned URL and the fetch_web_resource_content tool.
     """
+
+    # coerce types
+    additional_hosts = coerce_to_dict(additional_hosts)
+    cookies = coerce_to_dict(cookies, '=', ';')
+    request_headers = coerce_to_dict(request_headers, ':', '\n')
+
     await log_tool_history(ctx, "spider_website", url=url, additional_hosts=additional_hosts, user_agent=user_agent,
                            request_headers=request_headers)
     server_ctx = await get_server_context()

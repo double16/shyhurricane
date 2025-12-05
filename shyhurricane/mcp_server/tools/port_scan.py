@@ -3,7 +3,7 @@ import logging
 import queue
 import time
 from multiprocessing import Queue
-from typing import Optional, List, Annotated
+from typing import Optional, List, Annotated, Union
 
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
@@ -13,7 +13,8 @@ from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_c
     AdditionalHostsField
 from shyhurricane.task_queue import PortScanQueueItem
 from shyhurricane.task_queue.port_scan_worker import get_stored_port_scan_results
-from shyhurricane.utils import filter_hosts_and_addresses, filter_ip_networks, PortScanResults
+from shyhurricane.utils import filter_hosts_and_addresses, filter_ip_networks, PortScanResults, coerce_to_list, \
+    coerce_to_dict
 
 logger = logging.getLogger(__name__)
 
@@ -43,11 +44,11 @@ class PortScanToolResult(BaseModel):
 )
 async def port_scan(
         ctx: Context,
-        hostnames: Optional[List[str]] = None,
-        ip_addresses: Optional[List[str]] = None,
-        ip_subnets: Optional[List[str]] = None,
+        hostnames: Optional[Union[List[str], str]] = None,
+        ip_addresses: Optional[Union[List[str], str]] = None,
+        ip_subnets: Optional[Union[List[str], str]] = None,
         ports: Annotated[
-            Optional[List[int]],
+            Optional[Union[List[int], str]],
             Field(None, description="List of individual ports to scan, leave empty for all ports")
         ] = None,
         port_range_low: Annotated[
@@ -91,6 +92,14 @@ async def port_scan(
     The port scan may take a long time, and this tool may return before the scan is finished.
     If a timeout occurs, call this tool again with the same parameters, and it will return indexed results.
     """
+
+    # Coerce types
+    hostnames = coerce_to_list(hostnames)
+    ip_addresses = coerce_to_list(ip_addresses)
+    ip_subnets = coerce_to_list(ip_subnets)
+    ports = coerce_to_list(ports, int)
+    additional_hosts = coerce_to_dict(additional_hosts)
+
     await log_tool_history(ctx, "port_scan", hostnames=hostnames, ip_addresses=ip_addresses, ip_subnets=ip_subnets,
                            ports=ports, port_range_low=port_range_low, port_range_high=port_range_high,
                            additional_hosts=additional_hosts, timeout_seconds=timeout_seconds)
