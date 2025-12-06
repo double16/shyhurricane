@@ -36,7 +36,8 @@ def with_backoff(fn: Callable[..., List[WebSearchHit]],
         last_exc = None
         for attempt in range(retries + 1):
             try:
-                hits = await asyncio.to_thread(fn, *args, **kwargs)
+                async with asyncio.timeout(90):
+                    hits = await asyncio.to_thread(fn, *args, **kwargs)
                 if len(hits) == 0:
                     raise TimeoutException("no results")
                 return hits

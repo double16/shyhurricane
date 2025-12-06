@@ -441,14 +441,17 @@ async def find_web_resources(
         except Exception as e:
             logger.warning(f"Error reporting progress: {e}")
 
-    res = await asyncio.to_thread(document_pipeline.run,
-                                  data={"query": {"text": query, "filters": filters, "max_results": limit,
-                                                  "targets": filter_netloc + list(filter_domain),
-                                                  "doc_types": doc_types,
-                                                  "progress_callback": progress_callback}},
-                                  include_outputs_from={"combine"})
+    async with asyncio.timeout(300):
+        res = await asyncio.to_thread(document_pipeline.run,
+                                      data={"query": {"text": query, "filters": filters, "max_results": limit,
+                                                      "targets": filter_netloc + list(filter_domain),
+                                                      "doc_types": doc_types,
+                                                      "progress_callback": progress_callback}},
+                                      include_outputs_from={"combine"})
 
     documents = documents_sort_unique(res.get("combine", {}).get("documents", []), limit)
+
+    logger.info(f"Found {len(documents)} documents")
 
     return find_web_resources_result(results=_documents_to_http_resources(documents), query=query,
                                      http_methods=http_methods, limit=limit)

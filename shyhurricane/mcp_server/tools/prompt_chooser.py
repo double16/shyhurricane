@@ -63,9 +63,11 @@ async def extract_targets_and_prompt_title(query: str, titles: Iterable[str]) ->
             ChatMessage.from_system(prompt),
             ChatMessage.from_user(query),
         ]
-        generator_output = await asyncio.to_thread(generator.run, messages=prompt_messages)
+        async with asyncio.timeout(90):
+            generator_output = await asyncio.to_thread(generator.run, messages=prompt_messages)
     else:
-        generator_output = await asyncio.to_thread(generator.run, prompt=prompt + "\n" + query)
+        async with asyncio.timeout(90):
+            generator_output = await asyncio.to_thread(generator.run, prompt=prompt + "\n" + query)
 
     if "replies" in generator_output:
         replies = generator_output["replies"]
