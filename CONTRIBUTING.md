@@ -41,6 +41,21 @@ chroma browse --host http://127.0.0.1:8200 javascript
 chroma browse --host http://127.0.0.1:8200 javascript_256
 ```
 
+## colima docker build cache
+
+The `shyhurricane_unix_command` image can be quite large and the build cache size may need to be increased. For `colima`, use the following
+command and config.
+
+```shell
+colima start --edit
+
+docker:
+  builder:
+    gc:
+      enabled: true
+      defaultKeepStorage: 30G
+```
+
 # Debugging Model Communication
 
 Sometimes results from the model cannot be parsed.  Use `mitmproxy` to inspect model traffic.
