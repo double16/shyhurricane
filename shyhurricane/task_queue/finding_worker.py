@@ -82,7 +82,7 @@ def save_finding_worker(ctx: FindingContext, item: SaveFindingQueueItem):
     }
 
     doc = Document(
-        content=item.markdown,
+        content=str(item.markdown),
         meta=meta,
     )
 

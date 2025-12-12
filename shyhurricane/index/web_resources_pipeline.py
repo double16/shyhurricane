@@ -137,6 +137,12 @@ def _quantize_timestamp(timestamp: str):
     return timestamp[0:11]
 
 
+def _cache_key_response_headers(response_headers: Dict[str, str]) -> str:
+    headers = ["authorization", "etag", "cookie"]
+    values = [ v for k, v in response_headers.items() if k.lower() in headers ]
+    return ",".join(values)
+
+
 def build_splitters(embedders: Dict[str, Component]):
     splitters: Dict[str, SuffixIdSplitter] = dict()
     _doc_type_to_model = doc_type_to_model()
@@ -208,6 +214,7 @@ class RequestResponseToDocument:
             timestamp = datetime.datetime.now().isoformat()
 
         timestamp_for_id = _quantize_timestamp(timestamp)
+        response_values_for_id = _cache_key_response_headers(request_response.response_headers)
         request_headers = request_response.request_headers
         response_body = remove_unencodable(request_response.response_body)
         response_headers = request_response.response_headers
@@ -245,9 +252,15 @@ class RequestResponseToDocument:
 
         # Content Document (if body is present)
         if response_body and not is_binary(response_body, raw_mime):
-            content_sha256 = hashlib.sha256(response_body.encode("utf-8", errors="ignore")).hexdigest()
+            if isinstance(response_body, bytes):
+                response_body_bytes = response_body
+                response_body_str = response_body_bytes.decode("utf-8", errors="ignore")
+            else:
+                response_body_str = str(response_body)
+                response_body_bytes = response_body_str.encode("utf-8", errors="ignore")
+            content_sha256 = hashlib.sha256(response_body_bytes).hexdigest()
             doc = Document(
-                content=response_body,
+                content=response_body_str,
                 meta=base_meta | {
                     "type": "content",
                     "token_length": self._doc_type_to_model.get("content").get_primary_token_length(),
@@ -255,7 +268,7 @@ class RequestResponseToDocument:
                     "response_headers": json.dumps(response_headers),
                     "content_sha256": content_sha256,
                 },
-                id=hashlib.sha256(f"{url}:content:{timestamp_for_id}".encode()).hexdigest()
+                id=hashlib.sha256(f"{url}:content:{timestamp_for_id}:{response_values_for_id}".encode()).hexdigest()
             )
             documents.append(self._embed_single(doc))
 
@@ -503,6 +516,7 @@ class IndexDocTypeDocuments:
             url = doc.meta.get("url", "")
             raw_mime = doc.meta.get("content_type", "")
             timestamp_for_id = _quantize_timestamp(doc.meta.get("timestamp", ""))
+            response_values_for_id = _cache_key_response_headers(json.loads(doc.meta.get("response_headers", "{}")))
             if not url or not raw_mime or not timestamp_for_id:
                 logger.info(f"Skipping {doc.id} for missing url, content_type, or timestamp")
                 continue
@@ -519,7 +533,7 @@ class IndexDocTypeDocuments:
                 new_doc = Document(
                     content=doc.content,
                     meta=doc.meta.copy() | {"type": doc_type, "token_length": token_length},
-                    id=hashlib.sha256(f"{url}:{doc_type}:{token_length}:{timestamp_for_id}".encode()).hexdigest()
+                    id=hashlib.sha256(f"{url}:{doc_type}:{token_length}:{timestamp_for_id}:{response_values_for_id}".encode()).hexdigest()
                 )
                 collection_name = get_chroma_collection_name_by_doc_type_token_length(doc_type, token_length)
                 split_docs = self.splitters[collection_name].run(documents=[new_doc])["documents"]
