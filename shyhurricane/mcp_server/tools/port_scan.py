@@ -70,7 +70,7 @@ async def port_scan(
         retry: Annotated[
             bool,
             Field(False,
-                  description="Set to true to force retrying the port scan. Only use true if the results are suspected to be invalid, such as a temporary network failure."
+                  description="If the results are suspected to be invalid, such as a temporary network failure, set to true. Otherwise set to false to avoid unnecessary duplication of effort."
                   )
         ] = False,
 ) -> PortScanToolResult:
@@ -100,9 +100,12 @@ async def port_scan(
     ports = coerce_to_list(ports, int)
     additional_hosts = coerce_to_dict(additional_hosts)
 
+    # LLMs set retry without considering the stated reason for retry
+    retry = False
+
     await log_tool_history(ctx, "port_scan", hostnames=hostnames, ip_addresses=ip_addresses, ip_subnets=ip_subnets,
                            ports=ports, port_range_low=port_range_low, port_range_high=port_range_high,
-                           additional_hosts=additional_hosts, timeout_seconds=timeout_seconds)
+                           additional_hosts=additional_hosts, timeout_seconds=timeout_seconds, retry=retry)
 
     server_ctx = await get_server_context()
     assert server_ctx.open_world
