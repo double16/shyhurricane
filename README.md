@@ -30,6 +30,7 @@ The following tools are provided:
 | find_netloc                 | Query indexed resources for a list of network locations, i.e. host:port, for a given domain.        | No          |
 | find_urls                   | Query indexed resources for a list of URLs for the given host or domain.                            | No          |
 | register_hostname_address   | Registers a hostname with an IP address.                                                            | No          |
+| register_http_headers       | Register HTTP headers that should be sent on every request.                                         | No          |
 | save_finding                | Save findings as a markdown.                                                                        | No          |
 | query_findings              | Query for previous findings for a target.                                                           | No          |
 | web_search                  | Searches the web with the provided query.                                                           | Yes         |

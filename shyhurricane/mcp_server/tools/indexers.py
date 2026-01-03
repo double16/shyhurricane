@@ -15,7 +15,8 @@ from starlette.responses import Response
 from shyhurricane.doc_type_model_map import map_mime_to_type
 from shyhurricane.index.web_resources_pipeline import is_binary
 from shyhurricane.mcp_server import mcp_instance, get_server_context, log_tool_history, get_additional_hosts, \
-    UserAgentField, CookiesField, RequestHeadersField, AdditionalHostsField, RequestParamsField
+    UserAgentField, CookiesField, RequestHeadersField, AdditionalHostsField, RequestParamsField, \
+    get_additional_http_headers
 from shyhurricane.mcp_server.tools.deobfuscate_javascript import deobfuscate_javascript
 from shyhurricane.utils import stream_lines, is_katana_jsonl, HttpResource, urlparse_ext, \
     extract_domain, coerce_to_dict
@@ -107,6 +108,8 @@ async def index_http_url(
     cookies = coerce_to_dict(cookies, '=', ';')
     request_headers = coerce_to_dict(request_headers, ':', '\n')
     params = coerce_to_dict(params, '=', '&')
+
+    request_headers = get_additional_http_headers(ctx, request_headers)
 
     await log_tool_history(ctx, "index_http_url",
                            url=url,

@@ -33,6 +33,7 @@ import shyhurricane.mcp_server.tools.oast  # noqa: F401
 import shyhurricane.mcp_server.tools.port_scan  # noqa: F401
 import shyhurricane.mcp_server.tools.prompt_chooser  # noqa: F401
 import shyhurricane.mcp_server.tools.register_hostname_address  # noqa: F401
+import shyhurricane.mcp_server.tools.register_http_headers  # noqa: F401
 import shyhurricane.mcp_server.tools.run_unix_command  # noqa: F401
 import shyhurricane.mcp_server.tools.status  # noqa: F401
 import shyhurricane.mcp_server.tools.web_search  # noqa: F401

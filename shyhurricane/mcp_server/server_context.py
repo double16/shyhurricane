@@ -91,7 +91,10 @@ async def get_server_context() -> ServerContext:
                 db=db,
                 collection_name=col,
             )
-            document_store.count_documents()
+            if hasattr(document_store, "_ensure_initialized"):
+                document_store._ensure_initialized()
+            else:
+                document_store.count_documents()
 
     cache_path: str = os.path.join(os.environ.get('TOOL_CACHE', os.environ.get('TMPDIR', '/tmp')), 'tool_cache')
     os.makedirs(cache_path, exist_ok=True)

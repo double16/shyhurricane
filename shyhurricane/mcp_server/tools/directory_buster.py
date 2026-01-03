@@ -12,9 +12,10 @@ from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
 from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context, get_additional_hosts, \
-    AdditionalHostsField, CookiesField, RequestParamsField
+    AdditionalHostsField, CookiesField, RequestParamsField, get_additional_http_headers
 from shyhurricane.mcp_server.tools.find_wordlists import find_wordlists
 from shyhurricane.mcp_server.tools.run_unix_command import _run_unix_command
+from shyhurricane.rate_limit import get_rate_limit_requests_per_second
 from shyhurricane.task_queue import DirBustingQueueItem, DirBustingResultItem
 from shyhurricane.utils import coerce_to_list, coerce_to_dict
 
@@ -116,11 +117,15 @@ async def directory_buster(
     params = coerce_to_dict(params, '=', '&')
     request_headers = coerce_to_dict(request_headers, ':', '\n')
 
+    rate_limit_requests_per_second = get_rate_limit_requests_per_second(url)
+    request_headers = get_additional_http_headers(ctx, request_headers)
+
     await log_tool_history(ctx, "directory_buster", url=url, depth=depth, method=method, wordlist=wordlist,
                            extensions=extensions,
                            ignored_response_codes=ignored_response_codes, additional_hosts=additional_hosts,
                            user_agent=user_agent, request_headers=request_headers, cookies=cookies, params=params,
-                           timeout_seconds=timeout_seconds)
+                           timeout_seconds=timeout_seconds,
+                           rate_limit_requests_per_second=rate_limit_requests_per_second)
     server_ctx = await get_server_context()
     assert server_ctx.open_world
 
@@ -157,6 +162,7 @@ async def directory_buster(
         seclists_volume=server_ctx.seclists_volume,
         mcp_session_volume=server_ctx.mcp_session_volume,
         work_path=ctx.request_context.lifespan_context.work_path,
+        rate_limit_requests_per_second=rate_limit_requests_per_second,
     )
     await asyncio.to_thread(task_queue.put, queue_item)
     results: List[str] = []

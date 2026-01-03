@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 class AppContext:
     # TODO: add scope?
     cached_get_additional_hosts: Dict[str, str]
+    http_headers: Dict[str, str]
     cache_path: str
     app_context_id: str
     work_path: str

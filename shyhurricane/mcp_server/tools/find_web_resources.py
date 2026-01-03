@@ -18,8 +18,10 @@ from pydantic import BaseModel, Field, AnyUrl
 
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server import get_server_context, mcp_instance, log_tool_history, assert_elicitation, \
-    ServerContext, get_additional_hosts, AdditionalHostsField, CookiesField, UserAgentField, RequestHeadersField
+    ServerContext, get_additional_hosts, AdditionalHostsField, CookiesField, UserAgentField, RequestHeadersField, \
+    get_additional_http_headers
 from shyhurricane.mcp_server.tools.find_indexed_metadata import find_netloc
+from shyhurricane.rate_limit import get_rate_limit_requests_per_second
 from shyhurricane.target_info import parse_target_info, TargetInfo
 from shyhurricane.task_queue import SpiderQueueItem
 from shyhurricane.task_queue.types import SpiderResultItem
@@ -493,7 +495,7 @@ async def is_spider_time_recent(server_ctx: ServerContext, url: str) -> Optional
         collection: AsyncCollection = await chroma_client.get_collection("network")
         now = time.time()
         url_parsed = urlparse_ext(url)
-        where_filter = {"$and": [{"version": WEB_RESOURCE_VERSION}, {"netloc": url_parsed.netloc}]}
+        where_filter = {"netloc": url_parsed.netloc}
         logger.info("is_spider_time_recent using filters %s", json.dumps(where_filter))
         get_result = await collection.get(
             where=where_filter,
@@ -569,8 +571,12 @@ async def spider_website(
     cookies = coerce_to_dict(cookies, '=', ';')
     request_headers = coerce_to_dict(request_headers, ':', '\n')
 
+    rate_limit_requests_per_second = get_rate_limit_requests_per_second(url)
+    request_headers = get_additional_http_headers(ctx, request_headers)
+
     await log_tool_history(ctx, "spider_website", url=url, additional_hosts=additional_hosts, user_agent=user_agent,
-                           request_headers=request_headers)
+                           request_headers=request_headers,
+                           rate_limit_requests_per_second=rate_limit_requests_per_second)
     server_ctx = await get_server_context()
     assert server_ctx.open_world
 
@@ -596,6 +602,7 @@ async def spider_website(
         request_headers=request_headers,
         cookies=cookies,
         additional_hosts=get_additional_hosts(ctx, additional_hosts),
+        rate_limit_requests_per_second=rate_limit_requests_per_second,
     )
     await asyncio.to_thread(spider_queue.put, spider_queue_item)
     results: List[HttpResource] = []

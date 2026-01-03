@@ -104,6 +104,7 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         app_context_id=app_context_id,
         work_path=work_path,
         cached_get_additional_hosts={},
+        http_headers={},
         oast_provider=oast_provider,
     )
 
@@ -216,3 +217,8 @@ def get_additional_hosts(ctx: Context, additional_hosts: Dict[str, str] = None) 
         except (ValueError, ValidationError):
             pass
     return cached_get_additional_hosts | validated
+
+
+def get_additional_http_headers(ctx: Context, additional_http_headers: Dict[str, str] = None) -> Dict[str, str]:
+    http_headers = ctx.request_context.lifespan_context.http_headers
+    return http_headers | (additional_http_headers or {})

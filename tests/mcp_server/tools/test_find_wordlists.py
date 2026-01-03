@@ -59,7 +59,7 @@ class TestFindWordlists(unittest.IsolatedAsyncioTestCase):
         ])
 
     def new_context(self) -> Context:
-        server_context = Mock(spec=["cache_path", "work_path", "cached_get_additional_hosts"])
+        server_context = Mock(spec=["cache_path", "work_path", "cached_get_additional_hosts", "http_headers"])
         server_context.cache_path = "/var/tmp"
         server_context.work_path = "/var/tmp"
         server_context.cached_get_additional_hosts = {}

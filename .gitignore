@@ -168,3 +168,4 @@ cython_debug/
 node_modules/
 .DS_Store
 *.chroma
+chroma_store*
