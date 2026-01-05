@@ -2,13 +2,15 @@ import json
 import os
 from typing import Dict
 
-import chromadb
-from chromadb.api.models import AsyncCollection
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.http import models as qm
 from starlette.requests import Request
 from starlette.responses import Response
 
+from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.persistent_queue import get_doc_type_queue
 from shyhurricane.mcp_server import mcp_instance, get_server_context
+from shyhurricane.db import scroll_qdrant_collection
 
 
 @mcp_instance.custom_route('/status', methods=['POST'])
@@ -18,8 +20,7 @@ async def status(request: Request) -> Response:
     """
     server_ctx = await get_server_context()
     doc_type_queue = get_doc_type_queue(server_ctx.db)
-    chroma_client: chromadb.AsyncClientAPI = server_ctx.chroma_client
-    collection: AsyncCollection = await chroma_client.get_collection("network")
+    qdrant_client: AsyncQdrantClient = server_ctx.qdrant_client
 
     document_counts = {}
     domain_counts: Dict[str, int] = {}
@@ -27,30 +28,26 @@ async def status(request: Request) -> Response:
     for collection_name, store in server_ctx.stores.items():
         document_counts[collection_name] = await store.count_documents_async()
 
-        count = await collection.count()
-        limit = 1000
-        offset = 0
-        while offset < count:
-            get_result = await collection.get(
-                include=["metadatas"],
-                limit=limit,
-                offset=offset,
-            )
-            offset += limit
-            metadatas = get_result.get("metadatas", [])
-            for metadata in metadatas:
-                if "domain" in metadata:
-                    domain = metadata['domain'].lower()
-                    if domain in domain_counts:
-                        domain_counts[domain] += 1
-                    else:
-                        domain_counts[domain] = 1
-                if "host" in metadata:
-                    host = metadata['host'].lower()
-                    if host in host_counts:
-                        host_counts[host] += 1
-                    else:
-                        host_counts[host] = 1
+    filters = qm.Filter(
+        must=[
+            qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION)),
+        ]
+    )
+    async for record in scroll_qdrant_collection(qdrant_client=qdrant_client, index="network", fields=["meta"],
+                                                 scroll_filter=filters):
+        metadata = record.payload["meta"]
+        if "domain" in metadata:
+            domain = metadata['domain'].lower()
+            if domain in domain_counts:
+                domain_counts[domain] += 1
+            else:
+                domain_counts[domain] = 1
+        if "host" in metadata:
+            host = metadata['host'].lower()
+            if host in host_counts:
+                host_counts[host] += 1
+            else:
+                host_counts[host] = 1
 
     if server_ctx.proxy_ca_cert_path:
         with open(server_ctx.proxy_ca_cert_path) as f:

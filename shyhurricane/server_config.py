@@ -44,6 +44,7 @@ class OASTConfig:
 
 @dataclass
 class ServerConfig:
+    database: str = None
     task_pool_size: int = 3
     ingest_pool_size: int = 1
     open_world: bool = True

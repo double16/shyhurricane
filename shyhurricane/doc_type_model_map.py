@@ -22,8 +22,10 @@ CODE_EMBEDDING_MODEL: ModelConfig = ModelConfig("jina-embeddings-v2-base-code", 
 
 # CODE_EMBEDDING_MODEL: ModelConfig = ModelConfig("nomic-embed-code", 4096)  # 32768
 
+SPARSE_EMBEDDING_MODEL: ModelConfig = ModelConfig("Qdrant/bm42-all-minilm-l6-v2-attentions", 256)
 
-def get_chroma_collection_name_by_doc_type_token_length(doc_type: str, token_length: int) -> str:
+
+def get_qdrant_collection_name_by_doc_type_token_length(doc_type: str, token_length: int) -> str:
     if token_length == sys.maxsize:
         return doc_type
     else:
@@ -46,17 +48,17 @@ class EmbeddingModelConfig:
         self.model_config = model_config
         self.token_lengths = token_lengths
 
-    def get_chroma_collections(self) -> set[str]:
+    def get_qdrant_collections(self) -> set[str]:
         collections = set()
         if not self.token_lengths:
             collections.add(self.doc_type)
         else:
             for tl in self.token_lengths:
-                collections.add(self.get_chroma_collection(tl))
+                collections.add(self.get_qdrant_collection(tl))
         return collections
 
-    def get_chroma_collection(self, token_length: int = sys.maxsize):
-        return get_chroma_collection_name_by_doc_type_token_length(self.doc_type, token_length)
+    def get_qdrant_collection(self, token_length: int = sys.maxsize):
+        return get_qdrant_collection_name_by_doc_type_token_length(self.doc_type, token_length)
 
     def get_primary_token_length(self) -> int:
         if not self.token_lengths:
@@ -98,10 +100,10 @@ def get_all_required_models(collections: list[str]) -> set[ModelConfig]:
     return {doc_type_to_model()[c].model_config for c in collections if c in doc_type_to_model}
 
 
-def get_chroma_collections() -> set[str]:
+def get_qdrant_collections() -> set[str]:
     collections = set()
     for model in doc_type_to_model().values():
-        collections.update(model.get_chroma_collections())
+        collections.update(model.get_qdrant_collections())
     return collections
 
 

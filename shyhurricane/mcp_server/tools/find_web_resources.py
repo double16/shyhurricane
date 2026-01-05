@@ -6,15 +6,14 @@ import time
 from multiprocessing import Queue
 from typing import List, Dict, Any, Optional, Annotated, Union
 
-import chromadb
-from chromadb.api.models import AsyncCollection
-from chromadb.errors import NotFoundError
 from haystack import Document, Pipeline
 from mcp import Resource, McpError
 from mcp.server.elicitation import AcceptedElicitation, DeclinedElicitation, CancelledElicitation
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field, AnyUrl
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.http import models as qm
 
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server import get_server_context, mcp_instance, log_tool_history, assert_elicitation, \
@@ -22,6 +21,7 @@ from shyhurricane.mcp_server import get_server_context, mcp_instance, log_tool_h
     get_additional_http_headers
 from shyhurricane.mcp_server.tools.find_indexed_metadata import find_netloc
 from shyhurricane.rate_limit import get_rate_limit_requests_per_second
+from shyhurricane.db import scroll_qdrant_collection
 from shyhurricane.target_info import parse_target_info, TargetInfo
 from shyhurricane.task_queue import SpiderQueueItem
 from shyhurricane.task_queue.types import SpiderResultItem
@@ -304,7 +304,7 @@ async def find_web_resources(
         target_result = \
             website_context_pipeline.run({'builder': {'query': target_query}}).get('llm', {}).get('replies', [""])[0]
         if target_result:
-            logger.info("Target result: %s", json.dumps(target_result))
+            logger.info("Target result: %s", repr(target_result))
             try:
                 target_json = json.loads(target_result)
                 targets.extend(target_json.get('target', []))
@@ -432,7 +432,7 @@ async def find_web_resources(
             "conditions": conditions,
         }
 
-    logger.info(f"Searching for {', '.join(targets)} with filter {json.dumps(filters)}")
+    logger.info(f"Searching for {', '.join(targets)} with filter {repr(filters)}")
     await ctx.info(f"Searching for {', '.join(targets)}")
 
     loop = asyncio.get_running_loop()
@@ -491,19 +491,22 @@ async def is_spider_time_recent(server_ctx: ServerContext, url: str) -> Optional
     max_age_seconds = 24 * 3600
     count_limit = 10
     try:
-        chroma_client: chromadb.AsyncClientAPI = server_ctx.chroma_client
-        collection: AsyncCollection = await chroma_client.get_collection("network")
+        qdrant_client: AsyncQdrantClient = server_ctx.qdrant_client
         now = time.time()
         url_parsed = urlparse_ext(url)
-        where_filter = {"netloc": url_parsed.netloc}
-        logger.info("is_spider_time_recent using filters %s", json.dumps(where_filter))
-        get_result = await collection.get(
-            where=where_filter,
-            include=["metadatas"])
+        filters = qm.Filter(
+            must=[
+                qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION)),
+                qm.FieldCondition(key="meta.netloc", match=qm.MatchValue(value=url_parsed.netloc)),
+            ]
+        )
+        logger.info("is_spider_time_recent using filters %s", repr(filters))
         latest_time: float = 0.0
         # count the number of urls to make sure it's not a one-off
         count = 0
-        for metadata in get_result.get("metadatas", []):
+        async for record in scroll_qdrant_collection(qdrant_client=qdrant_client, index="network", fields=["meta"],
+                                                     scroll_filter=filters):
+            metadata = record.payload["meta"]
             try:
                 ts = metadata.get("timestamp_float", 0.0)
                 if now - ts > max_age_seconds:
@@ -524,9 +527,6 @@ async def is_spider_time_recent(server_ctx: ServerContext, url: str) -> Optional
             logger.info(
                 f"Spider for {url} was done {seconds_since_spider} seconds ago and found >= {count_limit} results")
             return True
-        return False
-    except NotFoundError:
-        # new database
         return False
     except Exception as e:
         logger.error("Failed checking for last spider time", exc_info=e)

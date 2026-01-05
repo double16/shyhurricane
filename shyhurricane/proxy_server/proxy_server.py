@@ -18,14 +18,15 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple, Set, Iterable
 
 from cachetools import TTLCache
-from chromadb.api.models.AsyncCollection import AsyncCollection
 from cryptography.hazmat._oid import ExtendedKeyUsageOID
 from h2.config import H2Configuration
 from h2.connection import H2Connection
 from h2.events import RequestReceived, DataReceived, StreamEnded, ConnectionTerminated, WindowUpdated
 
-import chromadb
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.http import models as qm
 
+from shyhurricane.db import create_qdrant_client, scroll_qdrant_collection
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server import ServerContext
 from shyhurricane.target_info import parse_target_info
@@ -40,23 +41,35 @@ logger = logging.getLogger(__name__)
 
 
 #
-# Chroma Store to serve up the indexed content.
+# Qdrant Store to serve up the indexed content.
 #
 class ContentStore:
-    def __init__(self, collection: AsyncCollection, default_status=200):
-        self.collection = collection
+    def __init__(self, qdrant_client: AsyncQdrantClient, default_status=200):
+        self.qdrant_client = qdrant_client
         self.default_status = default_status
         self.recommend_urls_cache = TTLCache(maxsize=100, ttl=60)
 
     async def lookup(self, url: str, method: str = "GET") -> Optional[Tuple[int, Dict[str, str], bytes]]:
-        where = {"$and": [{"version": WEB_RESOURCE_VERSION}, {"url": url}, {"http_method": method}]}
-        res = await self.collection.get(where=where, include=["metadatas", "documents"], limit=1)
-        docs = res.get("documents") or []
-        metas = res.get("metadatas") or []
-        if not docs or not docs[0]:
+        filters = qm.Filter(
+            must=[
+                qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION)),
+                qm.FieldCondition(key="meta.url", match=qm.MatchValue(value=url)),
+                qm.FieldCondition(key="meta.http_method", match=qm.MatchValue(value=method)),
+            ]
+        )
+        records, *_ = await self.qdrant_client.scroll(
+            collection_name="content",
+            scroll_filter=filters,
+            limit=1,
+            with_payload=["content", "meta"],
+            with_vectors=False,
+            order_by=qm.OrderBy(key="meta.timestamp_float", direction=qm.Direction.DESC),
+        )
+        if not records:
             return None
-        body_text = docs[0]
-        meta = metas[0] if metas and metas[0] else {}
+
+        body_text = records[0].payload["content"]
+        meta = records[0].payload["meta"]
 
         try:
             headers = json.loads(meta.get("response_headers") or "{}")
@@ -89,14 +102,19 @@ class ContentStore:
             domains_only = False
             metadatas = self.recommend_urls_cache.get(cache_key, None)
             if metadatas is None:
-                where = {"$and": [
-                    {"version": WEB_RESOURCE_VERSION},
-                    {"netloc": cache_key},
-                    {"http_method": "GET"}
-                ]}
-                limit = 1000
-                res = await self.collection.get(where=where, include=["metadatas"], limit=limit)
-                metadatas = res.get("metadatas") or []
+                filters = qm.Filter(
+                    must=[
+                        qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION)),
+                        qm.FieldCondition(key="meta.netloc", match=qm.MatchValue(value=cache_key)),
+                        qm.FieldCondition(key="meta.http_method", match=qm.MatchValue(value="GET")),
+                    ]
+                )
+                metadatas = []
+                async for record in scroll_qdrant_collection(qdrant_client=self.qdrant_client, index="content",
+                                                             scroll_filter=filters, fields=["meta"]):
+                    if len(metadatas) >= 1000:
+                        break
+                    metadatas.append(record.payload["meta"])
                 self.recommend_urls_cache[cache_key] = metadatas
         except ValueError:
             requested_url_parsed = None
@@ -108,13 +126,18 @@ class ContentStore:
             metadatas = self.recommend_urls_cache.get('domains', None)
             if metadatas is None:
                 requested_url_parsed = None
-                where = {"$and": [
-                    {"version": WEB_RESOURCE_VERSION},
-                    {"http_method": "GET"}
-                ]}
-                limit = 10_000
-                res = await self.collection.get(where=where, include=["metadatas"], limit=limit)
-                metadatas = res.get("metadatas") or []
+                filters = qm.Filter(
+                    must=[
+                        qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION)),
+                        qm.FieldCondition(key="meta.http_method", match=qm.MatchValue(value="GET")),
+                    ]
+                )
+                metadatas = []
+                async for record in scroll_qdrant_collection(qdrant_client=self.qdrant_client, index="content",
+                                                             scroll_filter=filters, fields=["meta"]):
+                    if len(metadatas) >= 10000:
+                        break
+                    metadatas.append(record.payload["meta"])
                 self.recommend_urls_cache['domains'] = metadatas
 
         for md in metadatas:
@@ -641,10 +664,8 @@ class ReplayProxy:
 
 
 async def run_proxy_server(db: str, host: str, port: int, cert_dir: PathLike, server_context: ServerContext) -> Server:
-    db_host, db_port_s = db.split(":", 1)
-    client = await chromadb.AsyncHttpClient(host=db_host, port=int(db_port_s))
-    collection = await client.get_or_create_collection(name="content")
-    store = ContentStore(collection)
+    client = await create_qdrant_client(db)
+    store = ContentStore(client)
 
     ca = CertAuthority(cert_dir=cert_dir)
     proxy = ReplayProxy(store, ca)

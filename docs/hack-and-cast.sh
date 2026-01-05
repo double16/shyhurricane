@@ -26,7 +26,7 @@ DEMO_DIR="$(pwd)/docs/demos"
 mkdir -p -m 0775 "${DEMO_DIR}"
 BASENAME="shyhurricane_demo_$(echo -n "${TARGET}" | tr -C '[:alnum:]' '_' | tr -s '_')"
 OUTFILE="${DEMO_DIR}/${BASENAME}.json"
-CHROMA_DB="${DEMO_DIR}/${BASENAME}.chroma"
+QDRANT_DB="${DEMO_DIR}/${TARGET}.db"
 
 TITLE="ShyHurricane demo - ${TARGET}"
 IDLE_LIMIT=2            # compress pauses > N sec in final cast
@@ -47,7 +47,6 @@ get_unused_port() {
 
 cleanup() {
   tmux kill-session -t "$SESSION" 2>/dev/null || true
-  [ -n "${CHROMA_PID}" ] && kill "${CHROMA_PID}"
 }
 trap cleanup EXIT
 
@@ -71,12 +70,6 @@ export BASH_SILENCE_DEPRECATION_WARNING=1
 
 source .venv/bin/activate
 
-# start chroma database for this demo
-CHROMA_PORT=$(get_unused_port)
-chroma run --path "${CHROMA_DB}" --host 127.0.0.1 --port "${CHROMA_PORT}" >/dev/null &
-CHROMA_PID=$!
-export CHROMA="127.0.0.1:${CHROMA_PORT}"
-
 # create tmux session with two stacked panes (horizontal split line)
 #DEMO_SHELL="${SHELL}"
 DEMO_SHELL=bash
@@ -96,7 +89,7 @@ PANE_ASSIST="$SESSION:0.1"
   sleep 0.2
   tmux send-keys -t "$PANE_MCP" C-l
 
-  type_cmd "$PANE_MCP" "python3 mcp_service.py"
+  type_cmd "$PANE_MCP" "python3 mcp_service.py --database \"${QDRANT_DB}\""
   tmux wait-for -S done-top
 ) &
 

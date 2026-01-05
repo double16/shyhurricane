@@ -15,16 +15,16 @@ from haystack.components.preprocessors import DocumentSplitter, DocumentCleaner
 from haystack.components.routers import ConditionalRouter
 from haystack.core.component import Component
 from haystack.document_stores.types import DuplicatePolicy
-from haystack_integrations.document_stores.chroma import ChromaDocumentStore
+from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 
 from shyhurricane.clean_css import normalize_css
 from shyhurricane.cleaners import normalize_html, normalize_xml, normalize_json
 from shyhurricane.doc_type_model_map import map_mime_to_type, doc_type_to_model, \
-    get_chroma_collection_name_by_doc_type_token_length
+    get_qdrant_collection_name_by_doc_type_token_length, SPARSE_EMBEDDING_MODEL
 from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.index.input_documents import HarDocument, HttpRawDocument, KatanaDocument, IngestableRequestResponse
-from shyhurricane.retrieval_pipeline import create_chrome_document_store
+from shyhurricane.db import create_qdrant_document_store
 from shyhurricane.utils import urlparse_ext, BeautifulSoupExtractor, extract_domain, \
     parse_to_iso8601, remove_unencodable, is_katana_jsonl, is_har_json, is_http_raw, unix_command_image, batch_iterable
 
@@ -164,7 +164,7 @@ def build_splitters(embedders: Dict[str, Component]):
                 split_overlap=overlap,
             )
             splitter.warm_up()
-            splitters[doc_type_model.get_chroma_collection(token_length)] = splitter
+            splitters[doc_type_model.get_qdrant_collection(token_length)] = splitter
     return splitters
 
 
@@ -175,11 +175,16 @@ class RequestResponseToDocument:
     IngestableRequestResponse and produces Document(s) for storage.
     """
 
-    def __init__(self, embedders: Dict[str, Component]):
+    def __init__(self, embedders: Dict[str, Component], sparse_embedder: Component):
         self.embedders = embedders
         self._soup_extractor = BeautifulSoupExtractor()
         self._title_soup_strainer = SoupStrainer(['title', 'meta'])
         self._doc_type_to_model = doc_type_to_model()
+        self.sparse_embedder = sparse_embedder
+
+    def warm_up(self):
+        if hasattr(self.sparse_embedder, "warm_up"):
+            self.sparse_embedder.warm_up()
 
     @component.output_types(documents=List[Document])
     def run(self, request_responses: List[IngestableRequestResponse]):
@@ -192,6 +197,7 @@ class RequestResponseToDocument:
         doc_type = doc.meta["type"]
         embedder = self.embedders.get(doc_type, self.embedders["default"])
         embedded_docs = embedder.run(documents=[Document(content=doc.content[0:4096])])["documents"]
+        embedded_docs = self.sparse_embedder.run(documents=embedded_docs)["documents"]
         doc.embedding = embedded_docs[0].embedding
         return doc
 
@@ -325,7 +331,7 @@ class NormalizeDocuments:
     Normalize document content for better results from embedding and make it easier for LLMs to analyze the content.
     """
 
-    def __init__(self, doc_cleaner: DocumentCleaner, stores: Dict[str, ChromaDocumentStore]) -> None:
+    def __init__(self, doc_cleaner: DocumentCleaner, stores: Dict[str, QdrantDocumentStore]) -> None:
         self.doc_cleaner = doc_cleaner
         self.store = stores.get("content")
 
@@ -401,7 +407,7 @@ class NormalizeDocuments:
 
 @component
 class FilterExistingDocumentsById:
-    def __init__(self, stores: Dict[str, ChromaDocumentStore]):
+    def __init__(self, stores: Dict[str, QdrantDocumentStore]):
         self.stores = stores
 
     @component.output_types(documents=List[Document])
@@ -413,12 +419,13 @@ class FilterExistingDocumentsById:
                 continue
             collection_name: Optional[str] = doc.meta.get("type", None)
             if not collection_name:
-                logger.warning(f"No chroma collection found for {doc}")
+                logger.warning(f"No collection found for {doc}")
                 new_documents.append(doc)
                 continue
             store = self.stores.get(collection_name)
             if store is None:
-                logger.warning(f"No chroma collection '{collection_name}' found for {doc}")
+                # This can happen if the only collection has the token length as a suffix
+                logger.debug(f"No collection '{collection_name}' found for {doc}")
                 new_documents.append(doc)
                 continue
 
@@ -432,7 +439,7 @@ class FilterExistingDocumentsById:
 
 @component
 class FilterExistingDocumentsByDocType:
-    def __init__(self, stores: Dict[str, ChromaDocumentStore]):
+    def __init__(self, stores: Dict[str, QdrantDocumentStore]):
         self.stores = stores
 
     @component.output_types(documents=List[Document])
@@ -448,10 +455,11 @@ class FilterExistingDocumentsByDocType:
 
             doc_type = map_mime_to_type(raw_mime)
             token_length = doc.meta.get("token_length", sys.maxsize)
-            collection_name = get_chroma_collection_name_by_doc_type_token_length(doc_type, token_length)
+            collection_name = get_qdrant_collection_name_by_doc_type_token_length(doc_type, token_length)
             store = self.stores.get(collection_name)
             if store is None:
-                logger.warning(f"No chroma collection '{collection_name}' found for {doc}")
+                # This can happen if the only collection has the token length as a suffix
+                logger.debug(f"No collection '{collection_name}' found for {doc}")
                 continue
 
             existing_docs = []
@@ -493,9 +501,11 @@ class IndexDocTypeDocuments:
     def __init__(
             self,
             embedders: Dict[str, Component],
+            sparse_embedder: Component,
             multi_store: "IngestMultiStore",
     ) -> None:
         self.embedders = embedders
+        self.sparse_embedder = sparse_embedder
         self._doc_type_to_model = doc_type_to_model()
         self.splitters: Dict[str, SuffixIdSplitter] = dict()
         self.multi_store = multi_store
@@ -503,6 +513,8 @@ class IndexDocTypeDocuments:
     def warm_up(self):
         if not self.splitters:
             self.splitters = build_splitters(self.embedders)
+        if hasattr(self.sparse_embedder, "warm_up"):
+            self.sparse_embedder.warm_up()
 
     def run(self, documents: List[Document]):
         results: List[Document] = []
@@ -535,7 +547,7 @@ class IndexDocTypeDocuments:
                     meta=doc.meta.copy() | {"type": doc_type, "token_length": token_length},
                     id=hashlib.sha256(f"{url}:{doc_type}:{token_length}:{timestamp_for_id}:{response_values_for_id}".encode()).hexdigest()
                 )
-                collection_name = get_chroma_collection_name_by_doc_type_token_length(doc_type, token_length)
+                collection_name = get_qdrant_collection_name_by_doc_type_token_length(doc_type, token_length)
                 split_docs = self.splitters[collection_name].run(documents=[new_doc])["documents"]
                 if hasattr(embedder, "to_dict"):
                     batch_size = embedder.to_dict().get("batch_size", 1)
@@ -543,6 +555,7 @@ class IndexDocTypeDocuments:
                     batch_size = 1
                 for docs_batch in batch_iterable(split_docs, batch_size):
                     embedded_docs = embedder.run(documents=docs_batch)["documents"]
+                    embedded_docs = self.sparse_embedder.run(documents=embedded_docs)["documents"]
                     self.multi_store.run(embedded_docs)
 
         return {}
@@ -550,17 +563,9 @@ class IndexDocTypeDocuments:
 
 @component
 class IngestMultiStore:
-    def __init__(self, stores: Dict[str, ChromaDocumentStore], should_update=None) -> None:
+    def __init__(self, stores: Dict[str, QdrantDocumentStore], should_update=None) -> None:
         self.stores = stores
         self.should_update = should_update
-
-    @staticmethod
-    def _update_document(doc: Document, store: ChromaDocumentStore):
-        store._ensure_initialized()
-        assert store._collection is not None
-        data = store._convert_document_to_chroma(doc)
-        if data is not None:
-            store._collection.update(**data)
 
     @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]):
@@ -569,17 +574,12 @@ class IngestMultiStore:
             try:
                 doc_type = doc.meta.get("type")
                 token_length = doc.meta.get("token_length", sys.maxsize)
-                collection_name = get_chroma_collection_name_by_doc_type_token_length(doc_type, token_length)
+                collection_name = get_qdrant_collection_name_by_doc_type_token_length(doc_type, token_length)
                 store = self.stores.get(collection_name)
                 if store is None:
-                    logger.error(f"No store for {collection_name}")
-                elif self.should_update and self.should_update(doc):
-                    self._update_document(doc, store)
+                    logger.error(f"No store for collection {collection_name}")
                 else:
-                    # 2025-10-02 ChromaDocumentStore doesn't support DuplicatePolicy, it always adds a new document
-                    if not store.filter_documents({"field": "id", "operator": "==", "value": doc.id}):
-                        logger.info(f"Writing new document {collection_name} {doc.id}")
-                        store.write_documents([doc], policy=DuplicatePolicy.OVERWRITE)
+                    store.write_documents([doc], policy=DuplicatePolicy.OVERWRITE)
             except Exception as e:
                 logger.warning(f"Document {doc_type} {doc.id} not written to the store: {e}", exc_info=e)
 
@@ -644,15 +644,15 @@ class GenerateTitleAndDescription:
         return {"documents": documents}
 
 
-def build_stores(db: str, doc_types: Optional[Set[str]] = None) -> Dict[str, ChromaDocumentStore]:
-    stores: Dict[str, ChromaDocumentStore] = {}
+def build_stores(db: str, doc_types: Optional[Set[str]] = None) -> Dict[str, QdrantDocumentStore]:
+    stores: Dict[str, QdrantDocumentStore] = {}
     for doc_type_model in doc_type_to_model().values():
         if doc_types is not None and doc_type_model.doc_type not in doc_types:
             continue
-        for col in doc_type_model.get_chroma_collections():
-            document_store = create_chrome_document_store(
+        for col in doc_type_model.get_qdrant_collections():
+            document_store = create_qdrant_document_store(
                 db=db,
-                collection_name=col,
+                index=col,
             )
             document_store.count_documents()  # ensure the collection exists
             stores[col] = document_store
@@ -676,6 +676,7 @@ def build_embedders(
 def build_ingest_pipeline(db: str, generator_config: GeneratorConfig) -> Pipeline:
     stores = build_stores(db)
     embedders = build_embedders(embedder_cache=EmbedderCache(generator_config))
+    sparse_embedder = generator_config.create_sparse_document_embedder(SPARSE_EMBEDDING_MODEL)
     doc_cleaner = new_doc_cleaner()
 
     pipe = Pipeline()
@@ -719,7 +720,8 @@ def build_ingest_pipeline(db: str, generator_config: GeneratorConfig) -> Pipelin
     pipe.add_component("har_document", HarDocument())
 
     pipe.add_component("rr_joiner", ListJoiner(List[IngestableRequestResponse]))
-    pipe.add_component("request_response_to_document", RequestResponseToDocument(embedders=embedders))
+    pipe.add_component("request_response_to_document",
+                       RequestResponseToDocument(embedders=embedders, sparse_embedder=sparse_embedder))
     pipe.add_component("normalize_document", NormalizeDocuments(doc_cleaner=doc_cleaner, stores=stores))
     pipe.add_component("filter_doc_by_id", FilterExistingDocumentsById(stores=stores))
 
@@ -757,13 +759,15 @@ def build_doc_type_pipeline(
 ) -> Pipeline:
     stores = build_stores(db)
     embedders = build_embedders(embedder_cache=EmbedderCache(generator_config))
+    sparse_embedder = generator_config.create_sparse_document_embedder(SPARSE_EMBEDDING_MODEL)
     multi_store = IngestMultiStore(stores, should_update=lambda d: d.meta.get("type") == "content")
 
     pipe = Pipeline()
 
     pipe.add_component("input", FilterExistingDocumentsByDocType(stores=stores))
     pipe.add_component("gen_title", GenerateTitleAndDescription(generator_config))
-    pipe.add_component("gen_doc_type", IndexDocTypeDocuments(embedders=embedders, multi_store=multi_store))
+    pipe.add_component("gen_doc_type", IndexDocTypeDocuments(embedders=embedders, sparse_embedder=sparse_embedder,
+                                                             multi_store=multi_store))
 
     pipe.connect("input", "gen_title")
     pipe.connect("gen_title", "gen_doc_type")

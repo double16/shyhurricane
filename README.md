@@ -154,14 +154,6 @@ brew services start ollama
 ollama pull llama3.2:3b
 ```
 
-#### Chroma Database
-
-Chroma is installed as part of the python environment.
-
-```shell
-chroma run --path chroma_store --host 127.0.0.1 --port 8200 
-```
-
 #### Command Container Image
 
 ```shell
@@ -389,7 +381,7 @@ The proxy supports HTTP and HTTPS with self-signed certs. Look for a log line li
 POST an empty body to `/status`. Either your tools can be configured to ignore certificate validation or trust this cert.
 
 ```
-replay proxy listening on ('127.0.0.1', 8010), CA cert is at /home/user/.local/state/shyhurricane/127.0.0.1_8200/certs/ca.pem (CONNECT→TLS ALPN: h2/http1.1)
+replay proxy listening on ('127.0.0.1', 8010), CA cert is at /home/user/.local/state/shyhurricane/shyhurricane.db/certs/ca.pem (CONNECT→TLS ALPN: h2/http1.1)
 ```
 
 An example `curl` call:

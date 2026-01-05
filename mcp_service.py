@@ -67,6 +67,7 @@ async def main():
         default="streamable-http",
         help="Transport method to use: streamable-http or sse"
     )
+    ap.add_argument("--database", default="shyhurricane.db", help="Database location: path or host:port of qdrant server")
     ap.add_argument("--host", default="127.0.0.1", help="Host to listen on")
     ap.add_argument("--port", type=int, default=8000, help="Port to listen on for MCP")
     ap.add_argument("--proxy-port", type=int, default=8010, help="Port to listen on for HTTP/HTTPS proxy")
@@ -83,6 +84,7 @@ async def main():
     args = ap.parse_args()
     set_generator_config(GeneratorConfig.from_args(args).apply_summarizing_default().check())
     set_server_config(ServerConfig(
+        database=args.database,
         task_pool_size=args.task_pool_size,
         ingest_pool_size=args.index_pool_size,
         open_world=_str_to_bool(args.open_world),

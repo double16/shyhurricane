@@ -4,8 +4,6 @@ import os
 import re
 from typing import Dict, List, Optional, Any, Tuple, Iterable, Callable, Union, Set
 
-import chromadb
-from chromadb import AsyncClientAPI
 from haystack import Pipeline, component, Document
 from haystack.components.agents import Agent
 from haystack.components.builders import PromptBuilder, ChatPromptBuilder
@@ -17,38 +15,20 @@ from haystack.tools import Toolset
 from haystack_experimental.chat_message_stores import InMemoryChatMessageStore
 from haystack_experimental.components.retrievers import ChatMessageRetriever
 from haystack_experimental.components.writers import ChatMessageWriter
-from haystack_integrations.components.retrievers.chroma import ChromaEmbeddingRetriever
-from haystack_integrations.document_stores.chroma import ChromaDocumentStore
+from haystack_integrations.components.embedders.fastembed import FastembedSparseTextEmbedder
+from haystack_integrations.components.retrievers.qdrant import QdrantHybridRetriever
+from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 from haystack_integrations.tools.mcp import StreamableHttpServerInfo, MCPToolset
 from mcp import Tool
 
-from shyhurricane.doc_type_model_map import doc_type_to_model, get_chroma_collections
+from shyhurricane.db import create_qdrant_document_store
+from shyhurricane.doc_type_model_map import doc_type_to_model, get_qdrant_collections, SPARSE_EMBEDDING_MODEL
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.mcp_client import load_mcp_servers_from_json, create_mcp_toolset
 from shyhurricane.prompts import pentester_agent_system_prompt, pentester_chat_system_prompt
 from shyhurricane.utils import documents_sort_unique
 
 logger = logging.getLogger(__name__)
-
-
-async def create_chroma_client(db: str) -> AsyncClientAPI:
-    if re.match(r'\S+:\d+$', db):
-        host, _, port = db.rpartition(':')
-        return await chromadb.AsyncHttpClient(host=host, port=int(port))
-    return await chromadb.AsyncHttpClient(host="127.0.0.1", port=8200)
-
-
-def create_chrome_document_store(db: str, **kwargs) -> ChromaDocumentStore:
-    if re.match(r'\S+:\d+$', db):
-        host, _, port = db.rpartition(':')
-        return ChromaDocumentStore(host=host, port=int(port), **kwargs)
-    return ChromaDocumentStore(host="127.0.0.1", port=8200, **kwargs)
-
-
-async def list_collections(db: str) -> List[str]:
-    """Return collection names using a raw Chroma client."""
-    client = await create_chroma_client(db)
-    return [c.name for c in (await client.list_collections())]
 
 
 @component
@@ -687,14 +667,17 @@ class QueryExpander:
 
 @component
 class MultiQueryChromaRetriever:
-    def __init__(self, name: str, embedder: Component, retriever: ChromaEmbeddingRetriever):
+    def __init__(self, name: str, embedder: Component, sparse_embedder: Component, retriever: QdrantHybridRetriever):
         self.name = name
         self.embedder = embedder
+        self.sparse_embedder = sparse_embedder
         self.retriever = retriever
 
     def warm_up(self):
         if hasattr(self.embedder, "warm_up"):
             self.embedder.warm_up()
+        if hasattr(self.sparse_embedder, "warm_up"):
+            self.sparse_embedder.warm_up()
 
     @component.output_types(documents=List[Document])
     def run(self,
@@ -713,6 +696,7 @@ class MultiQueryChromaRetriever:
                     progress_callback(f"Querying {self.name}: {query}")
                 result = self.retriever.run(
                     query_embedding=self.embedder.run(query)["embedding"],
+                    query_sparse_embedding=self.sparse_embedder.run(query)["sparse_embedding"],
                     filters=filters,
                     top_k=top_k)
                 found_count = 0
@@ -723,7 +707,7 @@ class MultiQueryChromaRetriever:
                         ids.add(doc.id)
                 logger.info(f"Query for {self.name}: {query} found {found_count} documents")
             except Exception as e:
-                logger.error(f"Exception querying chroma database: {str(e)}, filters={filters}", exc_info=e)
+                logger.error(f"Exception querying database: {str(e)}, filters={filters}", exc_info=e)
 
         unique_docs = documents_sort_unique(results)
 
@@ -942,14 +926,14 @@ def build_agent_pipeline(
 
 
 async def build_document_pipeline(db: str, generator_config: GeneratorConfig) -> Tuple[
-    Pipeline, Dict[str, MultiQueryChromaRetriever], Dict[str, ChromaDocumentStore]]:
+    Pipeline, Dict[str, MultiQueryChromaRetriever], Dict[str, QdrantDocumentStore]]:
     """
     Builds a pipeline for retrieving documents from the store.
     :return: Pipeline
     """
 
     pipe = Pipeline()
-    comb = CombineDocs([f"{col}_documents" for col in get_chroma_collections()])
+    comb = CombineDocs([f"{col}_documents" for col in get_qdrant_collections()])
     pipe.add_component("combine", comb)
     pipe.add_component("query", Query())
     pipe.add_component("vuln_type_prompt", PromptBuilder(vuln_type_prompt, required_variables=["query"]))
@@ -965,7 +949,9 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
     pipe.connect("query.doc_types", "combine.doc_types")
 
     retrievers: Dict[str, MultiQueryChromaRetriever] = {}
-    stores: Dict[str, ChromaDocumentStore] = {}
+    stores: Dict[str, QdrantDocumentStore] = {}
+
+    sparse_embedder = generator_config.create_sparse_text_embedder(SPARSE_EMBEDDING_MODEL)
 
     embedder_cache = dict()
     for doc_type_model in doc_type_to_model().values():
@@ -1003,11 +989,12 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
             pipe.connect("query.targets", custom_query_expander_name + ".targets")
             pipe.connect("vuln_type_parser", custom_query_expander_name)
 
-        for col in doc_type_model.get_chroma_collections():
-            store = create_chrome_document_store(db=db, collection_name=col)
+        for col in doc_type_model.get_qdrant_collections():
+            store = create_qdrant_document_store(db=db, index=col)
             stores[col] = store
-            retriever = ChromaEmbeddingRetriever(document_store=store)
-            multiquery_retriever = MultiQueryChromaRetriever(doc_type_model.doc_type, embedder, retriever)
+            retriever = QdrantHybridRetriever(document_store=store)
+            multiquery_retriever = MultiQueryChromaRetriever(doc_type_model.doc_type, embedder, sparse_embedder,
+                                                             retriever)
             retrievers[col] = multiquery_retriever
 
             ret_name = f"ret_{col}"

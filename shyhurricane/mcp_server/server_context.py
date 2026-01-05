@@ -9,18 +9,18 @@ from dataclasses import dataclass
 from multiprocessing import Queue
 from typing import Optional, Dict, List
 
-import chromadb
 import persistqueue
 from haystack import Pipeline
-from haystack_integrations.document_stores.chroma import ChromaDocumentStore
+from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
+from qdrant_client import AsyncQdrantClient
 
 from shyhurricane.doc_type_model_map import doc_type_to_model
 from shyhurricane.index.web_resources_pipeline import build_stores
 from shyhurricane.server_config import get_server_config
 from shyhurricane.index.web_resources import start_ingest_worker
 from shyhurricane.mcp_server.generator_config import get_generator_config
-from shyhurricane.retrieval_pipeline import create_chroma_client, build_document_pipeline, \
-    build_website_context_pipeline, create_chrome_document_store
+from shyhurricane.retrieval_pipeline import build_document_pipeline, build_website_context_pipeline
+from shyhurricane.db import create_qdrant_client, create_qdrant_document_store
 from shyhurricane.task_queue import start_task_worker, TaskPool
 from shyhurricane.utils import unix_command_image
 
@@ -46,8 +46,8 @@ class ServerContext:
     spider_result_queue: Queue
     port_scan_result_queue: Queue
     dir_busting_result_queue: Queue
-    stores: Dict[str, ChromaDocumentStore]
-    chroma_client: chromadb.AsyncClientAPI
+    stores: Dict[str, QdrantDocumentStore]
+    qdrant_client: AsyncQdrantClient
     mcp_session_volume: str
     seclists_volume: str
     open_world: bool = True
@@ -82,14 +82,14 @@ async def get_server_context() -> ServerContext:
 
     server_config = get_server_config()
 
-    db = os.environ.get('CHROMA', '127.0.0.1:8200')
-    logger.info("Using chroma database at %s", db)
+    db = server_config.database or os.environ.get('QDRANT', 'shyhurricane.db')
+    logger.info("Using Qdrant database at %s", db)
     # ensure collections are created
     for doc_type_model in doc_type_to_model().values():
-        for col in doc_type_model.get_chroma_collections():
-            document_store = create_chrome_document_store(
+        for col in doc_type_model.get_qdrant_collections():
+            document_store = create_qdrant_document_store(
                 db=db,
-                collection_name=col,
+                index=col,
             )
             if hasattr(document_store, "_ensure_initialized"):
                 document_store._ensure_initialized()
@@ -99,7 +99,7 @@ async def get_server_context() -> ServerContext:
     cache_path: str = os.path.join(os.environ.get('TOOL_CACHE', os.environ.get('TMPDIR', '/tmp')), 'tool_cache')
     os.makedirs(cache_path, exist_ok=True)
     disable_elicitation = bool(os.environ.get('DISABLE_ELICITATION', 'False'))
-    chroma_client = await create_chroma_client(db=db)
+    qdrant_client = await create_qdrant_client(db=db)
 
     mcp_session_volume = "mcp_session"
 
@@ -184,7 +184,7 @@ async def get_server_context() -> ServerContext:
         port_scan_result_queue=task_worker_ipc.port_scan_result_queue,
         dir_busting_result_queue=task_worker_ipc.dir_busting_result_queue,
         stores=stores,
-        chroma_client=chroma_client,
+        qdrant_client=qdrant_client,
         mcp_session_volume=mcp_session_volume,
         seclists_volume=seclists_volume,
         disable_elicitation=disable_elicitation,

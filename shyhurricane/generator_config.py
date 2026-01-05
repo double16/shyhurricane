@@ -16,6 +16,8 @@ from haystack import component, Document
 from haystack.dataclasses import ChatMessage, StreamingCallbackT, ToolCall
 from haystack_integrations.components.embedders.amazon_bedrock import AmazonBedrockDocumentEmbedder, \
     AmazonBedrockTextEmbedder
+from haystack_integrations.components.embedders.fastembed import FastembedSparseDocumentEmbedder, \
+    FastembedSparseTextEmbedder
 from haystack_integrations.components.embedders.google_genai import GoogleGenAIDocumentEmbedder, GoogleGenAITextEmbedder
 from haystack_integrations.components.embedders.ollama import OllamaDocumentEmbedder, OllamaTextEmbedder
 from haystack_integrations.components.generators.amazon_bedrock import AmazonBedrockChatGenerator, \
@@ -510,6 +512,19 @@ class GeneratorConfig(BaseModel):
             },
         )
         return embedder
+
+    def create_sparse_document_embedder(self, model_config: ModelConfig):
+        return FastembedSparseDocumentEmbedder(
+            model=model_config.model_name,
+            batch_size=1,
+            progress_bar=False,
+        )
+
+    def create_sparse_text_embedder(self, model_config: ModelConfig):
+        return FastembedSparseTextEmbedder(
+            model=model_config.model_name,
+            progress_bar=False,
+        )
 
 
 def safe_embedder(embedder: Component, docs: List[Document]) -> List[Document]:
