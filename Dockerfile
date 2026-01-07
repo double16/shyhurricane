@@ -1,8 +1,23 @@
 FROM python:3.12-slim
 
-RUN apt-get update &&\
-    apt-get install -y --no-install-recommends docker.io curl nmap haveged &&\
-    apt-get clean
+# https://docs.docker.com/engine/install/debian/
+RUN apt update &&\
+    apt install -y --no-install-recommends ca-certificates curl &&\
+    install -m 0755 -d /etc/apt/keyrings &&\
+    curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc &&\
+    chmod a+r /etc/apt/keyrings/docker.asc &&\
+    . /etc/os-release &&\
+    cat <<EOF > /etc/apt/sources.list.d/docker.sources
+Types: deb
+URIs: https://download.docker.com/linux/debian
+Suites: ${VERSION_CODENAME}
+Components: stable
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+
+RUN apt update &&\
+    apt install -y --no-install-recommends docker-ce-cli curl nmap haveged &&\
+    apt clean
 
 WORKDIR /app
 RUN --mount=type=bind,source=requirements.txt,target=/tmp/requirements.txt \
@@ -15,7 +30,7 @@ RUN useradd -u 2000 -m --shell /usr/bin/rbash runner
 RUN mkdir -p /data /tool_cache /home/runner/.cache && chown 2000:2000 /data /tool_cache /home/runner/.cache
 USER 2000
 
-ENV CHROMA=/data
+ENV HOME=/home/runner
 VOLUME /data
 VOLUME /tool_cache
 VOLUME /home/runner/.cache

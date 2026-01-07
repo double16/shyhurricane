@@ -1,15 +1,16 @@
 import logging
 from typing import Optional, List, Any, Annotated, TypeAlias
 
-import chromadb
-from chromadb.api.models.AsyncCollection import AsyncCollection
 from mcp.server.fastmcp import Context
 from mcp.types import ToolAnnotations
 from openai import BaseModel
 from pydantic import Field
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.http import models as qm
 
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context
+from shyhurricane.db import scroll_qdrant_collection
 from shyhurricane.utils import query_to_netloc
 
 logger = logging.getLogger(__name__)
@@ -54,15 +55,20 @@ async def find_domains(
     """
     await log_tool_history(ctx, "find_domains", query=query)
     server_ctx = await get_server_context()
-    chroma_client: chromadb.AsyncClientAPI = server_ctx.chroma_client
-    collection: AsyncCollection = await chroma_client.get_collection("network")
+    qdrant_client: AsyncQdrantClient = server_ctx.qdrant_client
     result = set()
     original_query = query
     query, port = query_to_netloc(query)
-    get_result = await collection.get(where={"version": WEB_RESOURCE_VERSION}, include=["metadatas"])
-    for metadata in get_result.get("metadatas", []):
+    filters = qm.Filter(
+        must=[
+            qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION)),
+        ]
+    )
+    async for record in scroll_qdrant_collection(qdrant_client=qdrant_client, index="network", fields=["meta"],
+                                                 scroll_filter=filters):
+        metadata = record.payload["meta"]
         if "domain" in metadata:
-            domain = metadata['domain'].lower()
+            domain = metadata["domain"].lower()
             if domain and (not query or query.lower() in domain):
                 result.add(domain)
     return FindDomainsResult(
@@ -96,15 +102,20 @@ async def find_hosts(
     await log_tool_history(ctx, "find_hosts", domain_query=domain_query)
     server_ctx = await get_server_context()
     try:
-        chroma_client: chromadb.AsyncClientAPI = server_ctx.chroma_client
-        collection: AsyncCollection = await chroma_client.get_collection("network")
+        qdrant_client: AsyncQdrantClient = server_ctx.qdrant_client
         result = set()
         original_query = domain_query
         domain_query, port = query_to_netloc(domain_query)
-        get_result = await collection.get(where={"version": WEB_RESOURCE_VERSION}, include=["metadatas"])
-        for metadata in get_result.get("metadatas", []):
+        filters = qm.Filter(
+            must=[
+                qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION)),
+            ]
+        )
+        async for record in scroll_qdrant_collection(qdrant_client=qdrant_client, index="network", fields=["meta"],
+                                                     scroll_filter=filters):
+            metadata = record.payload["meta"]
             if "host" in metadata:
-                hostname = metadata['host'].lower()
+                hostname = metadata["host"].lower()
                 if not domain_query or hostname.endswith(domain_query):
                     if port is None or port <= 0 or (metadata.get('port', None) == port):
                         result.add(hostname)
@@ -141,13 +152,18 @@ async def find_netloc(
     """
     await log_tool_history(ctx, "find_netloc", domain_query=domain_query)
     server_ctx = await get_server_context()
-    chroma_client: chromadb.AsyncClientAPI = server_ctx.chroma_client
-    collection: AsyncCollection = await chroma_client.get_collection("network")
+    qdrant_client: AsyncQdrantClient = server_ctx.qdrant_client
     result = set()
     original_query = domain_query
     domain_query, port = query_to_netloc(domain_query)
-    get_result = await collection.get(where={"version": WEB_RESOURCE_VERSION}, include=["metadatas"])
-    for metadata in get_result.get("metadatas", []):
+    filters = qm.Filter(
+        must=[
+            qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION)),
+        ]
+    )
+    async for record in scroll_qdrant_collection(qdrant_client=qdrant_client, index="network", fields=["meta"],
+                                                 scroll_filter=filters):
+        metadata = record.payload["meta"]
         if "host" in metadata:
             hostname = metadata['host'].lower()
             if not domain_query or hostname.endswith(domain_query):
@@ -191,13 +207,18 @@ async def find_urls(
     await log_tool_history(ctx, "find_urls", host_query=host_query, limit=limit)
     server_ctx = await get_server_context()
     limit = min(1000, max(10, limit or 100))
-    chroma_client: chromadb.AsyncClientAPI = server_ctx.chroma_client
-    collection: AsyncCollection = await chroma_client.get_collection("network")
+    qdrant_client: AsyncQdrantClient = server_ctx.qdrant_client
     result = set()
     original_host_query = host_query
     host_query, port = query_to_netloc(host_query)
-    get_results = await collection.get(where={"version": WEB_RESOURCE_VERSION}, include=["metadatas"])
-    for metadata in get_results.get("metadatas", []):
+    filters = qm.Filter(
+        must=[
+            qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION)),
+        ]
+    )
+    async for record in scroll_qdrant_collection(qdrant_client=qdrant_client, index="network", fields=["meta"],
+                                                 scroll_filter=filters):
+        metadata = record.payload["meta"]
         if "host" in metadata and "url" in metadata:
             hostname = metadata['host'].lower()
             if not host_query or hostname.endswith(host_query):

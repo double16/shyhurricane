@@ -87,7 +87,7 @@ def noop_get_server_context(monkeypatch):
             port_scan_result_queue=None,
             dir_busting_result_queue=None,
             stores={},
-            chroma_client=None,
+            qdrant_client=None,
             mcp_session_volume="mcp_session",
             seclists_volume="seclists",
             disable_elicitation=True,

@@ -182,7 +182,10 @@ def assert_elicitation(ctx: ServerContext):
 
 async def log_history(ctx: Context, data: Dict[str, Any]):
     data["timestamp"] = datetime.now().isoformat()
-    data_str = json.dumps(data)
+    try:
+        data_str = json.dumps(data)
+    except:
+        data_str = repr(data)
     try:
         if ctx is None:
             logger.info(data_str)
@@ -201,7 +204,11 @@ async def log_tool_history(ctx: Context, title: str, **kwargs):
         "arguments": kwargs or {},
     }
     await log_history(ctx, data)
-    logger.info(f"{title}: {json.dumps(data)}")
+    try:
+        data_str = json.dumps(data)
+    except:
+        data_str = repr(data)
+    logger.info(f"{title}: {data_str}")
 
 
 def get_additional_hosts(ctx: Context, additional_hosts: Dict[str, str] = None) -> Dict[str, str]:

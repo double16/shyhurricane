@@ -6,18 +6,12 @@ volumes:
   ollama:
 
 services:
-  chroma:
-    image: ghcr.io/chroma-core/chroma:1.0.15
-    command: run --path /data --host 0.0.0.0 --port 8200
-    environment:
-      CHROMA_SERVER_HTTP_PORT: "8200"
-      CHROMA_SERVER_GRPC_PORT: "8230"
-      CHROMA_DB_IMPL: "duckdb"
-      CHROMA_TELEMETRY: "FALSE"
+  db:
+    image: qdrant/qdrant:latest
     volumes:
-      - data:/data
+      - data:/qdrant/storage
     healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:8200/api/v1/heartbeat" ]
+      test: [ "CMD", "curl", "-f", "http://localhost:6333/readyz" ]
       interval: 30s
       retries: 3
       start_period: 10s
@@ -61,12 +55,12 @@ services:
     depends_on:
       - dind
       - unix_command_builder
-      - chroma
+      - db
       - ollama
       - ollama_pull
     environment:
       DOCKER_HOST: "tcp://dind:2375"
-      CHROMA: "chroma:8200"
+      QDRANT: "db:6333"
       TOOL_CACHE: "/tool_cache"
       # no model seems to support this yet
       DISABLE_ELICITATION: "True"

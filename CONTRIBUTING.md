@@ -9,12 +9,6 @@ pip install -r requirements.txt
 pip install -r tests/requirements.txt
 ```
 
-Start chroma:
-
-```shell
-chroma run --path chroma_store --host 127.0.0.1 --port 8200
-```
-
 Start mcp_server:
 
 ```shell
@@ -31,14 +25,6 @@ Start assistant:
 
 ```shell
 python3 assistant.py --ollama-model qwen3:30b
-```
-
-Browse the chroma collections:
-
-```shell
-chroma browse --host http://127.0.0.1:8200 content
-chroma browse --host http://127.0.0.1:8200 javascript
-chroma browse --host http://127.0.0.1:8200 javascript_256
 ```
 
 ## colima docker build cache

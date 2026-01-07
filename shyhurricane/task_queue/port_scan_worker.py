@@ -14,13 +14,13 @@ from xml.etree import ElementTree as ET
 from haystack import Document
 from haystack.core.component import Component
 from haystack.document_stores.types import DuplicatePolicy
-from haystack_integrations.document_stores.chroma import ChromaDocumentStore
+from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 
 from shyhurricane.doc_type_model_map import doc_type_to_model
 from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import safe_embedder
 from shyhurricane.ports import parse_ports_spec, bitfield_to_ports, is_subset
-from shyhurricane.retrieval_pipeline import create_chrome_document_store
+from shyhurricane.db import create_qdrant_document_store
 from shyhurricane.task_queue.types import PortScanQueueItem
 from shyhurricane.utils import PortScanResult, PortScanResults, unix_command_image
 
@@ -31,11 +31,11 @@ logger = logging.getLogger(__name__)
 
 class PortScanContext:
     def __init__(self, db: str, embedder_cache: EmbedderCache):
-        self.nmap_store = create_chrome_document_store(db=db, collection_name="nmap")
+        self.nmap_store = create_qdrant_document_store(db=db, index="nmap")
         _doc_type_to_model = doc_type_to_model()
         self.nmap_embedder = embedder_cache.get(_doc_type_to_model.get("nmap"))
 
-        self.portscan_store = create_chrome_document_store(db=db, collection_name="portscan")
+        self.portscan_store = create_qdrant_document_store(db=db, index="portscan")
         self.portscan_embedder = embedder_cache.get(_doc_type_to_model.get("portscan"))
 
     def warm_up(self):
@@ -71,9 +71,9 @@ def port_scan_worker(ctx: PortScanContext, item: PortScanQueueItem, result_queue
 def _do_port_scan(
         result_queue: Queue[PortScanResults],
         item: PortScanQueueItem,
-        nmap_store: ChromaDocumentStore,
+        nmap_store: QdrantDocumentStore,
         nmap_embedder: Component,
-        portscan_store: ChromaDocumentStore,
+        portscan_store: QdrantDocumentStore,
         portscan_embedder: Component,
         has_more: bool = False,
         retry: bool = False,
@@ -268,8 +268,8 @@ def _do_port_scan(
 
 def get_stored_port_scan_results(
         item: PortScanQueueItem,
-        nmap_store: ChromaDocumentStore,
-        portscan_store: ChromaDocumentStore
+        nmap_store: QdrantDocumentStore,
+        portscan_store: QdrantDocumentStore
 ) -> Optional[PortScanResults]:
     filters = {
         "operator": "AND",
