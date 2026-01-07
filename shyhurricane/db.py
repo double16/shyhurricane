@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import json
@@ -13,6 +14,7 @@ from qdrant_client import AsyncQdrantClient
 from qdrant_client.conversions import common_types as types
 from qdrant_client.http import models as qm
 
+logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class QdrantDockerInfo:
@@ -173,6 +175,7 @@ def qdrant_host_port(db: str) -> Tuple[str, int]:
 
     container_name = "qdrant-" + re.sub(r'[^A-Za-z0-9]+', '-', os.path.basename(db)).lower()
     container_info = _start_qdrant_docker(name=container_name, storage_dir=os.path.abspath(db))
+    logger.info(f"Qdrant database at {container_info.http_url}")
     _wait_ready(container_info.http_url)
     _QDRANT_HOST = container_info.http_host
     _QDRANT_HOST_PORT = container_info.http_port

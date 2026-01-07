@@ -513,9 +513,15 @@ class GeneratorConfig(BaseModel):
         )
         return embedder
 
+    def _fastembed_cache_dir(self) -> Optional[str]:
+        if "HOME" in os.environ:
+            return os.path.join(os.environ["HOME"], ".cache/fastembed")
+        return None
+
     def create_sparse_document_embedder(self, model_config: ModelConfig):
         return FastembedSparseDocumentEmbedder(
             model=model_config.model_name,
+            cache_dir=self._fastembed_cache_dir(),
             batch_size=1,
             progress_bar=False,
         )
@@ -523,6 +529,7 @@ class GeneratorConfig(BaseModel):
     def create_sparse_text_embedder(self, model_config: ModelConfig):
         return FastembedSparseTextEmbedder(
             model=model_config.model_name,
+            cache_dir=self._fastembed_cache_dir(),
             progress_bar=False,
         )
 

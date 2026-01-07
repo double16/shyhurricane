@@ -8,7 +8,7 @@ openai~=2.14.0
 google-genai-haystack~=2.3.0
 mcp-haystack~=1.1.0
 chardet~=5.2.0
-sentence-transformers~=5.1.2
+sentence-transformers~=5.2.0
 prompt_toolkit~=3.0.51
 mcp[cli]~=1.23.1
 httpx~=0.28.1
@@ -30,6 +30,7 @@ optimum~=2.1.0
 ddgs~=9.10.0
 pycryptodome~=3.23.0
 psutil~=7.2.1
-guppy3~=3.1.5
+guppy3~=3.1.6
 einops~=0.8.1
+cachetools~=6.2.4
 pydantic
