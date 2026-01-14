@@ -393,10 +393,16 @@ class GeneratorConfig(BaseModel):
                 return 30
         return 20
 
-    @staticmethod
-    def _embedder_enable_ollama() -> bool:
+    def _embedder_enable_ollama(self) -> bool:
         # v0.12.11, v0.13.0 - macos has use after free failures
-        return False
+        # v0.14.0 - macos embedding is working
+        try:
+            resp_version = requests.get("http://" + (self.ollama_host or OLLAMA_HOST_DEFAULT) + "/api/version")
+            resp_version.raise_for_status()
+            version = float(".".join(resp_version.json()["version"].split(".")[0:2]))
+            return version >= 0.14
+        except Exception:
+            return False
 
     def _embedder_model_name_to_path(self, model_name: str) -> str:
         """

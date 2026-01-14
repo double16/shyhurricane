@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import sys
+from pathlib import Path
 
 import torch
 from starlette.middleware.cors import CORSMiddleware
@@ -60,6 +61,10 @@ async def main():
     else:
         low_power_default = os.environ.get("LOW_POWER", "False")
 
+    default_database = os.environ.get("QDRANT", str(Path.home() / "Data" / "shyhurricane.db"))
+    if default_database:
+        Path(default_database).parent.mkdir(parents=True, exist_ok=True)
+
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--transport",
@@ -67,7 +72,7 @@ async def main():
         default="streamable-http",
         help="Transport method to use: streamable-http or sse"
     )
-    ap.add_argument("--database", default=os.getenv("QDRANT", "shyhurricane.db"), help="Database location: path or host:port of qdrant server")
+    ap.add_argument("--database", default=default_database, help="Database location: path or host:port of qdrant server")
     ap.add_argument("--host", default="127.0.0.1", help="Host to listen on")
     ap.add_argument("--port", type=int, default=8000, help="Port to listen on for MCP")
     ap.add_argument("--proxy-port", type=int, default=8010, help="Port to listen on for HTTP/HTTPS proxy")
@@ -81,6 +86,7 @@ async def main():
                     help="If true, disables compute intensive features and those requiring GPU.")
     add_generator_args(ap)
     add_oast_args(ap)
+
     args = ap.parse_args()
     set_generator_config(GeneratorConfig.from_args(args).apply_summarizing_default().check())
     set_server_config(ServerConfig(
