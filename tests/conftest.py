@@ -3,6 +3,8 @@ import os
 import pytest
 import requests
 
+from shyhurricane.generator_config import GeneratorConfig
+
 
 def pytest_runtest_setup(item):
     if "ollama" in item.keywords:
@@ -12,3 +14,6 @@ def pytest_runtest_setup(item):
             r.raise_for_status()
         except (requests.RequestException, ValueError):
             pytest.skip(f"Skipping tests: Ollama is not available at http://{ollama_host}", allow_module_level=True)
+            def noop(*args, **kwargs):
+                pass
+            setattr(GeneratorConfig, "ollama_pull", noop)
