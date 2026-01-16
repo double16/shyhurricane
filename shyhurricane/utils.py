@@ -721,3 +721,15 @@ def coerce_to_dict(value: Any, kv_sep: str = None, element_sep: str = None) -> D
         it = iter(value)
         return dict(zip_longest(it, it, fillvalue=None))
     return {str(value): ""}
+
+
+def process_cpu_count() -> int:
+    try:
+        return os.process_cpu_count()
+    except Exception:
+        pass
+    try:
+        return len(os.sched_getaffinity(0))
+    except Exception:
+        pass
+    return os.cpu_count()

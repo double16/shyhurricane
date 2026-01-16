@@ -1,6 +1,7 @@
 import argparse
 import logging
 import os
+from math import ceil
 from typing import Optional, Dict, Any, Union, List
 
 import requests
@@ -30,6 +31,7 @@ from ollama import ChatResponse
 from pydantic import BaseModel, Field
 
 from shyhurricane.doc_type_model_map import ModelConfig
+from shyhurricane.utils import process_cpu_count
 
 logger = logging.getLogger(__name__)
 
@@ -235,6 +237,14 @@ class GeneratorConfig(BaseModel):
         )
         return generator_config
 
+    def ollama_url(self) -> str:
+        return "http://" + (self.ollama_host or OLLAMA_HOST_DEFAULT)
+
+    def ollama_pull(self, model_id: str):
+        model, tag = model_id.rsplit(":", maxsplit=1)
+        r = requests.post(f"{self.ollama_url()}/api/pull", json={"model": model, "tag": tag, "force": False})
+        r.raise_for_status()
+
     def apply_reasoning_default(self):
         self.ollama_host = self.ollama_host or OLLAMA_HOST_DEFAULT
         if self.ollama_model or self.gemini_model or self.openai_model or self.bedrock_model:
@@ -325,8 +335,9 @@ class GeneratorConfig(BaseModel):
                 # https://huggingface.co/docs/inference-providers/guides/gpt-oss
                 _generation_kwargs["effort"] = "high"
             logger.info("Using Ollama chat with model %s at %s", self.ollama_model, self.ollama_host)
+            self.ollama_pull(self.ollama_model)
             return OllamaChatGenerator(
-                url="http://" + (self.ollama_host or OLLAMA_HOST_DEFAULT),
+                url=self.ollama_url(),
                 model=self.ollama_model,
                 timeout=ollama_timeout,
                 generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
@@ -374,8 +385,9 @@ class GeneratorConfig(BaseModel):
                 "temperature": temperature or self.temperature,
             }
             logger.info("Using Ollama generator with model %s at %s", self.ollama_model, self.ollama_host)
+            self.ollama_pull(self.ollama_model)
             return OllamaGenerator(
-                url="http://" + (self.ollama_host or OLLAMA_HOST_DEFAULT),
+                url=self.ollama_url(),
                 model=self.ollama_model,
                 generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
             )
@@ -397,7 +409,7 @@ class GeneratorConfig(BaseModel):
         # v0.12.11, v0.13.0 - macos has use after free failures
         # v0.14.0 - macos embedding is working
         try:
-            resp_version = requests.get("http://" + (self.ollama_host or OLLAMA_HOST_DEFAULT) + "/api/version")
+            resp_version = requests.get(self.ollama_url() + "/api/version")
             resp_version.raise_for_status()
             version = float(".".join(resp_version.json()["version"].split(".")[0:2]))
             return version >= 0.14
@@ -466,9 +478,10 @@ class GeneratorConfig(BaseModel):
             )
         elif self.ollama_model and self._embedder_enable_ollama():
             logger.info("Using Ollama document embedder with model %s at %s", model_path, self.ollama_host)
+            self.ollama_pull(model_path)
             return OllamaDocumentEmbedder(
                 model=model_path,
-                url="http://" + (self.ollama_host or OLLAMA_HOST_DEFAULT),
+                url=self.ollama_url(),
                 progress_bar=False,
             )
 
@@ -501,9 +514,10 @@ class GeneratorConfig(BaseModel):
             )
         elif self.ollama_model and self._embedder_enable_ollama():
             logger.info("Using Ollama text embedder with model %s at %s", model_path, self.ollama_host)
+            self.ollama_pull(model_path)
             return OllamaTextEmbedder(
                 model=model_path,
-                url="http://" + (self.ollama_host or OLLAMA_HOST_DEFAULT),
+                url=self.ollama_url(),
             )
 
         logger.info("Using local text embedder with model %s", model_path)
@@ -528,7 +542,9 @@ class GeneratorConfig(BaseModel):
         return FastembedSparseDocumentEmbedder(
             model=model_config.model_name,
             cache_dir=self._fastembed_cache_dir(),
-            batch_size=1,
+            threads=max(1, ceil(process_cpu_count() / 2)),
+            batch_size=32,
+            parallel=0,
             progress_bar=False,
         )
 
@@ -536,6 +552,8 @@ class GeneratorConfig(BaseModel):
         return FastembedSparseTextEmbedder(
             model=model_config.model_name,
             cache_dir=self._fastembed_cache_dir(),
+            threads=max(1, ceil(process_cpu_count() / 2)),
+            parallel=0,
             progress_bar=False,
         )
 
