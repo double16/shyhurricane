@@ -21,12 +21,6 @@ Start MCP dev tool:
 DANGEROUSLY_OMIT_AUTH=true mcp dev mcp_service.py:mcp_instance
 ```
 
-Start assistant:
-
-```shell
-python3 assistant.py --ollama-model qwen3:30b
-```
-
 ## colima docker build cache
 
 The `shyhurricane_unix_command` image can be quite large and the build cache size may need to be increased. For `colima`, use the following
@@ -40,22 +34,6 @@ docker:
     gc:
       enabled: true
       defaultKeepStorage: 30G
-```
-
-# Debugging Model Communication
-
-Sometimes results from the model cannot be parsed.  Use `mitmproxy` to inspect model traffic.
-
-```shell
-mitmproxy -w assistant.log
-```
-
-This works for haystack-ai components using httpx:
-
-```shell
-export HTTP_PROXY=http://127.0.0.1:8080
-export HTTPS_PROXY=http://127.0.0.1:8080
-export SSL_CERT_FILE="$HOME/.mitmproxy/mitmproxy-ca-cert.pem"
 ```
 
 # Dev Notes

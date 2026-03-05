@@ -33,22 +33,8 @@ The following tools are provided:
 | register_http_headers       | Register HTTP headers that should be sent on every request.                                         | No          |
 | save_finding                | Save findings as a markdown.                                                                        | No          |
 | query_findings              | Query for previous findings for a target.                                                           | No          |
-| web_search                  | Searches the web with the provided query.                                                           | Yes         |
 | deobfuscate_javascript      | De-obfuscate JavaScript content (automatically done during indexing)                                | No          |
 | deobfuscate_javascript_file | De-obfuscate a JavaScript file (automatically done during indexing)                                 | No          |
-| prompt_chooser              | Chooses the best prompt for an offensive security operation.                                        | No          |
-| prompt_list                 | Provides a list of available prompt titles for offensive security operations.                       | No          |
-| encoder_decoder             | Transforms the input by applying common operations.                                                 | No          |
-| channel_create_forward      | Create a forward channel backed by a local subprocess.                                              | Yes         |
-| channel_create_reverse      | Create a reverse channel for one duplex client                                                      | Yes         |
-| channel_poll                | Long-poll for events from a channel                                                                 | Yes         |
-| channel_send                | Write bytes to a channel's stdin                                                                    | Yes         |
-| channel_status              | Check whether a channel is established and ready for send/receive.                                  | Yes         |
-| channel_close               | Close a specific channel                                                                            | Yes         |
-| channel_close_all           | Close all channels                                                                                  | Yes         |
-| oast_health                 | Check the health/reachability of the currently configured OAST provider.                            | Yes         |
-| oast_endpoints              | Get the endpoints that can be used to test out-of-band interactions from the target.                | Yes         |
-| oast_poll                   | Retrieve new interactions with the OAST service since the last poll.                                | Yes         |
 
 
 ## GPU
@@ -123,7 +109,7 @@ or to build the images from source:
 docker compose -f docker-compose.dev.yml up -d
 ```
 
-Add the MCP server to your client of choice at http://127.0.0.1:8000/mcp, or use the `assistant.py` in this repo (see below).
+Add the MCP server to your client of choice at http://127.0.0.1:8000/mcp.
 
 ### Run From Source
 
@@ -205,85 +191,6 @@ Start the MCP server with `--open-world false`:
 python3 mcp_service.py --open-world false
 ```
 
-## Disabling "Assistant" Tools
-
-Some tools are intended to augment a simple assistant, such as choosing a prompt or saving and querying findings. Sophisticated
-frameworks have their own prompts and memory. The assistant tools in this MCP should be disabled when used with these
-frameworks.
-
-Configure `.env`:
-```shell
-ASSISTANT_TOOLS=false
-```
-
-Restart Docker:
-```shell
-docker compose up -d
-```
-
-OR
-
-Start the MCP server with `--assistant-tools false`:
-```shell
-python3 mcp_service.py --assistant-tools false
-```
-
-## Run the assistant
-
-The assistant provides a command line chat prompt. It isn't elaborate but provides an easy way to use the MCP server. The server queries MCP prompts for offensive security and the assistant will chose an appropriate system prompt using the first user prompt.
-
-The assistant should use a larger reasoning model than the MCP server. This model performs the real work of finding vulnerabilities and exploits.
-
-Local models must have a context size of at least 16k tokens. The MCP tools + system prompt currently use around 10k. The Ollama models may advertise
-a large context size but the default pull is usually 4k or so. It is easy to "build" a derived model, only increasing the context size. See
-`src/ollama` for example build scripts.
-
-```shell
-$(command -v python3.12) -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python3 assistant.py --ollama-model gpt-oss-20b:32k
-```
-
-Give the assistant instructions like:
-- Solve the CTF challenge at 10.129.10.10
-- Solve the HTB CTF challenge at 10.129.10.10  (Hack-the-Box specific agent)
-- Help me find vulns at https://example.com  (chat)
-- Find all the vulns at https://example.com  (agent)
-
-The prompts are exposed via the MCP protocol. Clients like [5ire](https://5ire.app/) can use them and the result is the same as using the assistant script.
-
-### Ollama Remote Server
-
-A remote Ollama server may be used:
-
-```shell
-python3 assistant.py --ollama-model gpt-oss-20b:32k --ollama-host 192.168.100.100:11434
-```
-
-### Google AI
-
-```shell
-export GOOGLE_API_KEY=xxxx
-python3 assistant.py --gemini-model gemini-flash-latest
-```
-
-### OpenAI
-
-Remove the Ollama options. Set the following environment variables before running the MCP server and assistant. The
-model may be set using `--openai-model`. The API key must be an environment variable.
-
-```shell
-export OPENAI_API_KEY=xxxx
-python3 assistant.py --openai-model o3
-```
-
-### AWS Bedrock
-
-```shell
-python3 assistant.py --bedrock-model global.anthropic.claude-sonnet-4-5-20250929-v1:0
-```
-
 ## Indexing Data
 
 The MCP tools will index data if appropriate. For example, spidering and directory busting. Data can be indexed by external means using the `/index` endpoint. The endpoint is not part of an MCP tool or protocol.
@@ -334,36 +241,6 @@ are controls for setting in-scope domains.
 The Burp Suite and ZAP extensions will forward both requests/responses and alerts/findings. The alerts are used by the LLM
 to improve effectiveness.
 
-## OAST
-
-Out-of-band Application Security Testing allows for callbacks from various payloads, such as XSS.
-
-### webhook_site
-
-The default OAST provider is webhook.site without authentication. There is a limit of 100 requests sent to a single
-webhook.site URL. Authentication is also supported.
-
-```shell
-# webhook.site (unauthenticated)
-OAST_PROVIDER=webhook_site
-
-# webhook.site (with API key)
-OAST_PROVIDER=webhook_site
-WEBHOOK_API_KEY=xxxxxxxx-xxxx-...
-```
-
-### interact.sh
-
-interactsh is supported, but doesn't work so well. Interactions seem to get lost. YMMV.
-
-```shell
-OAST_PROVIDER=interactsh
-# optional, randomly chosen if not specified
-INTERACT_SERVER=oast.pro
-# optional
-INTERACT_TOKEN=
-```
-
 ## Status Endpoint
 
 The `/status` endpoint is an HTTP POST endpoint and is not part of the MCP server protocol.
@@ -396,32 +273,3 @@ nuclei -proxy http://127.0.0.1:8010 -target https://example.com -j | curl http:/
 
 If a URL or domain isn't indexed, the 404 page will include links to URLs that have been indexed. A tool that spiders
 links may use this to find the indexed content.
-
-## MCP Servers
-
-The assistant is intended to exercise the shyhurricane MCP server. However, additional MCP servers may be used by configuring them in a JSON file and passing as an argument to `--mcp-url`. Multiple files may be specified.
-
-See the example below. Environment variables are interpolated in `${}`. The `token` field specifies an `Authorization: Bearer` token to include with requests.
-
-```json
-[
-  {
-    "transport": "stdio",
-    "command": "python",
-    "args": ["-m", "othermcp.server"],
-    "env": {"WORKSPACE_PATH": "/home/user/workspace", "API_KEY": "${API_KEY}"},
-    "max_retries": 3
-  },
-  {
-    "transport": "streamable_http",
-    "url": "https://mcp.example.com/mcp",
-    "token": "Bearer ${TOKEN}",
-    "timeout": 60
-  },
-  {
-    "transport": "sse",
-    "url": "https://legacy.example.com/sse",
-    "token": "${SSE_TOKEN}"
-  }
-]
-```

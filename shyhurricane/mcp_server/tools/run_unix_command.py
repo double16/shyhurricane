@@ -14,11 +14,11 @@ from pydantic import BaseModel, Field
 
 from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context, assert_elicitation, \
     get_additional_hosts, log_history, AdditionalHostsField, ProcessEnvField
-from shyhurricane.mcp_server.prompts import open_world_disable_notes
 from shyhurricane.utils import read_last_text_bytes, unix_command_image, coerce_to_dict
 
 logger = logging.getLogger(__name__)
 
+open_world_disable_notes = "Network access has been disabled. Rely on indexed content."
 open_world_command_disable_notes = open_world_disable_notes + " Only run commands on local files or stdin."
 
 

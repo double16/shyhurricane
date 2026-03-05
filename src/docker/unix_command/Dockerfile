@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.25 AS gobuild
+FROM --platform=$BUILDPLATFORM golang:1.26 AS gobuild
 ARG TARGETARCH
 ARG BUILDPLATFORM
 ENV DEBIAN_FRONTEND=noninteractive

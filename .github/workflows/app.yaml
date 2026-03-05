@@ -52,7 +52,7 @@ jobs:
           go install -v github.com/projectdiscovery/interactsh/cmd/interactsh-server@latest
           echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
-      #      - name: Install Ollama
+#      - name: Install Ollama
 #        run: |
 #          curl -fsSL https://ollama.com/install.sh | sh
 #

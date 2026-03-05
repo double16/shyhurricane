@@ -58,7 +58,12 @@ class VulnTypeParserTest(unittest.TestCase):
         results = (self.pipe.run({"query": "Look for injection vulns"})
                    .get("vuln_type_parser", {})
                    .get("vuln_types", set()))
-        self.assertEqual({'sql_injection', 'command_injection'}, results)
+        self.assertEqual({
+            'code_injection',
+            'command_injection',
+            'nosql_injection',
+            'sql_injection',
+            'template_injection'}, results)
 
     def test_injection2(self):
         results = (self.pipe.run({
@@ -86,4 +91,5 @@ class VulnTypeParserTest(unittest.TestCase):
             "query": 'example.com "insecure deserialization" OR "software integrity" OR "data integrity" OR "untrusted input" OR "supply chain" OR "auto-update"'})
                    .get("vuln_type_parser", {})
                    .get("vuln_types", set()))
-        self.assertEqual({'insecure_deserialization', 'unpatched_software'}, results)
+        self.assertEqual(
+            {'insecure_deserialization', 'security_misconfiguration', 'unvalidated_redirects_and_forwards'}, results)

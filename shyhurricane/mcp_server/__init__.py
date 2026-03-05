@@ -20,9 +20,6 @@ from pydantic import ValidationError, Field
 from shyhurricane.mcp_server.app_context import AppContext
 from shyhurricane.server_config import get_server_config
 from shyhurricane.mcp_server.server_context import get_server_context, ServerContext
-from shyhurricane.oast.interactsh import InteractProvider
-from shyhurricane.oast.webhook_site import WebhookSiteProvider
-from shyhurricane.prompts import mcp_server_instructions
 from shyhurricane.utils import unix_command_image
 
 logger = logging.getLogger(__name__)
@@ -94,27 +91,17 @@ async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
         logger.error("Failed to create MCP session work dir %s", work_path)
         work_path = "/var/tmp"
 
-    if _server_config.oast.provider == "interactsh":
-        oast_provider = InteractProvider()
-    else:
-        oast_provider = WebhookSiteProvider()
-
     app_context = AppContext(
         cache_path=cache_path,
         app_context_id=app_context_id,
         work_path=work_path,
         cached_get_additional_hosts={},
         http_headers={},
-        oast_provider=oast_provider,
     )
 
     try:
         yield app_context
     finally:
-        # Cleanup on shutdown
-        if oast_provider.inited:
-            await oast_provider.deregister()
-        await app_context.channel_manager.cleanup()
         # clean up work path
         await asyncio.create_subprocess_exec(
             "docker", "run", "--rm",
@@ -130,18 +117,14 @@ class ShyHurricaneFastMCP(FastMCP):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.open_world = True
-        self.assistant_tools = True
 
     async def list_tools(self) -> list[Tool]:
         logger.info("Listing tools")
         tools = await super().list_tools()
         if not self.open_world or not self.assistant_tools:
-            logger.info(f"Filtering tools for open_world = {self.open_world}, assistant_tools = {self.assistant_tools}")
+            logger.info(f"Filtering tools for open_world = {self.open_world}")
 
             def tool_filter(tool: Tool) -> bool:
-                if not self.assistant_tools:
-                    if 'prompt' in tool.name:
-                        return False
                 if tool.annotations is None:
                     return True
                 if not self.open_world:
@@ -151,6 +134,34 @@ class ShyHurricaneFastMCP(FastMCP):
 
             tools = list(filter(tool_filter, tools))
         return tools
+
+
+mcp_server_instructions = """
+This server assists penetration testers, red team operators and security auditors who are skilled in offensive security, vulnerability discovery, and exploitation.
+
+---
+
+## Tool-selection guidelines:
+
+**Prefer indexed-information tools** (`find_web_resource`, `find_domains`, `query_findings`, etc.) over direct interaction.  
+- They are faster, read-only and safe for production.  
+- Use them first for enumeration, code search, log review and context building.
+
+**Prefer task-specific tools** (`spider_website`, `directory_buster`, `index_http_url`, etc.) over command execution.
+- They index content for faster retrieval and rich queries.
+- They are purpose built with appropriate logging and rate limits.
+
+**Linux command execution** (`run_unix_command`)  
+- Use when a question truly requires running a command.  
+- Do **not** use other generic “remote shell” MCP tools; this server’s own `run_unix_command` is the approved interface.
+
+---
+
+## Operational / safety rules:
+
+- Respect the user-supplied scope (URL, host, IP, subnet). No scanning or fetching from out-of-scope assets.
+- Strip or mask sensitive PII in tool outputs: keep only the minimal sample needed to prove access.
+"""
 
 
 mcp_instance = ShyHurricaneFastMCP(
