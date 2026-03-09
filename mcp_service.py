@@ -21,7 +21,6 @@ from shyhurricane.server_config import ServerConfig, set_server_config, add_oast
 
 import shyhurricane.mcp_server.tools.deobfuscate_javascript  # noqa: F401
 import shyhurricane.mcp_server.tools.directory_buster  # noqa: F401
-import shyhurricane.mcp_server.tools.encoder_decoder  # noqa: F401
 import shyhurricane.mcp_server.tools.fetch_web_resource_content  # noqa: F401
 import shyhurricane.mcp_server.tools.find_indexed_metadata  # noqa: F401
 import shyhurricane.mcp_server.tools.find_web_resources  # noqa: F401
