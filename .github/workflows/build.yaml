@@ -69,6 +69,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      attestations: write
+      id-token: write
 
     env:
       IMAGE_NAME: ${{ github.repository }}_unix_command
@@ -109,6 +111,7 @@ jobs:
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
+        id: push
         with:
           context: src/docker/unix_command
           platforms: linux/amd64,linux/arm64
@@ -119,3 +122,10 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           outputs: type=image,oci-mediatypes=true,compression=zstd,compression-level=3,force-compression=true
+
+      - name: Generate artifact attestation
+        uses: actions/attest@v4
+        with:
+          subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}
+          subject-digest: ${{ steps.push.outputs.digest }}
+          push-to-registry: true

@@ -49,7 +49,6 @@ class ServerContext:
     stores: Dict[str, QdrantDocumentStore]
     qdrant_client: AsyncQdrantClient
     mcp_session_volume: str
-    seclists_volume: str
     open_world: bool = True
     commands: Optional[List[str]] = None
     disable_elicitation: bool = False
@@ -119,31 +118,6 @@ async def get_server_context() -> ServerContext:
                 else:
                     time.sleep(5)
 
-    seclists_volume = "seclists"
-    try:
-        subprocess.check_call(["docker", "volume", "inspect", seclists_volume],
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except subprocess.CalledProcessError:
-        try:
-            # make sure the image is available first
-            subprocess.check_call(["docker", "image", "ls", unix_command_image()],
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            # try to create the volume
-            subprocess.check_call(["docker", "volume", "create", seclists_volume],
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            logger.info(f"Populating {seclists_volume} volume")
-            subprocess.Popen(
-                ["docker", "run", "--user=0", "--rm", "-d", "-v", f"{seclists_volume}:/usr/share/seclists",
-                 unix_command_image(), "/bin/bash", "-c",
-                 "git clone --depth=1 https://github.com/danielmiessler/SecLists.git /usr/share/seclists && "
-                 "tar -xf /usr/share/seclists/Passwords/Leaked-Databases/rockyou.txt.tar.gz -C /usr/share/seclists/Passwords/Leaked-Databases/ && "
-                 "chmod a+r /usr/share/seclists/Passwords/Leaked-Databases/rockyou.txt",
-                 "/usr/share/seclists"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except subprocess.CalledProcessError as e:
-            logger.error(f"Failed to create {seclists_volume} volume", exc_info=e)
-            sys.exit(1)
-
     await asyncio.create_subprocess_exec(
         "docker", "run", "--rm",
         "-v", f"{mcp_session_volume}:/work",
@@ -186,7 +160,6 @@ async def get_server_context() -> ServerContext:
         stores=stores,
         qdrant_client=qdrant_client,
         mcp_session_volume=mcp_session_volume,
-        seclists_volume=seclists_volume,
         disable_elicitation=disable_elicitation,
         open_world=server_config.open_world,
     )

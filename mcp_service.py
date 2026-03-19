@@ -30,7 +30,6 @@ import shyhurricane.mcp_server.tools.indexers  # noqa: F401
 import shyhurricane.mcp_server.tools.port_scan  # noqa: F401
 import shyhurricane.mcp_server.tools.register_hostname_address  # noqa: F401
 import shyhurricane.mcp_server.tools.register_http_headers  # noqa: F401
-import shyhurricane.mcp_server.tools.run_unix_command  # noqa: F401
 import shyhurricane.mcp_server.tools.status  # noqa: F401
 from shyhurricane.utils import get_state_path
 
@@ -40,7 +39,7 @@ configure()
 
 
 def _str_to_bool(bool_as_str: str) -> bool:
-    if bool_as_str in ["False", "false", "0", "no"]:
+    if bool_as_str in ["False", "false", "0", "no", ""]:
         return False
     return True
 
@@ -138,7 +137,7 @@ async def main():
     proxy_server.close()
 
     #
-    # MCP Server
+    # Wait for servers to exit
     #
     uv_server.should_exit = True
     await uv_task

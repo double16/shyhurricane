@@ -2,8 +2,8 @@
 
 <img src="shyhurricane/assets/shyhurricane.png" alt="Hurricane picking padlock logo" width="150" style="float: left; margin-right:10px;" />
 
-ShyHurricane is an MCP server to assist AI in offensive security testing. It aims to solve a few problems observed with
-LLMs executing shell commands:
+ShyHurricane is an MCP server to assist AI in offensive security testing of web applications. It aims to solve a few problems observed with
+LLMs:
 
 1. Spidering and directory busting commands can be quite noisy and long-running. LLMs will go through a few iterations to pick a suitable command and options. The server provides spidering and busting tools to consistently provide the LLM with usable results.
 2. Models will also enumerate websites with many curl commands. The server saves and indexes responses to return data without contacting the website repeatedly. Large sites, common with bug bounty programs, are not efficiently enumerated with individual curl commands. 
@@ -17,12 +17,11 @@ The following tools are provided:
 
 | Tool                        | Description                                                                                         | Open World? |
 |-----------------------------|-----------------------------------------------------------------------------------------------------|-------------|
-| run_unix_command            | Run a Linux or macOS command and return its output.                                                 | No          |
 | port_scan                   | Performs a port scan and service identification on the target(s), similar to the functions of nmap. | Yes         |
 | spider_website              | Spider the website at the url and index the results for further analysis                            | Yes         |
 | directory_buster            | Search a website for hidden directories and files.                                                  | Yes         |
 | index_http_url              | Index an HTTP URL to allow for further analysis. (aka curl)                                         | Yes         |
-| find_wordlists              | Find available word lists for spidering and `run_unix_command`                                      | No          |
+| find_wordlists              | Find available word lists for spidering and directory_buster                                        | No          |
 | find_web_resources          | Query indexed resources about a website using natural language .                                    | No          |
 | fetch_web_resource_content  | Fetch the content of a web resource that has already been indexed.                                  | No          |
 | find_domains                | Query indexed resources for a list of domains.                                                      | No          |
@@ -34,8 +33,6 @@ The following tools are provided:
 | save_finding                | Save findings as a markdown.                                                                        | No          |
 | query_findings              | Query for previous findings for a target.                                                           | No          |
 | deobfuscate_javascript      | De-obfuscate JavaScript content (automatically done during indexing)                                | No          |
-| deobfuscate_javascript_file | De-obfuscate a JavaScript file (automatically done during indexing)                                 | No          |
-
 
 ## GPU
 

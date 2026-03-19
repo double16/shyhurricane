@@ -599,12 +599,13 @@ def validate_container_file_path(path: str, message: Optional[str] = None):
 
 
 def log_heap_stats():
-    try:
-        from guppy import hpy
-        h=hpy()
-        logger.info(h.heap()[0:12])
-    except ImportError:
-        logger.debug("Install guppy3 for heap analysis")
+    if logger.isEnabledFor(logging.DEBUG):
+        try:
+            from guppy import hpy
+            h = hpy()
+            logger.debug(h.heap()[0:12])
+        except ImportError:
+            logger.debug("Install guppy3 for heap analysis")
 
 
 def log_gpu_memory_summary():

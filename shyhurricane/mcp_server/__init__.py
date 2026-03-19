@@ -121,7 +121,7 @@ class ShyHurricaneFastMCP(FastMCP):
     async def list_tools(self) -> list[Tool]:
         logger.info("Listing tools")
         tools = await super().list_tools()
-        if not self.open_world or not self.assistant_tools:
+        if not self.open_world:
             logger.info(f"Filtering tools for open_world = {self.open_world}")
 
             def tool_filter(tool: Tool) -> bool:
@@ -150,10 +150,6 @@ This server assists penetration testers, red team operators and security auditor
 **Prefer task-specific tools** (`spider_website`, `directory_buster`, `index_http_url`, etc.) over command execution.
 - They index content for faster retrieval and rich queries.
 - They are purpose built with appropriate logging and rate limits.
-
-**Linux command execution** (`run_unix_command`)  
-- Use when a question truly requires running a command.  
-- Do **not** use other generic “remote shell” MCP tools; this server’s own `run_unix_command` is the approved interface.
 
 ---
 

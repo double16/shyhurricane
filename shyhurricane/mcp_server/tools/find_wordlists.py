@@ -8,7 +8,7 @@ from mcp.types import ToolAnnotations, ErrorData, INTERNAL_ERROR
 from pydantic import Field
 
 from shyhurricane.mcp_server import mcp_instance, log_tool_history
-from shyhurricane.mcp_server.tools.run_unix_command import RunUnixCommand, _run_unix_command
+from ..run_unix_command import RunUnixCommand, _run_unix_command
 
 
 def _split_components(path: str) -> List[str]:

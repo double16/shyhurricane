@@ -10,11 +10,3 @@ brew "qemu"
 
 # its more efficient to run nmap on the host
 brew "nmap"
-
-# for recording demos:
-brew "asciinema"
-brew "agg"
-cask "font-jetbrains-mono"
-cask "font-jetbrains-mono-nerd-font"
-cask "font-noto-color-emoji"
-cask "font-noto-emoji"

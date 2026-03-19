@@ -43,11 +43,6 @@ isolate command calls to their own files other than obscurity.
 these directories contents are synced before and after a command starts. Various attempts at docker mounts were
 tried and failed for various reasons.
 
-## volume seclists
-
-The SecLists repository contains popular word lists. The repo is large and is not included with the docker image.
-Instead, the `seclists` volume is created and populated by the server.
-
 ## mitm_proxy
 
 Commands that are intended to capture HTTP requests and index use `mitm_proxy` to capture and output the request/response

@@ -79,8 +79,7 @@ async def port_scan(
     The results are indexed to allow later retrieval. The output format is that of nmap.
 
     Invoke this tool when the user needs to identify which services are running on the targets in-scope.
-    Use this tool instead of nmap or rustscan unless the user wants to run specific nmap NSE scripts, then
-    use the run_unix_command tool.
+    Use this tool instead of nmap or rustscan unless the user wants to run specific nmap NSE scripts.
 
     One of hostnames, ip_addresses, or ip_subnets must be specified. The hostnames parameter is a list of hostnames and
     may require entries in additional_hosts if the IP address is known for a hostname. The ip_addresses parameters is

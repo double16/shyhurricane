@@ -7,6 +7,8 @@ from typing import List, Dict, Optional
 
 from shyhurricane.utils import HttpResource, PortScanResults
 
+DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/67.0.3396.99 Safari/537.36"
+
 
 class PortScanQueueItem:
     def __init__(self,
@@ -75,7 +77,6 @@ class DirBustingQueueItem:
                  cookies: Optional[Dict[str, str]] = None,
                  params: Optional[Dict[str, str]] = None,
                  rate_limit_requests_per_second: Optional[int] = None,
-                 seclists_volume: Optional[str] = None,
                  mcp_session_volume: Optional[str] = None,
                  work_path: Optional[str] = None,
                  ):
@@ -92,7 +93,6 @@ class DirBustingQueueItem:
         self.cookies = cookies
         self.params = params
         self.rate_limit_requests_per_second = rate_limit_requests_per_second
-        self.seclists_volume = seclists_volume
         self.mcp_session_volume = mcp_session_volume
         self.work_path = work_path
 

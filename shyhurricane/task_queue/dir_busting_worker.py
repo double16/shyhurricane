@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 import persistqueue
 
 from shyhurricane.index.input_documents import KatanaDocument, IngestableRequestResponse
-from shyhurricane.task_queue.types import DirBustingQueueItem, DirBustingResultItem
+from shyhurricane.task_queue.types import DirBustingQueueItem, DirBustingResultItem, DEFAULT_USER_AGENT
 from shyhurricane.utils import unix_command_image, remove_unencodable
 
 logger = logging.getLogger(__name__)
@@ -67,8 +67,6 @@ def _do_busting(
     mitmdump_docker_command = ["docker", "run", "--rm", "--name", container_name]
     for host, ip in (item.additional_hosts or {}).items():
         mitmdump_docker_command.extend(["--add-host", f"{host}:{ip}"])
-    if item.seclists_volume:
-        mitmdump_docker_command.extend(["-v", f"{item.seclists_volume}:/usr/share/seclists"])
     if item.mcp_session_volume:
         mitmdump_docker_command.extend(["-v", f"{item.mcp_session_volume}:/work"])
     mitmdump_docker_command.append(unix_command_image())
@@ -80,7 +78,7 @@ def _do_busting(
     buster_docker_command.extend([container_name, "timeout", "--kill-after=1m", "30m"])
     buster_docker_command.extend(buster_command)
 
-    logger.info(f"Dir busting with command {' '.join(buster_docker_command)}")
+    logger.info(f"Dir busting with\nmitm {' '.join(mitmdump_docker_command)}\ncommand {' '.join(buster_docker_command)}")
     mitmdump_proc = subprocess.Popen(mitmdump_docker_command, universal_newlines=True, stdout=subprocess.PIPE,
                                      stderr=subprocess.DEVNULL)
     try:
@@ -184,7 +182,7 @@ def _build_feroxbuster_command(
         item: DirBustingQueueItem,
         replay_codes: Optional[Set[str]] = None,
 ) -> List[str]:
-    command = ["/usr/local/bin/feroxbuster", "-u", item.uri, "--insecure", "--extract-links", "--threads", "5"]
+    command = ["feroxbuster", "-u", item.uri, "--insecure", "--extract-links", "--threads", "5"]
 
     if item.rate_limit_requests_per_second:
         command.extend(["--scan-limit", "1", "--rate-limit", str(item.rate_limit_requests_per_second)])
@@ -209,6 +207,8 @@ def _build_feroxbuster_command(
 
     if item.user_agent:
         command.extend(["--user-agent", item.user_agent])
+    else:
+        command.append("--random-agent")
 
     if item.request_headers:
         for k, v in item.request_headers.items():
@@ -240,7 +240,7 @@ def _build_ffuf_command(
         item: DirBustingQueueItem,
         replay_codes: Optional[Set[str]] = None,
 ) -> List[str]:
-    command = ["/usr/bin/ffuf", "-u", item.uri, "-ac", "-s", "-sf"]
+    command = ["ffuf", "-u", item.uri, "-ac", "-s", "-sf"]
 
     if item.rate_limit_requests_per_second:
         command.extend(["-rate", str(item.rate_limit_requests_per_second)])
@@ -257,8 +257,7 @@ def _build_ffuf_command(
         command.append("-e")
         command.append(",".join(item.extensions))
 
-    if item.user_agent:
-        command.extend(["-H", f"User-Agent: {item.user_agent}"])
+    command.extend(["-H", f"User-Agent: {item.user_agent or DEFAULT_USER_AGENT}"])
 
     if item.request_headers:
         for k, v in item.request_headers.items():
