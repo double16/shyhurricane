@@ -11,7 +11,7 @@ from mcp import Resource
 from pydantic import AnyUrl
 
 from shyhurricane.index.input_documents import KatanaDocument, IngestableRequestResponse
-from shyhurricane.task_queue.types import SpiderQueueItem, SpiderResultItem
+from shyhurricane.task_queue.types import SpiderQueueItem, SpiderResultItem, DEFAULT_USER_AGENT
 from shyhurricane.utils import BeautifulSoupExtractor, urlparse_ext, HttpResource, \
     extract_domain, unix_command_image
 
@@ -41,8 +41,7 @@ def _katana_ingest(
 
     if item.rate_limit_requests_per_second:
         katana_command.extend(["-rate-limit", str(item.rate_limit_requests_per_second)])
-    if item.user_agent:
-        katana_command.extend(["-H", f"User-Agent: {item.user_agent}"])
+    katana_command.extend(["-H", f"User-Agent: {item.user_agent or DEFAULT_USER_AGENT}"])
     if item.request_headers:
         for k, v in item.request_headers.items():
             katana_command.extend(["-H", f"{k}: {v}"])

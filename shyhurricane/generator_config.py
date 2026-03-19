@@ -2,32 +2,26 @@ import argparse
 import logging
 import os
 from math import ceil
-from typing import Optional, Dict, Any, Union, List
+from typing import Optional, Dict, Any, List
 
 import requests
 from google.genai import Client
 from google.genai.types import HttpOptions, HttpRetryOptions
 from haystack.components.embedders import SentenceTransformersDocumentEmbedder, SentenceTransformersTextEmbedder
 from haystack.components.generators import OpenAIGenerator
-from haystack.components.generators.chat import OpenAIChatGenerator
 from haystack.core.component import Component
-from haystack.tools import Toolset
 from haystack.utils import Secret
 from haystack import component, Document
-from haystack.dataclasses import ChatMessage, StreamingCallbackT, ToolCall
+from haystack.dataclasses import ChatMessage, StreamingCallbackT
 from haystack_integrations.components.embedders.amazon_bedrock import AmazonBedrockDocumentEmbedder, \
     AmazonBedrockTextEmbedder
 from haystack_integrations.components.embedders.fastembed import FastembedSparseDocumentEmbedder, \
     FastembedSparseTextEmbedder
 from haystack_integrations.components.embedders.google_genai import GoogleGenAIDocumentEmbedder, GoogleGenAITextEmbedder
 from haystack_integrations.components.embedders.ollama import OllamaDocumentEmbedder, OllamaTextEmbedder
-from haystack_integrations.components.generators.amazon_bedrock import AmazonBedrockChatGenerator, \
-    AmazonBedrockGenerator
+from haystack_integrations.components.generators.amazon_bedrock import AmazonBedrockGenerator
 from haystack_integrations.components.generators.google_genai.chat.chat_generator import GoogleGenAIChatGenerator
-from haystack_integrations.components.generators.ollama import OllamaChatGenerator, OllamaGenerator
-import haystack_integrations.components.generators.ollama.chat.chat_generator as ollama_cg
-from mcp import Tool
-from ollama import ChatResponse
+from haystack_integrations.components.generators.ollama import OllamaGenerator
 from pydantic import BaseModel, Field
 
 from shyhurricane.doc_type_model_map import ModelConfig
@@ -103,108 +97,6 @@ class GoogleGenAIGeneratorWithRetry:
         return {"replies": text_result}
 
 
-# Monkey patch fix for OllamaChatGenerator, ollama-haystack==5.1.0
-def _safe_convert_ollama_meta_to_openai_format(input_response_dict: Dict) -> Dict[str, Any]:
-    """
-    Map Ollama metadata keys onto the OpenAI-compatible names Haystack expects.
-    All fields that are not part of the OpenAI metadata are left unchanged in the returned dict.
-
-    Example Ollama metadata:
-    {
-        'model': 'phi4:14b-q4_K_M',
-        'created_at': '2025-03-09T18:38:33.004185821Z',
-        'done': True,
-        'done_reason': 'stop',
-        'total_duration': 86627206961,
-        'load_duration': 23585622554,
-        'prompt_eval_count': 26,
-        'prompt_eval_duration': 3426000000,
-        'eval_count': 298,
-        'eval_duration': 4799921000
-    }
-    Example OpenAI metadata:
-    {
-        'model': 'phi4:14b-q4_K_M',
-        'finish_reason': 'stop',
-        'usage': {
-            'completion_tokens': 298,
-            'prompt_tokens': 26,
-            'total_tokens': 324,
-        }
-        'completion_start_time': '2025-03-09T18:38:33.004185821Z',
-        'done': True,
-        'total_duration': 86627206961,
-        'load_duration': 23585622554,
-        'prompt_eval_duration': 3426000000,
-        'eval_duration': 4799921000,
-    }
-    """
-    meta = {key: value for key, value in input_response_dict.items() if key != "message"}
-
-    if "done_reason" in meta:
-        meta["finish_reason"] = ollama_cg.FINISH_REASON_MAPPING.get(meta.pop("done_reason") or "")
-    if "created_at" in meta:
-        meta["completion_start_time"] = meta.pop("created_at")
-    if "eval_count" in meta and "prompt_eval_count" in meta:
-        eval_count = meta.pop("eval_count")
-        prompt_eval_count = meta.pop("prompt_eval_count")
-        # The following line is the fix for eval_count or prompt_eval_count == None
-        if isinstance(eval_count, int) and isinstance(prompt_eval_count, int):
-            meta["usage"] = {
-                "completion_tokens": eval_count,
-                "prompt_tokens": prompt_eval_count,
-                "total_tokens": eval_count + prompt_eval_count,
-            }
-    return meta
-
-
-# Monkey patch fix for OllamaChatGenerator, ollama-haystack==5.1.0
-def _thinking_convert_ollama_response_to_chatmessage(ollama_response: ChatResponse) -> ChatMessage:
-    """
-    Convert non-streaming Ollama Chat API response to Haystack ChatMessage with the assistant role.
-    """
-    response_dict = ollama_response.model_dump()
-    ollama_message = response_dict["message"]
-    text = ollama_message["content"]
-    reasoning = ollama_message.get("thinking", None)
-    if not text and reasoning:
-        text = reasoning
-        reasoning = None
-
-    tool_calls: List[ToolCall] = []
-
-    if ollama_tool_calls := ollama_message.get("tool_calls"):
-        for ollama_tc in ollama_tool_calls:
-            tool_calls.append(
-                ToolCall(
-                    tool_name=ollama_tc["function"]["name"],
-                    arguments=ollama_tc["function"]["arguments"],
-                )
-            )
-
-    chat_msg = ChatMessage.from_assistant(text=text or None, tool_calls=tool_calls, reasoning=reasoning)
-
-    chat_msg._meta = _safe_convert_ollama_meta_to_openai_format(response_dict)
-
-    return chat_msg
-
-
-# ollama_cg._convert_ollama_meta_to_openai_format = _safe_convert_ollama_meta_to_openai_format
-# ollama_cg._convert_ollama_response_to_chatmessage = _thinking_convert_ollama_response_to_chatmessage
-
-
-def ollama_model_supports_thinking(ollama_host: str, ollama_model: str) -> bool:
-    r = requests.post(f"http://{ollama_host}/api/chat", json={
-        "model": ollama_model,
-        "messages": [{"role": "user", "content": "ping"}],
-        "think": True,
-        "stream": False
-    })
-    data = r.json()
-    supports_thinking = bool(data.get("message", {}).get("thinking"))
-    return supports_thinking
-
-
 class GeneratorConfig(BaseModel):
     ollama_host: Optional[str] = Field(description="The location of the Ollama server", default=None)
     ollama_model: Optional[str] = Field(description="The name of the Ollama model", default=None)
@@ -245,20 +137,6 @@ class GeneratorConfig(BaseModel):
         r = requests.post(f"{self.ollama_url()}/api/pull", json={"model": model, "tag": tag, "force": False})
         r.raise_for_status()
 
-    def apply_reasoning_default(self):
-        self.ollama_host = self.ollama_host or OLLAMA_HOST_DEFAULT
-        if self.ollama_model or self.gemini_model or self.openai_model or self.bedrock_model:
-            return self
-        if os.environ.get("GEMINI_API_KEY", None) or os.environ.get("GOOGLE_API_KEY", None):
-            self.gemini_model = "gemini-flash-latest"
-        elif os.environ.get("OPENAI_API_KEY", None):
-            self.openai_model = "gpt-5-mini"
-        elif os.environ.get("AWS_SECRET_ACCESS_KEY", None):
-            self.bedrock_model = "global.anthropic.claude-sonnet-4-5-20250929-v1:0"
-        else:
-            self.ollama_model = "gpt-oss:20b"
-        return self
-
     def apply_summarizing_default(self):
         self.ollama_host = self.ollama_host or OLLAMA_HOST_DEFAULT
         if self.ollama_model or self.gemini_model or self.openai_model or self.bedrock_model:
@@ -286,66 +164,6 @@ class GeneratorConfig(BaseModel):
             return f"Bedrock {self.bedrock_model}"
         else:
             return f"Ollama {self.ollama_model} at {self.ollama_host}"
-
-    def create_chat_generator(self,
-                              temperature: Optional[float] = None,
-                              generation_kwargs: Optional[Dict[str, Any]] = None,
-                              tools: Optional[Union[List[Tool], Toolset]] = None):
-        if self.openai_model:
-            logger.info("Using OpenAI chat with model %s", self.openai_model)
-            if self.openai_model.startswith("o4-mini") or self.openai_model.startswith("gpt-5"):
-                temperature = 1.0
-            _generation_kwargs = {
-                "temperature": temperature or self.temperature,
-            }
-            return OpenAIChatGenerator(
-                model=self.openai_model,
-                generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
-                max_retries=10,
-                tools=tools
-            )
-        elif self.gemini_model:
-            logger.info("Using Google Gemini chat with model %s", self.gemini_model)
-            _generation_kwargs = {
-                "temperature": temperature or self.temperature,
-            }
-            return GoogleGenAIChatGeneratorWithRetry(
-                model=self.gemini_model,
-                generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
-                tools=tools
-            )
-        elif self.bedrock_model:
-            logger.info("Using AWS Bedrock chat with model %s", self.bedrock_model)
-            _generation_kwargs = {
-                "temperature": temperature or self.temperature,
-            }
-            return AmazonBedrockChatGenerator(
-                model=self.bedrock_model,
-                generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
-                tools=tools
-            )
-        elif self.ollama_model:
-            _generation_kwargs: Dict[str, Any] = {
-                "temperature": temperature or self.temperature,
-            }
-            ollama_timeout = int(os.environ.get("OLLAMA_TIMEOUT", "300"))
-            ollama_think = ollama_model_supports_thinking(self.ollama_host, self.ollama_model)
-            if ollama_think:
-                # OllamaChatGenerator docs say the think parameter can be a bool or "low", "medium", "high", but the client only supports bool
-                # https://huggingface.co/docs/inference-providers/guides/gpt-oss
-                _generation_kwargs["effort"] = "high"
-            logger.info("Using Ollama chat with model %s at %s", self.ollama_model, self.ollama_host)
-            self.ollama_pull(self.ollama_model)
-            return OllamaChatGenerator(
-                url=self.ollama_url(),
-                model=self.ollama_model,
-                timeout=ollama_timeout,
-                generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
-                tools=tools,
-                think=ollama_think,
-            )
-        else:
-            raise NotImplementedError
 
     def create_generator(self,
                          temperature: Optional[float] = None,
@@ -393,17 +211,6 @@ class GeneratorConfig(BaseModel):
             )
         else:
             raise NotImplementedError
-
-    @property
-    def chat_message_retriever_last_k(self):
-        if self.openai_model:
-            return 50
-        elif self.gemini_model:
-            return 100
-        elif self.ollama_model:
-            if self.ollama_model.startswith("gpt-oss"):
-                return 30
-        return 20
 
     def _embedder_enable_ollama(self) -> bool:
         # v0.12.11, v0.13.0 - macos has use after free failures

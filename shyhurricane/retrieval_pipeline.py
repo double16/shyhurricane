@@ -2,30 +2,18 @@ import json
 import logging
 import os
 import re
-from typing import Dict, List, Optional, Any, Tuple, Iterable, Callable, Union, Set
+from typing import Dict, List, Optional, Any, Tuple, Iterable, Callable, Set
 
 from haystack import Pipeline, component, Document
-from haystack.components.agents import Agent
-from haystack.components.builders import PromptBuilder, ChatPromptBuilder
-from haystack.components.joiners import ListJoiner
-from haystack.components.tools import ToolInvoker
+from haystack.components.builders import PromptBuilder
 from haystack.core.component import Component
-from haystack.dataclasses import ChatMessage, ChatRole
-from haystack.tools import Toolset
-from haystack_experimental.chat_message_stores import InMemoryChatMessageStore
-from haystack_experimental.components.retrievers import ChatMessageRetriever
-from haystack_experimental.components.writers import ChatMessageWriter
-from haystack_integrations.components.embedders.fastembed import FastembedSparseTextEmbedder
+from haystack.dataclasses import ChatMessage
 from haystack_integrations.components.retrievers.qdrant import QdrantHybridRetriever
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
-from haystack_integrations.tools.mcp import StreamableHttpServerInfo, MCPToolset
-from mcp import Tool
 
 from shyhurricane.db import create_qdrant_document_store
 from shyhurricane.doc_type_model_map import doc_type_to_model, get_qdrant_collections, SPARSE_EMBEDDING_MODEL
 from shyhurricane.generator_config import GeneratorConfig
-from shyhurricane.mcp_client import load_mcp_servers_from_json, create_mcp_toolset
-from shyhurricane.prompts import pentester_agent_system_prompt, pentester_chat_system_prompt
 from shyhurricane.utils import documents_sort_unique
 
 logger = logging.getLogger(__name__)
@@ -552,8 +540,8 @@ class VulnTypeParser:
 @component
 class QueryExpander:
     target_placeholders = ["example.com", "{NETLOC}"]
-    split_head = re.compile(r"^----+\s*(.*)")
-    split_tail = re.compile(r"(.*)\s*----+$")
+    split_head = re.compile(r"^(?:----+|====+)\s*(.*)")
+    split_tail = re.compile(r"(.*)\s*(?:----+|====+)$")
 
     def __init__(
             self,
@@ -714,21 +702,6 @@ class MultiQueryChromaRetriever:
         return {"documents": unique_docs}
 
 
-def create_tools(mcp_urls: Optional[List[str]] = None, shim: Callable[[Tool], Tool] = None) -> Tuple[
-    Toolset, List[MCPToolset]]:
-    servers = []
-    if mcp_urls is None:
-        mcp_urls = ["http://127.0.0.1:8000/mcp/"]
-    for mcp_url in mcp_urls:
-        if mcp_url.startswith("file://"):
-            servers.extend(load_mcp_servers_from_json(mcp_url[7:]))
-        elif "://" in mcp_url:
-            servers.append(StreamableHttpServerInfo(url=mcp_url))
-        else:
-            servers.extend(load_mcp_servers_from_json(mcp_url))
-    return create_mcp_toolset(servers, shim)
-
-
 @component
 class ChatMessageLogger:
     def __init__(self, label: str):
@@ -779,150 +752,11 @@ class ChatMessageFilter:
         return {"messages": filtered}
 
 
-def build_chat_pipeline(
-        generator_config: GeneratorConfig,
-        prompt: Optional[List[ChatMessage]] = None,
-        mcp_urls: Optional[List[str]] = None,
-        tools: Optional[Union[list[Tool], Toolset]] = None,
-) -> Tuple[Pipeline, Component, Toolset]:
-    """
-    Builds a pipeline for an offensive security assistant chat.
-
-    Deprecated: The chat function we want is an agent with instructions for chat, not autonomous.
-
-    :return: Pipeline, generator component
-    """
-
-    if not prompt:
-        prompt = [ChatMessage.from_system(pentester_chat_system_prompt)]
-
-    tools = tools or create_tools(mcp_urls)
-    prompt_builder = ChatPromptBuilder()
-    chat_generator = generator_config.create_chat_generator(
-        tools=tools,
-        generation_kwargs={}
-    )
-    response_chat_generator = generator_config.create_chat_generator(
-        generation_kwargs={}
-    )
-
-    memory_store = InMemoryChatMessageStore()
-    memory_retriever = ChatMessageRetriever(memory_store, last_k=generator_config.chat_message_retriever_last_k)
-    memory_writer = ChatMessageWriter(memory_store)
-
-    pipeline = Pipeline()
-    pipeline.add_component("query", ListJoiner(List[ChatMessage]))
-    pipeline.add_component("template_builder", ChatPromptTemplateBuilder(prompt))
-    pipeline.add_component("prompt_builder", prompt_builder)
-    pipeline.add_component("llm", chat_generator)
-    pipeline.add_component("tool_invoker", ToolInvoker(tools=tools))
-    pipeline.add_component("list_joiner", ListJoiner(List[ChatMessage]))
-    pipeline.add_component("memory_filter", ChatMessageFilter())
-    pipeline.add_component("memory_retriever", memory_retriever)
-    pipeline.add_component("memory_writer", memory_writer)
-    pipeline.add_component("memory_joiner", ListJoiner(List[ChatMessage]))
-    pipeline.add_component("response_llm", response_chat_generator)
-    pipeline.add_component("query_chat_message_logger", ChatMessageLogger("query"))
-    pipeline.add_component("prompt_chat_message_logger", ChatMessageLogger("prompt"))
-    pipeline.add_component("tool_invoker_chat_message_logger", ChatMessageLogger("tool_invoker"))
-    pipeline.add_component("llm_chat_message_logger", ChatMessageLogger("llm"))
-    pipeline.add_component("response_llm_chat_message_logger", ChatMessageLogger("response_llm"))
-
-    pipeline.connect("query", "template_builder.query")
-    pipeline.connect("query", "memory_joiner.values")
-    pipeline.connect("query", "query_chat_message_logger")
-    pipeline.connect("memory_retriever", "template_builder.memories")
-    pipeline.connect("template_builder", "prompt_builder.template")
-    pipeline.connect("prompt_builder.prompt", "llm.messages")
-    pipeline.connect("prompt_builder.prompt", "prompt_chat_message_logger.messages")
-    pipeline.connect("llm.replies", "tool_invoker.messages")
-    pipeline.connect("llm.replies", "list_joiner")
-    pipeline.connect("llm.replies", "memory_joiner")
-    pipeline.connect("llm.replies", "llm_chat_message_logger")
-    pipeline.connect("tool_invoker.tool_messages", "list_joiner")
-    pipeline.connect("tool_invoker.tool_messages", "memory_joiner")
-    pipeline.connect("tool_invoker.tool_messages", "tool_invoker_chat_message_logger")
-    pipeline.connect("list_joiner.values", "response_llm.messages")
-    pipeline.connect("response_llm.replies", "memory_joiner")
-    pipeline.connect("response_llm.replies", "response_llm_chat_message_logger")
-    pipeline.connect("memory_joiner", "memory_filter")
-    pipeline.connect("memory_filter", "memory_writer")
-
-    return pipeline, response_chat_generator, tools
-
-
 @component
 class ChatMessageToListAdapter:
     @component.output_types(values=List[ChatMessage])
     def run(self, value: ChatMessage):
         return {"values": [value]}
-
-
-def build_agent_pipeline(
-        generator_config: GeneratorConfig,
-        prompt: Optional[List[ChatMessage]] = None,
-        mcp_urls: Optional[List[str]] = None,
-        tools: Optional[Union[list[Tool], Toolset]] = None,
-) -> Tuple[Pipeline, Component, Toolset]:
-    """
-    Builds a pipeline for an offensive security agent.
-    :return: Pipeline
-    """
-
-    if not prompt:
-        prompt = [ChatMessage.from_system(pentester_agent_system_prompt)]
-
-    system_prompt = "\n".join(map(lambda m: m.text, prompt))
-
-    tools = tools or create_tools(mcp_urls)
-    prompt_builder = ChatPromptBuilder()
-    template_builder = ChatPromptTemplateBuilder(
-        list(filter(lambda m: not m.is_from(ChatRole.SYSTEM), prompt)),
-    )
-    chat_generator = generator_config.create_chat_generator(
-        tools=tools,
-        generation_kwargs={}
-    )
-    assistant = Agent(
-        chat_generator=chat_generator,
-        tools=tools,
-        system_prompt=system_prompt,
-        exit_conditions=["text"],
-        max_agent_steps=1000,
-        raise_on_tool_invocation_failure=False
-    )
-
-    memory_store = InMemoryChatMessageStore()
-    memory_retriever = ChatMessageRetriever(memory_store, last_k=generator_config.chat_message_retriever_last_k)
-    memory_writer = ChatMessageWriter(memory_store)
-
-    pipeline = Pipeline()
-    pipeline.add_component("query", ListJoiner(List[ChatMessage]))
-    pipeline.add_component("template_builder", template_builder)
-    pipeline.add_component("prompt_builder", prompt_builder)
-    pipeline.add_component("agent", assistant)
-    pipeline.add_component("memory_filter", ChatMessageFilter())
-    pipeline.add_component("memory_retriever", memory_retriever)
-    pipeline.add_component("memory_writer", memory_writer)
-    pipeline.add_component("memory_joiner", ListJoiner(List[ChatMessage]))
-    pipeline.add_component("str_to_list", ChatMessageToListAdapter())
-    pipeline.add_component("chat_message_logger", ChatMessageLogger("prompt"))
-
-    pipeline.connect("query", "template_builder.query")
-    pipeline.connect("query", "memory_joiner.values")
-    pipeline.connect("memory_retriever", "template_builder.memories")
-    pipeline.connect("template_builder", "prompt_builder.template")
-    pipeline.connect("prompt_builder", "agent")
-    pipeline.connect("prompt_builder.prompt", "chat_message_logger.messages")
-
-    pipeline.connect("agent.last_message", "str_to_list")
-    pipeline.connect("str_to_list", "memory_joiner")
-    pipeline.connect("memory_joiner", "memory_filter")
-    pipeline.connect("memory_filter", "memory_writer")
-
-    pipeline.warm_up()
-
-    return pipeline, assistant, tools
 
 
 async def build_document_pipeline(db: str, generator_config: GeneratorConfig) -> Tuple[

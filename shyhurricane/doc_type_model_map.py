@@ -13,7 +13,7 @@ class ModelConfig:
 
 
 # DEFAULT_EMBEDDING_MODEL: ModelConfig = ModelConfig("all-MiniLM-L6-v2", 512)
-DEFAULT_EMBEDDING_MODEL: ModelConfig = ModelConfig("nomic-embed-text", 8192)
+DEFAULT_EMBEDDING_MODEL: ModelConfig = ModelConfig("nomic-embed-text", 2048)
 
 # CODE_EMBEDDING_MODEL = "microsoft/codebert-base" # 512 tokens
 # CODE_EMBEDDING_MODEL = "nomic-ai/nomic-embed-code" # 7B, very large

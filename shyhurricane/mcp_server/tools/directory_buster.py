@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context, get_additional_hosts, \
     AdditionalHostsField, CookiesField, RequestParamsField, get_additional_http_headers
 from shyhurricane.mcp_server.tools.find_wordlists import find_wordlists
-from shyhurricane.mcp_server.tools.run_unix_command import _run_unix_command
+from ..run_unix_command import _run_unix_command
 from shyhurricane.rate_limit import get_rate_limit_requests_per_second
 from shyhurricane.task_queue import DirBustingQueueItem, DirBustingResultItem
 from shyhurricane.utils import coerce_to_list, coerce_to_dict
@@ -159,7 +159,6 @@ async def directory_buster(
         cookies=cookies,
         params=params,
         additional_hosts=get_additional_hosts(ctx, additional_hosts),
-        seclists_volume=server_ctx.seclists_volume,
         mcp_session_volume=server_ctx.mcp_session_volume,
         work_path=ctx.request_context.lifespan_context.work_path,
         rate_limit_requests_per_second=rate_limit_requests_per_second,

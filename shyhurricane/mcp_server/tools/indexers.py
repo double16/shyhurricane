@@ -98,7 +98,7 @@ async def index_http_url(
     Index an HTTP URL to allow for further analysis and return the context, response code, response headers.
 
     Invoke this tool when the user needs the content of one specific URL. If the content type is binary or over
-    the content_length_limit, content will not be returned. Get the content by running curl with the run_unix_command tool.
+    the content_length_limit, content will not be returned.
 
     If follow_redirects is true, redirects will be followed and the result is the destination of the redirect.
     """

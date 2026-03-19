@@ -8,8 +8,7 @@ from pydantic import AnyUrl, Field
 
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server import get_server_context, mcp_instance, log_tool_history
-from shyhurricane.mcp_server.tools.run_unix_command import _run_unix_command
-from shyhurricane.utils import HttpResource, TextResourcePartialContents, validate_container_file_path
+from shyhurricane.utils import HttpResource, TextResourcePartialContents
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +47,6 @@ async def fetch_web_resource_content(
         output_length_limit: Annotated[
             int, Field(4096, description="Output length limit, truncates output if over this length.", ge=1,
                        le=4 * 1024 * 1024)] = 4096,
-        save_path: Annotated[Optional[str], Field(
-            description="Optional path for saving the content for further processing by the run_unix_command tool.")] = None,
 ) -> Optional[HttpResource]:
     """Fetch the content of a web resource that has already been indexed.
 
@@ -57,16 +54,10 @@ async def fetch_web_resource_content(
      - the user requests analysis of resource content that has already been indexed, spidered or scanned
      - the user requests content with a URL that starts with "web://"
 
-    If save_path is specified, the content will be available for further processing by the run_unix_command tool. After
-    running this tool, use commands with run_unix_command to operate on the value of save_path.
-
     Javascript has already been deobfuscated as well as can be, do not try to deobfuscate or deminify.
     """
-    await log_tool_history(ctx, "fetch_web_resource_content", url=url, save_path=save_path,
+    await log_tool_history(ctx, "fetch_web_resource_content", url=url,
                            output_start_position=output_start_position, output_length_limit=output_length_limit)
-    if save_path:
-        validate_container_file_path(save_path, "save_path invalid")
-
     server_ctx = await get_server_context()
     doc_type: Optional[str] = None
     doc_id: Optional[str] = None
@@ -98,9 +89,6 @@ async def fetch_web_resource_content(
             doc_id = doc.id
     if not doc or not doc.content:
         return None
-
-    if save_path:
-        await _run_unix_command(ctx, f"cat > '{save_path}'", None, stdin=doc.content)
 
     if output_start_position >= len(doc.content):
         text = ""

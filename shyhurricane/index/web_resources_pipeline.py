@@ -766,8 +766,11 @@ def build_doc_type_pipeline(
 
     pipe.add_component("input", FilterExistingDocumentsByDocType(stores=stores))
     pipe.add_component("gen_title", GenerateTitleAndDescription(generator_config))
-    pipe.add_component("gen_doc_type", IndexDocTypeDocuments(embedders=embedders, sparse_embedder=sparse_embedder,
-                                                             multi_store=multi_store))
+    pipe.add_component("gen_doc_type", IndexDocTypeDocuments(
+        embedders=embedders,
+        sparse_embedder=sparse_embedder,
+        multi_store=multi_store,
+    ))
 
     pipe.connect("input", "gen_title")
     pipe.connect("gen_title", "gen_doc_type")
