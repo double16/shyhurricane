@@ -34,39 +34,19 @@ The following tools are provided:
 | query_findings              | Query for previous findings for a target.                                                           | No          |
 | deobfuscate_javascript      | De-obfuscate JavaScript content (automatically done during indexing)                                | No          |
 
-## GPU
-
-The MCP server requires GPUs that pytorch supports, such as nvidia or Apple Silicon. Even if non-local LLMs are used,
-the index embeddings require GPU.
-
-Features that use embeddings can be disabled by enabling "low power" mode.
-
-Configure `.env`:
-
-```shell
-echo LOW_POWER=true >> .env
-docker compose up -d
-```
-
-OR
-
-```shell
-python3 mcp_service.py --low-power true
-```
-
 ## Install
 
-The MCP server itself uses an LLM for light tasks such that the `llama3.2:3b` model is sufficient. Ollama is recommended but not required. OpenAI and Google AI models are also supported. Docker is required for tool specific commands and the generic unix commands.
+The MCP server itself uses an LLM for light tasks such that the `llama3.2:3b` model is sufficient. Ollama is recommended but not required. OpenAI and Google AI models are also supported. Docker is required for tool specific commands such as spidering and directory busting.
 
 ### Docker Desktop or colima
 
-Docker is required and the quality of the networking stack is important. Docker Desktop is accepted. On macOS, Apple Virtualization networking has issues. Use `colima` with `qemu` virtualization for better results.
+Docker is required and the quality of the networking stack is important. Docker Desktop is acceptable. On macOS, Apple Virtualization networking has issues. Use `colima` with `qemu` virtualization for better results.
 
 If you use Homebrew, `brew bundle` may be used for installation. Otherwise, use your operating system to install `colima`, `qemu`, `docker`, and `docker-compose`.
 
 Start `colima` with a command such as the following:
 ```shell
-colima start --runtime docker --cpu 6 --disk 50 -m 12 --vm-type qemu
+colima start --runtime docker --cpu 4 --disk 50 -m 4 --vm-type qemu
 ```
 
 ### nmap
@@ -81,7 +61,7 @@ Configure your desired provider and model in `.env`:
 
 ```shell
 OLLAMA_MODEL=llama3.2:3b
-OLLAMA_HOST=192.168.100.100:11434
+OLLAMA_HOST=192.168.253.100:11434
 
 GEMINI_API_KEY=
 GEMINI_MODEL=
