@@ -3,6 +3,8 @@ brew "virtualenv"
 brew "docker"
 brew "docker-buildx"
 brew "docker-compose"
+# ~/.docker/config.json:
+# "cliPluginsExtraDirs": [ "/opt/homebrew/lib/docker/cli-plugins" ]
 
 # colima has better networking than podman when used with qemu
 brew "colima"
