@@ -702,23 +702,26 @@ def coerce_to_list(value: Any, element_type: Type = str) -> List[Any]:
     return [element_type(part) for part in str(value).split(",")]
 
 
-def coerce_to_dict(value: Any, kv_sep: str = None, element_sep: str = None) -> Dict[str, Any]:
+def coerce_to_dict(value: Any, kv_sep: Optional[str] = None, element_sep: Optional[str] = None) -> Dict[str, Any]:
     if not value:
         return {}
     if isinstance(value, dict):
         return value
     if isinstance(value, str):
         if value.startswith("{") and value.endswith("}"):
-            return json.loads(value)
-        for seps in [(kv_sep, element_sep), ("=", ","), (":", ",")]:
-            if seps[0] and seps[1] and seps[0] in value:
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                value = value[1:-1]
+        for s_kv, s_el in [(kv_sep, element_sep), ("=", ","), (":", ",")]:
+            if s_kv and s_el and s_kv in value:
                 return {
                     k.strip(): v.strip()
-                    for part in value.split(seps[1])
-                    if part.strip()
-                    for k, v in [part.split(seps[0], 1)]
+                    for part in value.split(s_el)
+                    if part.strip() and s_kv in part
+                    for k, v in [part.split(s_kv, 1)]
                 }
-    if isinstance(value, Iterable):
+    if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
         it = iter(value)
         return dict(zip_longest(it, it, fillvalue=None))
     return {str(value): ""}

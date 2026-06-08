@@ -95,7 +95,7 @@ Add the MCP server to your client of choice at http://127.0.0.1:8000/mcp.
 ```shell
 $(command -v python3.12) -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+uv sync
 ```
 
 #### Ollama
@@ -172,11 +172,11 @@ python3 mcp_service.py --open-world false
 
 The MCP tools will index data if appropriate. For example, spidering and directory busting. Data can be indexed by external means using the `/index` endpoint. The endpoint is not part of an MCP tool or protocol.
 
-The `ingest.py` script makes using this endpoint more convenient. It isn't complicated to use directly. The supported data formats are inferred. Katana JSON is the preferred format.
-
 ```shell
 curl -X POST -H "Content-Type: application/json" http://127.0.0.1:8000/index @katana.json
 ```
+
+The `ingest.py` script makes using this endpoint more convenient. It isn't complicated to use directly. The supported data formats are inferred. Katana JSON is the preferred format.
 
 ### katana
 

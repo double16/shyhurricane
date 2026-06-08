@@ -296,10 +296,27 @@ def get_stored_port_scan_results(
             continue
         if "ERROR: Script execution failed" in doc.content:
             continue
+
+        # populate results from port_scan_store
+        portscan_filters = {
+            "operator": "AND",
+            "conditions": [
+                {"field": "meta.version", "operator": "==", "value": NMAP_DOCUMENT_VERSION},
+                {"field": "meta.runtime_ts", "operator": "==", "value": doc.meta.get("runtime_ts")},
+            ]
+        }
+        portscan_docs = portscan_store.filter_documents(filters=portscan_filters)
+        current_results = []
+        for p_doc in portscan_docs:
+            try:
+                current_results.append(PortScanResult.model_validate_json(p_doc.content))
+            except Exception:
+                pass
+
         results.append(PortScanResults(
             context_id=item.context_id,
             runtime_ts=doc.meta.get("runtime_ts", 0),
-            results=existing_results,
+            results=current_results,
             targets=item.targets,
             ports=item.ports,
             nmap_xml=doc.content,
@@ -312,5 +329,4 @@ def get_stored_port_scan_results(
     # return the most recent
     results.sort(key=lambda r: r.runtime_ts, reverse=True)
     result = results[0]
-    # TODO: populate result.results from port_scan_store
     return result

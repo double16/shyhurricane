@@ -138,7 +138,7 @@ def _quantize_timestamp(timestamp: str):
 
 
 def _cache_key_response_headers(response_headers: Dict[str, str]) -> str:
-    headers = ["authorization", "etag", "cookie"]
+    headers = ["authorization", "etag", "cookie", "last-modified", "content-encoding", "content-language", "vary"]
     values = [ v for k, v in response_headers.items() if k.lower() in headers ]
     return ",".join(values)
 
