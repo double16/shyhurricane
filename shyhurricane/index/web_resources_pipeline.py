@@ -15,6 +15,7 @@ from haystack.components.preprocessors import DocumentSplitter, DocumentCleaner
 from haystack.components.routers import ConditionalRouter
 from haystack.core.component import Component
 from haystack.document_stores.types import DuplicatePolicy
+from haystack_experimental.components.agents.human_in_the_loop import errors
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 
 from shyhurricane.clean_css import normalize_css
@@ -138,7 +139,7 @@ def _quantize_timestamp(timestamp: str):
 
 
 def _cache_key_response_headers(response_headers: Dict[str, str]) -> str:
-    headers = ["authorization", "etag", "cookie"]
+    headers = ["authorization", "etag", "cookie", "last-modified", "content-encoding", "content-language", "vary"]
     values = [ v for k, v in response_headers.items() if k.lower() in headers ]
     return ",".join(values)
 
@@ -543,7 +544,7 @@ class IndexDocTypeDocuments:
             for token_length in (self._doc_type_to_model.get(doc_type).token_lengths or [sys.maxsize]):
                 # create docs per token_length
                 new_doc = Document(
-                    content=doc.content,
+                    content=doc.content.decode("utf-8", errors="ignore") if isinstance(doc.content, bytes) else str(doc.content),
                     meta=doc.meta.copy() | {"type": doc_type, "token_length": token_length},
                     id=hashlib.sha256(f"{url}:{doc_type}:{token_length}:{timestamp_for_id}:{response_values_for_id}".encode()).hexdigest()
                 )

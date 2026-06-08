@@ -15,7 +15,7 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
 
 # TODO: test with ollama when we can run with GPU
 #    services:
@@ -29,7 +29,7 @@ jobs:
 
     strategy:
       matrix:
-        python-version: [ "3.12" ]
+        python-version: [ "3.12", "3.13" ]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -39,16 +39,14 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: 'pip'
 
+      - name: Install UV
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.22.x'
           cache: false
-
-      - name: Install interactsh-server
-        run: |
-          go install -v github.com/projectdiscovery/interactsh/cmd/interactsh-server@latest
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
 #      - name: Install Ollama
 #        run: |
@@ -66,11 +64,12 @@ jobs:
 
       - name: test
         run: |
-          pip install -r requirements.txt
-          pip install -r tests/requirements.txt
+          export PATH="$HOME/.local/bin:$PATH"
+          export PYTHONPATH="${PWD}:${PYTHONPATH}"
+          uv sync --all-extras
           RESULT_DIR="test-results/${{ matrix.python-version }}"
           mkdir -p "${RESULT_DIR}"
-          PYTHONPATH=$(pwd) pytest tests --junitxml=${RESULT_DIR}/test-results.xml --cov=shyhurricane --cov-branch --cov-report=xml:${RESULT_DIR}/coverage.xml --cov-report=html:${RESULT_DIR}/htmlcov --cov-report=term-missing
+          uv run pytest tests/ --junitxml=${RESULT_DIR}/test-results.xml --cov=shyhurricane --cov-branch --cov-report=xml:${RESULT_DIR}/coverage.xml --cov-report=html:${RESULT_DIR}/htmlcov --cov-report=term-missing
 
       - name: Upload pytest test results
         uses: actions/upload-artifact@v4
@@ -82,7 +81,7 @@ jobs:
         if: ${{ always() }}
 
   unix-command-image:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write

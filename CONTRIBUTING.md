@@ -5,8 +5,7 @@ python3 virtualenv:
 ```shell
 $(command -v python3.12) -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
-pip install -r tests/requirements.txt
+uv sync --all-extras
 ```
 
 Start mcp_server:
