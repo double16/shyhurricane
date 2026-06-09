@@ -17,7 +17,7 @@ dependencies = [
     "haystack-ai~=2.30.0",
     "qdrant-haystack~=10.3.0",
     "fastembed-haystack~=2.3.0",
-    "numpy<2",
+    "numpy<3",
     "ollama-haystack~=6.6.0",
     "amazon-bedrock-haystack~=6.11.0",
     "openai~=2.41.0",
