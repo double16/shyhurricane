@@ -24,6 +24,14 @@ RUN echo 'path-exclude=/usr/share/doc/*'        >  /etc/dpkg/dpkg.cfg.d/excludes
 RUN apt-get update &&\
     apt-get install -y --no-install-recommends rsync nmap curl feroxbuster ffuf nodejs npm mitmproxy python3-pip python3-virtualenv jq seclists &&\
     apt-get clean
+
+# Install opengrep (fork of semgrep that is open)
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then OPENGREP_ARCH="x86"; else OPENGREP_ARCH="${ARCH}"; fi && \
+    OPENGREP_VERSION=$(curl -s https://api.github.com/repos/opengrep/opengrep/releases/latest | grep "tag_name" | cut -d ":" -f 2 | tr -d " ,\"") && \
+    curl -L "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_${OPENGREP_ARCH}" -o /usr/local/bin/opengrep && \
+    chmod +x /usr/local/bin/opengrep
+
 RUN mkdir /usr/share/wakaru/ && chown 0:0 /usr/share/wakaru/ && chmod 0755 /usr/share/wakaru/
 COPY --chown=0:0 --chmod=644 package.json package-lock.json /usr/share/wakaru/
 COPY --chown=0:0 --chmod=755 wakaru.cjs /usr/share/wakaru/
