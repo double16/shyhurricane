@@ -976,16 +976,16 @@ aiohttp = [
 
 [[package]]
 name = "google-genai-haystack"
-version = "4.3.0"
+version = "4.4.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "google-genai", extra = ["aiohttp"] },
     { name = "haystack-ai" },
     { name = "jsonref" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f6/20/a9d33469084a56a80dd21c45d2a47623a6a448fcaf2ade13a06cf7cc3874/google_genai_haystack-4.3.0.tar.gz", hash = "sha256:23b2d4b1001a5717f880ec22a077424d56de082bbceb65c8013460020db54aac", size = 857598, upload-time = "2026-06-05T08:26:32.206Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/90/34/007b5a1413f440fa6727dd0e31123347fcee94a5695f6c6e4e868d8d8e1e/google_genai_haystack-4.4.1.tar.gz", hash = "sha256:84e9a630d3d146ffa0687a9173e01dad064dee8d4c8f9c501e32882abc0c2091", size = 858097, upload-time = "2026-06-08T16:09:55.236Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0f/85/5b58eb8586994f660fb3027be212d8e034bd9d1e99826d35e411b87de3a1/google_genai_haystack-4.3.0-py3-none-any.whl", hash = "sha256:c5a91cf8c0c230d83a856cc973e3662dae51f0ce2e49d2bda4433628df6fdf44", size = 33946, upload-time = "2026-06-05T08:26:30.816Z" },
+    { url = "https://files.pythonhosted.org/packages/04/b1/3e2596ba099982fc228b7e25bb514ffe30f7bbf8b899849b4502101ec3c1/google_genai_haystack-4.4.1-py3-none-any.whl", hash = "sha256:9b2a00c853ee4871860ed8ec5ecd34d2ab229b04f14f17dc02558ada95419434", size = 34577, upload-time = "2026-06-08T16:09:53.616Z" },
 ]
 
 [[package]]
@@ -3337,7 +3337,7 @@ requires-dist = [
     { name = "cachetools", specifier = "~=7.1.4" },
     { name = "einops", specifier = "~=0.8.1" },
     { name = "fastembed-haystack", specifier = "~=2.3.0" },
-    { name = "google-genai-haystack", specifier = "~=4.3.0" },
+    { name = "google-genai-haystack", specifier = "~=4.4.1" },
     { name = "guppy3", specifier = "~=3.1.6" },
     { name = "haystack-ai", specifier = "~=2.30.0" },
     { name = "haystack-experimental", specifier = "~=0.19.0" },
