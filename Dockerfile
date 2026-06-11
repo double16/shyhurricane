@@ -20,10 +20,12 @@ RUN apt update &&\
     apt clean
 
 WORKDIR /app
-RUN --mount=type=bind,source=requirements.txt,target=/tmp/requirements.txt \
-    pip install --no-cache-dir --prefer-binary --compile --requirement /tmp/requirements.txt
-COPY *.py /app/
+COPY *.py pyproject.toml uv.lock /app/
 COPY shyhurricane /app/shyhurricane/
+COPY --from=ghcr.io/astral-sh/uv:0.11.18 /uv /usr/bin/uv
+RUN --mount=type=cache,target=/root/.cache \
+    uv sync --no-dev --link-mode copy
+
 COPY --chown=0:0 --chmod=755 src/docker/mcp_server/entrypoint.sh /
 
 RUN useradd -u 2000 -m --shell /usr/bin/rbash runner
