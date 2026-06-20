@@ -1,5 +1,6 @@
 import pytest
 from haystack import Document
+from shyhurricane.task_queue.types import SpiderResultItem
 
 import shyhurricane.mcp_server.tools.find_web_resources as resources
 
@@ -140,3 +141,160 @@ async def test_find_web_resources_low_power_returns_without_pipelines(monkeypatc
     assert result.instructions == resources.find_web_resources_instructions_low_power
     assert result.limit == 10
     assert result.http_methods == ["GET"]
+
+
+class Record:
+    def __init__(self, meta):
+        self.payload = {"meta": meta}
+
+
+async def scroll(records):
+    for record in records:
+        yield record
+
+
+@pytest.mark.asyncio
+async def test_is_spider_time_recent_returns_true_after_enough_recent_records(monkeypatch):
+    now = 1_000_000.0
+    records = [
+        Record({"timestamp_float": now - 10, "url": "https://example.com/path/" + str(idx)})
+        for idx in range(11)
+    ]
+    monkeypatch.setattr(resources.time, "time", lambda: now)
+    monkeypatch.setattr(resources, "scroll_qdrant_collection", lambda **kwargs: scroll(records))
+
+    assert await resources.is_spider_time_recent(type("Ctx", (), {"qdrant_client": object()})(),
+                                                 "https://example.com/path") is True
+
+
+@pytest.mark.asyncio
+async def test_is_spider_time_recent_returns_false_for_old_bad_or_invalid_records(monkeypatch):
+    now = 1_000_000.0
+    records = [
+        Record({"timestamp_float": now - 90_000, "url": "https://example.com/path/old"}),
+        Record({"timestamp_float": "bad", "url": "https://example.com/path/bad"}),
+    ]
+    monkeypatch.setattr(resources.time, "time", lambda: now)
+    monkeypatch.setattr(resources, "scroll_qdrant_collection", lambda **kwargs: scroll(records))
+
+    assert await resources.is_spider_time_recent(type("Ctx", (), {"qdrant_client": object()})(),
+                                                 "https://example.com/path") is False
+    assert await resources.is_spider_time_recent(type("Ctx", (), {"qdrant_client": object()})(), "not a url") is False
+
+
+class LifespanContext:
+    app_context_id = "ctx-1"
+    http_headers = {"X-Global": "yes"}
+    cached_get_additional_hosts = {}
+
+
+class RequestContext:
+    lifespan_context = LifespanContext()
+
+
+class ToolCtx:
+    request_context = RequestContext()
+
+    def __init__(self):
+        self.messages = []
+
+    async def info(self, message):
+        self.messages.append(message)
+
+
+class Queue:
+    def __init__(self, items=None):
+        self.items = list(items or [])
+        self.put_items = []
+
+    def put(self, item, block=True):
+        self.put_items.append(item)
+
+    def get(self, timeout):
+        if not self.items:
+            raise resources.queue.Empty
+        return self.items.pop(0)
+
+
+class SpiderServerContext:
+    open_world = True
+    qdrant_client = object()
+
+    def __init__(self, results=None):
+        self.task_queue = Queue()
+        self.spider_result_queue = Queue(results)
+
+
+@pytest.mark.asyncio
+async def test_spider_website_returns_recent_indexed_results(monkeypatch):
+    resource = resources._documents_to_http_resources([make_doc("doc", "https://example.com/")])[0]
+    server_ctx = SpiderServerContext()
+
+    async def get_server_context():
+        return server_ctx
+
+    async def is_recent(server_ctx, url):
+        return True
+
+    monkeypatch.setattr(resources, "log_tool_history", noop)
+    monkeypatch.setattr(resources, "get_server_context", get_server_context)
+    monkeypatch.setattr(resources, "is_spider_time_recent", is_recent)
+
+    async def find_web_resources(ctx, url, limit):
+        return resources.FindWebResourcesResult(
+            instructions="",
+            query=url,
+            limit=limit,
+            resources=[resource],
+        )
+
+    monkeypatch.setattr(resources, "find_web_resources", find_web_resources)
+
+    result = await resources.spider_website(ToolCtx(), " https://example.com/ ", timeout_seconds=30)
+
+    assert result.url == "https://example.com/"
+    assert result.resources == [resource]
+    assert result.has_more is False
+
+
+@pytest.mark.asyncio
+async def test_spider_website_queues_work_requeues_other_context_and_collects_results(monkeypatch):
+    resource = resources._documents_to_http_resources([make_doc("doc", "https://example.com/found")])[0]
+    other = SpiderResultItem("other", resource)
+    done = SpiderResultItem("ctx-1", None)
+    found = SpiderResultItem("ctx-1", resource)
+    server_ctx = SpiderServerContext([other, found, done])
+
+    async def get_server_context():
+        return server_ctx
+
+    async def is_recent(server_ctx, url):
+        return False
+
+    monkeypatch.setattr(resources, "log_tool_history", noop)
+    monkeypatch.setattr(resources, "get_server_context", get_server_context)
+    monkeypatch.setattr(resources, "is_spider_time_recent", is_recent)
+    monkeypatch.setattr(resources, "get_rate_limit_requests_per_second", lambda url: 9)
+    monkeypatch.setattr(resources, "get_additional_hosts", lambda ctx, additional=None: additional or {})
+
+    ctx = ToolCtx()
+    result = await resources.spider_website(
+        ctx,
+        "https://example.com",
+        additional_hosts={"example.com": "127.0.0.1"},
+        user_agent="agent",
+        request_headers="X-Test: yes",
+        cookies="sid=abc",
+        timeout_seconds=30,
+    )
+
+    queued = server_ctx.task_queue.put_items[0]
+    assert queued.uri == "https://example.com"
+    assert queued.user_agent == "agent"
+    assert queued.request_headers == {"X-Global": "yes", "X-Test": "yes"}
+    assert queued.cookies == {"sid": "abc"}
+    assert queued.rate_limit_requests_per_second == 9
+    assert server_ctx.spider_result_queue.put_items[0].context_id == "other"
+    assert result.resources == [resource]
+    assert result.has_more is False
+    assert ctx.messages == ["Found: https://example.com/found"]
