@@ -21,7 +21,7 @@ from shyhurricane.index.web_resources import start_ingest_worker
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.retrieval_pipeline import build_document_pipeline, build_website_context_pipeline
 from shyhurricane.db import create_qdrant_client, create_qdrant_document_store
-from shyhurricane.task_queue import start_task_worker, TaskPool
+from shyhurricane.task_queue.types import TaskPool
 from shyhurricane.utils import unix_command_image
 
 logger = logging.getLogger(__name__)
@@ -143,6 +143,7 @@ async def get_server_context() -> ServerContext:
 
     ingest_queue, ingest_pool = start_ingest_worker(db=db, generator_config=get_generator_config(),
                                                     pool_size=server_config.ingest_pool_size)
+    from shyhurricane.task_queue import start_task_worker
     task_worker_ipc = start_task_worker(db, ingest_queue.path, server_config.task_pool_size)
 
     _server_context = ServerContext(

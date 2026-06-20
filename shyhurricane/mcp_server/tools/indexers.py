@@ -199,6 +199,6 @@ async def index_http_url(
             contents=contents,
             response_headers=response_headers,
         )
-    except requests.exceptions.RequestException as e:
+    except (httpx.RequestError, requests.exceptions.RequestException) as e:
         logger.info("Request exception: %s", e)
         return None

@@ -16,7 +16,7 @@ from shyhurricane.index.web_resources_pipeline import build_ingest_pipeline, bui
 from shyhurricane.server_config import get_server_config
 from shyhurricane.persistent_queue import persistent_queue_get, get_ingest_queue, \
     get_doc_type_queue
-from shyhurricane.task_queue import TaskPool
+from shyhurricane.task_queue.types import TaskPool
 from shyhurricane.utils import get_log_path, log_heap_stats, log_gpu_memory_summary
 
 logger = logging.getLogger(__name__)
