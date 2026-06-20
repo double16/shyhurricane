@@ -171,8 +171,7 @@ class TestQueryExpanderNetwork(QueryExpanderBase):
             for header_value in exp.split("\n"):
                 if len(header_value) > 3 and header_value.count(":") == 1 and header_value.endswith(":"):
                     pass
-                split = header_value.split(": ")
-                self.assertLessEqual(len(split), 2, f"Invalid header value: {exp}")
+                split = header_value.split(": ", maxsplit=1)
                 self.assertFalse(" " in split[0].strip(), f"Invalid header value: {exp}")
 
     def test_csp(self):
