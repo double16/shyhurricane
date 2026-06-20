@@ -2,7 +2,6 @@ import json
 import sys
 from collections import defaultdict
 
-import pytest
 from haystack import Document
 
 from shyhurricane.index.input_documents import IngestableRequestResponse
