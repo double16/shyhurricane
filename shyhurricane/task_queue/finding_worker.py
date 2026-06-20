@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 import time
+from dataclasses import replace
 
 from haystack import Document
 from haystack.document_stores.types import DuplicatePolicy
@@ -93,7 +94,7 @@ def save_finding_worker(ctx: FindingContext, item: SaveFindingQueueItem):
     split_docs = ctx.splitters["finding"].run(documents=[doc])["documents"]
     logger.info("Embedding finding '%s'", item.title)
     embedded_docs = ctx.embedders["finding"].run(documents=[split_docs[0]])["documents"]
-    doc.embedding = embedded_docs[0].embedding
+    doc = replace(doc, embedding=embedded_docs[0].embedding)
     logger.info("Storing finding '%s' into collection finding", item.title)
     ctx.stores["finding"].write_documents([doc], policy=DuplicatePolicy.OVERWRITE)
 

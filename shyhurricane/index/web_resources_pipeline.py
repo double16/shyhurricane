@@ -4,6 +4,7 @@ import json
 import logging
 import subprocess
 import sys
+from dataclasses import replace
 from math import floor
 from typing import List, Optional, Dict, Set
 
@@ -121,13 +122,16 @@ class SuffixIdSplitter(DocumentSplitter):
 
     def _split_document(self, doc) -> List[Document]:
         parts = super()._split_document(doc)
+        updated_parts = []
         for i, p in enumerate(parts):
-            p.id = f"{doc.id}_{i}"
+            meta = p.meta
             if "_split_overlap" in p.meta:
                 split_overlap = p.meta["_split_overlap"]
                 if not isinstance(split_overlap, str) and not isinstance(split_overlap, int):
-                    p.meta["_split_overlap"] = json.dumps(split_overlap)
-        return parts
+                    meta = dict(p.meta)
+                    meta["_split_overlap"] = json.dumps(split_overlap)
+            updated_parts.append(replace(p, id=f"{doc.id}_{i}", meta=meta))
+        return updated_parts
 
 
 def _quantize_timestamp(timestamp: str):
@@ -199,8 +203,7 @@ class RequestResponseToDocument:
         embedder = self.embedders.get(doc_type, self.embedders["default"])
         embedded_docs = embedder.run(documents=[Document(content=doc.content[0:4096])])["documents"]
         embedded_docs = self.sparse_embedder.run(documents=embedded_docs)["documents"]
-        doc.embedding = embedded_docs[0].embedding
-        return doc
+        return replace(doc, embedding=embedded_docs[0].embedding)
 
     def _to_documents(self, request_response: IngestableRequestResponse) -> List[Document]:
         url = request_response.url
@@ -355,8 +358,9 @@ class NormalizeDocuments:
 
     @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]):
-        for doc in filter(lambda d: d.meta.get("type", "") == "content" and not d.meta.get("normalized", False),
-                          documents):
+        for index, doc in filter(lambda item: item[1].meta.get("type", "") == "content"
+                                 and not item[1].meta.get("normalized", False),
+                                 enumerate(documents)):
             raw_mime = doc.meta.get("content_type", "")
             if not raw_mime:
                 logger.warning(f"NormalizeDocuments: No content_type for {doc}")
@@ -397,11 +401,12 @@ class NormalizeDocuments:
                 else:
                     logger.info(
                         f"Normalized {doc_type} content of {len(doc.content)} bytes to {len(normalized_content)} bytes")
-                doc.content = normalized_content
-                doc.meta["normalized"] = True
+                updated_meta = dict(doc.meta)
+                updated_meta["normalized"] = True
                 response_headers = json.loads(doc.meta.get("response_headers", "{}"))
                 response_headers["Content-Length"] = str(len(normalized_content))
-                doc.meta["response_headers"] = json.dumps(response_headers)
+                updated_meta["response_headers"] = json.dumps(response_headers)
+                documents[index] = replace(doc, content=normalized_content, meta=updated_meta)
 
         return {"documents": documents}
 
