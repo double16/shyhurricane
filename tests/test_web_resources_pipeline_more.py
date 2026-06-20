@@ -1,6 +1,7 @@
 import json
 import sys
 from collections import defaultdict
+from dataclasses import replace
 
 from haystack import Document
 
@@ -22,9 +23,7 @@ class Embedder:
 
     def run(self, documents):
         self.documents.extend(documents)
-        for doc in documents:
-            doc.embedding = [1.0]
-        return {"documents": documents}
+        return {"documents": [replace(doc, embedding=[1.0]) for doc in documents]}
 
 
 class Store:
@@ -339,7 +338,7 @@ def test_index_doc_type_documents_splits_embeds_and_stores(monkeypatch):
         "response_headers": "{}",
         "type": "content",
     })
-    doc.content = b"<html></html>"
+    object.__setattr__(doc, "content", b"<html></html>")
 
     assert component.run([doc]) == {}
 

@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import re
+from dataclasses import replace
 from typing import Dict, List, Optional, Any, Tuple, Iterable, Callable, Set
 
 from haystack import Pipeline, component, Document
@@ -33,9 +34,9 @@ class CombineDocs:
 
         # increase score when document is from doc_type
         if doc_types:
-            for doc in merged:
+            for index, doc in enumerate(merged):
                 if doc.meta.get("type", None) in doc_types and doc.score:
-                    doc.score *= 10
+                    merged[index] = replace(doc, score=doc.score * 10)
         merged.sort(key=lambda d: (d.score or 0, d.meta.get("timestamp_float", 0)), reverse=True)
         return {"documents": merged}
 

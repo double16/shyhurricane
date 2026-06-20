@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 from haystack import Document
 
@@ -14,8 +15,7 @@ class Embedder:
         self.warmed = True
 
     def run(self, documents):
-        documents[0].embedding = [1.0, 2.0]
-        return {"documents": documents}
+        return {"documents": [replace(doc, embedding=[1.0, 2.0]) for doc in documents]}
 
 
 class Splitter:

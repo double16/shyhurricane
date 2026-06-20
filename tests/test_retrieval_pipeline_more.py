@@ -26,8 +26,8 @@ def test_combine_docs_sorts_and_boosts_requested_doc_types():
     result = rp.CombineDocs(["content", "network"]).run(doc_types=["content"], content=docs[:2], network=docs[2:])
 
     assert [doc.content for doc in result["documents"]] == ["b", "c", "a"]
-    assert docs[1].score == 2.0
-    assert docs[2].score == 1.0
+    assert [doc.score for doc in result["documents"]] == [2.0, 1.0, 0.6]
+    assert [doc.score for doc in docs] == [0.6, 0.2, 0.1]
 
 
 def test_trace_docs_writes_debug_markdown(tmp_path):
