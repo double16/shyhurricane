@@ -141,9 +141,10 @@ def _doc_type_watcher(db: str, generator_config: GeneratorConfig):
             process = multiprocessing.Process(target=_doc_type_worker, args=(db, generator_config))
             process.start()
             process.join()
-            if process.exitcode != 0:
-                process.close()
-                process = None
+            exitcode = process.exitcode
+            process.close()
+            process = None
+            if exitcode != 0:
                 break
 
     except KeyboardInterrupt:

@@ -37,6 +37,8 @@ class ServerContext:
         self.stores = {"content": store}
         self.document_pipeline = None
         self.website_context_pipeline = None
+        self.open_world = True
+        self.disable_elicitation = False
 
 
 async def noop(*args, **kwargs):
@@ -197,9 +199,14 @@ class ToolCtx:
 
     def __init__(self):
         self.messages = []
+        self.elicit_result = None
 
     async def info(self, message):
         self.messages.append(message)
+
+    async def elicit(self, message, schema):
+        self.messages.append(message)
+        return self.elicit_result
 
 
 class Queue:
@@ -298,3 +305,171 @@ async def test_spider_website_queues_work_requeues_other_context_and_collects_re
     assert result.resources == [resource]
     assert result.has_more is False
     assert ctx.messages == ["Found: https://example.com/found"]
+
+
+class Pipeline:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    def run(self, data=None, include_outputs_from=None):
+        self.calls.append((data, include_outputs_from))
+        if isinstance(self.result, list):
+            return self.result.pop(0)
+        return self.result
+
+
+class FullServerContext(ServerContext):
+    def __init__(self, store, website_context_result, document_result, open_world=True):
+        super().__init__(store)
+        if isinstance(website_context_result, list):
+            self.website_context_pipeline = Pipeline(website_context_result)
+        else:
+            self.website_context_pipeline = Pipeline({"llm": {"replies": [website_context_result]}})
+        self.document_pipeline = Pipeline(document_result)
+        self.open_world = open_world
+
+
+class Netlocs:
+    def __init__(self, values):
+        self.network_locations = values
+
+
+@pytest.mark.asyncio
+async def test_find_web_resources_runs_document_pipeline_with_target_filters(monkeypatch):
+    doc = make_doc("doc", "https://example.com/admin", score=2.0, timestamp_float=10)
+    store = AsyncStore([[], [], []])
+    server_ctx = FullServerContext(
+        store,
+        '{"target": ["example.com"], "content": ["html"], "response_codes": [403]}',
+        {"combine": {"documents": [doc]}},
+    )
+    patch_server_context(monkeypatch, server_ctx)
+    monkeypatch.setattr(resources, "log_tool_history", noop)
+
+    async def find_netloc(ctx, query):
+        return Netlocs(["example.com:80", "example.com:443"])
+
+    monkeypatch.setattr(resources, "find_netloc", find_netloc)
+
+    result = await resources.find_web_resources(ToolCtx(), " find admin pages ", limit=12, http_methods=["POST"])
+
+    data, include_outputs_from = server_ctx.document_pipeline.calls[0]
+    filters = data["query"]["filters"]
+    assert result.resources[0].url == "https://example.com/admin"
+    assert include_outputs_from == {"combine"}
+    assert data["query"]["targets"] == ["example.com:80", "example.com:443"]
+    assert data["query"]["doc_types"] == ["html"]
+    assert {"field": "meta.http_method", "operator": "==", "value": "POST"} in filters["conditions"]
+    assert {"field": "meta.status_code", "operator": "==", "value": 403} in filters["conditions"]
+
+
+@pytest.mark.asyncio
+async def test_find_web_resources_uses_recommended_urls_and_domain_filter(monkeypatch):
+    doc = make_doc("doc", "https://sub.example.com/", domain="example.com", netloc="sub.example.com:443")
+    server_ctx = FullServerContext(
+        AsyncStore([[], [], []]),
+        '{"target": [], "content": [], "response_codes": []}',
+        {"combine": {"documents": [doc]}},
+    )
+    patch_server_context(monkeypatch, server_ctx)
+    monkeypatch.setattr(resources, "log_tool_history", noop)
+
+    async def recommended(ctx):
+        return ["sub.example.com"]
+
+    async def find_netloc(ctx, query):
+        return Netlocs(["known.sub.example.com:443"])
+
+    monkeypatch.setattr(resources, "_find_recommended_urls", recommended)
+    monkeypatch.setattr(resources, "find_netloc", find_netloc)
+
+    result = await resources.find_web_resources(ToolCtx(), "no explicit target", limit=10)
+
+    filters = server_ctx.document_pipeline.calls[0][0]["query"]["filters"]
+    assert result.resources[0].url == "https://sub.example.com/"
+    assert {"field": "meta.domain", "operator": "==", "value": "sub.example.com"} in filters["conditions"]
+
+
+@pytest.mark.asyncio
+async def test_find_web_resources_elicits_missing_target_and_handles_decline(monkeypatch):
+    server_ctx = FullServerContext(
+        AsyncStore([[], [], []]),
+        [
+            {"llm": {"replies": [""]}},
+            {"llm": {"replies": ['{"target": ["example.com"], "content": [], "response_codes": []}']}},
+        ],
+        {"combine": {"documents": []}},
+    )
+    patch_server_context(monkeypatch, server_ctx)
+    monkeypatch.setattr(resources, "log_tool_history", noop)
+    monkeypatch.setattr(resources, "assert_elicitation", lambda server_ctx: None)
+
+    async def no_recommended(ctx):
+        return None
+
+    async def find_netloc(ctx, query):
+        return Netlocs(["example.com:80", "example.com:443"])
+
+    monkeypatch.setattr(resources, "_find_recommended_urls", no_recommended)
+    monkeypatch.setattr(resources, "find_netloc", find_netloc)
+
+    ctx = ToolCtx()
+    ctx.elicit_result = resources.AcceptedElicitation(data=resources.RequestTargetUrl(data="example.com"))
+
+    result = await resources.find_web_resources(ctx, "what is indexed?", limit=10)
+
+    assert result.instructions == resources.find_web_resources_instructions_not_found
+    assert "What URL(s) should we look for?" in ctx.messages
+
+
+@pytest.mark.asyncio
+async def test_find_web_resources_missing_target_open_world_branches(monkeypatch):
+    server_ctx = FullServerContext(
+        AsyncStore([[], [], []]),
+        '{"target": ["missing.example.com"], "content": [], "response_codes": []}',
+        {"combine": {"documents": []}},
+        open_world=False,
+    )
+    patch_server_context(monkeypatch, server_ctx)
+    monkeypatch.setattr(resources, "log_tool_history", noop)
+
+    async def find_netloc(ctx, query):
+        return Netlocs(["other.example.com:443"])
+
+    monkeypatch.setattr(resources, "find_netloc", find_netloc)
+
+    result = await resources.find_web_resources(ToolCtx(), "missing.example.com", limit=10)
+
+    assert result.instructions == resources.find_web_resources_instructions_not_found
+
+
+@pytest.mark.asyncio
+async def test_find_web_resources_starts_spider_when_elicitation_unavailable(monkeypatch):
+    server_ctx = FullServerContext(
+        AsyncStore([[], [], []]),
+        '{"target": ["missing.example.com"], "content": [], "response_codes": []}',
+        {"combine": {"documents": []}},
+    )
+    patch_server_context(monkeypatch, server_ctx)
+    monkeypatch.setattr(resources, "log_tool_history", noop)
+
+    async def find_netloc(ctx, query):
+        return Netlocs([])
+
+    def raise_mcp_error(server_ctx):
+        from mcp.types import ErrorData, INTERNAL_ERROR
+        raise resources.McpError(ErrorData(code=INTERNAL_ERROR, message="nope"))
+
+    monkeypatch.setattr(resources, "find_netloc", find_netloc)
+    monkeypatch.setattr(resources, "assert_elicitation", raise_mcp_error)
+    spidered = []
+
+    async def spider_website(ctx, url):
+        spidered.append(url)
+
+    monkeypatch.setattr(resources, "spider_website", spider_website)
+
+    await resources.find_web_resources(ToolCtx(), "missing.example.com", limit=10)
+
+    assert spidered == ["http://missing.example.com:80", "https://missing.example.com:443"]

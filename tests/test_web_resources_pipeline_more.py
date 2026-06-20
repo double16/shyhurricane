@@ -1,6 +1,8 @@
 import json
 import sys
+from collections import defaultdict
 
+import pytest
 from haystack import Document
 
 from shyhurricane.index.input_documents import IngestableRequestResponse
@@ -41,6 +43,18 @@ class Store:
         if self.exc:
             raise self.exc
         self.written.extend(documents)
+
+
+class Pipe:
+    def __init__(self):
+        self.components = {}
+        self.connections = []
+
+    def add_component(self, name, component):
+        self.components[name] = component
+
+    def connect(self, left, right):
+        self.connections.append((left, right))
 
 
 def request_response(**overrides):
@@ -215,3 +229,210 @@ def test_generate_title_and_description_skips_uses_cache_and_parses_generator():
     assert "title" not in skipped.meta
     assert "title" not in network.meta
     assert config.generator.calls == 1
+
+
+def test_deobfuscate_javascript_empty_success_and_failure(monkeypatch):
+    assert wrp._deobfuscate_javascript("") == ""
+
+    class Stream:
+        def __init__(self, lines):
+            self.lines = list(lines)
+            self.written = ""
+            self.closed = False
+
+        def write(self, value):
+            self.written += value
+
+        def close(self):
+            self.closed = True
+
+        def readline(self):
+            if not self.lines:
+                return ""
+            return self.lines.pop(0)
+
+    class Proc:
+        def __init__(self, return_code, lines):
+            self.return_code = return_code
+            self.stdin = Stream([])
+            self.stdout = Stream(lines)
+            self.polls = 0
+
+        def poll(self):
+            self.polls += 1
+            if self.polls == 1:
+                return None
+            return self.return_code
+
+        def wait(self):
+            return self.return_code
+
+    procs = [Proc(0, ["readable\n"]), Proc(1, [""])]
+    monkeypatch.setattr(wrp.subprocess, "Popen", lambda *args, **kwargs: procs.pop(0))
+    monkeypatch.setattr(wrp, "unix_command_image", lambda: "image")
+
+    assert wrp._deobfuscate_javascript("eval(1)") == "readable\n"
+    assert wrp._deobfuscate_javascript("eval(2)") == "eval(2)"
+
+
+def test_build_splitters_uses_token_lengths_and_suffix_splitter(monkeypatch):
+    created = []
+
+    class Splitter:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.warmed = False
+            created.append(self)
+
+        def warm_up(self):
+            self.warmed = True
+
+    monkeypatch.setattr(wrp, "SuffixIdSplitter", Splitter)
+
+    splitters = wrp.build_splitters({"html": object(), "network": object()})
+
+    assert set(splitters)
+    assert all(splitter.warmed for splitter in splitters.values())
+    assert all(splitter.kwargs["split_by"] == "word" for splitter in created)
+
+
+def test_suffix_id_splitter_sets_child_ids_and_serializes_overlap(monkeypatch):
+    splitter = object.__new__(wrp.SuffixIdSplitter)
+    parent = Document(content="hello", id="parent", meta={})
+    children = [
+        Document(content="a", meta={"_split_overlap": {"doc_id": "old"}}),
+        Document(content="b", meta={"_split_overlap": "ok"}),
+    ]
+    monkeypatch.setattr(wrp.DocumentSplitter, "_split_document", lambda self, doc: children)
+
+    result = splitter._split_document(parent)
+
+    assert [doc.id for doc in result] == ["parent_0", "parent_1"]
+    assert result[0].meta["_split_overlap"] == '{"doc_id": "old"}'
+    assert result[1].meta["_split_overlap"] == "ok"
+
+
+def test_index_doc_type_documents_splits_embeds_and_stores(monkeypatch):
+    html_embedder = Embedder(batch_size=2)
+    sparse = Embedder()
+
+    class Splitter:
+        def run(self, documents):
+            return {"documents": [
+                Document(content=documents[0].content + "-1", id="s1", meta=documents[0].meta.copy()),
+                Document(content=documents[0].content + "-2", id="s2", meta=documents[0].meta.copy()),
+            ]}
+
+    class MultiStore:
+        def __init__(self):
+            self.batches = []
+
+        def run(self, documents):
+            self.batches.append(list(documents))
+
+    multi_store = MultiStore()
+    component = wrp.IndexDocTypeDocuments({"default": html_embedder, "html": html_embedder}, sparse, multi_store)
+    component.splitters = defaultdict(Splitter)
+    doc = Document(content="<html></html>", meta={
+        "url": "https://example.com/",
+        "content_type": "text/html",
+        "timestamp": "2025-08-06T12:03:55",
+        "response_headers": "{}",
+        "type": "content",
+    })
+    doc.content = b"<html></html>"
+
+    assert component.run([doc]) == {}
+
+    assert set(d.content for d in html_embedder.documents) == {"<html></html>-1", "<html></html>-2"}
+    assert len(html_embedder.documents) >= 2
+    assert len(sparse.documents) == len(html_embedder.documents)
+    assert len(multi_store.batches) >= 1
+    assert {d.meta["type"] for d in multi_store.batches[0]} == {"html"}
+
+
+def test_index_doc_type_documents_warm_up_and_skip_branches(monkeypatch):
+    sparse = Embedder()
+    multi_store = type("MultiStore", (), {"run": lambda self, documents: None})()
+    component = wrp.IndexDocTypeDocuments({"default": Embedder(), "html": Embedder()}, sparse, multi_store)
+    monkeypatch.setattr(wrp, "build_splitters", lambda embedders: {"html": object()})
+
+    component.warm_up()
+    component.warm_up()
+    component.run([
+        Document(content="", meta={"type": "content"}),
+        Document(content="body", meta={"url": "", "content_type": "text/html", "timestamp": ""}),
+        Document(content="body", meta={"url": "https://example.com/", "content_type": "application/pdf",
+                                       "timestamp": "2025-08-06T", "response_headers": "{}"}),
+    ])
+
+    assert component.splitters == {"html": component.splitters["html"]}
+    assert sparse.warmed is True
+
+
+def test_build_stores_embedders_and_pipelines_are_wired(monkeypatch):
+    stores = {}
+
+    class DocumentStore:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+            self.counted = False
+
+        def count_documents(self):
+            self.counted = True
+            return 0
+
+    class Cache:
+        def __init__(self, config):
+            self.config = config
+
+        def get(self, doc_type_model):
+            return f"embedder-{doc_type_model.doc_type}"
+
+    class Config:
+        def __init__(self):
+            self.sparse_calls = 0
+
+        def create_sparse_document_embedder(self, model):
+            self.sparse_calls += 1
+            return "sparse"
+
+        def create_generator(self):
+            return type("Generator", (), {"run": lambda self, prompt: {"replies": ["{}"]}})()
+
+    def create_store(**kwargs):
+        store = DocumentStore(**kwargs)
+        stores[kwargs["index"]] = store
+        return store
+
+    monkeypatch.setattr(wrp, "create_qdrant_document_store", create_store)
+    monkeypatch.setattr(wrp, "EmbedderCache", Cache)
+    monkeypatch.setattr(wrp, "Pipeline", Pipe)
+    monkeypatch.setattr(wrp, "ConditionalRouter", lambda **kwargs: ("router", kwargs))
+    monkeypatch.setattr(wrp, "ListJoiner", lambda *args, **kwargs: ("joiner", args, kwargs))
+
+    selected_stores = wrp.build_stores("db", doc_types={"content"})
+    embedders = wrp.build_embedders(Cache("cfg"), doc_types={"content", "network"})
+    ingest = wrp.build_ingest_pipeline("db", Config())
+    doc_type = wrp.build_doc_type_pipeline("db", Config())
+    cleaner = wrp.new_doc_cleaner()
+
+    assert selected_stores
+    assert all(store.counted for store in selected_stores.values())
+    assert set(embedders) == {"content", "network"}
+    assert {"input_router", "katana_document", "raw_document", "har_document", "output"}.issubset(ingest.components)
+    assert ("normalize_document", "output") in ingest.connections
+    assert {"input", "gen_title", "gen_doc_type"} == set(doc_type.components)
+    assert cleaner.keep_id is True
+
+
+def test_generate_title_and_description_ignores_invalid_generator_json():
+    class Config:
+        def create_generator(self):
+            return type("Generator", (), {"run": lambda self, prompt: {"replies": ["not-json"]}})()
+
+    doc = Document(content="body", meta={"status_code": 200, "type": "content"})
+
+    result = wrp.GenerateTitleAndDescription(Config()).run([doc])["documents"][0]
+
+    assert "title" not in result.meta

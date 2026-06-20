@@ -119,3 +119,77 @@ def test_wait_ready_returns_on_200_and_times_out(monkeypatch):
 
     with pytest.raises(TimeoutError):
         db._wait_ready("http://127.0.0.1:6333", timeout_s=1)
+
+
+def docker_inspect(container_id="abc", running=True):
+    return {
+        "Id": container_id,
+        "State": {"Running": running},
+        "NetworkSettings": {
+            "Ports": {
+                "6333/tcp": [{"HostIp": "127.0.0.1", "HostPort": "63330"}],
+                "6334/tcp": [{"HostIp": "127.0.0.1", "HostPort": "63340"}],
+            }
+        },
+    }
+
+
+def test_start_qdrant_docker_creates_starts_reuses_and_errors(monkeypatch, tmp_path):
+    commands = []
+    inspect_values = iter([None, docker_inspect(), docker_inspect(running=False), docker_inspect()])
+
+    def inspect(name):
+        return next(inspect_values)
+
+    monkeypatch.setattr(db, "_inspect_container", inspect)
+    monkeypatch.setattr(db, "_run", lambda cmd, check=True: commands.append(cmd))
+
+    created = db._start_qdrant_docker(name="qdrant-test", storage_dir=str(tmp_path / "create"), pull=True)
+    started = db._start_qdrant_docker(name="qdrant-test", storage_dir=str(tmp_path / "start"))
+
+    assert created.http_port == 63330
+    assert started.grpc_port == 63340
+    assert ["docker", "pull", "qdrant/qdrant:latest"] in commands
+    assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in commands)
+    assert ["docker", "start", "qdrant-test"] in commands
+
+    monkeypatch.setattr(db, "_inspect_container", lambda name: {"State": {"Running": True}})
+    with pytest.raises(RuntimeError, match="container Id"):
+        db._start_qdrant_docker(name="bad", storage_dir=str(tmp_path / "bad"))
+
+
+def test_create_qdrant_store_client_and_list_collections(monkeypatch):
+    created = {}
+
+    class Client:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def get_collections(self):
+            return type("Collections", (), {"collections": [
+                type("Collection", (), {"name": "content"})(),
+                type("Collection", (), {"name": "network"})(),
+            ]})()
+
+    class Store:
+        def __init__(self, **kwargs):
+            created.update(kwargs)
+
+    monkeypatch.setattr(db, "qdrant_host_port", lambda database: ("host", 6333))
+    monkeypatch.setattr(db, "AsyncQdrantClient", Client)
+    monkeypatch.setattr(db, "QdrantDocumentStore", Store)
+
+    import asyncio
+
+    client = asyncio.run(db.create_qdrant_client("db"))
+    store = db.create_qdrant_document_store("db", index="content")
+    collections = asyncio.run(db.list_collections("db"))
+
+    assert client.kwargs == {"host": "host", "port": 6333}
+    assert isinstance(store, Store)
+    assert created["host"] == "host"
+    assert created["port"] == 6333
+    assert created["index"] == "content"
+    assert created["use_sparse_embeddings"] is True
+    assert {"field_name": "meta.url", "field_schema": "keyword"} in created["payload_fields_to_index"]
+    assert collections == ["content", "network"]

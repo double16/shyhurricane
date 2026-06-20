@@ -369,6 +369,102 @@ async def test_run_proxy_server_sets_context(monkeypatch, tmp_path):
     assert ctx.proxy_ca_cert_path == Path(tmp_path, "ca.pem")
 
 
+@pytest.mark.asyncio
+async def test_content_store_lookup_handles_bad_headers_and_base64_decode_failure():
+    class Record:
+        payload = {
+            "content": "not-base64",
+            "meta": {"response_headers": "not-json", "status_code": 203},
+        }
+
+    class Client:
+        async def scroll(self, **kwargs):
+            return [Record()], None
+
+    result = await srv.ContentStore(Client()).lookup("https://example.com/")
+
+    assert result == (203, {}, b"not-base64")
+
+
+class H2Transport:
+    def __init__(self):
+        self.data = bytearray()
+        self.aborted = False
+
+    def write(self, data):
+        self.data.extend(data)
+
+    def abort(self):
+        self.aborted = True
+
+
+class H2Writer(DummyWriter):
+    def __init__(self):
+        super().__init__()
+        self.transport = H2Transport()
+
+
+async def run_h2_request(store, headers):
+    reader = asyncio.StreamReader()
+    client = H2Connection(H2Configuration(client_side=True, header_encoding="iso-8859-1"))
+    client.initiate_connection()
+    stream_id = client.get_next_available_stream_id()
+    client.send_headers(stream_id, headers, end_stream=True)
+    reader.feed_data(client.data_to_send())
+    reader.feed_eof()
+    writer = H2Writer()
+
+    await srv.ReplayProxy.handle_h2_connection(reader, writer, "example.com", store)
+
+    return writer
+
+
+@pytest.mark.asyncio
+async def test_handle_h2_connection_serves_found_and_404():
+    found_writer = await run_h2_request(
+        DummyStore({("GET", "https://example.com/ok"): (200, {"Content-Type": "text/plain"}, b"ok")}),
+        [
+            (":method", "GET"),
+            (":authority", "example.com"),
+            (":scheme", "https"),
+            (":path", "/ok"),
+        ],
+    )
+    missing_writer = await run_h2_request(
+        DummyStore({}),
+        [
+            (":method", "GET"),
+            (":authority", "example.com"),
+            (":scheme", "https"),
+            (":path", "/missing"),
+        ],
+    )
+
+    assert found_writer.transport.aborted is True
+    assert missing_writer.transport.aborted is True
+    assert found_writer.transport.data
+    assert missing_writer.transport.data
+
+
+@pytest.mark.asyncio
+async def test_handle_h2_connection_returns_500_on_store_error():
+    class BrokenStore(DummyStore):
+        async def lookup(self, url: str, method: str = "GET"):
+            raise RuntimeError("failed")
+
+    writer = await run_h2_request(
+        BrokenStore({}),
+        [
+            (":method", "GET"),
+            (":authority", "example.com"),
+            (":scheme", "https"),
+            (":path", "/error"),
+        ],
+    )
+
+    assert writer.transport.data
+
+
 async def connect_tunnel(loop: asyncio.AbstractEventLoop, proxy_host, proxy_port, target_host, target_port, alpn=None):
     """
     Open TCP to proxy, send CONNECT, then upgrade this client-side connection to TLS

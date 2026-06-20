@@ -146,6 +146,70 @@ def test_start_ingest_worker_respects_low_power(monkeypatch):
     assert len(pool.processes) == 1
 
 
+def test_start_ingest_worker_starts_doc_type_watchers_when_enabled(monkeypatch):
+    processes = []
+    queue = Queue()
+
+    class Config:
+        low_power = False
+
+    class Process:
+        def __init__(self, target, args):
+            self.target = target
+            self.args = args
+            processes.append(self)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(web_resources, "get_server_config", lambda: Config())
+    monkeypatch.setattr(web_resources.multiprocessing, "Process", Process)
+    monkeypatch.setattr(web_resources, "get_ingest_queue", lambda db: queue)
+
+    _, pool = web_resources.start_ingest_worker("db", object(), pool_size=2)
+
+    assert [p.target for p in processes] == [
+        web_resources._doc_type_watcher,
+        web_resources._doc_type_watcher,
+        web_resources._ingest_worker,
+    ]
+    assert len(pool.processes) == 3
+
+
+def test_doc_type_watcher_restarts_on_zero_exit_and_closes(monkeypatch):
+    processes = []
+    exitcodes = iter([0, 1])
+
+    class Process:
+        def __init__(self, target, args):
+            self.target = target
+            self.args = args
+            self.exitcode = next(exitcodes)
+            self.terminated = False
+            self.closed = False
+            processes.append(self)
+
+        def start(self):
+            pass
+
+        def join(self):
+            pass
+
+        def terminate(self):
+            self.terminated = True
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(web_resources.faulthandler, "register", lambda *args, **kwargs: None)
+    monkeypatch.setattr(web_resources.multiprocessing, "Process", Process)
+
+    web_resources._doc_type_watcher("db", object())
+
+    assert len(processes) == 2
+    assert all(process.closed for process in processes)
+
+
 def test_bad_state_detects_mps_memory(monkeypatch):
     class MpsBackend:
         @staticmethod
@@ -168,3 +232,23 @@ def test_bad_state_detects_mps_memory(monkeypatch):
     monkeypatch.setattr(web_resources.torch, "mps", Mps())
 
     assert web_resources.is_current_process_in_bad_state() is True
+
+
+def test_bad_state_handles_missing_mps_memory_apis(monkeypatch):
+    class MpsBackend:
+        @staticmethod
+        def is_available():
+            return True
+
+    class Backends:
+        mps = MpsBackend()
+
+    class Mps:
+        @staticmethod
+        def driver_allocated_memory():
+            raise AttributeError("unsupported")
+
+    monkeypatch.setattr(web_resources.torch, "backends", Backends())
+    monkeypatch.setattr(web_resources.torch, "mps", Mps())
+
+    assert web_resources.is_current_process_in_bad_state() is False

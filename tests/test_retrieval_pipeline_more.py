@@ -172,3 +172,67 @@ def test_chat_message_helpers_filter_merge_and_wrap(caplog):
     assert merged == system + memories + query
     assert filtered == merged + [ChatMessage.from_assistant("")]
     assert wrapped == [query[0]]
+
+
+def test_query_expander_number_one_and_retriever_error_path():
+    expander = make_expander(ExpanderPipeline([]))
+    expander.number = 1
+
+    assert expander.run("original", targets=["example.com"], vuln_types=["xss"]) == {"queries": ["original"]}
+
+    component = rp.MultiQueryChromaRetriever(
+        "content",
+        Warmable("embedding", exc=RuntimeError("embed failed")),
+        Warmable("sparse_embedding"),
+        Retriever(),
+    )
+
+    assert component.run(["q"], top_k=0)["documents"] == []
+
+
+def test_build_document_and_website_context_pipelines_are_wired(monkeypatch):
+    class Pipe:
+        def __init__(self):
+            self.components = {}
+            self.connections = []
+
+        def add_component(self, name, component):
+            self.components[name] = component
+
+        def connect(self, left, right):
+            self.connections.append((left, right))
+
+    class Config:
+        def __init__(self):
+            self.created_text = []
+
+        def create_generator(self, **kwargs):
+            return ("generator", kwargs)
+
+        def create_sparse_text_embedder(self, model):
+            return "sparse"
+
+        def create_text_embedder(self, model):
+            self.created_text.append(model)
+            return Warmable("embedding")
+
+    class Store:
+        pass
+
+    monkeypatch.setattr(rp, "Pipeline", Pipe)
+    monkeypatch.setattr(rp, "QdrantHybridRetriever", lambda document_store: ("retriever", document_store))
+    monkeypatch.setattr(rp, "create_qdrant_document_store", lambda **kwargs: Store())
+    monkeypatch.setattr(rp, "QueryExpander", lambda *args, **kwargs: ("expander", kwargs))
+
+    import asyncio
+
+    pipe, retrievers, stores = asyncio.run(rp.build_document_pipeline("db", Config()))
+    website = rp.build_website_context_pipeline(Config())
+
+    assert {"combine", "query", "vuln_type_prompt", "vuln_type_llm", "vuln_type_parser", "query_expander"}.issubset(
+        pipe.components)
+    assert retrievers
+    assert stores
+    assert any(left == "query.max_results" and right.endswith(".top_k") for left, right in pipe.connections)
+    assert {"builder", "llm"} == set(website.components)
+    assert ("builder", "llm") in website.connections
