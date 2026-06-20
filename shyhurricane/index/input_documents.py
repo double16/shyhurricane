@@ -259,8 +259,10 @@ class KatanaDocument:
             http_method = entry["request"].get("method", "").upper()
             request_headers = self._title_case_header(entry["request"].get("headers", {}))
             request_headers.pop("raw", None)
+            request_headers.pop("Raw", None)
             response_headers = self._title_case_header(entry["response"].get("headers", {}))
             response_headers.pop("raw", None)
+            response_headers.pop("Raw", None)
             response_rtt: Optional[float] = entry.get("response", {}).get("rtt", None)
             technologies = entry["response"].get("technologies", [])
             if not isinstance(technologies, list):

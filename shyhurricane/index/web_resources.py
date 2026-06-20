@@ -5,7 +5,7 @@ import logging
 import multiprocessing
 import os
 import signal
-from typing import Tuple, Optional
+from typing import Tuple, Optional, TYPE_CHECKING
 
 import persistqueue
 import torch
@@ -16,10 +16,12 @@ from shyhurricane.index.web_resources_pipeline import build_ingest_pipeline, bui
 from shyhurricane.server_config import get_server_config
 from shyhurricane.persistent_queue import persistent_queue_get, get_ingest_queue, \
     get_doc_type_queue
-from shyhurricane.task_queue import TaskPool
 from shyhurricane.utils import get_log_path, log_heap_stats, log_gpu_memory_summary
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from shyhurricane.task_queue.types import TaskPool
 
 
 def _ingest_worker(db: str, generator_config: GeneratorConfig):
@@ -139,9 +141,10 @@ def _doc_type_watcher(db: str, generator_config: GeneratorConfig):
             process = multiprocessing.Process(target=_doc_type_worker, args=(db, generator_config))
             process.start()
             process.join()
-            if process.exitcode != 0:
-                process.close()
-                process = None
+            exitcode = process.exitcode
+            process.close()
+            process = None
+            if exitcode != 0:
                 break
 
     except KeyboardInterrupt:
@@ -160,7 +163,9 @@ def _doc_type_watcher(db: str, generator_config: GeneratorConfig):
 
 
 def start_ingest_worker(db: str, generator_config: GeneratorConfig, pool_size: int = 1) -> Tuple[
-    persistqueue.SQLiteAckQueue, TaskPool]:
+    persistqueue.SQLiteAckQueue, "TaskPool"]:
+    from shyhurricane.task_queue.types import TaskPool
+
     processes = []
 
     if get_server_config().low_power:

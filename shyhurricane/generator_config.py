@@ -373,5 +373,5 @@ def safe_embedder(embedder: Component, docs: List[Document]) -> List[Document]:
     try:
         return embedder.run(documents=docs)["documents"]
     except Exception as e:
-        logger.error("Embedding documents, continuing without embeddings", e)
+        logger.error("Embedding documents, continuing without embeddings: %s", e)
         return docs

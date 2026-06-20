@@ -7,7 +7,7 @@ import sys
 import time
 from dataclasses import dataclass
 from multiprocessing import Queue
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, TYPE_CHECKING
 
 import persistqueue
 from haystack import Pipeline
@@ -17,14 +17,15 @@ from qdrant_client import AsyncQdrantClient
 from shyhurricane.doc_type_model_map import doc_type_to_model
 from shyhurricane.index.web_resources_pipeline import build_stores
 from shyhurricane.server_config import get_server_config
-from shyhurricane.index.web_resources import start_ingest_worker
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.retrieval_pipeline import build_document_pipeline, build_website_context_pipeline
 from shyhurricane.db import create_qdrant_client, create_qdrant_document_store
-from shyhurricane.task_queue import start_task_worker, TaskPool
 from shyhurricane.utils import unix_command_image
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from shyhurricane.task_queue.types import TaskPool
 
 
 @dataclass
@@ -40,9 +41,9 @@ class ServerContext:
     Determines the context of the query to `document_pipeline` using an LLM. May be None when in low power mode.
     """
     ingest_queue: persistqueue.SQLiteAckQueue
-    ingest_pool: TaskPool
+    ingest_pool: "TaskPool"
     task_queue: Queue
-    task_pool: TaskPool
+    task_pool: "TaskPool"
     spider_result_queue: Queue
     port_scan_result_queue: Queue
     dir_busting_result_queue: Queue
@@ -78,6 +79,8 @@ async def get_server_context() -> ServerContext:
     global _server_context
     if _server_context is not None:
         return _server_context
+    from shyhurricane.index.web_resources import start_ingest_worker
+    from shyhurricane.task_queue import start_task_worker
 
     server_config = get_server_config()
 

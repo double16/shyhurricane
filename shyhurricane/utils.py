@@ -437,8 +437,14 @@ def filter_ip_networks(input: Optional[List[str]] = None) -> List[str]:
     result = []
     for e in input:
         try:
-            if ipaddress.ip_address(e) or ipaddress.ip_network(e):
-                result.append(e)
+            ipaddress.ip_address(e)
+            result.append(e)
+            continue
+        except (ValueError, ValidationError):
+            pass
+        try:
+            ipaddress.ip_network(e)
+            result.append(e)
         except (ValueError, ValidationError):
             pass
     return result

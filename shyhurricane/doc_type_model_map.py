@@ -97,7 +97,8 @@ def get_model_for_doc_type(doc_type: str) -> EmbeddingModelConfig:
 
 
 def get_all_required_models(collections: list[str]) -> set[ModelConfig]:
-    return {doc_type_to_model()[c].model_config for c in collections if c in doc_type_to_model}
+    models = doc_type_to_model()
+    return {models[c].model_config for c in collections if c in models}
 
 
 def get_qdrant_collections() -> set[str]:
