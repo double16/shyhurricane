@@ -72,7 +72,7 @@ jobs:
           uv run pytest tests/ --junitxml=${RESULT_DIR}/test-results.xml --cov=shyhurricane --cov-branch --cov-report=xml:${RESULT_DIR}/coverage.xml --cov-report=html:${RESULT_DIR}/htmlcov --cov-report=term-missing
 
       - name: Upload pytest test results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: pytest-results-${{ matrix.python-version }}
           path: |
