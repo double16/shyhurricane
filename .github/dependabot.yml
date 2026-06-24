@@ -8,6 +8,7 @@ updates:
       minor:
         applies-to: version-updates
         update-types:
+          - "major"
           - "minor"
           - "patch"
 
