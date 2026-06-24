@@ -5,7 +5,7 @@ updates:
     schedule:
       interval: "weekly"
     groups:
-      minor:
+      all:
         applies-to: version-updates
         update-types:
           - "major"
