@@ -1,6 +1,12 @@
 # shyhurricane Change Log
 
+## Unreleased
 
-## v0.1
+### Features
 
-First release
+- First release
+
+### Fixes
+
+- Prevent persistent queue workers from racing to create queue directories during first-time initialization.
+

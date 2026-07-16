@@ -18,7 +18,7 @@ def get_persistent_queue(db: str, queue_name: str) -> persistqueue.SQLiteAckQueu
         path = Path("/data", "queues", queue_name)
     else:
         path = Path(Path.home(), ".local", "state", "shyhurricane", re.sub(r'[^A-Za-z0-9_.-]', '_', db), queue_name)
-    os.makedirs(path.parent, mode=0o755, exist_ok=True)
+    os.makedirs(path, mode=0o755, exist_ok=True)
     return persistqueue.SQLiteAckQueue(path=str(path), auto_commit=True)
 
 
