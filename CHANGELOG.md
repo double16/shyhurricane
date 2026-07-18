@@ -5,6 +5,8 @@
 ### Features
 
 - First release
+- Migrate generator setup from deprecated `OpenAIGenerator`, `AmazonBedrockGenerator`, and `OllamaGenerator`
+  to chat-based generators.
 
 ### Fixes
 

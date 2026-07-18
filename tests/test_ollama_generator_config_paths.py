@@ -80,7 +80,7 @@ def test_ollama_version_check_accepts_new_versions_and_rejects_errors(monkeypatc
 
 def test_ollama_generator_and_embedders_use_ollama_components(monkeypatch):
     pulls = []
-    monkeypatch.setattr(generator_config, "OllamaGenerator", FakeComponent)
+    monkeypatch.setattr(generator_config, "OllamaChatGenerator", FakeComponent)
     monkeypatch.setattr(generator_config, "OllamaDocumentEmbedder", FakeComponent)
     monkeypatch.setattr(generator_config, "OllamaTextEmbedder", FakeComponent)
     monkeypatch.setattr(GeneratorConfig, "_embedder_enable_ollama", lambda self: True)
@@ -93,7 +93,7 @@ def test_ollama_generator_and_embedders_use_ollama_components(monkeypatch):
     doc_embedder = config.create_document_embedder(model)
     text_embedder = config.create_text_embedder(model)
 
-    assert generator.kwargs == {
+    assert generator.chat_generator.kwargs == {
         "url": "http://ollama:11434",
         "model": "llama3.2:3b",
         "generation_kwargs": {"temperature": 0.5, "num_ctx": 4096},
