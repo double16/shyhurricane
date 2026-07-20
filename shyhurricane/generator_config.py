@@ -8,7 +8,6 @@ import requests
 from google.genai import Client
 from google.genai.types import HttpOptions, HttpRetryOptions
 from haystack.components.embedders import SentenceTransformersDocumentEmbedder, SentenceTransformersTextEmbedder
-from haystack.components.generators import OpenAIGenerator
 from haystack.core.component import Component
 from haystack.utils import Secret
 from haystack import component, Document
@@ -19,9 +18,10 @@ from haystack_integrations.components.embedders.fastembed import FastembedSparse
     FastembedSparseTextEmbedder
 from haystack_integrations.components.embedders.google_genai import GoogleGenAIDocumentEmbedder, GoogleGenAITextEmbedder
 from haystack_integrations.components.embedders.ollama import OllamaDocumentEmbedder, OllamaTextEmbedder
-from haystack_integrations.components.generators.amazon_bedrock import AmazonBedrockGenerator
+from haystack_integrations.components.generators.amazon_bedrock import AmazonBedrockChatGenerator
 from haystack_integrations.components.generators.google_genai.chat.chat_generator import GoogleGenAIChatGenerator
-from haystack_integrations.components.generators.ollama import OllamaGenerator
+from haystack_integrations.components.generators.ollama import OllamaChatGenerator
+from haystack.components.generators.chat import OpenAIChatGenerator
 from pydantic import BaseModel, Field
 
 from shyhurricane.doc_type_model_map import ModelConfig
@@ -65,6 +65,34 @@ class GoogleGenAIChatGeneratorWithRetry(GoogleGenAIChatGenerator):
                 )
             )
         )
+
+
+@component
+class ChatGeneratorCompatibilityWrapper:
+    def __init__(self, chat_generator):
+        self.chat_generator = chat_generator
+
+    @component.output_types(replies=List[str])
+    def run(
+            self,
+            prompt: str,
+            system_prompt: Optional[str] = None,
+            generation_kwargs: Optional[Dict[str, Any]] = None,
+            streaming_callback: Optional[StreamingCallbackT] = None,
+    ) -> Dict[str, Any]:
+        messages = []
+        if system_prompt:
+            messages.append(ChatMessage.from_system(system_prompt))
+        messages.append(ChatMessage.from_user(prompt))
+        chat_result = self.chat_generator.run(
+            messages=messages,
+            generation_kwargs=generation_kwargs,
+            streaming_callback=streaming_callback,
+        )
+        text_result = []
+        for reply in chat_result.get("replies", []):
+            text_result.extend(reply.texts)
+        return {"replies": text_result}
 
 
 @component
@@ -175,10 +203,12 @@ class GeneratorConfig(BaseModel):
             _generation_kwargs = {
                 "temperature": temperature or self.temperature,
             }
-            return OpenAIGenerator(
-                model=self.openai_model,
-                generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
-                max_retries=10,
+            return ChatGeneratorCompatibilityWrapper(
+                OpenAIChatGenerator(
+                    model=self.openai_model,
+                    generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
+                    max_retries=10,
+                )
             )
         elif self.gemini_model:
             logger.info("Using Google Gemini generator with model %s", self.gemini_model)
@@ -194,9 +224,11 @@ class GeneratorConfig(BaseModel):
             _generation_kwargs = {
                 "temperature": temperature or self.temperature,
             }
-            return AmazonBedrockGenerator(
-                model=self.bedrock_model,
-                generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
+            return ChatGeneratorCompatibilityWrapper(
+                AmazonBedrockChatGenerator(
+                    model=self.bedrock_model,
+                    generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
+                )
             )
         elif self.ollama_model:
             _generation_kwargs = {
@@ -204,10 +236,12 @@ class GeneratorConfig(BaseModel):
             }
             logger.info("Using Ollama generator with model %s at %s", self.ollama_model, self.ollama_host)
             self.ollama_pull(self.ollama_model)
-            return OllamaGenerator(
-                url=self.ollama_url(),
-                model=self.ollama_model,
-                generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
+            return ChatGeneratorCompatibilityWrapper(
+                OllamaChatGenerator(
+                    url=self.ollama_url(),
+                    model=self.ollama_model,
+                    generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
+                )
             )
         else:
             raise NotImplementedError

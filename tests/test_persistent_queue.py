@@ -37,6 +37,7 @@ def test_get_persistent_queue_sanitizes_db_name_and_uses_user_state_dir(monkeypa
 
     class FakeSQLiteAckQueue:
         def __init__(self, path, auto_commit):
+            assert Path(path).is_dir()
             captured["path"] = path
             captured["auto_commit"] = auto_commit
 
@@ -50,7 +51,40 @@ def test_get_persistent_queue_sanitizes_db_name_and_uses_user_state_dir(monkeypa
     assert isinstance(queue, FakeSQLiteAckQueue)
     assert captured["auto_commit"] is True
     assert captured["path"] == str(tmp_path / ".local/state/shyhurricane/prod_db_2026/ingest_queue")
-    assert (tmp_path / ".local/state/shyhurricane/prod_db_2026").is_dir()
+    assert (tmp_path / ".local/state/shyhurricane/prod_db_2026/ingest_queue").is_dir()
+
+
+def test_get_persistent_queue_allows_existing_queue_directory(monkeypatch, tmp_path):
+    queue_path = tmp_path / ".local/state/shyhurricane/db/doc_type_queue"
+    queue_path.mkdir(parents=True)
+    calls = []
+
+    class FakeSQLiteAckQueue:
+        def __init__(self, path, auto_commit):
+            calls.append((path, auto_commit))
+
+    monkeypatch.setattr(persistent_queue.os.path, "exists",
+                        lambda path: False if path == "/data" else Path(path).exists())
+    monkeypatch.setattr(persistent_queue.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(persistent_queue.persistqueue, "SQLiteAckQueue", FakeSQLiteAckQueue)
+
+    persistent_queue.get_persistent_queue("db", "doc_type_queue")
+    persistent_queue.get_persistent_queue("db", "doc_type_queue")
+
+    assert calls == [(str(queue_path), True), (str(queue_path), True)]
+
+
+def test_get_persistent_queue_rejects_file_at_queue_path(monkeypatch, tmp_path):
+    queue_path = tmp_path / ".local/state/shyhurricane/db/doc_type_queue"
+    queue_path.parent.mkdir(parents=True)
+    queue_path.write_text("not a directory")
+
+    monkeypatch.setattr(persistent_queue.os.path, "exists",
+                        lambda path: False if path == "/data" else Path(path).exists())
+    monkeypatch.setattr(persistent_queue.Path, "home", lambda: tmp_path)
+
+    with pytest.raises(FileExistsError):
+        persistent_queue.get_persistent_queue("db", "doc_type_queue")
 
 
 def test_persistent_queue_get_acks_none_and_yields_next_item():

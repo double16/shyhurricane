@@ -2,10 +2,11 @@ import argparse
 
 import pytest
 from haystack import Document
+from haystack.dataclasses import ChatMessage
 
 import shyhurricane.generator_config as generator_config
 from shyhurricane.doc_type_model_map import ModelConfig
-from shyhurricane.generator_config import GeneratorConfig, safe_embedder
+from shyhurricane.generator_config import GeneratorConfig, ChatGeneratorCompatibilityWrapper, safe_embedder
 
 
 class FakeComponent:
@@ -89,17 +90,18 @@ def test_embedder_model_name_to_path_for_providers(monkeypatch):
 
 
 def test_create_generator_selects_provider(monkeypatch):
-    monkeypatch.setattr(generator_config, "OpenAIGenerator", FakeComponent)
+    monkeypatch.setattr(generator_config, "OpenAIChatGenerator", FakeComponent)
     monkeypatch.setattr(generator_config, "GoogleGenAIGeneratorWithRetry", FakeComponent)
-    monkeypatch.setattr(generator_config, "AmazonBedrockGenerator", FakeComponent)
-    monkeypatch.setattr(generator_config, "OllamaGenerator", FakeComponent)
+    monkeypatch.setattr(generator_config, "AmazonBedrockChatGenerator", FakeComponent)
+    monkeypatch.setattr(generator_config, "OllamaChatGenerator", FakeComponent)
     monkeypatch.setattr(GeneratorConfig, "ollama_pull", lambda self, model: None)
 
-    assert GeneratorConfig(openai_model="gpt-5-test").create_generator().kwargs["generation_kwargs"][
+    assert GeneratorConfig(openai_model="gpt-5-test").create_generator().chat_generator.kwargs["generation_kwargs"][
                "temperature"] == 1.0
     assert GeneratorConfig(gemini_model="gemini").create_generator().kwargs["model"] == "gemini"
-    assert GeneratorConfig(bedrock_model="bedrock").create_generator().kwargs["model"] == "bedrock"
-    assert GeneratorConfig(ollama_model="llama", ollama_host="host").create_generator().kwargs["model"] == "llama"
+    assert GeneratorConfig(bedrock_model="bedrock").create_generator().chat_generator.kwargs["model"] == "bedrock"
+    assert GeneratorConfig(ollama_model="llama", ollama_host="host").create_generator().chat_generator.kwargs[
+               "model"] == "llama"
 
     with pytest.raises(NotImplementedError):
         GeneratorConfig().create_generator()
@@ -151,3 +153,25 @@ def test_safe_embedder_returns_embedded_docs_or_original_on_error():
 
     assert safe_embedder(Working(), docs)[0].content == "embedded"
     assert safe_embedder(Broken(), docs) is docs
+
+
+def test_chat_generator_compatibility_wrapper_converts_chat_replies():
+    class ChatGenerator:
+        def run(self, **kwargs):
+            return {"replies": [ChatMessage.from_assistant("one"), ChatMessage.from_assistant("two")]}
+
+    wrapper = ChatGeneratorCompatibilityWrapper(ChatGenerator())
+    result = wrapper.run(prompt="user", system_prompt="system")
+
+    assert result == {"replies": ["one", "two"]}
+
+
+def test_chat_generator_compatibility_wrapper_handles_empty_replies():
+    class ChatGenerator:
+        def run(self, **kwargs):
+            return {"replies": []}
+
+    wrapper = ChatGeneratorCompatibilityWrapper(ChatGenerator())
+    result = wrapper.run(prompt="user")
+
+    assert result == {"replies": []}
