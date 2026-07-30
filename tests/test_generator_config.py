@@ -29,6 +29,8 @@ def test_generator_config_from_env_args_defaults_check_and_describe(monkeypatch)
         gemini_model=None,
         openai_model=None,
         bedrock_model=None,
+        litellm_model="openai/gpt-test",
+        litellm_api_base=None,
         temperature=0.3,
     ))
 
@@ -37,10 +39,25 @@ def test_generator_config_from_env_args_defaults_check_and_describe(monkeypatch)
     assert env_config.temperature == 0.7
     assert args_config.ollama_model == "llama"
     assert args_config.openai_model == "gpt-test"
+    assert args_config.litellm_model == "openai/gpt-test"
     assert env_config.check() is env_config
     assert env_config.describe() == "OpenAI gpt-test"
     assert GeneratorConfig(ollama_model="llama",
                            ollama_host="ollama:11434").describe() == "Ollama llama at ollama:11434"
+
+
+def test_generator_config_supports_litellm(monkeypatch):
+    monkeypatch.setenv("LITELLM_MODEL", "openai/gpt-4.1-mini")
+    monkeypatch.setenv("LITELLM_API_BASE", "https://litellm.example/v1")
+    monkeypatch.setenv("LITELLM_API_KEY", "test-key")
+
+    config = GeneratorConfig.from_env()
+
+    assert config.litellm_model == "openai/gpt-4.1-mini"
+    assert config.litellm_api_base == "https://litellm.example/v1"
+    assert config.litellm_api_key == "test-key"
+    assert config.check() is config
+    assert config.describe() == "LiteLLM openai/gpt-4.1-mini"
 
 
 def test_apply_summarizing_default_picks_available_provider(monkeypatch):
@@ -91,6 +108,7 @@ def test_embedder_model_name_to_path_for_providers(monkeypatch):
 
 def test_create_generator_selects_provider(monkeypatch):
     monkeypatch.setattr(generator_config, "OpenAIChatGenerator", FakeComponent)
+    monkeypatch.setattr(generator_config, "LiteLLMChatGenerator", FakeComponent)
     monkeypatch.setattr(generator_config, "GoogleGenAIGeneratorWithRetry", FakeComponent)
     monkeypatch.setattr(generator_config, "AmazonBedrockChatGenerator", FakeComponent)
     monkeypatch.setattr(generator_config, "OllamaChatGenerator", FakeComponent)
@@ -98,6 +116,11 @@ def test_create_generator_selects_provider(monkeypatch):
 
     assert GeneratorConfig(openai_model="gpt-5-test").create_generator().chat_generator.kwargs["generation_kwargs"][
                "temperature"] == 1.0
+    assert GeneratorConfig(litellm_model="openai/gpt-4.1-mini").create_generator().chat_generator.kwargs[
+               "model"] == "openai/gpt-4.1-mini"
+    assert GeneratorConfig(litellm_model="openai/gpt-4.1-mini",
+                           litellm_api_base="https://litellm.example/v1").create_generator().chat_generator.kwargs[
+               "api_base_url"] == "https://litellm.example/v1"
     assert GeneratorConfig(gemini_model="gemini").create_generator().kwargs["model"] == "gemini"
     assert GeneratorConfig(bedrock_model="bedrock").create_generator().chat_generator.kwargs["model"] == "bedrock"
     assert GeneratorConfig(ollama_model="llama", ollama_host="host").create_generator().chat_generator.kwargs[

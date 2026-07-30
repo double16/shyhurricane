@@ -36,7 +36,7 @@ The following tools are provided:
 
 ## Install
 
-The MCP server itself uses an LLM for light tasks such that the `llama3.2:3b` model is sufficient. Ollama is recommended but not required. OpenAI and Google AI models are also supported. Docker is required for tool specific commands such as spidering and directory busting.
+The MCP server itself uses an LLM for light tasks such that the `llama3.2:3b` model is sufficient. Ollama is recommended but not required. OpenAI, Google AI, AWS Bedrock, and LiteLLM models are supported. Docker is required for tool specific commands such as spidering and directory busting.
 
 ### Docker Desktop or colima
 
@@ -57,22 +57,19 @@ It is best to run `nmap` on the host. If not installed on the host, the docker c
 
 #### As a Docker Service
 
-Configure your desired provider and model in `.env`:
+Configure one desired provider and model in `.env`:
 
-```shell
-OLLAMA_MODEL=llama3.2:3b
-OLLAMA_HOST=192.168.253.100:11434
+| Provider | Model variable | Credential and connection variables |
+| --- | --- | --- |
+| Ollama | `OLLAMA_MODEL=llama3.2:3b` | `OLLAMA_HOST=192.168.253.100:11434` |
+| Google AI | `GEMINI_MODEL=gemini-2.5-pro` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
+| OpenAI | `OPENAI_MODEL=gpt-5-nano` | `OPENAI_API_KEY` |
+| AWS Bedrock | `BEDROCK_MODEL=us.meta.llama3-2-3b-instruct-v1:0` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` |
+| LiteLLM | `LITELLM_MODEL=anthropic/claude-sonnet-4-6` | `LITELLM_API_KEY`; optionally `LITELLM_API_BASE` for a LiteLLM proxy |
 
-GEMINI_API_KEY=
-GEMINI_MODEL=
-
-OPENAI_MODEL=
-OPENAI_API_KEY=
-
-BEDROCK_MODEL=
-AWS_ACCESS_KEY_ID=
-AWS_SECRET_ACCESS_KEY=
-```
+For a direct LiteLLM provider connection, omit `LITELLM_API_KEY` and supply the selected provider's
+standard credential environment variable, such as `ANTHROPIC_API_KEY`. When using Docker Compose, use
+`LITELLM_API_KEY` and `LITELLM_API_BASE` to connect to a LiteLLM proxy.
 
 Run the MCP server:
 
@@ -134,6 +131,12 @@ OpenAI:
 ```shell
 export OPENAI_API_KEY=xxxx
 python3 mcp_service.py --openai-model gpt-4-turbo
+```
+
+LiteLLM:
+```shell
+export ANTHROPIC_API_KEY=xxxx
+python3 mcp_service.py --litellm-model anthropic/claude-sonnet-4-6
 ```
 
 Google AI:

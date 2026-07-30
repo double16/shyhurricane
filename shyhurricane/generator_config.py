@@ -20,6 +20,7 @@ from haystack_integrations.components.embedders.google_genai import GoogleGenAID
 from haystack_integrations.components.embedders.ollama import OllamaDocumentEmbedder, OllamaTextEmbedder
 from haystack_integrations.components.generators.amazon_bedrock import AmazonBedrockChatGenerator
 from haystack_integrations.components.generators.google_genai.chat.chat_generator import GoogleGenAIChatGenerator
+from haystack_integrations.components.generators.litellm import LiteLLMChatGenerator
 from haystack_integrations.components.generators.ollama import OllamaChatGenerator
 from haystack.components.generators.chat import OpenAIChatGenerator
 from pydantic import BaseModel, Field
@@ -40,6 +41,12 @@ def add_generator_args(ap: argparse.ArgumentParser):
                     required=False)
     ap.add_argument("--openai-model",
                     help="Use OpenAI with the specified model (o4-mini is recommended), API key must be in env var OPENAI_API_KEY",
+                    required=False)
+    ap.add_argument("--litellm-model",
+                    help="Use LiteLLM with a provider-qualified model (for example anthropic/claude-sonnet-4-6); provide the provider's API key in its standard environment variable",
+                    required=False)
+    ap.add_argument("--litellm-api-base",
+                    help="Use this LiteLLM API base URL, for example a LiteLLM proxy URL",
                     required=False)
     ap.add_argument("--bedrock-model",
                     help="Use AWS Bedrock with the specified model (anthropic.claude-sonnet-4-5-20250929-v1:0 is recommended), AWS credentials must be provided in the same way as the aws cli",
@@ -130,6 +137,9 @@ class GeneratorConfig(BaseModel):
     ollama_model: Optional[str] = Field(description="The name of the Ollama model", default=None)
     gemini_model: Optional[str] = Field(description="The name of the Gemini model", default=None)
     openai_model: Optional[str] = Field(description="The name of the OpenAI model", default=None)
+    litellm_model: Optional[str] = Field(description="The provider-qualified LiteLLM model name", default=None)
+    litellm_api_base: Optional[str] = Field(description="The LiteLLM API base URL", default=None)
+    litellm_api_key: Optional[str] = Field(description="The LiteLLM API key", default=None)
     bedrock_model: Optional[str] = Field(description="The name of the AWS Bedrock model", default=None)
     temperature: float = Field(description="The temperature of the generator", default=TEMPERATURE_DEFAULT)
 
@@ -140,6 +150,9 @@ class GeneratorConfig(BaseModel):
             ollama_model=args.ollama_model or os.environ.get("OLLAMA_MODEL", None),
             gemini_model=args.gemini_model or os.environ.get("GEMINI_MODEL", None),
             openai_model=args.openai_model or os.environ.get("OPENAI_MODEL", None),
+            litellm_model=args.litellm_model or os.environ.get("LITELLM_MODEL", None),
+            litellm_api_base=args.litellm_api_base or os.environ.get("LITELLM_API_BASE", None),
+            litellm_api_key=os.environ.get("LITELLM_API_KEY", None),
             bedrock_model=args.bedrock_model or os.environ.get("BEDROCK_MODEL", None),
             temperature=args.temperature,
         )
@@ -152,6 +165,9 @@ class GeneratorConfig(BaseModel):
             ollama_model=os.environ.get("OLLAMA_MODEL", None),
             gemini_model=os.environ.get("GEMINI_MODEL", None),
             openai_model=os.environ.get("OPENAI_MODEL", None),
+            litellm_model=os.environ.get("LITELLM_MODEL", None),
+            litellm_api_base=os.environ.get("LITELLM_API_BASE", None),
+            litellm_api_key=os.environ.get("LITELLM_API_KEY", None),
             bedrock_model=os.environ.get("BEDROCK_MODEL", None),
             temperature=float(os.environ.get("TEMPERATURE", str(TEMPERATURE_DEFAULT))),
         )
@@ -167,7 +183,7 @@ class GeneratorConfig(BaseModel):
 
     def apply_summarizing_default(self):
         self.ollama_host = self.ollama_host or OLLAMA_HOST_DEFAULT
-        if self.ollama_model or self.gemini_model or self.openai_model or self.bedrock_model:
+        if self.ollama_model or self.gemini_model or self.openai_model or self.litellm_model or self.bedrock_model:
             return self
         if os.environ.get("GEMINI_API_KEY", None) or os.environ.get("GOOGLE_API_KEY", None):
             self.gemini_model = "gemini-flash-lite-latest"
@@ -180,12 +196,14 @@ class GeneratorConfig(BaseModel):
         return self
 
     def check(self):
-        assert self.ollama_model or self.gemini_model or self.openai_model or self.bedrock_model
+        assert self.ollama_model or self.gemini_model or self.openai_model or self.litellm_model or self.bedrock_model
         return self
 
     def describe(self) -> str:
         if self.openai_model:
             return f"OpenAI {self.openai_model}"
+        elif self.litellm_model:
+            return f"LiteLLM {self.litellm_model}"
         elif self.gemini_model:
             return f"Gemini {self.gemini_model}"
         elif self.bedrock_model:
@@ -208,6 +226,19 @@ class GeneratorConfig(BaseModel):
                     model=self.openai_model,
                     generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
                     max_retries=10,
+                )
+            )
+        elif self.litellm_model:
+            logger.info("Using LiteLLM generator with model %s", self.litellm_model)
+            _generation_kwargs = {
+                "temperature": temperature or self.temperature,
+            }
+            return ChatGeneratorCompatibilityWrapper(
+                LiteLLMChatGenerator(
+                    model=self.litellm_model,
+                    api_key=Secret.from_token(self.litellm_api_key) if self.litellm_api_key else None,
+                    api_base_url=self.litellm_api_base,
+                    generation_kwargs=_generation_kwargs | (generation_kwargs or {}),
                 )
             )
         elif self.gemini_model:
