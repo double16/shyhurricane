@@ -45,6 +45,7 @@ dependencies = [
     "einops~=0.8.1",
     "cachetools~=7.1.4",
     "pydantic",
+    "litellm-haystack>=1.1.2",
 ]
 
 [project.optional-dependencies]
