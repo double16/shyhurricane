@@ -122,6 +122,10 @@ docker build -t ghcr.io/double16/shyhurricane_unix_command:main src/docker/unix_
 
 #### MCP Server
 
+When started from an interactive terminal, the server displays a `shyhurricane` monitoring dashboard with
+configuration, queue, database, indexing, and running MCP tool information. Press `q` to stop the
+dashboard and shut down the server. Non-interactive starts, including Docker Compose, continue to use normal logging output.
+
 Ollama with `llama3.2:3b`:
 ```shell
 python3 mcp_service.py

@@ -65,3 +65,21 @@ def get_ingest_queue(db: str) -> persistqueue.SQLiteAckQueue:
 
 def get_doc_type_queue(db: str) -> persistqueue.SQLiteAckQueue:
     return get_persistent_queue(db, "doc_type_queue")
+
+
+def active_queue_size(queue) -> int:
+    """Return the number of queued and currently processing items."""
+    ready_count = getattr(queue, "_count", None)
+    unack_count = getattr(queue, "unack_count", None)
+    if unack_count is not None and ready_count is not None:
+        try:
+            return unack_count() + ready_count()
+        except (NotImplementedError, OSError):
+            pass
+    total = getattr(queue, "total", None)
+    if total is not None:
+        try:
+            return total() if callable(total) else total
+        except (NotImplementedError, OSError):
+            pass
+    return queue.active_size()

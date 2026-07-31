@@ -32,6 +32,51 @@ class FakeQueue:
         self.shrink_calls += 1
 
 
+def test_active_queue_size_uses_total_unacknowledged_count():
+    class Queue:
+        def active_size(self):
+            return 10
+
+        total = 7
+
+        def unack_count(self):
+            return 2
+
+    assert persistent_queue.active_queue_size(Queue()) == 7
+
+
+def test_active_queue_size_reads_ready_and_processing_rows():
+    class Queue:
+        total = 10
+
+        def _count(self):
+            return 4
+
+        def unack_count(self):
+            return 2
+
+    assert persistent_queue.active_queue_size(Queue()) == 6
+
+
+def test_active_queue_size_falls_back_when_total_is_unavailable():
+    class Queue:
+        def active_size(self):
+            return 3
+
+        def total(self):
+            raise NotImplementedError
+
+    assert persistent_queue.active_queue_size(Queue()) == 3
+
+
+def test_active_queue_size_falls_back_for_non_ack_queue():
+    class Queue:
+        def active_size(self):
+            return 3
+
+    assert persistent_queue.active_queue_size(Queue()) == 3
+
+
 def test_get_persistent_queue_sanitizes_db_name_and_uses_user_state_dir(monkeypatch, tmp_path):
     captured = {}
 

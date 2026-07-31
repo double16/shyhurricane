@@ -63,12 +63,18 @@ class ServerContext:
         logger.info("Terminating ingest pool")
         self.ingest_pool.close()
         logger.info("Closing queues ...")
-        for q in [self.ingest_queue, self.task_queue, self.spider_result_queue, self.port_scan_result_queue]:
+        # The ingest queue is persistent. Adding a sentinel after terminating its
+        # workers leaves an unprocessed active item for the next server startup.
+        for q in [self.task_queue, self.spider_result_queue, self.port_scan_result_queue]:
             try:
                 q.put(None)
                 q.close()
             except Exception:
                 pass
+        try:
+            self.ingest_queue.close()
+        except Exception:
+            pass
         logger.info("ServerContext closed")
 
 
@@ -130,6 +136,16 @@ async def get_server_context() -> ServerContext:
         stderr=asyncio.subprocess.DEVNULL,
     )
 
+    # Start indexing before initializing the retrieval pipelines. Retrieval model
+    # loading can take minutes, and must not stall an existing indexing backlog.
+    generator_config = get_generator_config()
+    ingest_queue, ingest_pool = start_ingest_worker(
+        db=db,
+        generator_config=generator_config,
+        pool_size=server_config.ingest_pool_size,
+    )
+    task_worker_ipc = start_task_worker(db, ingest_queue.path, server_config.task_pool_size)
+
     if server_config.low_power:
         logger.warning("low_power: skipping embedding based retrieval pipelines")
         document_pipeline = None
@@ -138,15 +154,11 @@ async def get_server_context() -> ServerContext:
     else:
         document_pipeline, _, stores = await build_document_pipeline(
             db=db,
-            generator_config=get_generator_config(),
+            generator_config=generator_config,
         )
         website_context_pipeline = build_website_context_pipeline(
-            generator_config=get_generator_config(),
+            generator_config=generator_config,
         )
-
-    ingest_queue, ingest_pool = start_ingest_worker(db=db, generator_config=get_generator_config(),
-                                                    pool_size=server_config.ingest_pool_size)
-    task_worker_ipc = start_task_worker(db, ingest_queue.path, server_config.task_pool_size)
 
     _server_context = ServerContext(
         db=db,

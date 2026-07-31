@@ -17,6 +17,7 @@ from shyhurricane.server_config import get_server_config
 from shyhurricane.persistent_queue import persistent_queue_get, get_ingest_queue, \
     get_doc_type_queue
 from shyhurricane.utils import get_log_path, log_heap_stats, log_gpu_memory_summary
+from shyhurricane.task_queue.types import prepare_worker_process
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ if TYPE_CHECKING:
 
 
 def _ingest_worker(db: str, generator_config: GeneratorConfig):
+    prepare_worker_process()
     try:
         faulthandler.register(signal.SIGUSR1)
         logger.info(f"Index worker starting in PID {os.getpid()}")
@@ -132,6 +134,7 @@ def _doc_type_watcher(db: str, generator_config: GeneratorConfig):
     The watcher process maintains a doc type index process. It will start a new one if the process exits successfully,
     indicating it exited due to excessive memory usage.
     """
+    prepare_worker_process()
     process: Optional[multiprocessing.Process] = None
     try:
         faulthandler.register(signal.SIGUSR1)
@@ -175,11 +178,13 @@ def start_ingest_worker(db: str, generator_config: GeneratorConfig, pool_size: i
         for idx in range(pool_size):
             # these processes are heavy-weight
             process = multiprocessing.Process(target=_doc_type_watcher, args=(db, generator_config))
+            process._shyhurricane_monitor_process_group = os.environ.get("SHYHURRICANE_MONITOR") == "1"
             process.start()
             processes.append(process)
 
     # this is a light-weight process, we only need one
     ingest_process = multiprocessing.Process(target=_ingest_worker, args=(db, generator_config))
+    ingest_process._shyhurricane_monitor_process_group = os.environ.get("SHYHURRICANE_MONITOR") == "1"
     ingest_process.start()
     processes.append(ingest_process)
 
