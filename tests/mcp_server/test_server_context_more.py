@@ -47,7 +47,7 @@ def test_server_context_close_closes_pools_and_queues():
 
     assert ctx.task_pool.closed is True
     assert ctx.ingest_pool.closed is True
-    assert ctx.ingest_queue.items == [None]
+    assert ctx.ingest_queue.items == []
     assert ctx.task_queue.items == [None]
     assert ctx.spider_result_queue.items == [None]
     assert ctx.port_scan_result_queue.items == [None]

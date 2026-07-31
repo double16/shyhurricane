@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import multiprocessing
+import os
+import signal
 import time
 from multiprocessing import Process
-from typing import List, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from shyhurricane.utils import HttpResource, PortScanResults
 
@@ -124,11 +126,32 @@ class TaskPool:
     def close(self):
         for process in self.processes:
             try:
-                process.terminate()
+                if getattr(process, "_shyhurricane_monitor_process_group", False):
+                    os.killpg(process.pid, signal.SIGTERM)
+                else:
+                    process.terminate()
                 process.join()
                 process.close()
             except Exception:
                 pass
+
+
+def prepare_worker_process() -> None:
+    """Detach a monitor worker from the terminal before it starts processing tasks."""
+    if os.environ.get("SHYHURRICANE_MONITOR") == "1":
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        try:
+            os.setsid()
+        except OSError:
+            pass
+        with open(os.devnull, "w") as null_output:
+            os.dup2(null_output.fileno(), 1)
+            os.dup2(null_output.fileno(), 2)
+
+
+def run_worker(target: Callable[..., Any], *args: Any, **kwargs: Any) -> None:
+    prepare_worker_process()
+    target(*args, **kwargs)
 
 
 class TaskWorkerIPC:

@@ -27,11 +27,6 @@ class Store:
         return self.count
 
 
-class Record:
-    def __init__(self, meta):
-        self.payload = {"meta": meta}
-
-
 class StatusServerContext:
     db = "db"
     qdrant_client = object()
@@ -46,21 +41,15 @@ async def get_status_server_context():
     return StatusServerContext()
 
 
-async def fake_scroll(records):
-    for record in records:
-        yield record
-
-
 @pytest.mark.asyncio
 async def test_status_aggregates_counts_and_metadata(monkeypatch):
-    records = [
-        Record({"domain": "Example.com", "host": "WWW.Example.com"}),
-        Record({"domain": "example.com", "host": "api.example.com"}),
-        Record({"host": "api.example.com"}),
-    ]
     monkeypatch.setattr(status_tool, "get_server_context", get_status_server_context)
     monkeypatch.setattr(status_tool, "get_doc_type_queue", lambda db: Queue(5))
-    monkeypatch.setattr(status_tool, "scroll_qdrant_collection", lambda **kwargs: fake_scroll(records))
+
+    async def domain_and_host_counts(*args, **kwargs):
+        return {"example.com": 2}, {"www.example.com": 1, "api.example.com": 2}
+
+    monkeypatch.setattr(status_tool, "get_domain_and_host_counts", domain_and_host_counts)
 
     response = await status_tool.status(None)
     body = json.loads(response.body)

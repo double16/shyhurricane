@@ -19,7 +19,7 @@ from shyhurricane.task_queue.finding_worker import save_finding_worker, FindingC
 from shyhurricane.task_queue.port_scan_worker import port_scan_worker, PortScanContext
 from shyhurricane.task_queue.spider_worker import spider_worker
 from shyhurricane.task_queue.types import SpiderQueueItem, PortScanQueueItem, TaskWorkerIPC, DirBustingQueueItem, \
-    TaskPool, SaveFindingQueueItem, SpiderResultItem, DirBustingResultItem
+    TaskPool, SaveFindingQueueItem, SpiderResultItem, DirBustingResultItem, prepare_worker_process
 from shyhurricane.utils import PortScanResults
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,7 @@ def start_task_worker(db: str, ingest_queue_path: str, pool_size: int = 1) -> Ta
             "dir_busting_result_queue": dir_busting_result_queue,
             "generator_config": get_generator_config(),
         })
+        proc._shyhurricane_monitor_process_group = os.environ.get("SHYHURRICANE_MONITOR") == "1"
         proc.start()
         processes.append(proc)
     return TaskWorkerIPC(
@@ -61,6 +62,7 @@ def _task_router(db: str,
                  dir_busting_result_queue: Queue[DirBustingResultItem],
                  generator_config: GeneratorConfig,
                  ):
+    prepare_worker_process()
     try:
         faulthandler.register(signal.SIGUSR1)
         logger.info(f"Starting task router in PID {os.getpid()}")

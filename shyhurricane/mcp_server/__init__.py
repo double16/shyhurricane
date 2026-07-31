@@ -117,6 +117,7 @@ class ShyHurricaneFastMCP(FastMCP):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.open_world = True
+        self.running_tools: set[str] = set()
 
     async def list_tools(self) -> list[Tool]:
         logger.info("Listing tools")
@@ -134,6 +135,13 @@ class ShyHurricaneFastMCP(FastMCP):
 
             tools = list(filter(tool_filter, tools))
         return tools
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]):
+        self.running_tools.add(name)
+        try:
+            return await super().call_tool(name, arguments)
+        finally:
+            self.running_tools.discard(name)
 
 
 mcp_server_instructions = """
@@ -191,7 +199,7 @@ async def log_history(ctx: Context, data: Dict[str, Any]):
     data["timestamp"] = datetime.now().isoformat()
     try:
         data_str = json.dumps(data)
-    except:
+    except (TypeError, ValueError):
         data_str = repr(data)
     try:
         if ctx is None:
@@ -213,7 +221,7 @@ async def log_tool_history(ctx: Context, title: str, **kwargs):
     await log_history(ctx, data)
     try:
         data_str = json.dumps(data)
-    except:
+    except (TypeError, ValueError):
         data_str = repr(data)
     logger.info(f"{title}: {data_str}")
 

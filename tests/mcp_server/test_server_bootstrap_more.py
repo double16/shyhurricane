@@ -1,10 +1,12 @@
 import os
+import signal
 from types import SimpleNamespace
 
 import pytest
 
 import shyhurricane.mcp_server as mcp_server
 import shyhurricane.mcp_server.server_context as server_context
+from shyhurricane.task_queue.types import TaskPool, run_worker
 
 
 class Proc:
@@ -13,6 +15,31 @@ class Proc:
 
     async def wait(self):
         return self.return_code
+
+
+def test_task_pool_terminates_monitor_worker_process_groups(monkeypatch):
+    calls = []
+    process = SimpleNamespace(pid=1234, _shyhurricane_monitor_process_group=True,
+                              terminate=lambda: pytest.fail("terminate should not be called"),
+                              join=lambda: None, close=lambda: None)
+    monkeypatch.setenv("SHYHURRICANE_MONITOR", "1")
+    monkeypatch.setattr("shyhurricane.task_queue.types.os.killpg", lambda pid, sig: calls.append((pid, sig)))
+
+    TaskPool([process]).close()
+
+    assert calls == [(1234, signal.SIGTERM)]
+
+
+def test_run_worker_silences_output_in_monitor_mode(monkeypatch):
+    calls = []
+    monkeypatch.setenv("SHYHURRICANE_MONITOR", "1")
+    monkeypatch.setattr("shyhurricane.task_queue.types.signal.signal", lambda sig, handler: calls.append((sig, handler)))
+    monkeypatch.setattr("shyhurricane.task_queue.types.os.setsid", lambda: calls.append("setsid"))
+    monkeypatch.setattr("shyhurricane.task_queue.types.os.dup2", lambda source, target: calls.append(target))
+
+    run_worker(lambda: calls.append("worker"))
+
+    assert calls == [(signal.SIGINT, signal.SIG_IGN), "setsid", 1, 2, "worker"]
 
 
 @pytest.mark.asyncio
@@ -77,6 +104,33 @@ async def test_shyhurricane_fastmcp_filters_open_world_tools(monkeypatch):
     server.open_world = False
 
     assert [tool.name for tool in await server.list_tools()] == ["safe", "plain"]
+
+
+@pytest.mark.asyncio
+async def test_shyhurricane_fastmcp_tracks_running_tools_until_completion(monkeypatch):
+    async def call_tool(self, name, arguments):
+        assert server.running_tools == {"port_scan"}
+        return {"result": "complete"}
+
+    monkeypatch.setattr(mcp_server.FastMCP, "call_tool", call_tool)
+    server = mcp_server.ShyHurricaneFastMCP("test")
+
+    assert await server.call_tool("port_scan", {"target": "example.test"}) == {"result": "complete"}
+    assert server.running_tools == set()
+
+
+@pytest.mark.asyncio
+async def test_shyhurricane_fastmcp_removes_failed_tools_from_monitor(monkeypatch):
+    async def call_tool(self, name, arguments):
+        assert server.running_tools == {"port_scan"}
+        raise RuntimeError("failed")
+
+    monkeypatch.setattr(mcp_server.FastMCP, "call_tool", call_tool)
+    server = mcp_server.ShyHurricaneFastMCP("test")
+
+    with pytest.raises(RuntimeError, match="failed"):
+        await server.call_tool("port_scan", {"target": "example.test"})
+    assert server.running_tools == set()
 
 
 @pytest.mark.asyncio

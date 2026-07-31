@@ -219,6 +219,27 @@ async def scroll_qdrant_collection(
             yield record
 
 
+async def get_domain_and_host_counts(
+        qdrant_client: AsyncQdrantClient, version: int
+) -> tuple[dict[str, int], dict[str, int]]:
+    filters = qm.Filter(
+        must=[qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=version))]
+    )
+    domain_counts: dict[str, int] = {}
+    host_counts: dict[str, int] = {}
+    async for record in scroll_qdrant_collection(
+        qdrant_client=qdrant_client, index="network", fields=["meta"], scroll_filter=filters
+    ):
+        metadata = record.payload.get("meta", {})
+        if domain := metadata.get("domain"):
+            domain = domain.lower()
+            domain_counts[domain] = domain_counts.get(domain, 0) + 1
+        if host := metadata.get("host"):
+            host = host.lower()
+            host_counts[host] = host_counts.get(host, 0) + 1
+    return domain_counts, host_counts
+
+
 def create_qdrant_document_store(db: str, **kwargs) -> QdrantDocumentStore:
     payload_fields_to_index = [
         {"field_name": "meta.version", "field_schema": "integer"},
