@@ -1173,14 +1173,14 @@ wheels = [
 
 [[package]]
 name = "haystack-experimental"
-version = "0.19.0"
+version = "0.19.0.post1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "haystack-ai" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/71/a3/02eb86716f4856072feb852555f2d23855bb20c993264dcf4e83dfe87a8a/haystack_experimental-0.19.0.tar.gz", hash = "sha256:194f9074f9184a20d2f4efa7b5082dd33118bc886f87937d13e33616cd549067", size = 45328, upload-time = "2026-02-05T08:31:33.862Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a5/92/747d8955f3d6558a16d5b113814a074c05f04e1f6b2a1a1748028bc65032/haystack_experimental-0.19.0.post1.tar.gz", hash = "sha256:898a6974567655b345d0088900bbb6ac539124faec6e209d37307ee7aa6ec652", size = 45003, upload-time = "2026-07-28T14:57:20.257Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/58/c4/6719e1b03b72ab31729b556a47fe3df1ab7fa233b1d01182f0c5ddadfda6/haystack_experimental-0.19.0-py3-none-any.whl", hash = "sha256:ebe1691a4b8d06f934bad792ff95fb4b6858a2ae08f08519e9cf35b7b439b4bd", size = 63150, upload-time = "2026-02-05T08:31:34.683Z" },
+    { url = "https://files.pythonhosted.org/packages/98/b5/2bc81bbfbfa83ed8a7d123ddc079e1c0ac52a5b6cfd3876bd6ba579cf313/haystack_experimental-0.19.0.post1-py3-none-any.whl", hash = "sha256:b2d0a9548ff3a16de0138cbfc8dccd94a81eeec1315cc9f3fe304808a138610f", size = 62552, upload-time = "2026-07-28T14:57:18.706Z" },
 ]
 
 [[package]]
