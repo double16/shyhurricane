@@ -120,6 +120,36 @@ def test_wait_ready_returns_on_200_and_times_out(monkeypatch):
         db._wait_ready("http://127.0.0.1:6333", timeout_s=1)
 
 
+def test_find_available_port_uses_requested_host_and_closes_socket(monkeypatch):
+    calls = []
+
+    class Socket:
+        def getsockname(self):
+            return ("127.0.0.1", 49201)
+
+        def close(self):
+            calls.append("closed")
+
+    def create_server(address):
+        calls.append(address)
+        return Socket()
+
+    monkeypatch.setattr(db.socket, "create_server", create_server)
+
+    assert db._find_available_port("127.0.0.1") == 49201
+    assert calls == [("127.0.0.1", 0), "closed"]
+
+
+def test_find_available_port_propagates_binding_errors(monkeypatch):
+    def create_server(address):
+        raise OSError("address unavailable")
+
+    monkeypatch.setattr(db.socket, "create_server", create_server)
+
+    with pytest.raises(OSError, match="address unavailable"):
+        db._find_available_port("127.0.0.1")
+
+
 def docker_inspect(container_id="abc", running=True):
     return {
         "Id": container_id,
@@ -142,6 +172,8 @@ def test_start_qdrant_docker_creates_starts_reuses_and_errors(monkeypatch, tmp_p
 
     monkeypatch.setattr(db, "_inspect_container", inspect)
     monkeypatch.setattr(db, "_run", lambda cmd, check=True: commands.append(cmd))
+    ports = iter([49201, 49201, 49202])
+    monkeypatch.setattr(db, "_find_available_port", lambda host: next(ports))
 
     created = db._start_qdrant_docker(name="qdrant-test", storage_dir=str(tmp_path / "create"), pull=True)
     started = db._start_qdrant_docker(name="qdrant-test", storage_dir=str(tmp_path / "start"))
@@ -150,6 +182,9 @@ def test_start_qdrant_docker_creates_starts_reuses_and_errors(monkeypatch, tmp_p
     assert started.grpc_port == 63340
     assert ["docker", "pull", "qdrant/qdrant:latest"] in commands
     assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in commands)
+    create_command = next(cmd for cmd in commands if cmd[:3] == ["docker", "run", "-d"])
+    assert "127.0.0.1:49201:6333" in create_command
+    assert "127.0.0.1:49202:6334" in create_command
     assert ["docker", "start", "qdrant-test"] in commands
 
     monkeypatch.setattr(db, "_inspect_container", lambda name: {"State": {"Running": True}})

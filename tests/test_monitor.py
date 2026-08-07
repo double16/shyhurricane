@@ -6,10 +6,12 @@ from shyhurricane.db import get_domain_and_host_counts
 from shyhurricane.monitor import (
     MonitorData,
     collect_monitor_data,
+    format_configuration_panel,
     format_database_panel,
     format_domain_and_host_panel,
     top_counts,
 )
+from shyhurricane.health import HealthMonitor
 
 
 class Queue:
@@ -26,6 +28,11 @@ class Store:
 
     async def count_documents_async(self):
         return self.count
+
+
+class UnavailableStore:
+    async def count_documents_async(self):
+        raise ConnectionError("Qdrant is unavailable")
 
 
 def test_top_counts_limits_results_and_sorts_ties_by_name():
@@ -48,8 +55,12 @@ def test_format_domain_and_host_panel_includes_top_counts_and_empty_states():
         bound_address="127.0.0.1:8000",
         proxy_address="not started",
         model="Ollama llama3.2:3b at localhost:11434",
+        model_health=None,
         certificate_fingerprint=None,
         database="db",
+        qdrant_host_bind="127.0.0.1",
+        qdrant_http_port=49201,
+        qdrant_health=None,
         document_counts={},
         domain_count=2,
         host_count=0,
@@ -64,6 +75,102 @@ def test_format_domain_and_host_panel_includes_top_counts_and_empty_states():
         "[b]Domains and hosts[/b]\nDomains: 2\nHosts: 0\n[b]Top domains[/b]\n"
         "example.test: 4\nother.test: 2\n[b]Top hosts[/b]\nNo hosts indexed"
     )
+
+
+def test_format_configuration_panel_orders_dependencies_and_shows_health_indicators():
+    data = MonitorData(
+        bound_address="127.0.0.1:8000",
+        proxy_address="not started",
+        model="model",
+        model_health=True,
+        certificate_fingerprint=None,
+        database="qdrant",
+        qdrant_host_bind="127.0.0.1",
+        qdrant_http_port=49201,
+        qdrant_health=False,
+        document_counts={},
+        domain_count=0,
+        host_count=0,
+        top_domains=[],
+        top_hosts=[],
+        queue_sizes={},
+        recent_urls=[],
+        running_tools=[],
+    )
+
+    panel = format_configuration_panel(data)
+    assert panel.index("Model: model 🟢") < panel.index("Qdrant: qdrant 127.0.0.1:49201 🔴")
+    assert "Qdrant: qdrant 127.0.0.1:49201 🔴" in panel
+    assert "healthy" not in panel
+    assert "unhealthy" not in panel
+    assert "Host bind:" not in panel
+    assert "HTTP port:" not in panel
+
+
+def test_format_configuration_panel_marks_missing_qdrant_endpoint_unavailable():
+    data = MonitorData(
+        bound_address="127.0.0.1:8000",
+        proxy_address="not started",
+        model="model",
+        model_health=None,
+        certificate_fingerprint=None,
+        database="qdrant",
+        qdrant_host_bind=None,
+        qdrant_http_port=None,
+        qdrant_health=None,
+        document_counts={},
+        domain_count=0,
+        host_count=0,
+        top_domains=[],
+        top_hosts=[],
+        queue_sizes={},
+        recent_urls=[],
+        running_tools=[],
+    )
+
+    panel = format_configuration_panel(data)
+
+    assert "Qdrant: qdrant unavailable:unavailable (unavailable)" in panel
+
+
+def test_health_monitor_exposes_unavailable_then_per_service_results():
+    monitor = HealthMonitor(lambda: True, lambda: False)
+    assert monitor.qdrant_healthy is None
+    assert monitor.llm_healthy is None
+
+    assert monitor.check() is False
+    assert monitor.qdrant_healthy is True
+    assert monitor.llm_healthy is False
+
+
+def test_health_monitor_marks_connection_probe_errors_unhealthy():
+    def unavailable_qdrant():
+        raise ConnectionError("Qdrant is unavailable")
+
+    monitor = HealthMonitor(unavailable_qdrant, lambda: True)
+
+    assert monitor.check() is False
+    assert monitor.qdrant_healthy is False
+    assert monitor.llm_healthy is True
+    assert monitor.ready.is_set() is False
+
+
+def test_health_monitor_recovers_after_qdrant_probe_failure():
+    results = iter([ConnectionError("Qdrant is unavailable"), True])
+
+    def qdrant_probe():
+        result = next(results)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monitor = HealthMonitor(qdrant_probe, lambda: True)
+
+    assert monitor.check() is False
+    assert monitor.qdrant_healthy is False
+    assert monitor.check() is True
+    assert monitor.qdrant_healthy is True
+    assert monitor.ready.is_set() is True
 
 
 @pytest.mark.asyncio
@@ -113,6 +220,9 @@ async def test_collect_monitor_data_includes_runtime_configuration_and_statistic
         proxy_port=8010,
         proxy_ca_cert_path=certificate,
         qdrant_client=object(),
+        qdrant_host="127.0.0.1",
+        qdrant_port=49201,
+        health_monitor=SimpleNamespace(llm_healthy=True, qdrant_healthy=False),
     )
 
     async def recent_urls(*args, **kwargs):
@@ -141,8 +251,12 @@ async def test_collect_monitor_data_includes_runtime_configuration_and_statistic
         bound_address="127.0.0.1:8000",
         proxy_address="127.0.0.1:8010",
         model="OpenAI gpt-5-nano",
+        model_health=True,
         certificate_fingerprint=None,
         database="/tmp/shyhurricane.db",
+        qdrant_host_bind="127.0.0.1",
+        qdrant_http_port=49201,
+        qdrant_health=False,
         document_counts={"content": 12, "network": 8},
         domain_count=3,
         host_count=5,
@@ -168,6 +282,43 @@ async def test_collect_monitor_data_includes_runtime_configuration_and_statistic
 
 
 @pytest.mark.asyncio
+async def test_collect_monitor_data_tolerates_unavailable_qdrant_document_counts(monkeypatch):
+    context = SimpleNamespace(
+        db="qdrant:6333",
+        ingest_queue=Queue(0),
+        task_queue=Queue(0),
+        spider_result_queue=Queue(0),
+        port_scan_result_queue=Queue(0),
+        dir_busting_result_queue=Queue(0),
+        stores={"javascript": UnavailableStore()},
+        proxy_host=None,
+        proxy_port=None,
+        proxy_ca_cert_path=None,
+        qdrant_client=object(),
+        health_monitor=SimpleNamespace(llm_healthy=True, qdrant_healthy=False),
+    )
+
+    monkeypatch.setattr("shyhurricane.monitor.get_doc_type_queue", lambda db: Queue(0))
+    monkeypatch.setattr(
+        "shyhurricane.monitor.get_generator_config",
+        lambda: SimpleNamespace(describe=lambda: "model"),
+    )
+
+    async def recent_urls(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr("shyhurricane.monitor.get_recent_indexed_urls", recent_urls)
+    monkeypatch.setattr(
+        "shyhurricane.monitor.get_domain_and_host_counts", lambda *args: ({}, {}),
+    )
+
+    data = await collect_monitor_data(context, "127.0.0.1", 8000, [])
+
+    assert data.document_counts == {"javascript": 0}
+    assert data.qdrant_health is False
+
+
+@pytest.mark.asyncio
 async def test_collect_monitor_data_tolerates_unavailable_optional_data(monkeypatch):
     context = SimpleNamespace(
         db="qdrant:6333",
@@ -181,6 +332,7 @@ async def test_collect_monitor_data_tolerates_unavailable_optional_data(monkeypa
         proxy_port=None,
         proxy_ca_cert_path=None,
         qdrant_client=object(),
+        health_monitor=None,
     )
 
     monkeypatch.setattr("shyhurricane.monitor.get_doc_type_queue", lambda db: Queue(0))
@@ -204,6 +356,8 @@ async def test_collect_monitor_data_tolerates_unavailable_optional_data(monkeypa
 
     assert data.proxy_address == "not started"
     assert data.model == "Ollama llama3.2:3b at localhost:11434"
+    assert data.model_health is None
+    assert data.qdrant_health is None
     assert data.recent_urls == []
     assert data.domain_count == 0
     assert data.host_count == 0

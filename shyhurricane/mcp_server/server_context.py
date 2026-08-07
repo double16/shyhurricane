@@ -19,8 +19,9 @@ from shyhurricane.index.web_resources_pipeline import build_stores
 from shyhurricane.server_config import get_server_config
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.retrieval_pipeline import build_document_pipeline, build_website_context_pipeline
-from shyhurricane.db import create_qdrant_client, create_qdrant_document_store
+from shyhurricane.db import create_qdrant_client, create_qdrant_document_store, qdrant_host_port
 from shyhurricane.utils import unix_command_image
+from shyhurricane.health import HealthMonitor, qdrant_probe
 
 logger = logging.getLogger(__name__)
 
@@ -50,14 +51,19 @@ class ServerContext:
     stores: Dict[str, QdrantDocumentStore]
     qdrant_client: AsyncQdrantClient
     mcp_session_volume: str
+    qdrant_host: Optional[str] = None
+    qdrant_port: Optional[int] = None
     open_world: bool = True
     commands: Optional[List[str]] = None
     disable_elicitation: bool = False
     proxy_host: Optional[str] = None
     proxy_port: Optional[int] = None
     proxy_ca_cert_path: Optional[os.PathLike] = None
+    health_monitor: Optional[HealthMonitor] = None
 
     def close(self):
+        if self.health_monitor is not None:
+            self.health_monitor.close()
         logger.info("Terminating task pool")
         self.task_pool.close()
         logger.info("Terminating ingest pool")
@@ -108,6 +114,9 @@ async def get_server_context() -> ServerContext:
     os.makedirs(cache_path, exist_ok=True)
     disable_elicitation = bool(os.environ.get('DISABLE_ELICITATION', 'False'))
     qdrant_client = await create_qdrant_client(db=db)
+    qdrant_host, qdrant_port = qdrant_host_port(db)
+    health_monitor = HealthMonitor(lambda: qdrant_probe(qdrant_host, qdrant_port), lambda: True)
+    health_monitor.start()
 
     mcp_session_volume = "mcp_session"
 
@@ -143,6 +152,7 @@ async def get_server_context() -> ServerContext:
         db=db,
         generator_config=generator_config,
         pool_size=server_config.ingest_pool_size,
+        health_state=health_monitor.ready,
     )
     task_worker_ipc = start_task_worker(db, ingest_queue.path, server_config.task_pool_size)
 
@@ -175,8 +185,11 @@ async def get_server_context() -> ServerContext:
         stores=stores,
         qdrant_client=qdrant_client,
         mcp_session_volume=mcp_session_volume,
+        qdrant_host=qdrant_host,
+        qdrant_port=qdrant_port,
         disable_elicitation=disable_elicitation,
         open_world=server_config.open_world,
+        health_monitor=health_monitor,
     )
 
     return _server_context
