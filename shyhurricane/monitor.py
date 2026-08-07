@@ -21,8 +21,12 @@ class MonitorData:
     bound_address: str
     proxy_address: str
     model: str
+    model_health: bool | None
     certificate_fingerprint: str | None
     database: str
+    qdrant_host_bind: str | None
+    qdrant_http_port: int | None
+    qdrant_health: bool | None
     document_counts: dict[str, int]
     domain_count: int
     host_count: int
@@ -102,11 +106,33 @@ def format_domain_and_host_panel(data: MonitorData) -> str:
     )
 
 
+def health_label(healthy: bool | None) -> str:
+    if healthy is None:
+        return "(unavailable)"
+    return "🟢" if healthy else "🔴"
+
+
+def format_configuration_panel(data: MonitorData) -> str:
+    fingerprint = data.certificate_fingerprint or "unavailable"
+    qdrant_host_bind = data.qdrant_host_bind or "unavailable"
+    qdrant_http_port = data.qdrant_http_port if data.qdrant_http_port is not None else "unavailable"
+    return (
+        "[b]Configuration[/b]\n"
+        f"Model: {data.model} {health_label(data.model_health)}\n"
+        f"Qdrant: {data.database} {qdrant_host_bind}:{qdrant_http_port} {health_label(data.qdrant_health)}\n"
+        f"MCP: {data.bound_address}\n"
+        f"Proxy: {data.proxy_address}\nTLS SHA-256: {fingerprint}"
+    )
+
+
 async def collect_monitor_data(server_context, host: str, port: int, running_tools: Iterable[str]) -> MonitorData:
-    document_counts = {
-        collection_name: await store.count_documents_async()
-        for collection_name, store in server_context.stores.items()
-    }
+    document_counts = {}
+    for collection_name, store in server_context.stores.items():
+        try:
+            document_counts[collection_name] = await store.count_documents_async()
+        except Exception:
+            logger.debug("Unable to load document count for %s", collection_name, exc_info=True)
+            document_counts[collection_name] = 0
     queues = {
         "index": queue_size(server_context.ingest_queue),
         "type-specific index": queue_size(get_doc_type_queue(server_context.db)),
@@ -133,12 +159,17 @@ async def collect_monitor_data(server_context, host: str, port: int, running_too
         logger.debug("Unable to load domain and host counts", exc_info=True)
         domain_count, host_count = 0, 0
         top_domains, top_hosts = [], []
+    health_monitor = getattr(server_context, "health_monitor", None)
     return MonitorData(
         bound_address=f"{host}:{port}",
         proxy_address=proxy_address,
         model=get_generator_config().describe(),
+        model_health=health_monitor.llm_healthy if health_monitor is not None else None,
         certificate_fingerprint=certificate_fingerprint(server_context.proxy_ca_cert_path),
         database=server_context.db,
+        qdrant_host_bind=getattr(server_context, "qdrant_host", None),
+        qdrant_http_port=getattr(server_context, "qdrant_port", None),
+        qdrant_health=health_monitor.qdrant_healthy if health_monitor is not None else None,
         document_counts=document_counts,
         domain_count=domain_count,
         host_count=host_count,
@@ -187,11 +218,7 @@ class MonitorApp(App[None]):
         data = await collect_monitor_data(
             self.server_context, self.host, self.port, self.server.running_tools
         )
-        fingerprint = data.certificate_fingerprint or "unavailable"
-        self.query_one("#configuration", Static).update(
-            f"[b]Configuration[/b]\nModel: {data.model}\nMCP: {data.bound_address}\nProxy: {data.proxy_address}\n"
-            f"TLS SHA-256: {fingerprint}\nQdrant: {data.database}"
-        )
+        self.query_one("#configuration", Static).update(format_configuration_panel(data))
         queues = "\n".join(f"{name}: {size}" for name, size in data.queue_sizes.items())
         self.query_one("#queues", Static).update(f"[b]Queue status[/b]\n{queues}")
         self.query_one("#database", Static).update(format_database_panel(data.document_counts))

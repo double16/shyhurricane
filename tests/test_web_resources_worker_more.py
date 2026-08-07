@@ -42,10 +42,34 @@ class Pipeline:
         return self.output
 
 
+class HealthState:
+    def __init__(self, healthy=False):
+        self.healthy = healthy
+        self.wait_calls = 0
+
+    def is_set(self):
+        return self.healthy
+
+    def wait(self, timeout):
+        self.wait_calls += 1
+        self.healthy = True
+
+
 def finite_queue(items):
     for item in items:
         yield item
     raise KeyboardInterrupt
+
+
+def test_wait_for_health_blocks_until_state_recovers():
+    health_state = HealthState()
+
+    assert web_resources._wait_for_health(health_state) is True
+    assert health_state.wait_calls == 1
+
+
+def test_wait_for_health_accepts_missing_state():
+    assert web_resources._wait_for_health(None) is True
 
 
 def test_ingest_worker_acks_and_queues_content_documents(monkeypatch, tmp_path):
@@ -142,7 +166,7 @@ def test_start_ingest_worker_respects_low_power(monkeypatch):
 
     assert returned_queue is queue
     assert len(processes) == 1
-    assert processes[0].target is web_resources._ingest_worker
+    assert processes[0].target is web_resources._ingest_watcher
     assert len(pool.processes) == 1
 
 
@@ -171,7 +195,7 @@ def test_start_ingest_worker_starts_doc_type_watchers_when_enabled(monkeypatch):
     assert [p.target for p in processes] == [
         web_resources._doc_type_watcher,
         web_resources._doc_type_watcher,
-        web_resources._ingest_worker,
+        web_resources._ingest_watcher,
     ]
     assert len(pool.processes) == 3
 
@@ -205,6 +229,47 @@ def test_doc_type_watcher_restarts_on_zero_exit_and_closes(monkeypatch):
     monkeypatch.setattr(web_resources.multiprocessing, "Process", Process)
 
     web_resources._doc_type_watcher("db", object())
+
+    assert len(processes) == 2
+    assert all(process.closed for process in processes)
+
+
+def test_ingest_watcher_restarts_after_health_recovers(monkeypatch):
+    processes = []
+    exitcodes = iter([0, 1])
+
+    class HealthState:
+        def __init__(self):
+            self.healthy = False
+
+        def is_set(self):
+            return self.healthy
+
+        def wait(self, timeout):
+            self.healthy = True
+
+    class Process:
+        def __init__(self, target, args):
+            self.exitcode = next(exitcodes)
+            self.closed = False
+            processes.append(self)
+
+        def start(self):
+            pass
+
+        def join(self):
+            pass
+
+        def terminate(self):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(web_resources, "prepare_worker_process", lambda: None)
+    monkeypatch.setattr(web_resources.multiprocessing, "Process", Process)
+
+    web_resources._ingest_watcher("db", object(), HealthState())
 
     assert len(processes) == 2
     assert all(process.closed for process in processes)

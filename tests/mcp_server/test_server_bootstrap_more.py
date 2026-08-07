@@ -195,6 +195,7 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
     monkeypatch.setattr(server_context, "get_server_config", lambda: Config())
     monkeypatch.setattr(server_context, "create_qdrant_document_store", create_store)
     monkeypatch.setattr(server_context, "create_qdrant_client", create_client)
+    monkeypatch.setattr(server_context, "qdrant_host_port", lambda db: ("127.0.0.1", 49201))
     monkeypatch.setattr(server_context, "build_stores", lambda db: stores)
     monkeypatch.setattr(server_context.subprocess, "check_call", lambda *args, **kwargs: None)
     monkeypatch.setattr(server_context.asyncio, "create_subprocess_exec", create_subprocess_exec)
@@ -208,6 +209,7 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
     assert ctx.website_context_pipeline is None
     assert ctx.stores is stores
     assert ctx.qdrant_client == "client"
+    assert (ctx.qdrant_host, ctx.qdrant_port) == ("127.0.0.1", 49201)
     assert ctx.open_world is False
     assert ctx.cache_path == os.path.join(str(tmp_path), "tool_cache")
     assert doc_stores and all(store.initialized for store in doc_stores)

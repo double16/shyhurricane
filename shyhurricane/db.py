@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import json
+import socket
 import subprocess
 import time
 import requests
@@ -72,6 +73,14 @@ def _get_published_port(inspect: dict, container_port: str) -> Tuple[str, int]:
     return host_ip, int(host_port)
 
 
+def _find_available_port(host: str) -> int:
+    listener = socket.create_server((host, 0))
+    try:
+        return listener.getsockname()[1]
+    finally:
+        listener.close()
+
+
 def _start_qdrant_docker(
         *,
         name: str = "qdrant-shyhurricane-db",
@@ -87,7 +96,7 @@ def _start_qdrant_docker(
         - If running: reuse it.
         - If stopped: start it.
       (No recreation, no port changes.)
-    - If it doesn't exist: create it with auto-assigned host ports, bound to `host_bind`.
+    - If it doesn't exist: create it with available host ports, bound to `host_bind`.
     - Returns the bound host ports discovered via docker inspect.
     """
     storage = Path(storage_dir).resolve()
@@ -98,7 +107,10 @@ def _start_qdrant_docker(
 
     inspect = _inspect_container(name)
     if inspect is None:
-        # Auto-assign host ports by leaving host port empty, but still bind to localhost
+        http_host_port = _find_available_port(host_bind)
+        grpc_host_port = _find_available_port(host_bind)
+        while grpc_host_port == http_host_port:
+            grpc_host_port = _find_available_port(host_bind)
         _run(
             [
                 "docker",
@@ -107,9 +119,9 @@ def _start_qdrant_docker(
                 "--name",
                 name,
                 "-p",
-                f"{host_bind}::{http_container_port}",
+                f"{host_bind}:{http_host_port}:{http_container_port}",
                 "-p",
-                f"{host_bind}::{grpc_container_port}",
+                f"{host_bind}:{grpc_host_port}:{grpc_container_port}",
                 "-v",
                 f"{str(storage)}:/qdrant/storage:rw",
                 image,
