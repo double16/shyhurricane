@@ -22,7 +22,8 @@ RUN echo 'path-exclude=/usr/share/doc/*'        >  /etc/dpkg/dpkg.cfg.d/excludes
     echo 'path-include=/usr/share/doc/*/copyright' >> /etc/dpkg/dpkg.cfg.d/excludes
 
 RUN apt-get update &&\
-    apt-get install -y --no-install-recommends rsync nmap curl feroxbuster ffuf nodejs npm mitmproxy python3-pip python3-virtualenv jq seclists &&\
+    apt-get install -y --no-install-recommends rsync nmap curl feroxbuster ffuf nodejs npm mitmproxy python3-pip python3-virtualenv jq seclists \
+    build-essential gcc g++ python3-dev libffi-dev &&\
     apt-get clean
 
 # Install opengrep (fork of semgrep that is open)
