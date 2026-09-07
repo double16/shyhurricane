@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 # https://docs.docker.com/engine/install/debian/
 RUN apt update &&\

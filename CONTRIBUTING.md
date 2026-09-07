@@ -3,7 +3,7 @@
 python3 virtualenv:
 
 ```shell
-$(command -v python3.12) -m venv .venv
+$(command -v python3.14) -m venv .venv
 source .venv/bin/activate
 uv sync --all-extras
 ```

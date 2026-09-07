@@ -1,4 +1,4 @@
-brew "python@3.12"
+brew "python@3.14"
 brew "uv"
 brew "virtualenv"
 brew "docker"
