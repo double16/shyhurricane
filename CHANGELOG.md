@@ -21,4 +21,3 @@
 - Keep the monitoring dashboard running when Qdrant disconnects while loading document counts.
 - Keep the health monitor alive when Qdrant disconnects during a health check.
 - Prevent persistent queue workers from racing to create queue directories during first-time initialization.
-
