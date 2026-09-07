@@ -16,7 +16,7 @@ Signed-By: /etc/apt/keyrings/docker.asc
 EOF
 
 RUN apt update &&\
-    apt install -y --no-install-recommends docker-ce-cli curl nmap haveged &&\
+    apt install -y --no-install-recommends build-essential docker-ce-cli curl nmap haveged &&\
     apt clean
 
 WORKDIR /app
