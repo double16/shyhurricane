@@ -29,7 +29,7 @@ jobs:
 
     strategy:
       matrix:
-        python-version: [ "3.12", "3.13" ]
+        python-version: [ "3.13", "3.14" ]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
@@ -58,9 +58,9 @@ jobs:
 #
       - name: Lint with Ruff
         run: |
-          pip install ruff
-          ruff check --output-format=github .
-        continue-on-error: true
+          export PATH="$HOME/.local/bin:$PATH"
+          uv sync --all-extras
+          uv run ruff check --output-format=github .
 
       - name: test
         run: |
@@ -69,7 +69,8 @@ jobs:
           uv sync --all-extras
           RESULT_DIR="test-results/${{ matrix.python-version }}"
           mkdir -p "${RESULT_DIR}"
-          uv run pytest tests/ --junitxml=${RESULT_DIR}/test-results.xml --cov=shyhurricane --cov-branch --cov-report=xml:${RESULT_DIR}/coverage.xml --cov-report=html:${RESULT_DIR}/htmlcov --cov-report=term-missing
+          uv run pytest tests/ --junitxml=${RESULT_DIR}/test-results.xml --cov=shyhurricane --cov-branch --cov-report=xml:${RESULT_DIR}/coverage.xml --cov-report=json:${RESULT_DIR}/coverage.json --cov-report=html:${RESULT_DIR}/htmlcov --cov-report=term-missing
+          uv run python scripts/check_coverage.py "${RESULT_DIR}/coverage.json"
 
       - name: Upload pytest test results
         uses: actions/upload-artifact@v7

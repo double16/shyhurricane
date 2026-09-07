@@ -3,6 +3,7 @@ import unittest
 from haystack.dataclasses import StreamingChunk, ToolCall, ToolCallResult, ToolCallDelta
 
 from shyhurricane.streaming_chunk_writer import StreamingChunkWriter
+from shyhurricane.streaming_chunk_writer import LastOutputSource
 
 
 class StreamingChunkWriterTest(unittest.TestCase):
@@ -291,3 +292,44 @@ Hostname registered.
         for chunk in chunks:
             self.callback(chunk)
         self.assertEqual("""I will begin by enumerating open ports and services on 10.129.231.188.""", self.output)
+
+    def test_context_decrease_length_and_verbose_stop(self):
+        writer_output = []
+        writer = StreamingChunkWriter(writer_output.append, verbose=True)
+        writer.callback(StreamingChunk(
+            content="first", index=0, tool_calls=[], tool_call_result=None, start=True,
+            finish_reason=None, meta={"prompt_eval_count": 10},
+        ))
+        writer.callback(StreamingChunk(
+            content="second", index=0, tool_calls=[], tool_call_result=None, start=False,
+            finish_reason="length", meta={"prompt_eval_count": 5},
+        ))
+        writer.callback(StreamingChunk(
+            content="", index=0, tool_calls=[], tool_call_result=None, start=False,
+            finish_reason="stop", meta={"prompt_eval_count": 5},
+        ))
+        output = "".join(writer_output)
+        self.assertIn("model context decreased from 10 to 5", output)
+        self.assertIn("run out of model context, 5 tokens", output)
+        self.assertIn("5 tokens", output)
+
+    def test_double_space_tracks_sources_and_ignores_empty_output(self):
+        writer_output = []
+        writer = StreamingChunkWriter(writer_output.append)
+        writer.output("")
+        writer.double_space(LastOutputSource.CONTENT)
+        writer.double_space(LastOutputSource.CONTENT)
+        writer.output("content")
+        writer.double_space(LastOutputSource.TOOL)
+        writer.double_space(LastOutputSource.TOOL)
+        self.assertEqual("content\n\n", "".join(writer_output))
+
+    def test_unknown_tool_result_is_ignored(self):
+        writer_output = []
+        writer = StreamingChunkWriter(writer_output.append)
+        writer.callback(StreamingChunk(
+            content="", index=99, tool_calls=[], tool_call_result=ToolCallResult(
+                result="ignored", origin=None, error=True,
+            ), start=False, finish_reason=None,
+        ))
+        self.assertEqual([], writer_output)

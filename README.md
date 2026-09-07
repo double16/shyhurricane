@@ -90,7 +90,7 @@ Add the MCP server to your client of choice at http://127.0.0.1:8000/mcp.
 #### Python Environment
 
 ```shell
-$(command -v python3.12) -m venv .venv
+$(command -v python3.14) -m venv .venv
 source .venv/bin/activate
 uv sync
 ```

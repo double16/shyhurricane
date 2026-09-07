@@ -280,7 +280,6 @@ def get_stored_port_scan_results(
     }
     nmap_existing = nmap_store.filter_documents(filters=filters)
     runtime_expired_ts = time.time() - 60 * 60 * 24 * 7
-    existing_results = []
     wanted_ports = parse_ports_spec(item.ports)
 
     # 0 is a special case of "don't care"

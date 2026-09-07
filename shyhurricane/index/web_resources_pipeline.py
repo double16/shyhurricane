@@ -16,7 +16,6 @@ from haystack.components.preprocessors import DocumentSplitter, DocumentCleaner
 from haystack.components.routers import ConditionalRouter
 from haystack.core.component import Component
 from haystack.document_stores.types import DuplicatePolicy
-from haystack_experimental.components.agents.human_in_the_loop import errors
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 
 from shyhurricane.clean_css import normalize_css

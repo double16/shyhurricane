@@ -1,19 +1,20 @@
 # test_proxy_server.py
 import asyncio
-import ssl
-import contextlib
-import pytest
-import tempfile
-import shutil
 import base64
+import contextlib
+import shutil
+import ssl
+import tempfile
 from pathlib import Path
+
+import pytest
+from h2.config import H2Configuration
 
 # Minimal async h2 client using hyper-h2 over asyncio streams
 from h2.connection import H2Connection
-from h2.config import H2Configuration
-from h2.events import ResponseReceived, DataReceived, StreamEnded
+from h2.events import DataReceived, ResponseReceived, StreamEnded
 
-from shyhurricane.proxy_server import proxy_server as srv  # noqa: F401
+from shyhurricane.proxy_server import proxy_server as srv
 
 
 class DummyStore:
@@ -532,7 +533,11 @@ async def proxy_server():
     ca = srv.CertAuthority(cert_dir=temp_dir)
     proxy = srv.ReplayProxy(store, ca)
 
-    server = await asyncio.start_server(proxy.handle, "127.0.0.1", 0)
+    try:
+        server = await asyncio.start_server(proxy.handle, "127.0.0.1", 0)
+    except PermissionError as exc:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        pytest.skip(f"Loopback sockets are unavailable: {exc}")
     host, port = server.sockets[0].getsockname()[:2]
 
     yield host, port

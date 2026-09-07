@@ -14,12 +14,12 @@ license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.12"
 # see requirements.txt
 dependencies = [
-    "haystack-ai~=2.30.2",
-    "qdrant-haystack~=10.4.0",
-    "fastembed-haystack~=2.4.0",
-    "numpy<2",
+    "haystack-ai~=2.31.0",
+    "qdrant-haystack~=10.6.0",
+    "fastembed-haystack~=2.7.0",
+    "numpy>=2.3.0",
     "ollama-haystack~=6.8.0",
-    "amazon-bedrock-haystack~=6.15.1",
+    "amazon-bedrock-haystack~=7.0",
     "openai~=2.53.0",
     "google-genai-haystack>=4.5,<4.9",
     "haystack-experimental~=0.19.0",
@@ -39,6 +39,7 @@ dependencies = [
     "json5~=0.15.0",
     "html5lib~=1.1",
     "optimum[onnxruntime]~=2.1.0",
+    "onnxruntime>=1.24.2,<1.25.0",
     "pycryptodome~=3.23.0",
     "psutil~=7.2.1",
     "guppy3~=3.1.6",
@@ -51,13 +52,17 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest~=9.1.1",
+    "pytest~=8.4.2",
     "pytest-cov~=7.1.0",
+    "pytest-mock~=3.15.1",
+    "pytest-asyncio~=1.4.0",
     "ruff~=0.16.2",
     "parameterized~=0.9.0",
-    "pytest-asyncio~=1.4.0",
     "respx~=0.23.1",
-    "parameterized~=0.9.0",
+    "black",
+    "isort",
+    "flake8",
+    "mypy"
 ]
 
 [tool.pytest.ini_options]
@@ -65,3 +70,86 @@ asyncio_mode = "auto"
 markers = [
     "ollama: tests that require a reachable Ollama server",
 ]
+testpaths = ["tests"]
+python_files = ["test_*.py", "*_test.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--strict-markers",
+    "--strict-config",
+    "--verbose"
+]
+pythonpath = ["src"]
+
+[tool.black]
+line-length = 120
+target-version = ['py312']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 120
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+ensure_newline_before_comments = true
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+# The blocking CI gate covers correctness errors and syntax/import issues. The remaining
+# modernization/style rules are tracked separately until the legacy baseline is migrated.
+select = ["E4", "E7", "E9", "F"]
+# These rules are intentionally unsuitable for this codebase: several inspect dynamically supplied
+# values, preserve user-facing Unicode, or create less-readable control flow in test fixtures.
+ignore = [
+    "B008", "B012", "B017", "B018", "B019", "B023", "B904",
+    "E402", "E722",
+    "RUF001", "RUF002", "RUF003", "RUF012", "RUF043",
+    "SIM102", "SIM105", "SIM108", "SIM115", "SIM117",
+    "UP031",
+]
+
+[tool.mypy]
+python_version = "3.14"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+ignore_missing_imports = true
+
+[tool.pylint.main]
+# Disable specific warnings that are not relevant for this project
+disable = [
+    "too-many-positional-arguments",  # R0917 - Common for API functions
+    "unused-argument",               # W0613 - Common for API compatibility
+    "too-many-lines",               # C0302 - Some modules need to be large
+    "too-many-nested-blocks",       # R1702 - Complex logic sometimes needed
+    "logging-fstring-interpolation", # W1203 - f-strings in logging are readable
+    "redefined-outer-name",         # W0621 - Common in function parameters
+    "no-else-continue",             # R1724 - Sometimes else-continue is clearer
+    "attribute-defined-outside-init" # W0201 - Sometimes needed for complex initialization
+]
+
+[tool.pylint.format]
+max-line-length = 120
+
+[tool.pylint.design]
+# Allow more arguments and attributes for complex classes
+max-args = 10
+max-attributes = 15

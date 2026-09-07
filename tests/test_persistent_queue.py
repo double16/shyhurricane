@@ -79,6 +79,7 @@ def test_active_queue_size_falls_back_for_non_ack_queue():
 
 def test_get_persistent_queue_sanitizes_db_name_and_uses_user_state_dir(monkeypatch, tmp_path):
     captured = {}
+    original_exists = persistent_queue.os.path.exists
 
     class FakeSQLiteAckQueue:
         def __init__(self, path, auto_commit):
@@ -87,7 +88,7 @@ def test_get_persistent_queue_sanitizes_db_name_and_uses_user_state_dir(monkeypa
             captured["auto_commit"] = auto_commit
 
     monkeypatch.setattr(persistent_queue.os.path, "exists",
-                        lambda path: False if path == "/data" else Path(path).exists())
+                        lambda path: False if path == "/data" else original_exists(path))
     monkeypatch.setattr(persistent_queue.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(persistent_queue.persistqueue, "SQLiteAckQueue", FakeSQLiteAckQueue)
 
@@ -103,13 +104,14 @@ def test_get_persistent_queue_allows_existing_queue_directory(monkeypatch, tmp_p
     queue_path = tmp_path / ".local/state/shyhurricane/db/doc_type_queue"
     queue_path.mkdir(parents=True)
     calls = []
+    original_exists = persistent_queue.os.path.exists
 
     class FakeSQLiteAckQueue:
         def __init__(self, path, auto_commit):
             calls.append((path, auto_commit))
 
     monkeypatch.setattr(persistent_queue.os.path, "exists",
-                        lambda path: False if path == "/data" else Path(path).exists())
+                        lambda path: False if path == "/data" else original_exists(path))
     monkeypatch.setattr(persistent_queue.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(persistent_queue.persistqueue, "SQLiteAckQueue", FakeSQLiteAckQueue)
 
@@ -123,9 +125,10 @@ def test_get_persistent_queue_rejects_file_at_queue_path(monkeypatch, tmp_path):
     queue_path = tmp_path / ".local/state/shyhurricane/db/doc_type_queue"
     queue_path.parent.mkdir(parents=True)
     queue_path.write_text("not a directory")
+    original_exists = persistent_queue.os.path.exists
 
     monkeypatch.setattr(persistent_queue.os.path, "exists",
-                        lambda path: False if path == "/data" else Path(path).exists())
+                        lambda path: False if path == "/data" else original_exists(path))
     monkeypatch.setattr(persistent_queue.Path, "home", lambda: tmp_path)
 
     with pytest.raises(FileExistsError):

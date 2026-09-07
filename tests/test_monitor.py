@@ -5,10 +5,14 @@ import pytest
 from shyhurricane.db import get_domain_and_host_counts
 from shyhurricane.monitor import (
     MonitorData,
+    MonitorApp,
+    certificate_fingerprint,
     collect_monitor_data,
     format_configuration_panel,
     format_database_panel,
     format_domain_and_host_panel,
+    get_recent_indexed_urls,
+    queue_size,
     top_counts,
 )
 from shyhurricane.health import HealthMonitor
@@ -33,6 +37,68 @@ class Store:
 class UnavailableStore:
     async def count_documents_async(self):
         raise ConnectionError("Qdrant is unavailable")
+
+
+def test_certificate_fingerprint_handles_missing_and_invalid_files(tmp_path, monkeypatch):
+    assert certificate_fingerprint(None) is None
+    invalid_certificate = tmp_path / "invalid.pem"
+    invalid_certificate.write_text("not a certificate")
+    assert certificate_fingerprint(invalid_certificate) is None
+
+    class Certificate:
+        def fingerprint(self, algorithm):
+            return bytes.fromhex("abcd")
+
+    monkeypatch.setattr(
+        "cryptography.x509.load_pem_x509_certificate",
+        lambda contents: Certificate(),
+    )
+    assert certificate_fingerprint(invalid_certificate) == "ab:cd"
+
+
+def test_monitor_app_stores_runtime_dependencies():
+    context = object()
+    server = SimpleNamespace(running_tools=[])
+    app = MonitorApp(context, "127.0.0.1", 8000, server)
+
+    assert app.server_context is context
+    assert app.host == "127.0.0.1"
+    assert app.port == 8000
+    assert app.server is server
+
+
+def test_queue_size_uses_available_fallbacks(monkeypatch):
+    queue = SimpleNamespace(total=lambda: 3)
+    assert queue_size(queue) == 3
+
+    queue = SimpleNamespace(total=lambda: (_ for _ in ()).throw(NotImplementedError()), active_size=lambda: 4)
+    assert queue_size(queue) == 4
+
+    queue = SimpleNamespace(total=lambda: (_ for _ in ()).throw(OSError("unavailable")), qsize=lambda: 5)
+    assert queue_size(queue) == 5
+
+    queue = SimpleNamespace(total=lambda: (_ for _ in ()).throw(OSError("unavailable")))
+    assert queue_size(queue) == 0
+
+    monkeypatch.setattr("shyhurricane.monitor.active_queue_size", lambda value: 6)
+    queue = SimpleNamespace(unack_count=1, _count=2)
+    assert queue_size(queue) == 6
+
+
+@pytest.mark.asyncio
+async def test_get_recent_indexed_urls_filters_missing_metadata():
+    records = [
+        SimpleNamespace(payload={"meta": {"url": "https://example.test/one"}}),
+        SimpleNamespace(payload={"meta": {}}),
+        SimpleNamespace(payload={}),
+    ]
+
+    class Client:
+        async def scroll(self, **kwargs):
+            assert kwargs["collection_name"] == "network"
+            return records, None
+
+    assert await get_recent_indexed_urls(Client()) == ["https://example.test/one"]
 
 
 def test_top_counts_limits_results_and_sorts_ties_by_name():

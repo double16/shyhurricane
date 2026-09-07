@@ -3,7 +3,7 @@
 python3 virtualenv:
 
 ```shell
-$(command -v python3.12) -m venv .venv
+$(command -v python3.14) -m venv .venv
 source .venv/bin/activate
 uv sync --all-extras
 ```
@@ -36,6 +36,25 @@ docker:
 ```
 
 # Dev Notes
+
+## Quality checks
+
+Run the test suite with the project-local UV cache:
+
+```shell
+KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest tests/ -q
+```
+
+Run Ruff and enforce separate 80% line and branch coverage thresholds:
+
+```shell
+UV_CACHE_DIR="$PWD/.uv-cache" uv run ruff check .
+KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest tests/ --cov=shyhurricane --cov-branch --cov-report=json:coverage.json
+UV_CACHE_DIR="$PWD/.uv-cache" uv run python scripts/check_coverage.py coverage.json
+```
+
+Tests marked `ollama` are skipped unless `--ollama` is supplied and Ollama is reachable. Proxy integration tests skip
+only when the environment prohibits loopback socket binding.
 
 ## Queries that benefit from longer context
 
