@@ -1,7 +1,5 @@
 import multiprocessing
 
-import pytest
-
 import shyhurricane.task_queue.types as types
 from shyhurricane.task_queue.types import (
     DirBustingQueueItem,

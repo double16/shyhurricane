@@ -1,7 +1,15 @@
 import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 import requests
+from tldextract import tldextract as tldextract_module
+from tldextract.tldextract import TLDExtract
+
+tldextract_module.TLD_EXTRACTOR = TLDExtract(cache_dir=None)
 
 from shyhurricane.generator_config import GeneratorConfig
 
@@ -9,7 +17,7 @@ from shyhurricane.generator_config import GeneratorConfig
 def pytest_configure(config):
     def noop(*args, **kwargs):
         pass
-    setattr(GeneratorConfig, "ollama_pull", noop)
+    GeneratorConfig.ollama_pull = noop
 
 
 def pytest_addoption(parser):

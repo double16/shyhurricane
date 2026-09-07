@@ -1,7 +1,6 @@
 import importlib
 import json
 
-import shyhurricane.task_queue.spider_worker as spider_worker_export
 from shyhurricane.task_queue.spider_worker import _katana_ingest, spider_worker
 from shyhurricane.task_queue.types import SpiderQueueItem
 

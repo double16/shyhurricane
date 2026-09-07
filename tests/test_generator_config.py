@@ -70,6 +70,29 @@ def test_apply_summarizing_default_picks_available_provider(monkeypatch):
     assert config.openai_model == "gpt-5-nano"
     assert config.ollama_host == generator_config.OLLAMA_HOST_DEFAULT
 
+    monkeypatch.delenv("OPENAI_API_KEY")
+    monkeypatch.setenv("GEMINI_API_KEY", "key")
+    assert GeneratorConfig().apply_summarizing_default().gemini_model == "gemini-flash-lite-latest"
+
+    monkeypatch.delenv("GEMINI_API_KEY")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "key")
+    assert GeneratorConfig().apply_summarizing_default().bedrock_model == "us.meta.llama3-2-3b-instruct-v1:0"
+
+
+def test_generator_config_rejects_missing_provider_and_describes_providers():
+    with pytest.raises(AssertionError):
+        GeneratorConfig().check()
+
+    assert GeneratorConfig(gemini_model="gemini").describe() == "Gemini gemini"
+    assert GeneratorConfig(bedrock_model="bedrock").describe() == "Bedrock bedrock"
+    assert GeneratorConfig(litellm_model="provider/model").describe() == "LiteLLM provider/model"
+
+
+def test_embedder_enable_handles_request_failures(monkeypatch):
+    config = GeneratorConfig(ollama_host="host:11434", ollama_model="model:latest")
+    monkeypatch.setattr(generator_config.requests, "get", lambda *args, **kwargs: (_ for _ in ()).throw(OSError()))
+    assert config._embedder_enable_ollama() is False
+
 
 def test_ollama_url_pull_and_embedder_enable(monkeypatch):
     config = GeneratorConfig(ollama_host="host:11434")
@@ -125,6 +148,8 @@ def test_create_generator_selects_provider(monkeypatch):
     assert GeneratorConfig(bedrock_model="bedrock").create_generator().chat_generator.kwargs["model"] == "bedrock"
     assert GeneratorConfig(ollama_model="llama", ollama_host="host").create_generator().chat_generator.kwargs[
                "model"] == "llama"
+    assert GeneratorConfig(openai_model="gpt-4").create_generator().chat_generator.kwargs[
+               "generation_kwargs"]["temperature"] == generator_config.TEMPERATURE_DEFAULT
 
     with pytest.raises(NotImplementedError):
         GeneratorConfig().create_generator()
@@ -161,6 +186,11 @@ def test_create_embedders_and_sparse_embedders(monkeypatch):
     assert GeneratorConfig().create_text_embedder(model).kwargs["model"] == "nomic-ai/nomic-embed-text-v1.5"
     assert GeneratorConfig().create_sparse_document_embedder(model).kwargs["threads"] == 4
     assert GeneratorConfig().create_sparse_text_embedder(model).kwargs["threads"] == 4
+
+
+def test_sparse_embedder_cache_dir_can_be_disabled(monkeypatch):
+    monkeypatch.delenv("HOME", raising=False)
+    assert GeneratorConfig()._fastembed_cache_dir() is None
 
 
 def test_safe_embedder_returns_embedded_docs_or_original_on_error():

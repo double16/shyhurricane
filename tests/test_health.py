@@ -31,3 +31,21 @@ def test_qdrant_probe_creates_a_new_client_after_a_connection_failure(monkeypatc
         {"host": "127.0.0.1", "port": 6333},
     ]
     assert all(probe_client.closed for probe_client in created)
+
+
+def test_health_monitor_handles_llm_failure_and_stable_state():
+    monitor = health.HealthMonitor(lambda: True, lambda: (_ for _ in ()).throw(RuntimeError("LLM unavailable")))
+
+    assert monitor.check() is False
+    assert monitor.qdrant_healthy is True
+    assert monitor.llm_healthy is False
+    assert monitor.ready.is_set() is False
+
+    healthy = health.HealthMonitor(lambda: True, lambda: True)
+    assert healthy.check() is True
+    assert healthy.check() is True
+    assert healthy.ready.is_set() is True
+
+    stopped = health.HealthMonitor(lambda: True, lambda: True)
+    stopped._stop.set()
+    stopped._run()

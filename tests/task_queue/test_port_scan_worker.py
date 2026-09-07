@@ -1,8 +1,6 @@
 import io
 import importlib
 import time
-from xml.etree import ElementTree as ET
-
 from haystack import Document
 
 worker = importlib.import_module("shyhurricane.task_queue.port_scan_worker")
