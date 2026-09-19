@@ -60,6 +60,7 @@ class ServerContext:
     proxy_port: Optional[int] = None
     proxy_ca_cert_path: Optional[os.PathLike] = None
     health_monitor: Optional[HealthMonitor] = None
+    low_power: bool = False
 
     def close(self):
         if self.health_monitor is not None:
@@ -190,6 +191,7 @@ async def get_server_context() -> ServerContext:
         disable_elicitation=disable_elicitation,
         open_world=server_config.open_world,
         health_monitor=health_monitor,
+        low_power=server_config.low_power,
     )
 
     return _server_context

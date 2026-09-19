@@ -12,6 +12,7 @@ from shyhurricane.db import get_domain_and_host_counts
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.persistent_queue import active_queue_size, get_doc_type_queue
+from shyhurricane.server_config import get_server_config
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ class MonitorData:
     qdrant_host_bind: str | None
     qdrant_http_port: int | None
     qdrant_health: bool | None
+    low_power: bool
     document_counts: dict[str, int]
     domain_count: int
     host_count: int
@@ -116,10 +118,12 @@ def format_configuration_panel(data: MonitorData) -> str:
     fingerprint = data.certificate_fingerprint or "unavailable"
     qdrant_host_bind = data.qdrant_host_bind or "unavailable"
     qdrant_http_port = data.qdrant_http_port if data.qdrant_http_port is not None else "unavailable"
+    low_power = "enabled" if data.low_power else "disabled"
     return (
         "[b]Configuration[/b]\n"
         f"Model: {data.model} {health_label(data.model_health)}\n"
         f"Qdrant: {data.database} {qdrant_host_bind}:{qdrant_http_port} {health_label(data.qdrant_health)}\n"
+        f"Low power: {low_power}\n"
         f"MCP: {data.bound_address}\n"
         f"Proxy: {data.proxy_address}\nTLS SHA-256: {fingerprint}"
     )
@@ -160,6 +164,9 @@ async def collect_monitor_data(server_context, host: str, port: int, running_too
         domain_count, host_count = 0, 0
         top_domains, top_hosts = [], []
     health_monitor = getattr(server_context, "health_monitor", None)
+    low_power = getattr(server_context, "low_power", None)
+    if low_power is None:
+        low_power = getattr(get_server_config(), "low_power", False)
     return MonitorData(
         bound_address=f"{host}:{port}",
         proxy_address=proxy_address,
@@ -170,6 +177,7 @@ async def collect_monitor_data(server_context, host: str, port: int, running_too
         qdrant_host_bind=getattr(server_context, "qdrant_host", None),
         qdrant_http_port=getattr(server_context, "qdrant_port", None),
         qdrant_health=health_monitor.qdrant_healthy if health_monitor is not None else None,
+        low_power=low_power,
         document_counts=document_counts,
         domain_count=domain_count,
         host_count=host_count,

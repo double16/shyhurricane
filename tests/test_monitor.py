@@ -127,6 +127,7 @@ def test_format_domain_and_host_panel_includes_top_counts_and_empty_states():
         qdrant_host_bind="127.0.0.1",
         qdrant_http_port=49201,
         qdrant_health=None,
+        low_power=False,
         document_counts={},
         domain_count=2,
         host_count=0,
@@ -154,6 +155,7 @@ def test_format_configuration_panel_orders_dependencies_and_shows_health_indicat
         qdrant_host_bind="127.0.0.1",
         qdrant_http_port=49201,
         qdrant_health=False,
+        low_power=False,
         document_counts={},
         domain_count=0,
         host_count=0,
@@ -184,6 +186,7 @@ def test_format_configuration_panel_marks_missing_qdrant_endpoint_unavailable():
         qdrant_host_bind=None,
         qdrant_http_port=None,
         qdrant_health=None,
+        low_power=False,
         document_counts={},
         domain_count=0,
         host_count=0,
@@ -197,6 +200,55 @@ def test_format_configuration_panel_marks_missing_qdrant_endpoint_unavailable():
     panel = format_configuration_panel(data)
 
     assert "Qdrant: qdrant unavailable:unavailable (unavailable)" in panel
+
+
+def test_format_configuration_panel_shows_low_power_setting():
+    enabled_data = MonitorData(
+        bound_address="127.0.0.1:8000",
+        proxy_address="not started",
+        model="model",
+        model_health=True,
+        certificate_fingerprint=None,
+        database="qdrant",
+        qdrant_host_bind="127.0.0.1",
+        qdrant_http_port=49201,
+        qdrant_health=True,
+        low_power=True,
+        document_counts={},
+        domain_count=0,
+        host_count=0,
+        top_domains=[],
+        top_hosts=[],
+        queue_sizes={},
+        recent_urls=[],
+        running_tools=[],
+    )
+    disabled_data = MonitorData(
+        bound_address="127.0.0.1:8000",
+        proxy_address="not started",
+        model="model",
+        model_health=True,
+        certificate_fingerprint=None,
+        database="qdrant",
+        qdrant_host_bind="127.0.0.1",
+        qdrant_http_port=49201,
+        qdrant_health=True,
+        low_power=False,
+        document_counts={},
+        domain_count=0,
+        host_count=0,
+        top_domains=[],
+        top_hosts=[],
+        queue_sizes={},
+        recent_urls=[],
+        running_tools=[],
+    )
+
+    enabled_panel = format_configuration_panel(enabled_data)
+    disabled_panel = format_configuration_panel(disabled_data)
+
+    assert "Low power: enabled" in enabled_panel
+    assert "Low power: disabled" in disabled_panel
 
 
 def test_health_monitor_exposes_unavailable_then_per_service_results():
@@ -323,6 +375,7 @@ async def test_collect_monitor_data_includes_runtime_configuration_and_statistic
         qdrant_host_bind="127.0.0.1",
         qdrant_http_port=49201,
         qdrant_health=False,
+        low_power=False,
         document_counts={"content": 12, "network": 8},
         domain_count=3,
         host_count=5,
@@ -430,3 +483,55 @@ async def test_collect_monitor_data_tolerates_unavailable_optional_data(monkeypa
     assert data.top_domains == []
     assert data.top_hosts == []
     assert data.running_tools == []
+    assert data.low_power is False
+
+
+@pytest.mark.asyncio
+async def test_collect_monitor_data_reads_low_power_from_context_and_config(monkeypatch):
+    context_with_low_power = SimpleNamespace(
+        db="qdrant:6333",
+        ingest_queue=Queue(0),
+        task_queue=Queue(0),
+        spider_result_queue=Queue(0),
+        port_scan_result_queue=Queue(0),
+        dir_busting_result_queue=Queue(0),
+        stores={},
+        proxy_host=None,
+        proxy_port=None,
+        proxy_ca_cert_path=None,
+        qdrant_client=object(),
+        health_monitor=None,
+        low_power=True,
+    )
+    context_without_low_power = SimpleNamespace(
+        db="qdrant:6333",
+        ingest_queue=Queue(0),
+        task_queue=Queue(0),
+        spider_result_queue=Queue(0),
+        port_scan_result_queue=Queue(0),
+        dir_busting_result_queue=Queue(0),
+        stores={},
+        proxy_host=None,
+        proxy_port=None,
+        proxy_ca_cert_path=None,
+        qdrant_client=object(),
+        health_monitor=None,
+    )
+
+    monkeypatch.setattr("shyhurricane.monitor.get_doc_type_queue", lambda db: Queue(0))
+    monkeypatch.setattr(
+        "shyhurricane.monitor.get_generator_config",
+        lambda: SimpleNamespace(describe=lambda: "model"),
+    )
+    monkeypatch.setattr("shyhurricane.monitor.get_recent_indexed_urls", lambda *args, **kwargs: [])
+    monkeypatch.setattr("shyhurricane.monitor.get_domain_and_host_counts", lambda *args, **kwargs: ({}, {}))
+
+    data1 = await collect_monitor_data(context_with_low_power, "127.0.0.1", 8000, [])
+    assert data1.low_power is True
+
+    monkeypatch.setattr(
+        "shyhurricane.monitor.get_server_config",
+        lambda: SimpleNamespace(low_power=True),
+    )
+    data2 = await collect_monitor_data(context_without_low_power, "127.0.0.1", 8000, [])
+    assert data2.low_power is True

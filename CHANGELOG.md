@@ -4,6 +4,7 @@
 
 ### Features
 
+- Show low power setting status in the TTY monitoring Configuration panel.
 - Show the Qdrant data path and endpoint on the same line in the TTY monitoring Configuration panel.
 - Show model and Qdrant health states with green and red indicators in the TTY monitoring Configuration panel.
 - Pause index workers while Qdrant or the configured LLM is unhealthy, while retaining queued `/index` requests for automatic recovery.
