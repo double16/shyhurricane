@@ -72,6 +72,14 @@ def test_wait_for_health_accepts_missing_state():
     assert web_resources._wait_for_health(None) is True
 
 
+def test_wait_for_health_returns_false_when_unset_state_cannot_wait():
+    class UnwaitableState:
+        def is_set(self):
+            return False
+
+    assert web_resources._wait_for_health(UnwaitableState()) is False
+
+
 def test_wait_for_indexing_enabled_waits_until_runtime_resume():
     class IndexingState:
         def __init__(self):
@@ -335,5 +343,38 @@ def test_bad_state_handles_missing_mps_memory_apis(monkeypatch):
 
     monkeypatch.setattr(web_resources.torch, "backends", Backends())
     monkeypatch.setattr(web_resources.torch, "mps", Mps())
+
+    assert web_resources.is_current_process_in_bad_state() is False
+
+
+def test_bad_state_accepts_memory_below_recommended_limit(monkeypatch):
+    class MpsBackend:
+        @staticmethod
+        def is_available():
+            return True
+
+    class Backends:
+        mps = MpsBackend()
+
+    class Mps:
+        @staticmethod
+        def driver_allocated_memory():
+            return 5
+
+        @staticmethod
+        def recommended_max_memory():
+            return 10
+
+    monkeypatch.setattr(web_resources.torch, "backends", Backends())
+    monkeypatch.setattr(web_resources.torch, "mps", Mps())
+
+    assert web_resources.is_current_process_in_bad_state() is False
+
+
+def test_bad_state_accepts_missing_mps_backend(monkeypatch):
+    class Backends:
+        mps = None
+
+    monkeypatch.setattr(web_resources.torch, "backends", Backends())
 
     assert web_resources.is_current_process_in_bad_state() is False

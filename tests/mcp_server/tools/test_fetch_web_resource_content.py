@@ -109,6 +109,15 @@ async def test_fetch_web_resource_content_returns_none_without_content(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_fetch_web_resource_content_returns_none_for_unindexed_http_url(monkeypatch):
+    store = AsyncStore([])
+    patch_server_context(monkeypatch, ServerContext({"content": store}))
+    monkeypatch.setattr(fetch, "log_tool_history", noop)
+
+    assert await fetch.fetch_web_resource_content(None, "https://example.com/missing") is None
+
+
+@pytest.mark.asyncio
 async def test_web_resource_returns_full_text_resource(monkeypatch):
     doc = make_doc(content="full")
     patch_server_context(monkeypatch, ServerContext({"content": AsyncStore([doc])}))

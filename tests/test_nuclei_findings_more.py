@@ -69,6 +69,28 @@ def test_loading_splitting_formatting_and_basic_helpers():
     assert nf.norm({"a": 1}, "a", "b") is None
 
 
+def test_load_findings_skips_blank_ndjson_lines():
+    assert nf.load_findings('{"first": 1}\n  \n{"second": 2}') == [
+        {"first": 1}, {"second": 2}
+    ]
+
+
+def test_classification_handles_scalar_identifiers_and_invalid_metadata():
+    assert nf.classification_lines({"info": {"classification": "invalid"}}) == []
+
+    lines = nf.classification_lines({"info": {"classification": {
+        "cve-id": "CVE-2025-1234",
+        "cwe-id": "CWE-79",
+        "epss-score": 0.2,
+        "references": "not a list",
+    }}})
+
+    assert any("CVE-2025-1234" in line for line in lines)
+    assert any("CWE-79" in line for line in lines)
+    assert any("EPSS: 0.2" in line for line in lines)
+    assert not any("not a list" in line for line in lines)
+
+
 def test_classification_discovery_poc_remediation_references_and_markdown():
     data = finding()
 

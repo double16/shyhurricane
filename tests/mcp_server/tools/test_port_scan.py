@@ -135,3 +135,19 @@ async def test_port_scan_returns_pending_without_results(monkeypatch):
 
     assert result.instructions == port_scan.port_scan_instructions_no_results
     assert result.has_more is True
+
+
+@pytest.mark.asyncio
+async def test_port_scan_discards_expired_and_mismatched_results_then_returns_partial(monkeypatch):
+    expired = scan_result(context_id="other")
+    expired.timestamp = 0
+    wrong_target = scan_result(targets=["other.example.com"])
+    partial = scan_result(has_more=True)
+    ctx = ServerContext([expired, wrong_target, partial])
+    patch_context(monkeypatch, ctx)
+
+    result = await port_scan.port_scan(Ctx(), hostnames="example.com", timeout_seconds=30)
+
+    assert result.instructions == port_scan.port_scan_instructions_pending
+    assert result.has_more is True
+    assert ctx.port_scan_result_queue.requeued == []

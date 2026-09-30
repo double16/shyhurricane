@@ -94,6 +94,22 @@ async def test_index_request_body_indexes_csv_and_raw_body(monkeypatch):
     assert raw_ctx.ingest_queue.items == ["one\ntwo"]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body, expected", [
+    (b'{"request": {"endpoint": "https://example.com"}, "response": {}, "timestamp": "now"}\n', "katana"),
+    (b"single raw body\n", "raw"),
+])
+async def test_index_request_body_accepts_single_line(monkeypatch, body, expected):
+    ctx = ServerContext()
+    patch_context(monkeypatch, ctx)
+
+    response = await indexers.index_request_body(FakeRequest([body]))
+
+    assert response.status_code == 201
+    assert len(ctx.ingest_queue.items) == 1
+    assert (ctx.ingest_queue.items[0].startswith("{")) is (expected == "katana")
+
+
 class FakeResponse:
     status_code = 200
     text = "console.log('x')"

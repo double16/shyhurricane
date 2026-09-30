@@ -37,10 +37,15 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
-          cache: 'pip'
 
-      - name: Install UV
-        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          enable-cache: true
+          cache-local-path: .uv-cache
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
 
       - name: Set up Go
         uses: actions/setup-go@v7
@@ -69,8 +74,8 @@ jobs:
           uv sync --all-extras
           RESULT_DIR="test-results/${{ matrix.python-version }}"
           mkdir -p "${RESULT_DIR}"
-          uv run pytest tests/ --junitxml=${RESULT_DIR}/test-results.xml --cov=shyhurricane --cov-branch --cov-report=xml:${RESULT_DIR}/coverage.xml --cov-report=json:${RESULT_DIR}/coverage.json --cov-report=html:${RESULT_DIR}/htmlcov --cov-report=term-missing
-          uv run python scripts/check_coverage.py "${RESULT_DIR}/coverage.json"
+          uv run ./.github/scripts/run-python-coverage.sh --report-dir "${RESULT_DIR}" --junitxml="${RESULT_DIR}/test-results.xml"
+          uv run python .github/scripts/check-python-coverage-floor.py "${RESULT_DIR}/coverage.json"
 
       - name: Upload pytest test results
         uses: actions/upload-artifact@v7

@@ -182,3 +182,35 @@ async def test_run_unix_command_closed_world_error_prefers_stderr(monkeypatch):
     assert result.output_truncated is True
     assert result.error.strip() == "stderr"
     assert result.notes == run_unix.open_world_command_disable_notes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("return_code", "expected_output", "expected_error"),
+    [(0, "hello", ""), (2, "he", "error")],
+)
+async def test_run_unix_command_combined_limit_preserves_the_relevant_stream(
+    monkeypatch, return_code, expected_output, expected_error
+):
+    proc = Proc(return_code, [b"hello"], [b"error"])
+
+    async def create_subprocess_exec(*args, **kwargs):
+        return proc
+
+    async def get_server_context():
+        return ServerContext(open_world=True)
+
+    async def log_history(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(run_unix, "get_server_context", get_server_context)
+    monkeypatch.setattr(run_unix, "get_additional_hosts", lambda ctx, hosts=None: {})
+    monkeypatch.setattr(run_unix, "unix_command_image", lambda: "image")
+    monkeypatch.setattr(run_unix, "log_history", log_history)
+    monkeypatch.setattr(run_unix.asyncio, "create_subprocess_exec", create_subprocess_exec)
+
+    result = await _run_unix_command(Ctx(), "echo hello", {}, output_length_limit=7)
+
+    assert result.output == expected_output
+    assert result.error == expected_error
+    assert result.output_truncated is (return_code != 0)

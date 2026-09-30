@@ -72,6 +72,33 @@ def test_port_scan_context_initializes_stores_and_warms_embedders(monkeypatch):
     assert ctx.portscan_embedder.warmed is True
 
 
+def test_port_scan_context_accepts_embedders_without_warm_up(monkeypatch):
+    class Cache:
+        def get(self, config):
+            return object()
+
+    monkeypatch.setattr(worker, "create_qdrant_document_store", lambda db, index: Store())
+
+    ctx = PortScanContext("db", Cache())
+
+    ctx.warm_up()
+
+
+def test_port_scan_worker_runs_single_scan_for_small_port_set(monkeypatch):
+    class Ctx:
+        nmap_store = Store()
+        nmap_embedder = Embedder()
+        portscan_store = Store()
+        portscan_embedder = Embedder()
+
+    calls = []
+    monkeypatch.setattr(worker, "_do_port_scan", lambda *args: calls.append(args[1].ports))
+
+    port_scan_worker(Ctx(), PortScanQueueItem("ctx", ["127.0.0.1"], ["80"], {}, retry=False), ResultQueue())
+
+    assert calls == [["80"]]
+
+
 def test_get_stored_port_scan_results_returns_newest_matching_result():
     runtime_old = time.time() - 100
     runtime_new = time.time() - 10

@@ -63,6 +63,30 @@ async def test_status_aggregates_counts_and_metadata(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_status_includes_proxy_ca_certificate(monkeypatch, tmp_path):
+    cert_path = tmp_path / "ca.pem"
+    cert_path.write_text("test certificate")
+
+    class CertServerContext(StatusServerContext):
+        proxy_ca_cert_path = str(cert_path)
+
+    async def get_cert_context():
+        return CertServerContext()
+
+    monkeypatch.setattr(status_tool, "get_server_context", get_cert_context)
+    monkeypatch.setattr(status_tool, "get_doc_type_queue", lambda db: Queue(0))
+
+    async def empty_domain_and_host_counts(*args):
+        return {}, {}
+
+    monkeypatch.setattr(status_tool, "get_domain_and_host_counts", empty_domain_and_host_counts)
+
+    response = await status_tool.status(None)
+
+    assert json.loads(response.body)["proxy_ca_cert"] == "test certificate"
+
+
+@pytest.mark.asyncio
 async def test_register_hostname_address_success_already_and_error(monkeypatch):
     calls = []
     hosts = {"known.test": "127.0.0.1"}

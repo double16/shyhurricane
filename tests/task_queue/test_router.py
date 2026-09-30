@@ -64,8 +64,10 @@ def test_task_router_dispatches_all_known_items(monkeypatch):
     task_items = [
         SpiderQueueItem("ctx", "https://example.com"),
         PortScanQueueItem("ctx", ["example.com"], ["80"], {}, False),
+        PortScanQueueItem("ctx", ["example.com"], ["443"], {}, False),
         DirBustingQueueItem("ctx", "https://example.com"),
         SaveFindingQueueItem("example.com", "# finding", "Title"),
+        SaveFindingQueueItem("example.com", "# second", "Second title"),
     ]
 
     class AckQueue(FakeQueue):

@@ -31,3 +31,16 @@ def test_embedder_cache_creates_warms_and_reuses_embedder():
     assert first is second
     assert first.warm_up_calls == 1
     assert generator_config.created == [model_config]
+
+
+def test_embedder_cache_supports_embedders_without_warm_up():
+    class ColdGeneratorConfig:
+        def create_document_embedder(self, model_config):
+            return object()
+
+    cache = EmbedderCache(ColdGeneratorConfig())
+    config = EmbeddingModelConfig("html", ModelConfig("cold-model", 128))
+
+    embedder = cache.get(config)
+
+    assert embedder is cache.get(config)

@@ -125,3 +125,11 @@ def test_server_context_low_power_toggle_controls_indexing_event():
     ctx.set_low_power(False)
     assert ctx.low_power is False
     assert event.is_set()
+
+
+def test_server_context_low_power_toggle_without_indexing_event():
+    ctx = make_context()
+
+    ctx.set_low_power(True)
+
+    assert ctx.low_power is True

@@ -352,14 +352,13 @@ async def find_web_resources(
                         await determine_targets(data.data)
         except McpError:
             logger.info("elicit not supported, returning")
-        finally:
-            if not targets:
-                return FindWebResourcesResult(
-                    instructions=find_web_resources_instructions_need_target,
-                    query=query,
-                    http_methods=http_methods,
-                    limit=limit,
-                )
+        if not targets:
+            return FindWebResourcesResult(
+                instructions=find_web_resources_instructions_need_target,
+                query=query,
+                http_methods=http_methods,
+                limit=limit,
+            )
 
     parsed_targets: List[TargetInfo] = []
     for target in targets:

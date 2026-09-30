@@ -45,12 +45,12 @@ Run the test suite with the project-local UV cache:
 KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest tests/ -q
 ```
 
-Run Ruff and enforce separate 80% line and branch coverage thresholds:
+Run Ruff and enforce 80% line and branch coverage for every measured Python file:
 
 ```shell
 UV_CACHE_DIR="$PWD/.uv-cache" uv run ruff check .
-KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest tests/ --cov=shyhurricane --cov-branch --cov-report=json:coverage.json
-UV_CACHE_DIR="$PWD/.uv-cache" uv run python scripts/check_coverage.py coverage.json
+UV_CACHE_DIR="$PWD/.uv-cache" uv run ./.github/scripts/run-python-coverage.sh
+UV_CACHE_DIR="$PWD/.uv-cache" uv run python .github/scripts/check-python-coverage-floor.py coverage.json
 ```
 
 Tests marked `ollama` are skipped unless `--ollama` is supplied and Ollama is reachable. Proxy integration tests skip

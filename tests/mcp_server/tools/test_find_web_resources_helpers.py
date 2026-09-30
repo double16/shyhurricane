@@ -117,6 +117,43 @@ async def test_find_web_resources_by_netloc_rejects_invalid_queries(monkeypatch)
     assert await resources._find_web_resources_by_hostname(None, "example.com:443", limit=10) is None
 
 
+@pytest.mark.asyncio
+async def test_find_web_resources_exact_queries_return_none_when_store_is_empty(monkeypatch):
+    store = AsyncStore([[], [], [], []])
+    patch_server_context(monkeypatch, ServerContext(store))
+
+    assert await resources._find_web_resources_by_url(None, "https://example.com/", limit=10) is None
+    assert await resources._find_web_resources_by_netloc(None, "example.com:443", limit=10) is None
+    assert await resources._find_web_resources_by_hostname(None, "example.com", limit=10) is None
+
+
+@pytest.mark.asyncio
+async def test_recommended_urls_require_one_domain_and_choose_scheme_from_port(monkeypatch):
+    class NetlocResult:
+        def __init__(self, locations):
+            self.network_locations = locations
+
+    async def netlocs(ctx, query):
+        return NetlocResult([])
+
+    monkeypatch.setattr(resources, "find_netloc", netlocs)
+    assert await resources._find_recommended_urls(None) is None
+
+    async def mixed_domains(ctx, query):
+        return NetlocResult(["example.com:443", "other.test:80"])
+
+    monkeypatch.setattr(resources, "find_netloc", mixed_domains)
+    assert await resources._find_recommended_urls(None) is None
+
+    async def one_domain(ctx, query):
+        return NetlocResult(["www.example.com:443", "api.example.com:8080"])
+
+    monkeypatch.setattr(resources, "find_netloc", one_domain)
+    assert await resources._find_recommended_urls(None) == [
+        "https://www.example.com:443", "http://api.example.com:8080"
+    ]
+
+
 def test_find_web_resources_result_and_spider_instructions():
     found = resources.find_web_resources_result(
         "query",
