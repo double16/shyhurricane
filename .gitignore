@@ -170,3 +170,4 @@ node_modules/
 *.db
 qdrant_store*
 db/
+/coverage.json

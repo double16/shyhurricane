@@ -166,6 +166,26 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
         def close(self):
             pass
 
+    class RuntimeEvent:
+        def __init__(self):
+            self.enabled = False
+
+        def set(self):
+            self.enabled = True
+
+        def is_set(self):
+            return self.enabled
+
+        def clear(self):
+            self.enabled = False
+
+    class WorkerManager:
+        def Event(self):
+            return RuntimeEvent()
+
+        def shutdown(self):
+            pass
+
     async def create_client(db):
         return "client"
 
@@ -189,14 +209,19 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
             dir_busting_result_queue="dirs",
         )
 
+    async def build_document_pipeline(db, generator_config):
+        return object(), None, stores
+
     import shyhurricane.index.web_resources as web_resources
     import shyhurricane.task_queue as task_queue
 
     monkeypatch.setattr(server_context, "get_server_config", lambda: Config())
+    monkeypatch.setattr(server_context.multiprocessing, "Manager", WorkerManager)
     monkeypatch.setattr(server_context, "create_qdrant_document_store", create_store)
     monkeypatch.setattr(server_context, "create_qdrant_client", create_client)
     monkeypatch.setattr(server_context, "qdrant_host_port", lambda db: ("127.0.0.1", 49201))
-    monkeypatch.setattr(server_context, "build_stores", lambda db: stores)
+    monkeypatch.setattr(server_context, "build_document_pipeline", build_document_pipeline)
+    monkeypatch.setattr(server_context, "build_website_context_pipeline", lambda generator_config: object())
     monkeypatch.setattr(server_context.subprocess, "check_call", lambda *args, **kwargs: None)
     monkeypatch.setattr(server_context.asyncio, "create_subprocess_exec", create_subprocess_exec)
     monkeypatch.setattr(web_resources, "start_ingest_worker", start_ingest_worker)
@@ -205,11 +230,13 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
     ctx = await server_context.get_server_context()
 
     assert ctx.db == "db"
-    assert ctx.document_pipeline is None
-    assert ctx.website_context_pipeline is None
+    assert ctx.document_pipeline is not None
+    assert ctx.website_context_pipeline is not None
     assert ctx.stores is stores
+    assert not ctx.indexing_enabled.is_set()
     assert ctx.qdrant_client == "client"
     assert (ctx.qdrant_host, ctx.qdrant_port) == ("127.0.0.1", 49201)
     assert ctx.open_world is False
     assert ctx.cache_path == os.path.join(str(tmp_path), "tool_cache")
     assert doc_stores and all(store.initialized for store in doc_stores)
+    ctx.close()

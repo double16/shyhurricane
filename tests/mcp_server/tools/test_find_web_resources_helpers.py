@@ -145,6 +145,44 @@ async def test_find_web_resources_low_power_returns_without_pipelines(monkeypatc
     assert result.http_methods == ["GET"]
 
 
+@pytest.mark.asyncio
+async def test_find_web_resources_low_power_flag_disables_retrieval_when_pipelines_present(monkeypatch):
+    store = AsyncStore([[], [], []])
+    ctx = ServerContext(store)
+    ctx.document_pipeline = object()
+    ctx.website_context_pipeline = object()
+    ctx.low_power = True
+    patch_server_context(monkeypatch, ctx)
+    monkeypatch.setattr(resources, "log_tool_history", noop)
+
+    result = await resources.find_web_resources(None, "find things on invalid target", limit=1, http_methods="GET")
+
+    assert result.instructions == resources.find_web_resources_instructions_low_power
+    assert result.limit == 10
+    assert result.http_methods == ["GET"]
+
+
+@pytest.mark.asyncio
+async def test_find_web_resources_calls_ensure_retrieval_pipelines_when_not_low_power(monkeypatch):
+    store = AsyncStore([[], [], []])
+    ctx = ServerContext(store)
+    ctx.low_power = False
+    pipeline_ensured = False
+
+    async def ensure_pipelines():
+        nonlocal pipeline_ensured
+        pipeline_ensured = True
+
+    ctx.ensure_retrieval_pipelines = ensure_pipelines
+    patch_server_context(monkeypatch, ctx)
+    monkeypatch.setattr(resources, "log_tool_history", noop)
+
+    result = await resources.find_web_resources(None, "find things on invalid target", limit=1, http_methods="GET")
+
+    assert pipeline_ensured is True
+    assert result.instructions == resources.find_web_resources_instructions_low_power
+
+
 class Record:
     def __init__(self, meta):
         self.payload = {"meta": meta}

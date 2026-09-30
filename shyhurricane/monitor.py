@@ -5,6 +5,7 @@ from typing import Iterable
 
 from qdrant_client.http import models as qm
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Container
 from textual.widgets import Footer, Header, Static
 
@@ -12,6 +13,7 @@ from shyhurricane.db import get_domain_and_host_counts
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.persistent_queue import active_queue_size, get_doc_type_queue
+from shyhurricane.server_config import get_server_config
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +29,7 @@ class MonitorData:
     qdrant_host_bind: str | None
     qdrant_http_port: int | None
     qdrant_health: bool | None
+    low_power: bool
     document_counts: dict[str, int]
     domain_count: int
     host_count: int
@@ -116,10 +119,12 @@ def format_configuration_panel(data: MonitorData) -> str:
     fingerprint = data.certificate_fingerprint or "unavailable"
     qdrant_host_bind = data.qdrant_host_bind or "unavailable"
     qdrant_http_port = data.qdrant_http_port if data.qdrant_http_port is not None else "unavailable"
+    low_power = "enabled" if data.low_power else "disabled"
     return (
         "[b]Configuration[/b]\n"
         f"Model: {data.model} {health_label(data.model_health)}\n"
         f"Qdrant: {data.database} {qdrant_host_bind}:{qdrant_http_port} {health_label(data.qdrant_health)}\n"
+        f"Low power: {low_power}\n"
         f"MCP: {data.bound_address}\n"
         f"Proxy: {data.proxy_address}\nTLS SHA-256: {fingerprint}"
     )
@@ -160,6 +165,9 @@ async def collect_monitor_data(server_context, host: str, port: int, running_too
         domain_count, host_count = 0, 0
         top_domains, top_hosts = [], []
     health_monitor = getattr(server_context, "health_monitor", None)
+    low_power = getattr(server_context, "low_power", None)
+    if low_power is None:
+        low_power = getattr(get_server_config(), "low_power", False)
     return MonitorData(
         bound_address=f"{host}:{port}",
         proxy_address=proxy_address,
@@ -170,6 +178,7 @@ async def collect_monitor_data(server_context, host: str, port: int, running_too
         qdrant_host_bind=getattr(server_context, "qdrant_host", None),
         qdrant_http_port=getattr(server_context, "qdrant_port", None),
         qdrant_health=health_monitor.qdrant_healthy if health_monitor is not None else None,
+        low_power=low_power,
         document_counts=document_counts,
         domain_count=domain_count,
         host_count=host_count,
@@ -190,7 +199,10 @@ class MonitorApp(App[None]):
     #domains { height: 19; }
     #urls, #tools { height: 12; }
     """
-    BINDINGS = [("q", "quit", "Quit")]
+    BINDINGS = [
+        Binding("q", "quit", "Quit"),
+        Binding("l", "toggle_low_power", "Toggle low power"),
+    ]
 
     def __init__(self, server_context, host: str, port: int, server, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -218,6 +230,8 @@ class MonitorApp(App[None]):
         data = await collect_monitor_data(
             self.server_context, self.host, self.port, self.server.running_tools
         )
+        if not self.is_running:
+            return
         self.query_one("#configuration", Static).update(format_configuration_panel(data))
         queues = "\n".join(f"{name}: {size}" for name, size in data.queue_sizes.items())
         self.query_one("#queues", Static).update(f"[b]Queue status[/b]\n{queues}")
@@ -227,6 +241,28 @@ class MonitorApp(App[None]):
         self.query_one("#urls", Static).update(f"[b]Last five URLs indexed[/b]\n{urls}")
         tools = "\n".join(data.running_tools) or "No MCP tools running"
         self.query_one("#tools", Static).update(f"[b]Running MCP tools[/b]\n{tools}")
+
+    async def action_toggle_low_power(self) -> None:
+        current_low_power = getattr(self.server_context, "low_power", None)
+        if current_low_power is None:
+            current_low_power = getattr(get_server_config(), "low_power", False)
+        new_low_power = not current_low_power
+
+        if self.server_context is not None:
+            set_low_power = getattr(self.server_context, "set_low_power", None)
+            if callable(set_low_power):
+                set_low_power(new_low_power)
+            try:
+                self.server_context.low_power = new_low_power
+            except (AttributeError, TypeError):
+                pass
+        server_config = get_server_config()
+        if server_config is not None and hasattr(server_config, "low_power"):
+            try:
+                server_config.low_power = new_low_power
+            except (AttributeError, TypeError):
+                pass
+        await self.refresh_data()
 
     def action_quit(self) -> None:
         self.server.should_exit = True

@@ -95,12 +95,13 @@ are formatted. This helps make vectors diverge unnecessarily.
 
 Code for the indexing processes is in `shyhurricane/index`. There is always and only one first-level index process. The
 "doc type" index is resource intensive and can have multiple processes. On a single consumer machine, like a laptop, more
-than one process is not practical. The doc type index will not be started in "low-power" mode, a mode specified by the
-user with an option.
+than one process is not practical. Its workers and retrieval pipelines initialize at server startup. In "low-power" mode,
+workers wait before claiming document-specific work, and retrieval queries skip embedding-based matching. The TTY monitor
+can toggle this mode at runtime. Turning it off resumes queued document work without restarting the server.
 
 Data to be indexed is stored in SQLite based persistent queues. Restarting the MCP server will cause no loss of data. In
-low-power mode, the doc type queue is still populated. Restarting the server without the low power option will cause the
-data to be processed using the more expensive "doc type" indexing.
+low-power mode, the doc type queue is still populated. Turning low-power mode off resumes processing that queue; a
+server restart is not required.
 
 ## querying
 

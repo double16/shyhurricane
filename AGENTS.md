@@ -4,7 +4,7 @@
 
 ## Testing and contribution
 - Always write unit tests and check that they pass for new and changed business logic.
-- Changed and new code should have at least 80% code and branch coverage.
+- Changed and new code should have at least 80% code and branch coverage per file.
 - Always run unit tests to verify changes.
 - Test both positive and negative scenarios.
 - Keep tests in files based on component or functionality. Use existing test files if applicable.
@@ -51,8 +51,10 @@
   UV_CACHE_DIR="$PWD/.uv-cache" uv run python3 --version
   KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" uv run pytest -q --tb=short
   UV_CACHE_DIR="$PWD/.uv-cache" uv run ruff check src tests
-  KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage run -m pytest -q
-  KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" uv run coverage report
+  # Use the repository coverage entry point. It configures pytest-cov correctly.
+  UV_CACHE_DIR="$PWD/.uv-cache" uv run ./.github/scripts/run-python-coverage.sh
+  # Run after coverage is collected, it reports files that do not pass the python coverage floor.
+  UV_CACHE_DIR="$PWD/.uv-cache" uv run ./.github/scripts/check-python-coverage-floor.py coverage.json
   ```
 
 - If `.uv-cache` is not present, create it before running commands. Keep it project-local and persistent between agent

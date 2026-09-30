@@ -1,6 +1,7 @@
 import asyncio
 import atexit
 import logging
+import multiprocessing
 import os
 import subprocess
 import sys
@@ -15,7 +16,6 @@ from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 from qdrant_client import AsyncQdrantClient
 
 from shyhurricane.doc_type_model_map import doc_type_to_model
-from shyhurricane.index.web_resources_pipeline import build_stores
 from shyhurricane.server_config import get_server_config
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.retrieval_pipeline import build_document_pipeline, build_website_context_pipeline
@@ -60,6 +60,34 @@ class ServerContext:
     proxy_port: Optional[int] = None
     proxy_ca_cert_path: Optional[os.PathLike] = None
     health_monitor: Optional[HealthMonitor] = None
+    low_power: bool = False
+    indexing_enabled: Optional[object] = None
+    worker_manager: Optional[object] = None
+
+    def set_low_power(self, enabled: bool) -> None:
+        self.low_power = enabled
+        if self.indexing_enabled is not None:
+            if enabled:
+                self.indexing_enabled.clear()
+            else:
+                self.indexing_enabled.set()
+
+    async def ensure_retrieval_pipelines(self) -> None:
+        if self.document_pipeline is None or self.website_context_pipeline is None:
+            generator_config = get_generator_config()
+            document_pipeline, _, stores = await build_document_pipeline(
+                db=self.db,
+                generator_config=generator_config,
+            )
+            website_context_pipeline = build_website_context_pipeline(
+                generator_config=generator_config,
+            )
+            self.document_pipeline = document_pipeline
+            self.website_context_pipeline = website_context_pipeline
+            if self.stores is not None and isinstance(self.stores, dict):
+                self.stores.update(stores)
+            else:
+                self.stores = stores
 
     def close(self):
         if self.health_monitor is not None:
@@ -68,6 +96,8 @@ class ServerContext:
         self.task_pool.close()
         logger.info("Terminating ingest pool")
         self.ingest_pool.close()
+        if self.worker_manager is not None:
+            self.worker_manager.shutdown()
         logger.info("Closing queues ...")
         # The ingest queue is persistent. Adding a sentinel after terminating its
         # workers leaves an unprocessed active item for the next server startup.
@@ -148,27 +178,27 @@ async def get_server_context() -> ServerContext:
     # Start indexing before initializing the retrieval pipelines. Retrieval model
     # loading can take minutes, and must not stall an existing indexing backlog.
     generator_config = get_generator_config()
+    worker_manager = multiprocessing.Manager()
+    indexing_enabled = worker_manager.Event()
+    if not server_config.low_power:
+        indexing_enabled.set()
+
     ingest_queue, ingest_pool = start_ingest_worker(
         db=db,
         generator_config=generator_config,
         pool_size=server_config.ingest_pool_size,
         health_state=health_monitor.ready,
+        indexing_enabled=indexing_enabled,
     )
     task_worker_ipc = start_task_worker(db, ingest_queue.path, server_config.task_pool_size)
 
-    if server_config.low_power:
-        logger.warning("low_power: skipping embedding based retrieval pipelines")
-        document_pipeline = None
-        website_context_pipeline = None
-        stores = build_stores(db)
-    else:
-        document_pipeline, _, stores = await build_document_pipeline(
-            db=db,
-            generator_config=generator_config,
-        )
-        website_context_pipeline = build_website_context_pipeline(
-            generator_config=generator_config,
-        )
+    document_pipeline, _, stores = await build_document_pipeline(
+        db=db,
+        generator_config=generator_config,
+    )
+    website_context_pipeline = build_website_context_pipeline(
+        generator_config=generator_config,
+    )
 
     _server_context = ServerContext(
         db=db,
@@ -190,6 +220,9 @@ async def get_server_context() -> ServerContext:
         disable_elicitation=disable_elicitation,
         open_world=server_config.open_world,
         health_monitor=health_monitor,
+        low_power=server_config.low_power,
+        indexing_enabled=indexing_enabled,
+        worker_manager=worker_manager,
     )
 
     return _server_context

@@ -135,7 +135,15 @@ def is_current_process_in_bad_state() -> bool:
     return False
 
 
-def _doc_type_worker(db: str, generator_config: GeneratorConfig, health_state=None):
+def _wait_for_indexing_enabled(indexing_enabled=None) -> bool:
+    if indexing_enabled is None:
+        return True
+    while not indexing_enabled.is_set():
+        indexing_enabled.wait(timeout=1)
+    return True
+
+
+def _doc_type_worker(db: str, generator_config: GeneratorConfig, health_state=None, indexing_enabled=None):
     exit_code = -1
     try:
         faulthandler.register(signal.SIGUSR1)
@@ -150,6 +158,9 @@ def _doc_type_worker(db: str, generator_config: GeneratorConfig, health_state=No
         logger.info(f"Document specific index worker ready in PID {os.getpid()}")
         queue_items = iter(persistent_queue_get(doc_type_queue, shrink_count=100))
         while _wait_for_health(health_state):
+            _wait_for_indexing_enabled(indexing_enabled)
+            if not _wait_for_health(health_state):
+                break
             try:
                 item = next(queue_items)
             except StopIteration:
@@ -174,7 +185,7 @@ def _doc_type_worker(db: str, generator_config: GeneratorConfig, health_state=No
     return exit_code
 
 
-def _doc_type_watcher(db: str, generator_config: GeneratorConfig, health_state=None):
+def _doc_type_watcher(db: str, generator_config: GeneratorConfig, health_state=None, indexing_enabled=None):
     """
     The watcher process maintains a doc type index process. It will start a new one if the process exits successfully,
     indicating it exited due to excessive memory usage.
@@ -186,7 +197,10 @@ def _doc_type_watcher(db: str, generator_config: GeneratorConfig, health_state=N
         logger.info(f"Document specific index watcher starting in PID {os.getpid()}")
 
         while True:
-            process = multiprocessing.Process(target=_doc_type_worker, args=(db, generator_config, health_state))
+            process = multiprocessing.Process(
+                target=_doc_type_worker,
+                args=(db, generator_config, health_state, indexing_enabled),
+            )
             process.start()
             process.join()
             exitcode = process.exitcode
@@ -212,22 +226,24 @@ def _doc_type_watcher(db: str, generator_config: GeneratorConfig, health_state=N
     logger.info(f"Document specific index watcher finished in PID {os.getpid()}")
 
 
-def start_ingest_worker(db: str, generator_config: GeneratorConfig, pool_size: int = 1, health_state=None) -> Tuple[
+def start_ingest_worker(db: str, generator_config: GeneratorConfig, pool_size: int = 1, health_state=None,
+                        indexing_enabled=None) -> Tuple[
     persistqueue.SQLiteAckQueue, "TaskPool"]:
     from shyhurricane.task_queue.types import TaskPool
 
     processes = []
 
     if get_server_config().low_power:
-        logger.warning(
-            "low_power: disabling document type specific indexing, but still queuing (run with '--low-power false' to process)")
-    else:
-        for idx in range(pool_size):
-            # these processes are heavy-weight
-            process = multiprocessing.Process(target=_doc_type_watcher, args=(db, generator_config, health_state))
-            process._shyhurricane_monitor_process_group = os.environ.get("SHYHURRICANE_MONITOR") == "1"
-            process.start()
-            processes.append(process)
+        logger.warning("low_power: document type indexing is initialized but paused; queued items will be processed when disabled")
+    for idx in range(pool_size):
+        # These processes initialize their pipelines immediately, then wait before claiming work if paused.
+        process = multiprocessing.Process(
+            target=_doc_type_watcher,
+            args=(db, generator_config, health_state, indexing_enabled),
+        )
+        process._shyhurricane_monitor_process_group = os.environ.get("SHYHURRICANE_MONITOR") == "1"
+        process.start()
+        processes.append(process)
 
     # this is a light-weight process, we only need one
     ingest_process = multiprocessing.Process(target=_ingest_watcher, args=(db, generator_config, health_state))
