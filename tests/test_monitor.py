@@ -1,8 +1,10 @@
 from types import SimpleNamespace
 
 import pytest
+from textual.widgets import Static
 
 from shyhurricane.db import get_domain_and_host_counts
+from shyhurricane.server_config import ServerConfig
 from shyhurricane.monitor import (
     MonitorData,
     MonitorApp,
@@ -535,3 +537,121 @@ async def test_collect_monitor_data_reads_low_power_from_context_and_config(monk
     )
     data2 = await collect_monitor_data(context_without_low_power, "127.0.0.1", 8000, [])
     assert data2.low_power is True
+
+
+@pytest.mark.asyncio
+async def test_monitor_app_toggle_low_power_action(monkeypatch):
+    server_config = ServerConfig(low_power=False)
+    monkeypatch.setattr("shyhurricane.monitor.get_server_config", lambda: server_config)
+    context = SimpleNamespace(
+        db="qdrant:6333",
+        ingest_queue=Queue(0),
+        task_queue=Queue(0),
+        spider_result_queue=Queue(0),
+        port_scan_result_queue=Queue(0),
+        dir_busting_result_queue=Queue(0),
+        stores={},
+        proxy_host=None,
+        proxy_port=None,
+        proxy_ca_cert_path=None,
+        qdrant_client=object(),
+        health_monitor=None,
+        low_power=False,
+    )
+    server = SimpleNamespace(running_tools=[])
+    monkeypatch.setattr("shyhurricane.monitor.get_doc_type_queue", lambda db: Queue(0))
+    monkeypatch.setattr(
+        "shyhurricane.monitor.get_generator_config",
+        lambda: SimpleNamespace(describe=lambda: "model"),
+    )
+    monkeypatch.setattr("shyhurricane.monitor.get_recent_indexed_urls", lambda *args, **kwargs: [])
+    monkeypatch.setattr("shyhurricane.monitor.get_domain_and_host_counts", lambda *args, **kwargs: ({}, {}))
+
+    app = MonitorApp(context, "127.0.0.1", 8000, server)
+
+    # Toggle from False to True
+    await app.action_toggle_low_power()
+    assert context.low_power is True
+    assert server_config.low_power is True
+
+    # Toggle from True to False
+    await app.action_toggle_low_power()
+    assert context.low_power is False
+    assert server_config.low_power is False
+
+
+@pytest.mark.asyncio
+async def test_monitor_app_toggle_low_power_with_immutable_context(monkeypatch):
+    server_config = ServerConfig(low_power=False)
+    monkeypatch.setattr("shyhurricane.monitor.get_server_config", lambda: server_config)
+    context = object()
+    server = SimpleNamespace(running_tools=[])
+
+    app = MonitorApp(context, "127.0.0.1", 8000, server)
+
+    async def mock_collect(*args, **kwargs):
+        return MonitorData(
+            bound_address="127.0.0.1:8000",
+            proxy_address="not started",
+            model="model",
+            model_health=None,
+            certificate_fingerprint=None,
+            database="db",
+            qdrant_host_bind=None,
+            qdrant_http_port=None,
+            qdrant_health=None,
+            low_power=server_config.low_power,
+            document_counts={},
+            domain_count=0,
+            host_count=0,
+            top_domains=[],
+            top_hosts=[],
+            queue_sizes={},
+            recent_urls=[],
+            running_tools=[],
+        )
+
+    monkeypatch.setattr("shyhurricane.monitor.collect_monitor_data", mock_collect)
+
+    await app.action_toggle_low_power()
+    assert server_config.low_power is True
+
+
+@pytest.mark.asyncio
+async def test_monitor_app_key_press_toggles_low_power(monkeypatch):
+    server_config = ServerConfig(low_power=False)
+    monkeypatch.setattr("shyhurricane.monitor.get_server_config", lambda: server_config)
+    context = SimpleNamespace(
+        db="qdrant:6333",
+        ingest_queue=Queue(0),
+        task_queue=Queue(0),
+        spider_result_queue=Queue(0),
+        port_scan_result_queue=Queue(0),
+        dir_busting_result_queue=Queue(0),
+        stores={},
+        proxy_host=None,
+        proxy_port=None,
+        proxy_ca_cert_path=None,
+        qdrant_client=object(),
+        health_monitor=None,
+        low_power=False,
+    )
+    server = SimpleNamespace(running_tools=[])
+    monkeypatch.setattr("shyhurricane.monitor.get_doc_type_queue", lambda db: Queue(0))
+    monkeypatch.setattr(
+        "shyhurricane.monitor.get_generator_config",
+        lambda: SimpleNamespace(describe=lambda: "model"),
+    )
+    monkeypatch.setattr("shyhurricane.monitor.get_recent_indexed_urls", lambda *args, **kwargs: [])
+    monkeypatch.setattr("shyhurricane.monitor.get_domain_and_host_counts", lambda *args, **kwargs: ({}, {}))
+
+    app = MonitorApp(context, "127.0.0.1", 8000, server)
+    async with app.run_test() as pilot:
+        assert context.low_power is False
+        assert "Low power: disabled" in app.query_one("#configuration", Static).content
+
+        # Press 'l' (lowercase)
+        await pilot.press("l")
+        assert context.low_power is True
+        assert server_config.low_power is True
+        assert "Low power: enabled" in app.query_one("#configuration", Static).content

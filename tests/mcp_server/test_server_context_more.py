@@ -79,3 +79,49 @@ def test_close_server_context_closes_and_clears_global(monkeypatch):
 
     assert ctx.task_pool.closed is True
     assert server_context._server_context is None
+
+
+@pytest.mark.asyncio
+async def test_server_context_ensure_retrieval_pipelines(monkeypatch):
+    ctx = make_context()
+    doc_pipeline = object()
+    ctx_pipeline = object()
+    stores = {"retriever": object()}
+
+    monkeypatch.setattr(server_context, "get_generator_config", lambda: "gen_config")
+
+    async def mock_build_doc_pipe(db, generator_config):
+        assert db == "db"
+        assert generator_config == "gen_config"
+        return doc_pipeline, None, stores
+
+    monkeypatch.setattr(server_context, "build_document_pipeline", mock_build_doc_pipe)
+    monkeypatch.setattr(server_context, "build_website_context_pipeline", lambda generator_config: ctx_pipeline)
+
+    assert ctx.document_pipeline is None
+    assert ctx.website_context_pipeline is None
+
+    await ctx.ensure_retrieval_pipelines()
+
+    assert ctx.document_pipeline is doc_pipeline
+    assert ctx.website_context_pipeline is ctx_pipeline
+    assert ctx.stores == stores
+
+    # Second call should not re-run pipeline builders
+    monkeypatch.setattr(server_context, "build_document_pipeline", lambda *args, **kwargs: pytest.fail("Should not build again"))
+    await ctx.ensure_retrieval_pipelines()
+
+
+def test_server_context_low_power_toggle_controls_indexing_event():
+    event = server_context.multiprocessing.Event()
+    event.set()
+    ctx = make_context()
+    ctx.indexing_enabled = event
+
+    ctx.set_low_power(True)
+    assert ctx.low_power is True
+    assert not event.is_set()
+
+    ctx.set_low_power(False)
+    assert ctx.low_power is False
+    assert event.is_set()

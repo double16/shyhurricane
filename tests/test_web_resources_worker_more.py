@@ -72,6 +72,25 @@ def test_wait_for_health_accepts_missing_state():
     assert web_resources._wait_for_health(None) is True
 
 
+def test_wait_for_indexing_enabled_waits_until_runtime_resume():
+    class IndexingState:
+        def __init__(self):
+            self.enabled = False
+            self.wait_calls = 0
+
+        def is_set(self):
+            return self.enabled
+
+        def wait(self, timeout):
+            self.wait_calls += 1
+            self.enabled = True
+
+    state = IndexingState()
+
+    assert web_resources._wait_for_indexing_enabled(state) is True
+    assert state.wait_calls == 1
+
+
 def test_ingest_worker_acks_and_queues_content_documents(monkeypatch, tmp_path):
     ingest_queue = Queue()
     doc_type_queue = Queue()
@@ -141,7 +160,7 @@ def test_doc_type_worker_success_failure_and_bad_state(monkeypatch):
     assert queue.acked == [first]
 
 
-def test_start_ingest_worker_respects_low_power(monkeypatch):
+def test_start_ingest_worker_starts_paused_doc_type_watchers_in_low_power(monkeypatch):
     processes = []
     queue = Queue()
 
@@ -165,9 +184,10 @@ def test_start_ingest_worker_respects_low_power(monkeypatch):
     returned_queue, pool = web_resources.start_ingest_worker("db", object(), pool_size=3)
 
     assert returned_queue is queue
-    assert len(processes) == 1
-    assert processes[0].target is web_resources._ingest_watcher
-    assert len(pool.processes) == 1
+    assert len(processes) == 4
+    assert all(process.target is web_resources._doc_type_watcher for process in processes[:3])
+    assert processes[3].target is web_resources._ingest_watcher
+    assert len(pool.processes) == 4
 
 
 def test_start_ingest_worker_starts_doc_type_watchers_when_enabled(monkeypatch):

@@ -19,6 +19,7 @@ from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server import get_server_context, mcp_instance, log_tool_history, assert_elicitation, \
     ServerContext, get_additional_hosts, AdditionalHostsField, CookiesField, UserAgentField, RequestHeadersField, \
     get_additional_http_headers
+from shyhurricane.server_config import get_server_config
 from shyhurricane.mcp_server.tools.find_indexed_metadata import find_netloc
 from shyhurricane.rate_limit import get_rate_limit_requests_per_second
 from shyhurricane.db import scroll_qdrant_collection
@@ -281,8 +282,25 @@ async def find_web_resources(
         return find_web_resources_result(results=resources_by_hostname, query=query, http_methods=http_methods,
                                          limit=limit)
 
-    document_pipeline: Optional[Pipeline] = server_ctx.document_pipeline
-    website_context_pipeline: Optional[Pipeline] = server_ctx.website_context_pipeline
+    low_power = getattr(server_ctx, "low_power", None)
+    if low_power is None:
+        low_power = getattr(get_server_config(), "low_power", False)
+
+    if low_power:
+        logger.warning("low_power: embedding based-retrieval disabled")
+        return FindWebResourcesResult(
+            instructions=find_web_resources_instructions_low_power,
+            query=query,
+            http_methods=http_methods,
+            limit=limit,
+            resources=[],
+        )
+
+    if hasattr(server_ctx, "ensure_retrieval_pipelines"):
+        await server_ctx.ensure_retrieval_pipelines()
+
+    document_pipeline: Optional[Pipeline] = getattr(server_ctx, "document_pipeline", None)
+    website_context_pipeline: Optional[Pipeline] = getattr(server_ctx, "website_context_pipeline", None)
 
     if website_context_pipeline is None or document_pipeline is None:
         logger.warning("low_power: embedding based-retrieval disabled")

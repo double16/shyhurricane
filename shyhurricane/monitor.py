@@ -5,6 +5,7 @@ from typing import Iterable
 
 from qdrant_client.http import models as qm
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Container
 from textual.widgets import Footer, Header, Static
 
@@ -198,7 +199,10 @@ class MonitorApp(App[None]):
     #domains { height: 19; }
     #urls, #tools { height: 12; }
     """
-    BINDINGS = [("q", "quit", "Quit")]
+    BINDINGS = [
+        Binding("q", "quit", "Quit"),
+        Binding("l", "toggle_low_power", "Toggle low power"),
+    ]
 
     def __init__(self, server_context, host: str, port: int, server, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -226,6 +230,8 @@ class MonitorApp(App[None]):
         data = await collect_monitor_data(
             self.server_context, self.host, self.port, self.server.running_tools
         )
+        if not self.is_running:
+            return
         self.query_one("#configuration", Static).update(format_configuration_panel(data))
         queues = "\n".join(f"{name}: {size}" for name, size in data.queue_sizes.items())
         self.query_one("#queues", Static).update(f"[b]Queue status[/b]\n{queues}")
@@ -235,6 +241,28 @@ class MonitorApp(App[None]):
         self.query_one("#urls", Static).update(f"[b]Last five URLs indexed[/b]\n{urls}")
         tools = "\n".join(data.running_tools) or "No MCP tools running"
         self.query_one("#tools", Static).update(f"[b]Running MCP tools[/b]\n{tools}")
+
+    async def action_toggle_low_power(self) -> None:
+        current_low_power = getattr(self.server_context, "low_power", None)
+        if current_low_power is None:
+            current_low_power = getattr(get_server_config(), "low_power", False)
+        new_low_power = not current_low_power
+
+        if self.server_context is not None:
+            set_low_power = getattr(self.server_context, "set_low_power", None)
+            if callable(set_low_power):
+                set_low_power(new_low_power)
+            try:
+                self.server_context.low_power = new_low_power
+            except (AttributeError, TypeError):
+                pass
+        server_config = get_server_config()
+        if server_config is not None and hasattr(server_config, "low_power"):
+            try:
+                server_config.low_power = new_low_power
+            except (AttributeError, TypeError):
+                pass
+        await self.refresh_data()
 
     def action_quit(self) -> None:
         self.server.should_exit = True
