@@ -103,3 +103,13 @@ def test_save_finding_worker_ignores_invalid_target(tmp_path):
 
     assert ctx.stores["finding"].written == []
     assert ctx.doc_type_queue.items == []
+
+
+def test_save_finding_worker_skips_disabled_log(tmp_path):
+    ctx = make_context(tmp_path)
+    ctx.finding_log_path = None
+
+    save_finding_worker(ctx, SaveFindingQueueItem("example.com", "# markdown", "Title"))
+
+    assert ctx.stores["finding"].written
+    assert not (tmp_path / "findings.jsonl").exists()

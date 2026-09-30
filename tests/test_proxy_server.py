@@ -136,6 +136,27 @@ async def test_content_store_recommend_urls_uses_specific_cache_and_domain_fallb
 
 
 @pytest.mark.asyncio
+async def test_content_store_recommend_urls_caps_specific_results(monkeypatch):
+    class Record:
+        def __init__(self, index):
+            self.payload = {"meta": {
+                "netloc": "example.com:443", "url": f"https://example.com/path/{index}"
+            }}
+
+    async def many_records(**kwargs):
+        for index in range(1001):
+            yield Record(index)
+
+    monkeypatch.setattr(srv, "scroll_qdrant_collection", many_records)
+    store = srv.ContentStore(object())
+
+    urls = await store.recommend_urls("https://example.com/path")
+
+    assert len(urls) == 1000
+    assert len(store.recommend_urls_cache["example.com:443"]) == 1000
+
+
+@pytest.mark.asyncio
 async def test_replay_proxy_header_body_and_response_helpers():
     reader = asyncio.StreamReader()
     reader.feed_data(
@@ -246,6 +267,52 @@ async def test_replay_proxy_reads_chunked_body_and_handles_inner_http11():
     await srv.ReplayProxy.handle_inner_http11(request_reader, writer, "example.com", store)
 
     assert b"HTTP/1.1 200 OK" in writer.data
+    assert writer.closed is True
+
+
+@pytest.mark.asyncio
+async def test_replay_proxy_body_reader_handles_empty_and_incomplete_bodies():
+    empty_reader = asyncio.StreamReader()
+    empty_reader.feed_eof()
+    assert await srv.ReplayProxy.read_body_http11(empty_reader, {}) == b""
+
+    incomplete_chunk = asyncio.StreamReader()
+    incomplete_chunk.feed_eof()
+    assert await srv.ReplayProxy.read_body_http11(incomplete_chunk, {"Transfer-Encoding": "chunked"}) == b""
+
+
+@pytest.mark.asyncio
+async def test_inner_http11_handles_empty_malformed_and_bodyless_requests():
+    store = DummyStore({("GET", "https://example.com/ok"): (200, {}, b"")})
+    for request in (b"", b"bad\r\n"):
+        reader = asyncio.StreamReader()
+        reader.feed_data(request)
+        reader.feed_eof()
+        writer = DummyWriter()
+
+        await srv.ReplayProxy.handle_inner_http11(reader, writer, "example.com", store)
+
+        assert writer.closed is True
+
+    reader = asyncio.StreamReader()
+    reader.feed_data(b"GET /ok HTTP/1.1\r\nHost: example.com\r\n\r\n")
+    reader.feed_eof()
+    writer = DummyWriter()
+
+    await srv.ReplayProxy.handle_inner_http11(reader, writer, "example.com", store)
+
+    assert b"HTTP/1.1 200 OK" in writer.data
+    assert writer.data.endswith(b"\r\n\r\n")
+
+
+@pytest.mark.asyncio
+async def test_replay_proxy_handle_empty_request_closes_connection():
+    reader = asyncio.StreamReader()
+    reader.feed_eof()
+    writer = DummyWriter()
+
+    await srv.ReplayProxy(DummyStore({}), ca=object()).handle(reader, writer)
+
     assert writer.closed is True
 
 

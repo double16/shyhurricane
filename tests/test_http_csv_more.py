@@ -10,6 +10,7 @@ def test_is_http_csv_detection_edges():
     assert is_http_csv("", None) is False
     assert is_http_csv("", '{"request": true}') is False
     assert is_http_csv("", "a,b,c,d,e") is True
+    assert is_http_csv("ordinary text", None) is False
 
 
 def test_parse_headers_combines_duplicates_and_rejects_bad_names():

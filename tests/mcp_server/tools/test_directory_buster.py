@@ -104,6 +104,26 @@ async def test_validate_wordlist_corrects_to_found_wordlist(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_validate_wordlist_uses_default_when_no_candidates_exist(monkeypatch):
+    async def find_wordlists(ctx, name, limit):
+        return []
+
+    monkeypatch.setattr(directory, "find_wordlists", find_wordlists)
+
+    assert await directory.validate_wordlist(None, "/usr/share/missing.txt") is None
+
+
+@pytest.mark.asyncio
+async def test_validate_wordlist_accepts_catalog_match(monkeypatch):
+    async def find_wordlists(ctx, name, limit):
+        return ["/usr/share/words.txt"]
+
+    monkeypatch.setattr(directory, "find_wordlists", find_wordlists)
+
+    assert await directory.validate_wordlist(None, "/usr/share/words.txt") == "/usr/share/words.txt"
+
+
+@pytest.mark.asyncio
 async def test_directory_buster_queues_work_and_collects_results(monkeypatch):
     other = DirBustingResultItem("other", "https://other.test")
     done = DirBustingResultItem("ctx-1", None)
@@ -142,3 +162,17 @@ async def test_directory_buster_queues_work_and_collects_results(monkeypatch):
     assert result.urls == ["https://example.com/admin"]
     assert result.has_more is False
     assert ctx.messages == ["Found: https://example.com/admin"]
+
+
+@pytest.mark.asyncio
+async def test_directory_buster_returns_pending_when_result_queue_is_empty(monkeypatch):
+    server_context = ServerContext()
+    patch_context(monkeypatch, server_context)
+
+    result = await directory.directory_buster(
+        Ctx(), "https://example.com/", user_agent=" agent ", timeout_seconds=30
+    )
+
+    assert server_context.task_queue.put_items[0].user_agent == "agent"
+    assert result.urls == []
+    assert result.has_more is True

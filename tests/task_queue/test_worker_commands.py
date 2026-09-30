@@ -76,3 +76,15 @@ def test_build_ffuf_command_includes_fuzz_options():
     assert "-b" in command
     assert "-d" in command
     assert "-replay-proxy" in command
+
+
+def test_build_ffuf_command_uses_defaults_without_optional_filters():
+    item = DirBustingQueueItem("ctx", "https://example.com/path/FUZZ", depth=1)
+
+    command = _build_ffuf_command(item)
+
+    assert command[:3] == ["ffuf", "-u", "https://example.com/path/FUZZ"]
+    assert "/usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt" in command
+    assert "-recursion" not in command
+    assert "-fc" not in command
+    assert "-e" not in command
