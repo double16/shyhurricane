@@ -526,7 +526,6 @@ class ReplayProxy:
                             logger.info(f"proxy HTTP/2 500 {error_body.decode()}")
                             await ReplayProxy._h2_send_response(conn, reader, transport, event.stream_id, 500,
                                                                 {"content-type": "text/plain"}, error_body)
-                            return
                         finally:
                             # Politely end the connection and flush; then **stop reading**
                             conn.close_connection()  # send GOAWAY
@@ -534,7 +533,7 @@ class ReplayProxy:
                             # hard close to avoid TLS unwrap races
                             with contextlib.suppress(Exception):
                                 transport.abort()
-                            return
+                        return
                     elif isinstance(event, ConnectionTerminated):
                         return
                 transport.write(conn.data_to_send())
