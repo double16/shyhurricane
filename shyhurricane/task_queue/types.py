@@ -113,10 +113,12 @@ class SaveFindingQueueItem:
     def __init__(self,
                  target: str,
                  markdown: str,
-                 title: Optional[str]):
+                 title: Optional[str],
+                 finding_id: Optional[str] = None):
         self.target = target
         self.markdown = markdown
         self.title = title
+        self.finding_id = finding_id
 
 
 class TaskPool:

@@ -85,6 +85,7 @@ def save_finding_worker(ctx: FindingContext, item: SaveFindingQueueItem):
     doc = Document(
         content=str(item.markdown),
         meta=meta,
+        id=item.finding_id,
     )
 
     if not item.title:

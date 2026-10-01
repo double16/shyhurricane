@@ -1,4 +1,5 @@
 import pytest
+from queue import Empty
 
 import shyhurricane.task_queue as task_queue
 from shyhurricane.task_queue.types import (
@@ -123,3 +124,55 @@ def test_task_router_dispatches_all_known_items(monkeypatch):
     assert ("finding", "Title") in calls
     assert calls.count(("port_warm",)) == 1
     assert calls.count(("finding_warm",)) == 1
+
+
+def test_task_router_consumes_durable_scan_finding(monkeypatch):
+    calls = []
+    finding = SaveFindingQueueItem("https://example.com/a.js", "# finding", "Scan finding", "stable-id")
+
+    class TaskQueue:
+        count = 0
+
+        def get(self, timeout):
+            self.count += 1
+            if self.count == 1:
+                raise Empty
+            raise KeyboardInterrupt
+
+    class ScanQueue:
+        def __init__(self):
+            self.acked = []
+
+        def resume_unack_tasks(self):
+            calls.append("resumed")
+
+        def get(self, block):
+            assert block is False
+            return finding
+
+        def ack(self, item):
+            self.acked.append(item)
+
+        def close(self):
+            pass
+
+    class Context:
+        def __init__(self, **kwargs):
+            pass
+
+        def warm_up(self):
+            pass
+
+    scan_queue = ScanQueue()
+    monkeypatch.setattr(task_queue.faulthandler, "register", lambda *args: None)
+    monkeypatch.setattr(task_queue.atexit, "register", lambda *args: None)
+    monkeypatch.setattr(task_queue.persistqueue, "SQLiteAckQueue", lambda **kwargs: FakeQueue())
+    monkeypatch.setattr(task_queue, "get_doc_type_queue", lambda db: FakeQueue())
+    monkeypatch.setattr(task_queue, "get_scan_finding_queue", lambda db: scan_queue)
+    monkeypatch.setattr(task_queue, "FindingContext", Context)
+    monkeypatch.setattr(task_queue, "save_finding_worker", lambda ctx, item: calls.append(item.title))
+
+    task_queue._task_router("db", "/tmp/ingest", TaskQueue(), FakeQueue(), FakeQueue(), FakeQueue(), "generator")
+
+    assert calls == ["resumed", "Scan finding"]
+    assert scan_queue.acked == [finding]

@@ -83,6 +83,12 @@ def test_save_finding_worker_writes_log_document_store_and_doc_type_queue(tmp_pa
     assert ctx.doc_type_queue.items == [written_doc]
 
 
+def test_save_finding_worker_uses_scan_finding_id(tmp_path):
+    ctx = make_context(tmp_path)
+    save_finding_worker(ctx, SaveFindingQueueItem("https://example.com/app.js", "# finding", "Scan", "stable-id"))
+    assert ctx.stores["finding"].written[0][0][0].id == "stable-id"
+
+
 def test_save_finding_worker_generates_title_and_disables_bad_log_path(tmp_path):
     bad_path = tmp_path / "missing" / "findings.jsonl"
     ctx = make_context(tmp_path)

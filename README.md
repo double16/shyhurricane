@@ -179,6 +179,14 @@ python3 mcp_service.py --open-world false
 
 The MCP tools will index data if appropriate. For example, spidering and directory busting. Data can be indexed by external means using the `/index` endpoint. The endpoint is not part of an MCP tool or protocol.
 
+JavaScript responses are deobfuscated with webcrack and scanned with Opengrep during ingestion, including in low power
+mode. If a source map is indexed, shuji recovers its source files for scanning. When `OPEN_WORLD=true`, indexing a
+`.js` URL also attempts to fetch its `.js.map` URL. When `OPEN_WORLD=false`, only maps already supplied through
+indexing are used; Opengrep rule updates are still allowed. Scan matches are saved as findings and can be retrieved
+with `query_findings`. The command image includes a snapshot of the
+[Opengrep rules repository](https://github.com/amplify-security/opengrep-rules); it checks for updates at runtime and
+uses the cached snapshot if an update fails.
+
 Indexing workers monitor Qdrant and LLM readiness. If either dependency is unhealthy, `/index` requests continue to be accepted into the persistent queue, but ingest and type-specific indexing pause before consuming new items. Workers resume automatically after both health checks recover; MCP tools retain their existing request and error behavior.
 
 ```shell

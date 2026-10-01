@@ -136,6 +136,14 @@ def test_normalize_documents_uses_cached_js_and_updates_length(monkeypatch):
     assert json.loads(result.meta["response_headers"])["Content-Length"] == str(len(result.content))
 
 
+def test_normalize_documents_uses_webcrack_for_js_url_with_plain_mime(monkeypatch):
+    doc = Document(content="var a=1", meta={"type": "content", "url": "https://example.com/app.js?v=1",
+                                            "content_type": "text/plain", "response_headers": "{}"})
+    monkeypatch.setattr(wrp, "_deobfuscate_javascript", lambda content: "var a = 1;")
+    normalized = wrp.NormalizeDocuments(object(), {"content": Store()}).run([doc])["documents"][0]
+    assert normalized.content == "var a = 1;"
+
+
 def test_normalize_documents_handles_html_json_css_and_cleaner(monkeypatch):
     class Cleaner:
         def run(self, documents):

@@ -14,15 +14,15 @@ Start mcp_server:
 python3 mcp_service.py
 ```
 
-Start MCP dev tool:
+Start MCP Inspector:
 
 ```shell
-DANGEROUSLY_OMIT_AUTH=true mcp dev mcp_service.py:mcp_instance
+npx @modelcontextprotocol/inspector
 ```
 
 ## colima docker build cache
 
-The `shyhurricane_unix_command` image can be quite large and the build cache size may need to be increased. For `colima`, use the following
+The `shyhurricane_unix_command` image can be large (~6GB) and the build cache size may need to be increased. For `colima`, use the following
 command and config.
 
 ```shell
@@ -32,7 +32,7 @@ docker:
   builder:
     gc:
       enabled: true
-      defaultKeepStorage: 30G
+      defaultKeepStorage: 10G
 ```
 
 # Dev Notes

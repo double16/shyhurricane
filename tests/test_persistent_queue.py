@@ -2,8 +2,10 @@ from pathlib import Path
 
 import pytest
 from persistqueue import Empty
+from persistqueue import SQLiteAckQueue
 
 import shyhurricane.persistent_queue as persistent_queue
+from shyhurricane.task_queue.types import SaveFindingQueueItem
 
 
 class FakeQueue:
@@ -98,6 +100,20 @@ def test_get_persistent_queue_sanitizes_db_name_and_uses_user_state_dir(monkeypa
     assert captured["auto_commit"] is True
     assert captured["path"] == str(tmp_path / ".local/state/shyhurricane/prod_db_2026/ingest_queue")
     assert (tmp_path / ".local/state/shyhurricane/prod_db_2026/ingest_queue").is_dir()
+
+
+def test_scan_finding_queue_survives_reopen(tmp_path):
+    path = str(tmp_path / "scan_finding_queue")
+    queue = SQLiteAckQueue(path=path, auto_commit=True)
+    queue.put(SaveFindingQueueItem("https://example.com/a.js", "# finding", "Scan", "stable-id"))
+    queue.close()
+
+    reopened = SQLiteAckQueue(path=path, auto_commit=True)
+    item = reopened.get(block=False)
+    assert item.finding_id == "stable-id"
+    assert item.target == "https://example.com/a.js"
+    reopened.ack(item)
+    reopened.close()
 
 
 def test_get_persistent_queue_allows_existing_queue_directory(monkeypatch, tmp_path):

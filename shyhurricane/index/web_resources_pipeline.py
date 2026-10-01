@@ -371,6 +371,8 @@ class NormalizeDocuments:
 
             # Map MIME to a logical doc type
             doc_type = map_mime_to_type(raw_mime)
+            if doc_type != "javascript" and doc.meta.get("url", "").split("?", 1)[0].lower().endswith(".js"):
+                doc_type = "javascript"
 
             normalized_content = doc.content
             try:
