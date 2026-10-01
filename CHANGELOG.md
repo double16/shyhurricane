@@ -4,6 +4,9 @@
 
 ### Features
 
+- Scan indexed JavaScript with Opengrep, recover source-map files with shuji, and save matches as findings.
+- Fetch `.js.map` alongside indexed JavaScript when open-world access is enabled, and use cached Opengrep rules when updates fail.
+- Replace Wakaru with webcrack for JavaScript deobfuscation.
 - Add a single character command 'l' to the monitor to toggle low power mode.
 - Show low power setting status in the TTY monitoring Configuration panel.
 - Show the Qdrant data path and endpoint on the same line in the TTY monitoring Configuration panel.

@@ -22,7 +22,7 @@ RUN echo 'path-exclude=/usr/share/doc/*'        >  /etc/dpkg/dpkg.cfg.d/excludes
     echo 'path-include=/usr/share/doc/*/copyright' >> /etc/dpkg/dpkg.cfg.d/excludes
 
 RUN apt-get update &&\
-    apt-get install -y --no-install-recommends rsync nmap curl feroxbuster ffuf nodejs npm mitmproxy python3-pip python3-virtualenv jq seclists \
+    apt-get install -y --no-install-recommends rsync nmap curl git feroxbuster ffuf nodejs npm mitmproxy python3-pip python3-virtualenv jq seclists \
     build-essential gcc g++ python3-dev libffi-dev &&\
     apt-get clean
 
@@ -33,12 +33,13 @@ RUN ARCH=$(uname -m) && \
     curl -L "https://github.com/opengrep/opengrep/releases/download/${OPENGREP_VERSION}/opengrep_manylinux_${OPENGREP_ARCH}" -o /usr/local/bin/opengrep && \
     chmod +x /usr/local/bin/opengrep
 
-RUN mkdir /usr/share/wakaru/ && chown 0:0 /usr/share/wakaru/ && chmod 0755 /usr/share/wakaru/
-COPY --chown=0:0 --chmod=644 package.json package-lock.json /usr/share/wakaru/
-COPY --chown=0:0 --chmod=755 wakaru.cjs /usr/share/wakaru/
 COPY --chown=0:0 --chmod=755 jsdeobf.sh /usr/local/bin/
-RUN cd /usr/share/wakaru/ && npm install
 RUN npm -g install webcrack shuji
+
+# Seed the rule cache so JavaScript scans work when the registry is unavailable.
+RUN git clone --depth=1 https://github.com/amplify-security/opengrep-rules.git /opt/opengrep-rules && \
+    chown -R 2000:2000 /opt/opengrep-rules
+COPY --chown=0:0 --chmod=755 scan_javascript.sh /usr/local/bin/
 
 RUN mkdir /usr/share/mitm_to_katana/ && chown 0:0 /usr/share/mitm_to_katana/ && chmod 0755 /usr/share/mitm_to_katana/
 COPY --chown=0:0 --chmod=644 requirements.txt mitm_to_katana.py /usr/share/mitm_to_katana/

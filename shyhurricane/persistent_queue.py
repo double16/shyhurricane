@@ -67,6 +67,10 @@ def get_doc_type_queue(db: str) -> persistqueue.SQLiteAckQueue:
     return get_persistent_queue(db, "doc_type_queue")
 
 
+def get_scan_finding_queue(db: str) -> persistqueue.SQLiteAckQueue:
+    return get_persistent_queue(db, "scan_finding_queue")
+
+
 def active_queue_size(queue) -> int:
     """Return the number of queued and currently processing items."""
     ready_count = getattr(queue, "_count", None)

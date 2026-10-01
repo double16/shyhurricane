@@ -13,9 +13,12 @@ from haystack import Pipeline
 
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.index.web_resources_pipeline import build_ingest_pipeline, build_doc_type_pipeline
+from shyhurricane.index.javascript_analysis import analyze_document, javascript_url_from_map, source_map_url
+from shyhurricane.index.web_resources_pipeline import build_stores
+from shyhurricane.doc_type_model_map import map_mime_to_type
 from shyhurricane.server_config import get_server_config
 from shyhurricane.persistent_queue import persistent_queue_get, get_ingest_queue, \
-    get_doc_type_queue
+    get_doc_type_queue, get_scan_finding_queue
 from shyhurricane.utils import get_log_path, log_heap_stats, log_gpu_memory_summary
 from shyhurricane.task_queue.types import prepare_worker_process
 
@@ -49,6 +52,9 @@ def _ingest_worker(db: str, generator_config: GeneratorConfig, health_state=None
         doc_type_queue = get_doc_type_queue(db)
         atexit.register(doc_type_queue.close)
 
+        scan_finding_queue = None
+        content_store = None
+
         index_log_path = get_log_path(db, "index.txt")
 
         pipeline: Pipeline = build_ingest_pipeline(db=db, generator_config=generator_config)
@@ -77,6 +83,18 @@ def _ingest_worker(db: str, generator_config: GeneratorConfig, health_state=None
                 for doc in output.get("output", {}).get("documents", []):
                     if doc.meta.get("type") == "content":
                         doc_type_queue.put(doc)
+                        if (map_mime_to_type(doc.meta.get("content_type", "")) == "javascript" or source_map_url(
+                                doc.meta.get("url", ""))
+                                or javascript_url_from_map(doc.meta.get("url", ""))):
+                            if scan_finding_queue is None:
+                                scan_finding_queue = get_scan_finding_queue(db)
+                                atexit.register(scan_finding_queue.close)
+                                content_store = build_stores(db, {"content"})["content"]
+                            try:
+                                analyze_document(doc, get_server_config().open_world,
+                                                 content_store, scan_finding_queue)
+                            except Exception as exc:
+                                logger.warning("JavaScript analysis failed for %s: %s", doc.meta.get("url"), exc)
 
                 queue.ack(item)
             except Exception as e:

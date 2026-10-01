@@ -6,13 +6,14 @@ import logging
 import multiprocessing
 import os
 import signal
+from queue import Empty
 from multiprocessing import Queue, Process
 
 import persistqueue
 
 from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import GeneratorConfig
-from shyhurricane.persistent_queue import get_doc_type_queue
+from shyhurricane.persistent_queue import get_doc_type_queue, get_scan_finding_queue
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.task_queue.dir_busting_worker import dir_busting_worker
 from shyhurricane.task_queue.finding_worker import save_finding_worker, FindingContext
@@ -77,9 +78,25 @@ def _task_router(db: str,
 
         port_scan_ctx = None
         finding_ctx = None
+        scan_finding_queue = None
 
         while True:
-            item = task_queue.get()
+            queued_scan = False
+            try:
+                try:
+                    item = task_queue.get(timeout=1)
+                except TypeError:
+                    item = task_queue.get()
+            except Empty:
+                if scan_finding_queue is None:
+                    scan_finding_queue = get_scan_finding_queue(db)
+                    scan_finding_queue.resume_unack_tasks()
+                    atexit.register(scan_finding_queue.close)
+                try:
+                    item = scan_finding_queue.get(block=False)
+                    queued_scan = True
+                except persistqueue.Empty:
+                    continue
             logger.info(f"Processing {item.__class__.__name__} in PID {os.getpid()}")
             try:
                 if isinstance(item, SpiderQueueItem):
@@ -104,9 +121,14 @@ def _task_router(db: str,
                         finding_ctx.warm_up()
                     save_finding_worker(finding_ctx, item)
 
+                if queued_scan:
+                    scan_finding_queue.ack(item)
+
             except KeyboardInterrupt:
                 break
             except BaseException as e:
+                if queued_scan:
+                    scan_finding_queue.ack_failed(item)
                 logger.error(f"Error running {item.__class__.__name__} in PID {os.getpid()}", exc_info=e)
 
     except KeyboardInterrupt:

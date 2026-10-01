@@ -122,6 +122,36 @@ def test_ingest_worker_acks_and_queues_content_documents(monkeypatch, tmp_path):
     assert (tmp_path / "index.txt").read_text() == item + "\n"
 
 
+def test_ingest_worker_scans_javascript_even_in_low_power(monkeypatch, tmp_path):
+    ingest_queue = Queue()
+    doc_type_queue = Queue()
+    finding_queue = Queue()
+    doc = Document(content="eval(input)", meta={"type": "content", "content_type": "text/javascript",
+                                                 "url": "https://example.com/app.js"})
+    pipeline = Pipeline({"output": {"documents": [doc]}})
+    calls = []
+    item = json.dumps({"request": {"endpoint": "https://example.com/app.js"}})
+
+    monkeypatch.setattr(web_resources.faulthandler, "register", lambda *args, **kwargs: None)
+    monkeypatch.setattr(web_resources, "get_ingest_queue", lambda db: ingest_queue)
+    monkeypatch.setattr(web_resources, "get_doc_type_queue", lambda db: doc_type_queue)
+    monkeypatch.setattr(web_resources, "get_scan_finding_queue", lambda db: finding_queue)
+    monkeypatch.setattr(web_resources, "get_log_path", lambda db, name: tmp_path / name)
+    monkeypatch.setattr(web_resources, "build_ingest_pipeline", lambda **kwargs: pipeline)
+    monkeypatch.setattr(web_resources, "build_stores", lambda *args: {"content": object()})
+    monkeypatch.setattr(web_resources, "get_server_config", lambda: type("Config", (), {
+        "open_world": False, "low_power": True})())
+    monkeypatch.setattr(web_resources, "analyze_document", lambda *args: calls.append(args))
+    monkeypatch.setattr(web_resources, "persistent_queue_get", lambda queue, shrink_count: finite_queue([item]))
+
+    web_resources._ingest_worker("db", object())
+
+    assert doc_type_queue.items == [doc]
+    assert len(calls) == 1
+    assert calls[0][1] is False
+    assert calls[0][3] is finding_queue
+
+
 def test_ingest_worker_marks_failures(monkeypatch):
     ingest_queue = Queue()
     doc_type_queue = Queue()
