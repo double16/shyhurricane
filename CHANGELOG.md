@@ -19,6 +19,7 @@
 
 ### Fixes
 
+- Remove unused OAST provider configuration options.
 - Prevent the server-context unit test from creating a Docker-managed Qdrant container.
 - Select available localhost ports through Python before creating the Docker-managed Qdrant database.
 - Probe Qdrant using its configured endpoint after the database is restarted instead of reusing private state from a failed client.
