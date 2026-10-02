@@ -19,7 +19,7 @@ from shyhurricane.mcp_server import mcp_instance, get_server_context
 from shyhurricane.mcp_server.generator_config import set_generator_config
 from shyhurricane.monitor import run_monitor
 from shyhurricane.proxy_server.proxy_server import run_proxy_server
-from shyhurricane.server_config import ServerConfig, set_server_config, add_oast_args, OASTConfig
+from shyhurricane.server_config import ServerConfig, set_server_config
 
 import shyhurricane.mcp_server.tools.deobfuscate_javascript  # noqa: F401
 import shyhurricane.mcp_server.tools.directory_buster  # noqa: F401
@@ -89,7 +89,6 @@ async def main():
     ap.add_argument("--low-power", type=str, default=low_power_default,
                     help="If true, disables compute intensive features and those requiring GPU.")
     add_generator_args(ap)
-    add_oast_args(ap)
 
     args = ap.parse_args()
     set_generator_config(GeneratorConfig.from_args(args).apply_summarizing_default().check())
@@ -99,7 +98,6 @@ async def main():
         ingest_pool_size=args.index_pool_size,
         open_world=_str_to_bool(args.open_world),
         low_power=_str_to_bool(args.low_power),
-        oast=OASTConfig.from_args(args),
     ))
     server_context = await get_server_context()
 
