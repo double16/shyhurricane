@@ -14,7 +14,12 @@ import persistqueue
 from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.mcp_server.generator_config import get_generator_config
-from shyhurricane.persistent_queue import Base64QueueSerializer, get_doc_type_queue, get_scan_finding_queue
+from shyhurricane.persistent_queue import (
+    Base64QueueSerializer,
+    QueueMaintenance,
+    get_doc_type_queue,
+    get_scan_finding_queue,
+)
 from shyhurricane.task_queue.dir_busting_worker import dir_busting_worker
 from shyhurricane.task_queue.finding_worker import FindingContext, save_finding_worker
 from shyhurricane.task_queue.port_scan_worker import PortScanContext, port_scan_worker
@@ -95,9 +100,13 @@ def _task_router(db: str,
 
         port_scan_ctx = None
         finding_ctx = None
-        scan_finding_queue = None
+        scan_finding_queue = get_scan_finding_queue(db)
+        scan_finding_queue.resume_unack_tasks()
+        atexit.register(scan_finding_queue.close)
+        scan_maintenance = QueueMaintenance(scan_finding_queue)
 
         while True:
+            scan_maintenance.check()
             queued_scan = False
             try:
                 try:
@@ -105,10 +114,6 @@ def _task_router(db: str,
                 except TypeError:
                     item = task_queue.get()
             except Empty:
-                if scan_finding_queue is None:
-                    scan_finding_queue = get_scan_finding_queue(db)
-                    scan_finding_queue.resume_unack_tasks()
-                    atexit.register(scan_finding_queue.close)
                 try:
                     item = scan_finding_queue.get(block=False)
                     queued_scan = True
@@ -140,6 +145,7 @@ def _task_router(db: str,
 
                 if queued_scan:
                     scan_finding_queue.ack(item)
+                    scan_maintenance.count += 1
 
             except KeyboardInterrupt:
                 break

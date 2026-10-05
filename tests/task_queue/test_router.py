@@ -3,6 +3,7 @@ from queue import Empty
 import pytest
 
 import shyhurricane.task_queue as task_queue
+from shyhurricane.persistent_queue import QueueMaintenance
 from shyhurricane.task_queue.types import (
     DirBustingQueueItem,
     PortScanQueueItem,
@@ -23,6 +24,11 @@ class FakeQueue:
 
     def close(self):
         self.closed = True
+
+    path = "/tmp/scan_finding_queue"
+
+    def resume_unack_tasks(self):
+        pass
 
 
 class FakeProcess:
@@ -102,6 +108,7 @@ def test_task_router_dispatches_all_known_items(monkeypatch):
     monkeypatch.setattr(task_queue.atexit, "register", lambda func: None)
     monkeypatch.setattr(task_queue.persistqueue, "SQLiteAckQueue", AckQueue)
     monkeypatch.setattr(task_queue, "get_doc_type_queue", lambda db: DocTypeQueue())
+    monkeypatch.setattr(task_queue, "get_scan_finding_queue", lambda db: FakeQueue())
     monkeypatch.setattr(task_queue, "PortScanContext", PortScanContext)
     monkeypatch.setattr(task_queue, "FindingContext", FindingContext)
     monkeypatch.setattr(task_queue, "spider_worker",
@@ -145,6 +152,8 @@ def test_task_router_consumes_durable_scan_finding(monkeypatch):
             raise KeyboardInterrupt
 
     class ScanQueue:
+        path = "/tmp/scan_finding_queue"
+
         def __init__(self):
             self.acked = []
 
@@ -181,3 +190,77 @@ def test_task_router_consumes_durable_scan_finding(monkeypatch):
 
     assert calls == ["resumed", "Scan finding"]
     assert scan_queue.acked == [finding]
+
+
+@pytest.mark.parametrize("mode", ["processed", "idle", "busy", "failed"])
+def test_scan_finding_maintenance_during_router_iterations(monkeypatch, mode):
+    import shyhurricane.persistent_queue as persistent_queue
+
+    clock = [0.0]
+    finding = SaveFindingQueueItem("https://example.com/a.js", "# finding", "Scan")
+    calls = []
+
+    class TaskQueue:
+        def get(self, timeout):
+            if calls:
+                raise KeyboardInterrupt
+            calls.append("task")
+            if mode != "processed":
+                clock[0] = 61
+            if mode == "busy":
+                return finding
+            raise Empty
+
+    class ScanQueue(FakeQueue):
+        def get(self, block):
+            if mode == "idle":
+                raise task_queue.persistqueue.Empty
+            return finding
+
+        def ack(self, item):
+            calls.append("ack")
+
+        def ack_failed(self, item):
+            calls.append("failed")
+
+        def acked_count(self):
+            return 1500
+
+        def clear_acked_data(self, max_delete, keep_latest):
+            calls.append((max_delete, keep_latest))
+
+        def shrink_disk_usage(self):
+            calls.append("vacuum")
+
+    class Context:
+        def __init__(self, **kwargs):
+            pass
+
+        def warm_up(self):
+            pass
+
+    def save(ctx, item):
+        if mode == "failed":
+            raise RuntimeError("finding failed")
+
+    monkeypatch.setattr(persistent_queue.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(persistent_queue, "log_heap_stats", lambda: None)
+    monkeypatch.setattr(persistent_queue, "log_gpu_memory_summary", lambda: None)
+    monkeypatch.setattr(task_queue, "QueueMaintenance", lambda queue: QueueMaintenance(queue, shrink_count=1))
+    monkeypatch.setattr(task_queue.faulthandler, "register", lambda *args: None)
+    monkeypatch.setattr(task_queue.atexit, "register", lambda *args: None)
+    monkeypatch.setattr(task_queue.persistqueue, "SQLiteAckQueue", lambda **kwargs: FakeQueue())
+    monkeypatch.setattr(task_queue, "get_doc_type_queue", lambda db: FakeQueue())
+    monkeypatch.setattr(task_queue, "get_scan_finding_queue", lambda db: ScanQueue())
+    monkeypatch.setattr(task_queue, "FindingContext", Context)
+    monkeypatch.setattr(task_queue, "save_finding_worker", save)
+
+    task_queue._task_router("db", "/tmp/ingest", TaskQueue(), FakeQueue(), FakeQueue(), FakeQueue(), "generator")
+
+    assert (1500, 200) in calls
+    assert calls.count("vacuum") == 1
+    if mode == "processed":
+        assert calls.index("ack") < calls.index("vacuum")
+    if mode == "failed":
+        assert "failed" in calls
+        assert "ack" not in calls

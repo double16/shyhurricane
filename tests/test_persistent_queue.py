@@ -34,6 +34,9 @@ class FakeQueue:
     def clear_acked_data(self, max_delete, keep_latest):
         self.clear_calls.append((max_delete, keep_latest))
 
+    def acked_count(self):
+        return 1500
+
     def shrink_disk_usage(self):
         self.shrink_calls += 1
 
@@ -170,13 +173,15 @@ def test_persistent_queue_get_acks_none_and_yields_next_item():
 def test_persistent_queue_get_shrinks_after_processed_count(monkeypatch):
     monkeypatch.setattr(persistent_queue, "log_heap_stats", lambda: None)
     monkeypatch.setattr(persistent_queue, "log_gpu_memory_summary", lambda: None)
-    queue = FakeQueue(["first", "second"])
+    queue = FakeQueue(["first", "second", "third"])
 
     generator = persistent_queue.persistent_queue_get(queue, shrink_count=2)
 
     assert next(generator) == "first"
     assert next(generator) == "second"
-    assert queue.clear_calls == [(1000, 0)]
+    assert queue.clear_calls == []
+    assert next(generator) == "third"
+    assert queue.clear_calls == [(1500, 200)]
     assert queue.shrink_calls == 1
 
 
@@ -184,15 +189,16 @@ def test_persistent_queue_get_shrinks_after_idle_timeout(monkeypatch):
     monkeypatch.setattr(persistent_queue, "log_heap_stats", lambda: None)
     monkeypatch.setattr(persistent_queue, "log_gpu_memory_summary", lambda: None)
     monkeypatch.setattr(persistent_queue.time, "sleep", lambda seconds: None)
-    times = iter([0.0, 70.0, 70.0])
-    monkeypatch.setattr(persistent_queue.time, "time", lambda: next(times))
+    clock = [0.0]
+    monkeypatch.setattr(persistent_queue.time, "monotonic", lambda: clock[0])
     queue = FakeQueue(["first", Empty, "second"])
 
     generator = persistent_queue.persistent_queue_get(queue, shrink_idle_timeout=60.0)
 
     assert next(generator) == "first"
+    clock[0] = 70.0
     assert next(generator) == "second"
-    assert queue.clear_calls == [(1000, 0)]
+    assert queue.clear_calls == [(1500, 200)]
     assert queue.shrink_calls == 1
 
 
@@ -320,3 +326,119 @@ def test_base64_queue_resumes_unacknowledged_document_after_reopen(tmp_path):
         assert reopened.acked_count() == 1
     finally:
         reopened.close()
+
+
+@pytest.mark.parametrize("keep_latest", [0, 200])
+def test_cleanup_entire_success_backlog_preserves_other_statuses(tmp_path, monkeypatch, keep_latest):
+    monkeypatch.setattr(persistent_queue, "log_heap_stats", lambda: None)
+    monkeypatch.setattr(persistent_queue, "log_gpu_memory_summary", lambda: None)
+    queue = SQLiteAckQueue(path=str(tmp_path / "queue"), auto_commit=True)
+    try:
+        success_ids = [queue.put(f"success-{idx}" + "x" * 1000) for idx in range(1205)]
+        # Acknowledge in reverse order to verify retention follows queue insertion order.
+        for item_id in reversed(success_ids):
+            queue.ack(id=item_id)
+        failed_id = queue.put("failed")
+        queue.ack_failed(id=failed_id)
+        processing_id = queue.put("processing")
+        queue.get(block=False, id=processing_id)
+        ready_id = queue.put("ready")
+        before_pages = queue._conn.execute("PRAGMA page_count").fetchone()[0]
+
+        persistent_queue._shrink_persistent_queue(queue, "queue", keep_latest=keep_latest)
+
+        assert queue.acked_count() == keep_latest
+        assert queue.ack_failed_count() == 1
+        assert queue.unack_count() == 1
+        assert queue._count() == 1
+        remaining_ids = [item["id"] for item in queue.queue()]
+        expected_success = success_ids[-keep_latest:] if keep_latest else []
+        assert remaining_ids == expected_success + [failed_id, processing_id, ready_id]
+        assert queue.get(block=False) == "ready"
+        assert queue._conn.execute("PRAGMA page_count").fetchone()[0] < before_pages
+    finally:
+        queue.close()
+
+
+@pytest.mark.parametrize("acked_count", [0, 199, 200])
+def test_cleanup_skips_vacuum_within_retention(monkeypatch, acked_count):
+    queue = FakeQueue([])
+    monkeypatch.setattr(queue, "acked_count", lambda: acked_count)
+    persistent_queue._shrink_persistent_queue(queue, "queue")
+    assert queue.clear_calls == []
+    assert queue.shrink_calls == 0
+
+
+def test_startup_cleans_all_queues_and_closes_connections(monkeypatch, tmp_path):
+    monkeypatch.setattr(persistent_queue, "log_heap_stats", lambda: None)
+    monkeypatch.setattr(persistent_queue, "log_gpu_memory_summary", lambda: None)
+    queues = {}
+    for name in ("ingest_queue", "doc_type_queue", "scan_finding_queue"):
+        queue = SQLiteAckQueue(path=str(tmp_path / name), auto_commit=True)
+        for idx in range(1205):
+            queue.ack(id=queue.put(idx))
+        queue.put("pending")
+        queue.close()
+
+    def get_queue(db, name):
+        assert db == "db"
+        queue = SQLiteAckQueue(path=str(tmp_path / name), auto_commit=True)
+        queues[name] = queue
+        return queue
+
+    monkeypatch.setattr(persistent_queue, "get_persistent_queue", get_queue)
+    persistent_queue.cleanup_persistent_queues_on_startup("db")
+    assert len(queues) == 3
+    for name, queue in queues.items():
+        with pytest.raises(sqlite3.ProgrammingError):
+            queue.acked_count()
+        reopened = SQLiteAckQueue(path=str(tmp_path / name), auto_commit=True)
+        assert reopened.acked_count() == 0
+        assert reopened.get(block=False) == "pending"
+        reopened.close()
+
+
+def test_idle_cleanup_repeats_without_consuming_new_items(monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(persistent_queue.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(persistent_queue.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(persistent_queue, "log_heap_stats", lambda: None)
+    monkeypatch.setattr(persistent_queue, "log_gpu_memory_summary", lambda: None)
+    queue = FakeQueue([])
+    calls = [0]
+
+    def get(block, timeout):
+        calls[0] += 1
+        if calls[0] <= 2:
+            clock[0] += 61
+            raise Empty
+        return "first"
+
+    monkeypatch.setattr(queue, "get", get)
+    assert next(persistent_queue.persistent_queue_get(queue)) == "first"
+    assert queue.clear_calls == [(1500, 200), (1500, 200)]
+    assert queue.shrink_calls == 2
+
+
+@pytest.mark.parametrize("fail_operation", ["acked_count", "clear_acked_data", "shrink_disk_usage"])
+def test_maintenance_failure_warns_and_retries(monkeypatch, caplog, fail_operation):
+    clock = [0.0]
+    monkeypatch.setattr(persistent_queue.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(persistent_queue, "log_heap_stats", lambda: None)
+    monkeypatch.setattr(persistent_queue, "log_gpu_memory_summary", lambda: None)
+    queue = FakeQueue([])
+    maintenance = persistent_queue.QueueMaintenance(queue)
+    original = getattr(queue, fail_operation)
+
+    def fail(*args, **kwargs):
+        raise RuntimeError("database locked")
+
+    monkeypatch.setattr(queue, fail_operation, fail)
+    clock[0] = 60
+    maintenance.check()
+    assert "database locked" in caplog.text
+    assert caplog.records[-1].levelname == "WARNING"
+    monkeypatch.setattr(queue, fail_operation, original)
+    clock[0] = 120
+    maintenance.check()
+    assert queue.shrink_calls == 1

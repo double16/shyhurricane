@@ -39,41 +39,67 @@ def get_persistent_queue(db: str, queue_name: str) -> persistqueue.SQLiteAckQueu
     return persistqueue.SQLiteAckQueue(path=str(path), auto_commit=True, serializer=Base64QueueSerializer)
 
 
-def _shrink_persistent_queue(queue: persistqueue.SQLiteAckQueue, name: str):
-    logger.info(f"Shrinking {name}")
+def _shrink_persistent_queue(queue: persistqueue.SQLiteAckQueue, name: str, keep_latest: int = 200):
     try:
-        queue.clear_acked_data(max_delete=1000, keep_latest=0)
+        acked_count = queue.acked_count()
+        if acked_count <= keep_latest:
+            return
+        logger.info("Shrinking %s, retaining %d successful acknowledgements", name, keep_latest)
+        # persist-queue emits OFFSET without LIMIT for max_delete=0 with retention.
+        # Bound deletion by the entire current backlog instead of a fixed batch size.
+        queue.clear_acked_data(max_delete=acked_count if keep_latest else 0, keep_latest=keep_latest)
         queue.shrink_disk_usage()
     except Exception as e:
-        logger.debug("Shrinking queue %s failed: %s", name, e)
+        logger.warning("Shrinking queue %s failed: %s", name, e)
     log_heap_stats()
     log_gpu_memory_summary()
 
 
+def cleanup_persistent_queues_on_startup(db: str):
+    """Discard successful acknowledgement history before queue workers start."""
+    for queue_name in ("ingest_queue", "doc_type_queue", "scan_finding_queue"):
+        queue = get_persistent_queue(db, queue_name)
+        try:
+            _shrink_persistent_queue(queue, queue_name, keep_latest=0)
+        finally:
+            queue.close()
+
+
+class QueueMaintenance:
+    """Schedule queue cleanup by processed count or elapsed maintenance interval."""
+
+    def __init__(self, queue: persistqueue.SQLiteAckQueue, shrink_count: int = 1000,
+                 shrink_idle_timeout: float = 60.0):
+        self.queue = queue
+        self.shrink_count = shrink_count
+        self.shrink_idle_timeout = shrink_idle_timeout
+        self.count = 0
+        self.last_shrink = time.monotonic()
+
+    def check(self):
+        if self.count >= self.shrink_count or time.monotonic() - self.last_shrink >= self.shrink_idle_timeout:
+            _shrink_persistent_queue(self.queue, os.path.basename(self.queue.path))
+            self.last_shrink = time.monotonic()
+            self.count = 0
+
+
 def persistent_queue_get(queue: persistqueue.SQLiteAckQueue, shrink_count: int = 1000,
                          shrink_idle_timeout: float = 60.0):
-    name = os.path.basename(queue.path)
-    count = 0
-    last_shrink = time.time()
+    maintenance = QueueMaintenance(queue, shrink_count, shrink_idle_timeout)
     while True:
-        if count % shrink_count == (shrink_count - 1):
-            _shrink_persistent_queue(queue, name)
-            last_shrink = time.time()
-
+        maintenance.check()
         try:
             item = queue.get(block=True, timeout=60)
         except Empty:
-            if count > 0 and (time.time() - last_shrink) > shrink_idle_timeout:
-                _shrink_persistent_queue(queue, name)
-                last_shrink = time.time()
-                count = 0
+            maintenance.check()
             time.sleep(10)
             continue
-        count += 1
         if item is None:
             queue.ack(item)
+            maintenance.count += 1
             continue
         yield item
+        maintenance.count += 1
 
 
 def get_ingest_queue(db: str) -> persistqueue.SQLiteAckQueue:

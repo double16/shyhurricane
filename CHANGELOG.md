@@ -23,6 +23,8 @@
 
 ### Fixes
 
+- Remove the persistent queue cleanup deletion cap, retain 200 successful acknowledgements at runtime,
+  clear successful history on startup, and maintain the scan-finding queue.
 - Require scan confirmation when indexed retrieval has no data; unavailable elicitation no longer starts a scan.
 - Remove unused OAST provider configuration options.
 - Prevent the server-context unit test from creating a Docker-managed Qdrant container.

@@ -19,6 +19,7 @@ from shyhurricane.db import create_qdrant_client, create_qdrant_document_store, 
 from shyhurricane.doc_type_model_map import doc_type_to_model
 from shyhurricane.health import HealthMonitor, qdrant_probe
 from shyhurricane.mcp_server.generator_config import get_generator_config
+from shyhurricane.persistent_queue import cleanup_persistent_queues_on_startup
 from shyhurricane.retrieval_pipeline import build_document_pipeline, build_website_context_pipeline
 from shyhurricane.server_config import get_server_config
 from shyhurricane.utils import get_log_timestamp, unix_command_image
@@ -189,6 +190,7 @@ async def get_server_context() -> ServerContext:
     if not server_config.low_power:
         indexing_enabled.set()
 
+    cleanup_persistent_queues_on_startup(db)
     ingest_queue, ingest_pool = start_ingest_worker(
         db=db,
         generator_config=generator_config,

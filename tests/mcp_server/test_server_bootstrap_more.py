@@ -200,12 +200,16 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
         return store
 
     log_timestamps = []
+    startup_events = []
 
     def start_ingest_worker(**kwargs):
+        assert startup_events == [("cleanup", "db")]
+        startup_events.append(("ingest", "db"))
         log_timestamps.append(kwargs["log_timestamp"])
         return Queue(), Pool()
 
     def start_task_worker(*args):
+        assert startup_events == [("cleanup", "db"), ("ingest", "db")]
         assert args[3] == log_timestamps[0]
         return SimpleNamespace(
             task_queue="task",
@@ -222,6 +226,8 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
     import shyhurricane.task_queue as task_queue
 
     monkeypatch.setattr(server_context, "get_server_config", lambda: Config())
+    monkeypatch.setattr(server_context, "cleanup_persistent_queues_on_startup",
+                        lambda db: startup_events.append(("cleanup", db)))
     monkeypatch.setattr(server_context.multiprocessing, "Manager", WorkerManager)
     monkeypatch.setattr(server_context, "create_qdrant_document_store", create_store)
     monkeypatch.setattr(server_context, "create_qdrant_client", create_client)

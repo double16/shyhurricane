@@ -229,6 +229,12 @@ uses the cached snapshot if an update fails.
 
 Indexing workers monitor Qdrant and LLM readiness. If either dependency is unhealthy, `/index` requests continue to be accepted into the persistent queue, but ingest and type-specific indexing pause before consuming new items. Workers resume automatically after both health checks recover; MCP tools retain their existing request and error behavior.
 
+At server startup, ingest, document-type, and scan-finding queues discard all successfully acknowledged records
+and vacuum reclaimed space. Runtime cleanup retains the latest 200 successful acknowledgements by queue insertion
+order and removes the entire older history without a fixed deletion limit. Cleanup runs after 1,000 processed
+items (100 for document-type indexing) or on a 60-second maintenance interval while consumers are running.
+Failed acknowledgements, pending items, and items being processed are retained.
+
 ```shell
 curl -X POST -H "Content-Type: application/json" http://127.0.0.1:8000/index @katana.json
 ```
