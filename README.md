@@ -9,7 +9,7 @@ LLMs:
 2. Models will also enumerate websites with many curl commands. The server saves and indexes responses to return data without contacting the website repeatedly. Large sites, common with bug bounty programs, are not efficiently enumerated with individual curl commands. 
 3. Port scans may take a long time causing the LLM to assume the scan has failed and issue a repeated scan. The port_scan tool provided by the server addresses this.
 
-An important feature of the server is the indexing of website content using embedding models. The `find_web_resources` tool uses LLM prompts to find vulnerabilities specific to content type: html, javascript, css, xml, HTTP headers. The content is indexed when found by the tools. Content may also be indexed by feeding external data into the `/index` endpoint. Formats supported are `katana jsonl`, `hal json` and Burp Suite Logger++ CSV. Extensions exist for Burp Suite, ZAP, Firefox and Chrome to send requests to the server as the site is browsed.
+An important feature of the server is the indexing of website content using embedding models. The `find_web_resources` tool uses LLM prompts to find vulnerabilities specific to content type: html, javascript, css, xml, HTTP headers. The content is indexed when found by the tools. Content may also be indexed by feeding external data into the `/index` endpoint. Formats supported are `katana jsonl`, `hal json` and Burp Suite Logger++ CSV. The `ingest.py` script also converts Burp Suite request/response XML exports for indexing. Extensions exist for Burp Suite, ZAP, Firefox and Chrome to send requests to the server as the site is browsed.
 
 ## Tools
 
@@ -239,7 +239,8 @@ Failed acknowledgements, pending items, and items being processed are retained.
 curl -X POST -H "Content-Type: application/json" http://127.0.0.1:8000/index @katana.json
 ```
 
-The `ingest.py` script makes using this endpoint more convenient. It isn't complicated to use directly. The supported data formats are inferred. Katana JSON is the preferred format.
+The `ingest.py` script makes using this endpoint more convenient. Select its input format with `--katana`, `--csv`, or
+`--burp-xml`. The `/index` endpoint infers its supported data formats. Katana JSON is the preferred format.
 
 ### katana
 
@@ -266,6 +267,19 @@ cat LoggerPlusPlus.csv | python3 ingest.py --mcp-url http://127.0.0.1:8000/ --cs
 # live ingestion using the auto-export feature of Logger++:
 tail -f LoggerPlusPlus.csv | python3 ingest.py --mcp-url http://127.0.0.1:8000/ --csv
 ```
+
+### Burp Suite request/response XML
+
+Export requests and responses as XML from Burp Suite, then ingest the complete export:
+
+```shell
+python3 ingest.py --mcp-url http://127.0.0.1:8000/ --burp-xml < export.xml
+```
+
+Both base64 and plain-text HTTP messages are supported. Each valid exchange is converted to Katana JSON and sent
+to `/index`. Invalid or incomplete items are reported to stderr and skipped. Malformed XML stops ingestion with a
+nonzero exit status; exchanges already queued remain queued. XML ingestion requires a complete export rather than
+a continuously appended stream. XML exports must be converted through `ingest.py` before submission to `/index`.
 
 ### Extensions
 

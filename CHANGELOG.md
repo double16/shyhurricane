@@ -4,6 +4,7 @@
 
 ### Features
 
+- Accept Burp Suite request/response XML exports in `ingest.py` with `--burp-xml`.
 - Use a shared UTC startup timestamp for index and finding JSONL log filenames.
 - Store new and updated persistent queue payloads as base64, while continuing to read existing queue records.
 - Upgrade the MCP Python SDK to 2.2.0 and support modern multi-round target selection and scan confirmation.
