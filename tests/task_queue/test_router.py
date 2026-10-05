@@ -47,12 +47,13 @@ def test_start_task_worker_creates_queues_and_processes(monkeypatch):
     monkeypatch.setattr(task_queue, "Process", process_factory)
     monkeypatch.setattr(task_queue, "get_generator_config", lambda: "generator")
 
-    ipc = task_queue.start_task_worker("db", "/tmp/queue", pool_size=2)
+    ipc = task_queue.start_task_worker("db", "/tmp/queue", pool_size=2, log_timestamp="202610051234")
 
     assert len(created_processes) == 2
     assert all(process.started for process in created_processes)
     assert created_processes[0].kwargs["db"] == "db"
     assert created_processes[0].kwargs["ingest_queue_path"] == "/tmp/queue"
+    assert all(process.kwargs["log_timestamp"] == "202610051234" for process in created_processes)
     assert ipc.task_pool.processes == created_processes
 
 
@@ -90,7 +91,8 @@ def test_task_router_dispatches_all_known_items(monkeypatch):
             calls.append(("port_warm",))
 
     class FindingContext:
-        def __init__(self, db, generator_config, embedder_cache, doc_type_queue):
+        def __init__(self, db, generator_config, embedder_cache, doc_type_queue, log_timestamp=None):
+            assert log_timestamp == "202610051234"
             calls.append(("finding_ctx", db, generator_config, doc_type_queue.__class__.__name__))
 
         def warm_up(self):
@@ -118,6 +120,7 @@ def test_task_router_dispatches_all_known_items(monkeypatch):
         port_scan_result_queue=FakeQueue(),
         dir_busting_result_queue=FakeQueue(),
         generator_config="generator",
+        log_timestamp="202610051234",
     )
 
     assert ("spider", "https://example.com") in calls

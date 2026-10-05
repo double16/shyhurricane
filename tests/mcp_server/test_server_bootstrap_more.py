@@ -199,10 +199,14 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
         doc_stores.append(store)
         return store
 
+    log_timestamps = []
+
     def start_ingest_worker(**kwargs):
+        log_timestamps.append(kwargs["log_timestamp"])
         return Queue(), Pool()
 
     def start_task_worker(*args):
+        assert args[3] == log_timestamps[0]
         return SimpleNamespace(
             task_queue="task",
             task_pool=Pool(),

@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import logging
 
 import pytest
@@ -120,3 +121,14 @@ def test_logging_hardware_and_coerce_fallbacks(monkeypatch, caplog):
     assert utils.coerce_to_list(5, int) == [5]
     assert utils.coerce_to_dict(["a", "1", "b"]) == {"a": "1", "b": None}
     assert utils.coerce_to_dict("a:1,b:2") == {"a": "1", "b": "2"}
+
+
+def test_log_timestamp_uses_utc_and_minute_precision(monkeypatch):
+    class Clock(datetime.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            assert tz is datetime.UTC
+            return cls(2026, 1, 2, 3, 4, 59, tzinfo=tz)
+
+    monkeypatch.setattr(utils.datetime, "datetime", Clock)
+    assert utils.get_log_timestamp() == "202601020304"

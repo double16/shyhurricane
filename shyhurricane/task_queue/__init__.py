@@ -30,13 +30,16 @@ from shyhurricane.task_queue.types import (
     TaskWorkerIPC,
     prepare_worker_process,
 )
-from shyhurricane.utils import PortScanResults
+from shyhurricane.utils import PortScanResults, get_log_timestamp
 
 logger = logging.getLogger(__name__)
 
 
-def start_task_worker(db: str, ingest_queue_path: str, pool_size: int = 1) -> TaskWorkerIPC:
+def start_task_worker(
+        db: str, ingest_queue_path: str, pool_size: int = 1, log_timestamp: str | None = None
+) -> TaskWorkerIPC:
     assert pool_size > 0
+    log_timestamp = log_timestamp or get_log_timestamp()
     task_queue = multiprocessing.Queue()
     spider_result_queue = multiprocessing.Queue()
     port_scan_result_queue = multiprocessing.Queue()
@@ -51,6 +54,7 @@ def start_task_worker(db: str, ingest_queue_path: str, pool_size: int = 1) -> Ta
             "port_scan_result_queue": port_scan_result_queue,
             "dir_busting_result_queue": dir_busting_result_queue,
             "generator_config": get_generator_config(),
+            "log_timestamp": log_timestamp,
         })
         proc._shyhurricane_monitor_process_group = os.environ.get("SHYHURRICANE_MONITOR") == "1"
         proc.start()
@@ -71,7 +75,9 @@ def _task_router(db: str,
                  port_scan_result_queue: Queue[PortScanResults],
                  dir_busting_result_queue: Queue[DirBustingResultItem],
                  generator_config: GeneratorConfig,
+                 log_timestamp: str | None = None,
                  ):
+    log_timestamp = log_timestamp or get_log_timestamp()
     prepare_worker_process()
     try:
         faulthandler.register(signal.SIGUSR1)
@@ -128,7 +134,7 @@ def _task_router(db: str,
                             db=db,
                             generator_config=generator_config,
                             embedder_cache=embedder_cache,
-                            doc_type_queue=doc_type_queue)
+                            doc_type_queue=doc_type_queue, log_timestamp=log_timestamp)
                         finding_ctx.warm_up()
                     save_finding_worker(finding_ctx, item)
 

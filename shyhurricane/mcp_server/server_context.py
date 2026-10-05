@@ -21,7 +21,7 @@ from shyhurricane.health import HealthMonitor, qdrant_probe
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.retrieval_pipeline import build_document_pipeline, build_website_context_pipeline
 from shyhurricane.server_config import get_server_config
-from shyhurricane.utils import unix_command_image
+from shyhurricane.utils import get_log_timestamp, unix_command_image
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +129,7 @@ async def get_server_context() -> ServerContext:
     from shyhurricane.index.web_resources import start_ingest_worker
     from shyhurricane.task_queue import start_task_worker
 
+    log_timestamp = get_log_timestamp()
     server_config = get_server_config()
 
     db = server_config.database or os.environ.get('QDRANT', 'shyhurricane.db')
@@ -194,8 +195,9 @@ async def get_server_context() -> ServerContext:
         pool_size=server_config.ingest_pool_size,
         health_state=health_monitor.ready,
         indexing_enabled=indexing_enabled,
+        log_timestamp=log_timestamp,
     )
-    task_worker_ipc = start_task_worker(db, ingest_queue.path, server_config.task_pool_size)
+    task_worker_ipc = start_task_worker(db, ingest_queue.path, server_config.task_pool_size, log_timestamp)
 
     document_pipeline, _, stores = await build_document_pipeline(
         db=db,

@@ -5,22 +5,25 @@ import logging
 import multiprocessing
 import os
 import signal
-from typing import Tuple, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional, Tuple
 
 import persistqueue
 import torch
 from haystack import Pipeline
 
-from shyhurricane.generator_config import GeneratorConfig
-from shyhurricane.index.web_resources_pipeline import build_ingest_pipeline, build_doc_type_pipeline
-from shyhurricane.index.javascript_analysis import analyze_document, javascript_url_from_map, source_map_url
-from shyhurricane.index.web_resources_pipeline import build_stores
 from shyhurricane.doc_type_model_map import map_mime_to_type
+from shyhurricane.generator_config import GeneratorConfig
+from shyhurricane.index.javascript_analysis import analyze_document, javascript_url_from_map, source_map_url
+from shyhurricane.index.web_resources_pipeline import build_doc_type_pipeline, build_ingest_pipeline, build_stores
+from shyhurricane.persistent_queue import (
+    get_doc_type_queue,
+    get_ingest_queue,
+    get_scan_finding_queue,
+    persistent_queue_get,
+)
 from shyhurricane.server_config import get_server_config
-from shyhurricane.persistent_queue import persistent_queue_get, get_ingest_queue, \
-    get_doc_type_queue, get_scan_finding_queue
-from shyhurricane.utils import get_log_path, log_heap_stats, log_gpu_memory_summary
 from shyhurricane.task_queue.types import prepare_worker_process
+from shyhurricane.utils import get_log_path, get_log_timestamp, log_gpu_memory_summary, log_heap_stats
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +42,7 @@ def _wait_for_health(health_state) -> bool:
     return True
 
 
-def _ingest_worker(db: str, generator_config: GeneratorConfig, health_state=None):
+def _ingest_worker(db: str, generator_config: GeneratorConfig, health_state=None, log_timestamp: str | None = None):
     prepare_worker_process()
     try:
         faulthandler.register(signal.SIGUSR1)
@@ -55,7 +58,7 @@ def _ingest_worker(db: str, generator_config: GeneratorConfig, health_state=None
         scan_finding_queue = None
         content_store = None
 
-        index_log_path = get_log_path(db, "index.txt")
+        index_log_path = get_log_path(db, f"index-{log_timestamp or get_log_timestamp()}.jsonl")
 
         pipeline: Pipeline = build_ingest_pipeline(db=db, generator_config=generator_config)
         logger.info(f"Index worker ready in PID {os.getpid()}, logging to {index_log_path}")
@@ -111,12 +114,13 @@ def _ingest_worker(db: str, generator_config: GeneratorConfig, health_state=None
     logger.info(f"Index worker finished in PID {os.getpid()}")
 
 
-def _ingest_watcher(db: str, generator_config: GeneratorConfig, health_state=None):
+def _ingest_watcher(db: str, generator_config: GeneratorConfig, health_state=None, log_timestamp: str | None = None):
+    log_timestamp = log_timestamp or get_log_timestamp()
     prepare_worker_process()
     process = None
     try:
         while True:
-            process = multiprocessing.Process(target=_ingest_worker, args=(db, generator_config, health_state))
+            process = multiprocessing.Process(target=_ingest_worker, args=(db, generator_config, health_state, log_timestamp))
             process.start()
             process.join()
             exitcode = process.exitcode
@@ -245,10 +249,11 @@ def _doc_type_watcher(db: str, generator_config: GeneratorConfig, health_state=N
 
 
 def start_ingest_worker(db: str, generator_config: GeneratorConfig, pool_size: int = 1, health_state=None,
-                        indexing_enabled=None) -> Tuple[
+                        indexing_enabled=None, log_timestamp: str | None = None) -> Tuple[
     persistqueue.SQLiteAckQueue, "TaskPool"]:
     from shyhurricane.task_queue.types import TaskPool
 
+    log_timestamp = log_timestamp or get_log_timestamp()
     processes = []
 
     if get_server_config().low_power:
@@ -264,7 +269,7 @@ def start_ingest_worker(db: str, generator_config: GeneratorConfig, pool_size: i
         processes.append(process)
 
     # this is a light-weight process, we only need one
-    ingest_process = multiprocessing.Process(target=_ingest_watcher, args=(db, generator_config, health_state))
+    ingest_process = multiprocessing.Process(target=_ingest_watcher, args=(db, generator_config, health_state, log_timestamp))
     ingest_process._shyhurricane_monitor_process_group = os.environ.get("SHYHURRICANE_MONITOR") == "1"
     ingest_process.start()
     processes.append(ingest_process)

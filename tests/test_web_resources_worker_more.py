@@ -1,5 +1,6 @@
 import json
 
+import pytest
 from haystack import Document
 
 import shyhurricane.index.web_resources as web_resources
@@ -99,7 +100,8 @@ def test_wait_for_indexing_enabled_waits_until_runtime_resume():
     assert state.wait_calls == 1
 
 
-def test_ingest_worker_acks_and_queues_content_documents(monkeypatch, tmp_path):
+@pytest.mark.parametrize("timestamp", ["202610051234", "202610051235", None])
+def test_ingest_worker_acks_and_queues_content_documents(monkeypatch, tmp_path, timestamp):
     ingest_queue = Queue()
     doc_type_queue = Queue()
     doc = Document(content="body", meta={"type": "content"})
@@ -113,13 +115,17 @@ def test_ingest_worker_acks_and_queues_content_documents(monkeypatch, tmp_path):
     monkeypatch.setattr(web_resources, "build_ingest_pipeline", lambda **kwargs: pipeline)
     monkeypatch.setattr(web_resources, "persistent_queue_get", lambda queue, shrink_count: finite_queue([item]))
 
-    web_resources._ingest_worker("db", object())
+    monkeypatch.setattr(web_resources, "get_log_timestamp", lambda: "202610051234")
+    expected = timestamp or "202610051234"
+    path = tmp_path / f"index-{expected}.jsonl"
+    path.write_text("previous\n")
+    web_resources._ingest_worker("db", object(), log_timestamp=timestamp)
 
     assert ingest_queue.resumed is True
     assert ingest_queue.acked == [item]
     assert ingest_queue.failed == []
     assert doc_type_queue.items == [doc]
-    assert (tmp_path / "index.txt").read_text() == item + "\n"
+    assert path.read_text() == "previous\n" + item + "\n"
 
 
 def test_ingest_worker_scans_javascript_even_in_low_power(monkeypatch, tmp_path):
@@ -248,7 +254,7 @@ def test_start_ingest_worker_starts_doc_type_watchers_when_enabled(monkeypatch):
     monkeypatch.setattr(web_resources.multiprocessing, "Process", Process)
     monkeypatch.setattr(web_resources, "get_ingest_queue", lambda db: queue)
 
-    _, pool = web_resources.start_ingest_worker("db", object(), pool_size=2)
+    _, pool = web_resources.start_ingest_worker("db", object(), pool_size=2, log_timestamp="202610051234")
 
     assert [p.target for p in processes] == [
         web_resources._doc_type_watcher,
@@ -256,6 +262,7 @@ def test_start_ingest_worker_starts_doc_type_watchers_when_enabled(monkeypatch):
         web_resources._ingest_watcher,
     ]
     assert len(pool.processes) == 3
+    assert processes[-1].args[-1] == "202610051234"
 
 
 def test_doc_type_watcher_restarts_on_zero_exit_and_closes(monkeypatch):
@@ -308,6 +315,7 @@ def test_ingest_watcher_restarts_after_health_recovers(monkeypatch):
 
     class Process:
         def __init__(self, target, args):
+            self.args = args
             self.exitcode = next(exitcodes)
             self.closed = False
             processes.append(self)
@@ -327,10 +335,11 @@ def test_ingest_watcher_restarts_after_health_recovers(monkeypatch):
     monkeypatch.setattr(web_resources, "prepare_worker_process", lambda: None)
     monkeypatch.setattr(web_resources.multiprocessing, "Process", Process)
 
-    web_resources._ingest_watcher("db", object(), HealthState())
+    web_resources._ingest_watcher("db", object(), HealthState(), log_timestamp="202610051234")
 
     assert len(processes) == 2
     assert all(process.closed for process in processes)
+    assert all(process.args[-1] == "202610051234" for process in processes)
 
 
 def test_bad_state_detects_mps_memory(monkeypatch):
