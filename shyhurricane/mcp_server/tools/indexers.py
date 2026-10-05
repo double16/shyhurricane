@@ -1,26 +1,34 @@
 import json
 import logging
 from datetime import datetime
-from typing import Optional, Annotated
+from typing import Annotated, Optional
 
 import httpx
 import persistqueue
 import requests
-from mcp.server.fastmcp import Context
-from mcp.types import ToolAnnotations, TextResourceContents
-from pydantic import AnyUrl, Field
+from mcp.server.mcpserver import Context
+from mcp.types import TextResourceContents, ToolAnnotations
+from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import Response
 
 from shyhurricane.doc_type_model_map import map_mime_to_type
+from shyhurricane.http_csv import http_csv_generator, is_http_csv
 from shyhurricane.index.web_resources_pipeline import is_binary
-from shyhurricane.mcp_server import mcp_instance, get_server_context, log_tool_history, get_additional_hosts, \
-    UserAgentField, CookiesField, RequestHeadersField, AdditionalHostsField, RequestParamsField, \
-    get_additional_http_headers
+from shyhurricane.mcp_server import (
+    AdditionalHostsField,
+    CookiesField,
+    RequestHeadersField,
+    RequestParamsField,
+    UserAgentField,
+    get_additional_hosts,
+    get_additional_http_headers,
+    get_server_context,
+    log_tool_history,
+    mcp_instance,
+)
 from shyhurricane.mcp_server.tools.deobfuscate_javascript import deobfuscate_javascript
-from shyhurricane.utils import stream_lines, is_katana_jsonl, HttpResource, urlparse_ext, \
-    extract_domain, coerce_to_dict
-from shyhurricane.http_csv import is_http_csv, http_csv_generator
+from shyhurricane.utils import HttpResource, coerce_to_dict, extract_domain, is_katana_jsonl, stream_lines, urlparse_ext
 
 logger = logging.getLogger(__name__)
 
@@ -76,10 +84,10 @@ async def index_request_body(request: Request) -> Response:
 @mcp_instance.tool(
     annotations=ToolAnnotations(
         title="Index HTTP URL",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=True),
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True),
 )
 async def index_http_url(
         ctx: Context,
@@ -181,8 +189,8 @@ async def index_http_url(
 
         if body:
             contents = TextResourceContents(
-                uri=AnyUrl(url),
-                mimeType=response.headers.get("Content-Type", ""),
+                uri=str(url),
+                mime_type=response.headers.get("Content-Type", ""),
                 text=body,
             )
         else:

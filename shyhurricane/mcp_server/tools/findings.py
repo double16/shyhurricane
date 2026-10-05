@@ -1,18 +1,18 @@
 import asyncio
 import json
 import logging
-from typing import List, Optional, Annotated, Dict, Any
+from typing import Annotated, Any, Dict, List, Optional
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from mcp.types import ToolAnnotations
 from openai import BaseModel
 from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import Response
 
-from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context
+from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
 from shyhurricane.nuclei_findings import is_nuclei_finding, nuclei_finding_to_markdown
-from shyhurricane.target_info import parse_target_info, filter_targets_str
+from shyhurricane.target_info import filter_targets_str, parse_target_info
 from shyhurricane.task_queue import SaveFindingQueueItem
 from shyhurricane.task_queue.finding_worker import FINDING_VERSION
 from shyhurricane.utils import munge_urls, stream_lines
@@ -33,10 +33,10 @@ class SaveFindingResult(BaseModel):
 @mcp_instance.tool(
     annotations=ToolAnnotations(
         title="Save Finding",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=False),
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=False),
 )
 async def save_finding(
         ctx: Context,
@@ -106,8 +106,8 @@ class QueryFindingsResult(BaseModel):
 @mcp_instance.tool(
     annotations=ToolAnnotations(
         title="Query for Findings",
-        readOnlyHint=True,
-        openWorldHint=False),
+        read_only_hint=True,
+        open_world_hint=False),
 )
 async def query_findings(
         ctx: Context,

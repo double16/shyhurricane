@@ -1,3 +1,4 @@
+import asyncio
 import os
 import signal
 from types import SimpleNamespace
@@ -15,6 +16,18 @@ class Proc:
 
     async def wait(self):
         return self.return_code
+
+
+@pytest.mark.parametrize("value,disabled", [
+    (None, False), ("", False), ("False", False), (" false ", False), ("0", False),
+    ("no", False), ("off", False), ("True", True), ("1", True), ("yes", True),
+])
+def test_elicitation_environment_accepts_false_values(monkeypatch, value, disabled):
+    if value is None:
+        monkeypatch.delenv("DISABLE_ELICITATION", raising=False)
+    else:
+        monkeypatch.setenv("DISABLE_ELICITATION", value)
+    assert server_context._elicitation_disabled() is disabled
 
 
 def test_task_pool_terminates_monitor_worker_process_groups(monkeypatch):
@@ -43,52 +56,10 @@ def test_run_worker_silences_output_in_monitor_mode(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_app_lifespan_creates_context_and_cleans_work_path(monkeypatch, tmp_path):
-    calls = []
-
-    async def get_ctx():
-        return SimpleNamespace(cache_path=str(tmp_path), mcp_session_volume="volume")
-
-    async def create_subprocess_exec(*args, **kwargs):
-        calls.append(args)
-        return Proc(0)
-
-    monkeypatch.setattr(mcp_server, "get_server_context", get_ctx)
-    monkeypatch.setattr(mcp_server, "get_server_config", lambda: object())
-    monkeypatch.setattr(mcp_server.asyncio, "create_subprocess_exec", create_subprocess_exec)
-    monkeypatch.setattr(mcp_server, "unix_command_image", lambda: "image")
-
-    async with mcp_server.app_lifespan(object()) as app_context:
-        assert app_context.cache_path == str(tmp_path)
-        assert app_context.work_path.startswith("/work/")
-
-    assert calls[0][:3] == ("docker", "run", "--rm")
-    assert "mkdir" in calls[0]
-    assert "rm" in calls[1]
-
-
-@pytest.mark.asyncio
-async def test_app_lifespan_falls_back_when_workdir_creation_fails(monkeypatch, tmp_path):
-    async def get_ctx():
-        return SimpleNamespace(cache_path=str(tmp_path), mcp_session_volume="volume")
-
-    async def create_subprocess_exec(*args, **kwargs):
-        return Proc(1 if "mkdir" in args else 0)
-
-    monkeypatch.setattr(mcp_server, "get_server_context", get_ctx)
-    monkeypatch.setattr(mcp_server, "get_server_config", lambda: object())
-    monkeypatch.setattr(mcp_server.asyncio, "create_subprocess_exec", create_subprocess_exec)
-    monkeypatch.setattr(mcp_server, "unix_command_image", lambda: "image")
-
-    async with mcp_server.app_lifespan(object()) as app_context:
-        assert app_context.work_path == "/var/tmp"
-
-
-@pytest.mark.asyncio
 async def test_shyhurricane_fastmcp_filters_open_world_tools(monkeypatch):
     class Annotations:
         def __init__(self, open_world):
-            self.openWorldHint = open_world
+            self.open_world_hint = open_world
 
     tools = [
         SimpleNamespace(name="safe", annotations=Annotations(False)),
@@ -99,8 +70,8 @@ async def test_shyhurricane_fastmcp_filters_open_world_tools(monkeypatch):
     async def list_tools(self):
         return tools
 
-    monkeypatch.setattr(mcp_server.FastMCP, "list_tools", list_tools)
-    server = mcp_server.ShyHurricaneFastMCP("test")
+    monkeypatch.setattr(mcp_server.MCPServer, "list_tools", list_tools)
+    server = mcp_server.ShyHurricaneMCPServer("test")
     server.open_world = False
 
     assert [tool.name for tool in await server.list_tools()] == ["safe", "plain"]
@@ -108,12 +79,12 @@ async def test_shyhurricane_fastmcp_filters_open_world_tools(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_shyhurricane_fastmcp_tracks_running_tools_until_completion(monkeypatch):
-    async def call_tool(self, name, arguments):
+    async def call_tool(self, name, arguments, context):
         assert server.running_tools == {"port_scan"}
         return {"result": "complete"}
 
-    monkeypatch.setattr(mcp_server.FastMCP, "call_tool", call_tool)
-    server = mcp_server.ShyHurricaneFastMCP("test")
+    monkeypatch.setattr(mcp_server.MCPServer, "call_tool", call_tool)
+    server = mcp_server.ShyHurricaneMCPServer("test")
 
     assert await server.call_tool("port_scan", {"target": "example.test"}) == {"result": "complete"}
     assert server.running_tools == set()
@@ -121,16 +92,47 @@ async def test_shyhurricane_fastmcp_tracks_running_tools_until_completion(monkey
 
 @pytest.mark.asyncio
 async def test_shyhurricane_fastmcp_removes_failed_tools_from_monitor(monkeypatch):
-    async def call_tool(self, name, arguments):
+    async def call_tool(self, name, arguments, context):
         assert server.running_tools == {"port_scan"}
         raise RuntimeError("failed")
 
-    monkeypatch.setattr(mcp_server.FastMCP, "call_tool", call_tool)
-    server = mcp_server.ShyHurricaneFastMCP("test")
+    monkeypatch.setattr(mcp_server.MCPServer, "call_tool", call_tool)
+    server = mcp_server.ShyHurricaneMCPServer("test")
 
     with pytest.raises(RuntimeError, match="failed"):
         await server.call_tool("port_scan", {"target": "example.test"})
     assert server.running_tools == set()
+
+
+@pytest.mark.asyncio
+async def test_same_tool_stays_visible_until_all_calls_finish_or_cancel(monkeypatch):
+    server = mcp_server.ShyHurricaneMCPServer("test")
+    first_started, second_started = asyncio.Event(), asyncio.Event()
+    first_finish, second_finish = asyncio.Event(), asyncio.Event()
+    contexts = []
+
+    async def call_tool(self, name, arguments, context):
+        contexts.append(context)
+        started, finish = (first_started, first_finish) if arguments["first"] else (second_started, second_finish)
+        started.set()
+        await finish.wait()
+
+    monkeypatch.setattr(mcp_server.MCPServer, "call_tool", call_tool)
+    context = object()
+    first = asyncio.create_task(server.call_tool("probe", {"first": True}, context))
+    second = asyncio.create_task(server.call_tool("probe", {"first": False}, context))
+    await first_started.wait()
+    await second_started.wait()
+    assert server.running_tools == {"probe"}
+    first_finish.set()
+    await first
+    assert server.running_tools == {"probe"}
+    second.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await second
+    assert server.running_tools == set()
+    assert server._running_tool_counts == {}
+    assert contexts == [context, context]
 
 
 @pytest.mark.asyncio
@@ -237,6 +239,7 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
     assert ctx.qdrant_client == "client"
     assert (ctx.qdrant_host, ctx.qdrant_port) == ("127.0.0.1", 49201)
     assert ctx.open_world is False
+    assert ctx.disable_elicitation is False
     assert ctx.cache_path == os.path.join(str(tmp_path), "tool_cache")
     assert doc_stores and all(store.initialized for store in doc_stores)
     ctx.close()

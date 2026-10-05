@@ -10,16 +10,9 @@ from pathlib import Path
 
 import torch
 import uvicorn
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.cors import CORSMiddleware
 from uvicorn import Config, Server
-
-from shyhurricane.config import configure
-from shyhurricane.generator_config import GeneratorConfig, add_generator_args
-from shyhurricane.mcp_server import mcp_instance, get_server_context
-from shyhurricane.mcp_server.generator_config import set_generator_config
-from shyhurricane.monitor import run_monitor
-from shyhurricane.proxy_server.proxy_server import run_proxy_server
-from shyhurricane.server_config import ServerConfig, set_server_config
 
 import shyhurricane.mcp_server.tools.deobfuscate_javascript  # noqa: F401
 import shyhurricane.mcp_server.tools.directory_buster  # noqa: F401
@@ -33,6 +26,13 @@ import shyhurricane.mcp_server.tools.port_scan  # noqa: F401
 import shyhurricane.mcp_server.tools.register_hostname_address  # noqa: F401
 import shyhurricane.mcp_server.tools.register_http_headers  # noqa: F401
 import shyhurricane.mcp_server.tools.status  # noqa: F401
+from shyhurricane.config import configure
+from shyhurricane.generator_config import GeneratorConfig, add_generator_args
+from shyhurricane.mcp_server import get_server_context, mcp_instance
+from shyhurricane.mcp_server.generator_config import set_generator_config
+from shyhurricane.monitor import run_monitor
+from shyhurricane.proxy_server.proxy_server import run_proxy_server
+from shyhurricane.server_config import ServerConfig, set_server_config
 from shyhurricane.utils import get_state_path
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,24 @@ def _str_to_bool(bool_as_str: str) -> bool:
     if bool_as_str in ["False", "false", "0", "no", ""]:
         return False
     return True
+
+
+TRANSPORTS = ("streamable-http", "sse", "streamable-http-modern")
+
+
+def build_mcp_app(transport: str, host: str):
+    """Build the selected HTTP preset while retaining custom application routes."""
+    if transport not in TRANSPORTS:
+        raise ValueError(f"Unknown transport: {transport}")
+    options = {
+        "host": host,
+        "transport_security": TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    }
+    if transport == "sse":
+        return mcp_instance.sse_app(**options)
+    return mcp_instance.streamable_http_app(
+        stateless_http=transport == "streamable-http-modern", **options,
+    )
 
 
 async def main():
@@ -74,9 +92,9 @@ async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--transport",
-        choices=["streamable-http", "sse"],
-        default="streamable-http",
-        help="Transport method to use: streamable-http or sse"
+        choices=TRANSPORTS,
+        default=os.environ.get("MCP_TRANSPORT", "streamable-http"),
+        help="Transport: streamable-http (default), sse, or streamable-http-modern (stateless)"
     )
     ap.add_argument("--database", default=default_database, help="Database location: path or host:port of qdrant server")
     ap.add_argument("--host", default="127.0.0.1", help="Host to listen on")
@@ -91,6 +109,8 @@ async def main():
     add_generator_args(ap)
 
     args = ap.parse_args()
+    if args.transport not in TRANSPORTS:
+        ap.error(f"Invalid MCP_TRANSPORT: {args.transport}")
     set_generator_config(GeneratorConfig.from_args(args).apply_summarizing_default().check())
     set_server_config(ServerConfig(
         database=args.database,
@@ -106,14 +126,7 @@ async def main():
     #
     mcp_instance.open_world = _str_to_bool(args.open_world)
 
-    match args.transport:
-        case "sse":
-            mcp_app = mcp_instance.sse_app(None)
-        case "streamable-http":
-            mcp_app = mcp_instance.streamable_http_app()
-        case _:
-            print("Unknown transport:", args.transport, file=sys.stderr)
-            sys.exit(1)
+    mcp_app = build_mcp_app(args.transport, args.host)
 
     mcp_app = CORSMiddleware(
         mcp_app,
@@ -139,12 +152,12 @@ async def main():
     #
     # Proxy Server
     #
-    proxy_server = run_proxy_server(
+    proxy_server = await run_proxy_server(
         server_context.db, args.host, args.proxy_port,
         get_state_path(server_context.db, "certs"),
         server_context,
     )
-    proxy_task = asyncio.create_task(proxy_server)
+    proxy_task = asyncio.create_task(proxy_server.serve_forever())
 
     monitor_task = None
     if is_tty:

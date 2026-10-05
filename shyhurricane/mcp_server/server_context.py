@@ -8,20 +8,20 @@ import sys
 import time
 from dataclasses import dataclass
 from multiprocessing import Queue
-from typing import Optional, Dict, List, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import persistqueue
 from haystack import Pipeline
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 from qdrant_client import AsyncQdrantClient
 
+from shyhurricane.db import create_qdrant_client, create_qdrant_document_store, qdrant_host_port
 from shyhurricane.doc_type_model_map import doc_type_to_model
-from shyhurricane.server_config import get_server_config
+from shyhurricane.health import HealthMonitor, qdrant_probe
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.retrieval_pipeline import build_document_pipeline, build_website_context_pipeline
-from shyhurricane.db import create_qdrant_client, create_qdrant_document_store, qdrant_host_port
+from shyhurricane.server_config import get_server_config
 from shyhurricane.utils import unix_command_image
-from shyhurricane.health import HealthMonitor, qdrant_probe
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +117,11 @@ class ServerContext:
 _server_context: Optional[ServerContext] = None
 
 
+def _elicitation_disabled() -> bool:
+    value = os.environ.get("DISABLE_ELICITATION", "False").strip().lower()
+    return value not in {"", "false", "0", "no", "off"}
+
+
 async def get_server_context() -> ServerContext:
     global _server_context
     if _server_context is not None:
@@ -142,7 +147,7 @@ async def get_server_context() -> ServerContext:
 
     cache_path: str = os.path.join(os.environ.get('TOOL_CACHE', os.environ.get('TMPDIR', '/tmp')), 'tool_cache')
     os.makedirs(cache_path, exist_ok=True)
-    disable_elicitation = bool(os.environ.get('DISABLE_ELICITATION', 'False'))
+    disable_elicitation = _elicitation_disabled()
     qdrant_client = await create_qdrant_client(db=db)
     qdrant_host, qdrant_port = qdrant_host_port(db)
     health_monitor = HealthMonitor(lambda: qdrant_probe(qdrant_host, qdrant_port), lambda: True)

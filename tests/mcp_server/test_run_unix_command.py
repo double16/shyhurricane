@@ -1,5 +1,5 @@
 import pytest
-from mcp import McpError
+from mcp import MCPError
 
 import shyhurricane.mcp_server.run_unix_command as run_unix
 from shyhurricane.mcp_server.run_unix_command import OutputLimiter, _run_unix_command, _write_stream_to_file
@@ -106,7 +106,7 @@ class Proc:
 
 @pytest.mark.asyncio
 async def test_run_unix_command_rejects_blank_command():
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         await _run_unix_command(Ctx(), "   ", {})
 
 

@@ -4,6 +4,8 @@
 
 ### Features
 
+- Upgrade the MCP Python SDK to 2.2.0 and support modern multi-round target selection and scan confirmation.
+- Add the `streamable-http-modern` transport preset and `MCP_TRANSPORT` configuration.
 - Scan indexed JavaScript with Opengrep, recover source-map files with shuji, and save matches as findings.
 - Fetch `.js.map` alongside indexed JavaScript when open-world access is enabled, and use cached Opengrep rules when updates fail.
 - Replace Wakaru with webcrack for JavaScript deobfuscation.
@@ -19,6 +21,7 @@
 
 ### Fixes
 
+- Require scan confirmation when indexed retrieval has no data; unavailable elicitation no longer starts a scan.
 - Remove unused OAST provider configuration options.
 - Prevent the server-context unit test from creating a Docker-managed Qdrant container.
 - Select available localhost ports through Python before creating the Docker-managed Qdrant database.

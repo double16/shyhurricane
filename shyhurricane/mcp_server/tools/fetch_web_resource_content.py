@@ -1,13 +1,13 @@
 import logging
-from typing import Optional, Annotated
+from typing import Annotated, Optional
 
 from haystack import Document
-from mcp.server.fastmcp import Context
-from mcp.types import ToolAnnotations, TextResourceContents
-from pydantic import AnyUrl, Field
+from mcp.server.mcpserver import Context
+from mcp.types import TextResourceContents, ToolAnnotations
+from pydantic import Field
 
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
-from shyhurricane.mcp_server import get_server_context, mcp_instance, log_tool_history
+from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
 from shyhurricane.utils import HttpResource, TextResourcePartialContents
 
 logger = logging.getLogger(__name__)
@@ -32,8 +32,8 @@ async def _find_document_by_type_and_id(doc_type: str, doc_id: str) -> Optional[
 @mcp_instance.tool(
     annotations=ToolAnnotations(
         title="Fetch Web Resource Content",
-        readOnlyHint=True,
-        openWorldHint=False),
+        read_only_hint=True,
+        open_world_hint=False),
 )
 async def fetch_web_resource_content(
         ctx: Context,
@@ -99,8 +99,8 @@ async def fetch_web_resource_content(
                 doc_type, doc_id)
 
     contents = TextResourcePartialContents(
-        uri=AnyUrl(url),
-        mimeType=doc.meta.get('content_type', None),
+        uri=str(url),
+        mime_type=doc.meta.get('content_type', None),
         text=text,
         total_length=len(doc.content),
         offset=output_start_position,
@@ -118,7 +118,7 @@ async def web_resource(doc_type: str, doc_id: str) -> Optional[TextResourceConte
     if doc is None:
         return None
     return TextResourceContents(
-        uri=AnyUrl(f"web://{doc_type}/{doc_id}"),
-        mimeType=doc.meta.get('content_type', None),
+        uri=f"web://{doc_type}/{doc_id}",
+        mime_type=doc.meta.get('content_type', None),
         text=doc.content,
     )
