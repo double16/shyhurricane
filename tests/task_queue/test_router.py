@@ -1,5 +1,6 @@
-import pytest
 from queue import Empty
+
+import pytest
 
 import shyhurricane.task_queue as task_queue
 from shyhurricane.task_queue.types import (
@@ -72,7 +73,8 @@ def test_task_router_dispatches_all_known_items(monkeypatch):
     ]
 
     class AckQueue(FakeQueue):
-        def __init__(self, path, auto_commit):
+        def __init__(self, path, auto_commit, serializer):
+            assert serializer is task_queue.Base64QueueSerializer
             super().__init__()
             self.path = path
             self.auto_commit = auto_commit

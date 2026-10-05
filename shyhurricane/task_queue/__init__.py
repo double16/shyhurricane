@@ -6,21 +6,30 @@ import logging
 import multiprocessing
 import os
 import signal
+from multiprocessing import Process, Queue
 from queue import Empty
-from multiprocessing import Queue, Process
 
 import persistqueue
 
 from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import GeneratorConfig
-from shyhurricane.persistent_queue import get_doc_type_queue, get_scan_finding_queue
 from shyhurricane.mcp_server.generator_config import get_generator_config
+from shyhurricane.persistent_queue import Base64QueueSerializer, get_doc_type_queue, get_scan_finding_queue
 from shyhurricane.task_queue.dir_busting_worker import dir_busting_worker
-from shyhurricane.task_queue.finding_worker import save_finding_worker, FindingContext
-from shyhurricane.task_queue.port_scan_worker import port_scan_worker, PortScanContext
+from shyhurricane.task_queue.finding_worker import FindingContext, save_finding_worker
+from shyhurricane.task_queue.port_scan_worker import PortScanContext, port_scan_worker
 from shyhurricane.task_queue.spider_worker import spider_worker
-from shyhurricane.task_queue.types import SpiderQueueItem, PortScanQueueItem, TaskWorkerIPC, DirBustingQueueItem, \
-    TaskPool, SaveFindingQueueItem, SpiderResultItem, DirBustingResultItem, prepare_worker_process
+from shyhurricane.task_queue.types import (
+    DirBustingQueueItem,
+    DirBustingResultItem,
+    PortScanQueueItem,
+    SaveFindingQueueItem,
+    SpiderQueueItem,
+    SpiderResultItem,
+    TaskPool,
+    TaskWorkerIPC,
+    prepare_worker_process,
+)
 from shyhurricane.utils import PortScanResults
 
 logger = logging.getLogger(__name__)
@@ -70,7 +79,9 @@ def _task_router(db: str,
 
         embedder_cache = EmbedderCache(generator_config=generator_config)
 
-        ingest_queue = persistqueue.SQLiteAckQueue(path=ingest_queue_path, auto_commit=True)
+        ingest_queue = persistqueue.SQLiteAckQueue(
+            path=ingest_queue_path, auto_commit=True, serializer=Base64QueueSerializer
+        )
         atexit.register(ingest_queue.close)
 
         doc_type_queue = get_doc_type_queue(db)

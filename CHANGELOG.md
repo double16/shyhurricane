@@ -4,6 +4,7 @@
 
 ### Features
 
+- Store new and updated persistent queue payloads as base64, while continuing to read existing queue records.
 - Upgrade the MCP Python SDK to 2.2.0 and support modern multi-round target selection and scan confirmation.
 - Add the `streamable-http-modern` transport preset and `MCP_TRANSPORT` configuration.
 - Scan indexed JavaScript with Opengrep, recover source-map files with shuji, and save matches as findings.

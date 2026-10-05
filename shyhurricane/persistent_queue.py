@@ -1,15 +1,32 @@
+import base64
 import logging
 import os
 import re
 import time
 from pathlib import Path
+from typing import Any
 
 import persistqueue
 from persistqueue import Empty
+from persistqueue.serializers import pickle as pickle_serializer
 
-from shyhurricane.utils import log_heap_stats, log_gpu_memory_summary
+from shyhurricane.utils import log_gpu_memory_summary, log_heap_stats
 
 logger = logging.getLogger(__name__)
+
+
+class Base64QueueSerializer:
+    """Store base64-encoded pickle payloads while accepting existing binary pickle records."""
+
+    @staticmethod
+    def dumps(value: Any) -> bytes:
+        return base64.b64encode(pickle_serializer.dumps(value))
+
+    @staticmethod
+    def loads(data: bytes) -> Any:
+        if data.startswith(b"\x80"):
+            return pickle_serializer.loads(data)
+        return pickle_serializer.loads(base64.b64decode(data, validate=True))
 
 
 def get_persistent_queue(db: str, queue_name: str) -> persistqueue.SQLiteAckQueue:
@@ -19,7 +36,7 @@ def get_persistent_queue(db: str, queue_name: str) -> persistqueue.SQLiteAckQueu
     else:
         path = Path(Path.home(), ".local", "state", "shyhurricane", re.sub(r'[^A-Za-z0-9_.-]', '_', db), queue_name)
     os.makedirs(path, mode=0o755, exist_ok=True)
-    return persistqueue.SQLiteAckQueue(path=str(path), auto_commit=True)
+    return persistqueue.SQLiteAckQueue(path=str(path), auto_commit=True, serializer=Base64QueueSerializer)
 
 
 def _shrink_persistent_queue(queue: persistqueue.SQLiteAckQueue, name: str):
