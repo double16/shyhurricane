@@ -47,7 +47,7 @@ dependencies = [
     "cachetools>=7.1.7,<7.3.0",
     "pydantic",
     "litellm-haystack>=1.2.0",
-    "textual~=7.3.0",
+    "textual>=7.3,<8.3",
 ]
 
 [project.optional-dependencies]
