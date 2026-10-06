@@ -14,7 +14,7 @@ license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.12"
 # see requirements.txt
 dependencies = [
-    "haystack-ai~=2.31.0",
+    "haystack-ai>=2.31,<3.4",
     "qdrant-haystack~=10.6.0",
     "fastembed-haystack~=2.7.0",
     "numpy>=2.3.0",
