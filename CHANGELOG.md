@@ -4,9 +4,11 @@
 
 ### Features
 
+- Add an `r` keyboard shortcut to refresh the monitoring dashboard immediately.
 - Accept Burp Suite request/response XML exports in `ingest.py` with `--burp-xml`.
 - Use a shared UTC startup timestamp for index and finding JSONL log filenames.
-- Store new and updated persistent queue payloads as base64, while continuing to read existing queue records.
+- Compress new and updated persistent queue payloads with zlib level 1 before base64 encoding;
+  use a versioned marker and continue reading existing raw pickle and uncompressed base64 records.
 - Upgrade the MCP Python SDK to 2.2.0 and support modern multi-round target selection and scan confirmation.
 - Add the `streamable-http-modern` transport preset and `MCP_TRANSPORT` configuration.
 - Scan indexed JavaScript with Opengrep, recover source-map files with shuji, and save matches as findings.
@@ -24,6 +26,16 @@
 
 ### Fixes
 
+- Refresh the monitoring dashboard every 30 seconds instead of every 5 seconds to reduce polling overhead.
+- Create new persistent queue indexes on `status` alone, retaining existing `(status, _id)` indexes.
+- Index persistent queue status counts and move HTTP ingest writes and queue reporting off the event loop
+  to keep acceptance responsive with large queues; reporting no longer resumes processing items.
+
+- Shut down nested indexing workers without orphaned Python processes; allow current work up to five minutes
+  to finish when quitting, and retain pending persistent queue items for restart.
+- Increase the default runtime queue cleanup interval from 60 seconds to 10 minutes.
+- Skip queue vacuuming at startup and vacuum during runtime with at least 64 MiB and 25% free database pages,
+  or more than 1 GiB of free pages regardless of the ratio.
 - Remove the persistent queue cleanup deletion cap, retain 200 successful acknowledgements at runtime,
   clear successful history on startup, and maintain the scan-finding queue.
 - Require scan confirmation when indexed retrieval has no data; unavailable elicitation no longer starts a scan.

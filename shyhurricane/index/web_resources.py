@@ -31,10 +31,14 @@ if TYPE_CHECKING:
     from shyhurricane.task_queue.types import TaskPool
 
 
-def _wait_for_health(health_state) -> bool:
+def _wait_for_health(health_state, stop_event=None) -> bool:
+    if stop_event is not None and stop_event.is_set():
+        return False
     if health_state is None:
         return True
     while not health_state.is_set():
+        if stop_event is not None and stop_event.is_set():
+            return False
         if hasattr(health_state, "wait"):
             health_state.wait(timeout=1)
         else:
@@ -42,8 +46,9 @@ def _wait_for_health(health_state) -> bool:
     return True
 
 
-def _ingest_worker(db: str, generator_config: GeneratorConfig, health_state=None, log_timestamp: str | None = None):
-    prepare_worker_process()
+def _ingest_worker(db: str, generator_config: GeneratorConfig, health_state=None,
+                   log_timestamp: str | None = None, stop_event=None):
+    prepare_worker_process(create_process_group=False)
     try:
         faulthandler.register(signal.SIGUSR1)
         logger.info(f"Index worker starting in PID {os.getpid()}")
@@ -62,8 +67,8 @@ def _ingest_worker(db: str, generator_config: GeneratorConfig, health_state=None
 
         pipeline: Pipeline = build_ingest_pipeline(db=db, generator_config=generator_config)
         logger.info(f"Index worker ready in PID {os.getpid()}, logging to {index_log_path}")
-        queue_items = iter(persistent_queue_get(queue, shrink_count=1000))
-        while _wait_for_health(health_state):
+        queue_items = iter(persistent_queue_get(queue, shrink_count=1000, stop_event=stop_event))
+        while _wait_for_health(health_state, stop_event):
             try:
                 item = next(queue_items)
             except StopIteration:
@@ -114,13 +119,18 @@ def _ingest_worker(db: str, generator_config: GeneratorConfig, health_state=None
     logger.info(f"Index worker finished in PID {os.getpid()}")
 
 
-def _ingest_watcher(db: str, generator_config: GeneratorConfig, health_state=None, log_timestamp: str | None = None):
+def _ingest_watcher(db: str, generator_config: GeneratorConfig, health_state=None,
+                    log_timestamp: str | None = None, stop_event=None):
     log_timestamp = log_timestamp or get_log_timestamp()
     prepare_worker_process()
     process = None
     try:
-        while True:
-            process = multiprocessing.Process(target=_ingest_worker, args=(db, generator_config, health_state, log_timestamp))
+        while stop_event is None or not stop_event.is_set():
+            process = multiprocessing.Process(
+                target=_ingest_worker,
+                args=(db, generator_config, health_state, log_timestamp),
+                kwargs={"stop_event": stop_event},
+            )
             process.start()
             process.join()
             exitcode = process.exitcode
@@ -129,7 +139,7 @@ def _ingest_watcher(db: str, generator_config: GeneratorConfig, health_state=Non
             if exitcode != 0:
                 break
             if health_state is not None:
-                _wait_for_health(health_state)
+                _wait_for_health(health_state, stop_event)
     except KeyboardInterrupt:
         pass
     finally:
@@ -157,15 +167,20 @@ def is_current_process_in_bad_state() -> bool:
     return False
 
 
-def _wait_for_indexing_enabled(indexing_enabled=None) -> bool:
+def _wait_for_indexing_enabled(indexing_enabled=None, stop_event=None) -> bool:
+    if stop_event is not None and stop_event.is_set():
+        return False
     if indexing_enabled is None:
         return True
     while not indexing_enabled.is_set():
+        if stop_event is not None and stop_event.is_set():
+            return False
         indexing_enabled.wait(timeout=1)
     return True
 
 
-def _doc_type_worker(db: str, generator_config: GeneratorConfig, health_state=None, indexing_enabled=None):
+def _doc_type_worker(db: str, generator_config: GeneratorConfig, health_state=None, indexing_enabled=None,
+                     stop_event=None):
     exit_code = -1
     try:
         faulthandler.register(signal.SIGUSR1)
@@ -178,10 +193,11 @@ def _doc_type_worker(db: str, generator_config: GeneratorConfig, health_state=No
         pipeline: Pipeline = build_doc_type_pipeline(db=db, generator_config=generator_config)
 
         logger.info(f"Document specific index worker ready in PID {os.getpid()}")
-        queue_items = iter(persistent_queue_get(doc_type_queue, shrink_count=100))
-        while _wait_for_health(health_state):
-            _wait_for_indexing_enabled(indexing_enabled)
-            if not _wait_for_health(health_state):
+        queue_items = iter(persistent_queue_get(doc_type_queue, shrink_count=100, stop_event=stop_event))
+        while _wait_for_health(health_state, stop_event):
+            if not _wait_for_indexing_enabled(indexing_enabled, stop_event):
+                break
+            if not _wait_for_health(health_state, stop_event):
                 break
             try:
                 item = next(queue_items)
@@ -207,7 +223,8 @@ def _doc_type_worker(db: str, generator_config: GeneratorConfig, health_state=No
     return exit_code
 
 
-def _doc_type_watcher(db: str, generator_config: GeneratorConfig, health_state=None, indexing_enabled=None):
+def _doc_type_watcher(db: str, generator_config: GeneratorConfig, health_state=None, indexing_enabled=None,
+                      stop_event=None):
     """
     The watcher process maintains a doc type index process. It will start a new one if the process exits successfully,
     indicating it exited due to excessive memory usage.
@@ -218,10 +235,11 @@ def _doc_type_watcher(db: str, generator_config: GeneratorConfig, health_state=N
         faulthandler.register(signal.SIGUSR1)
         logger.info(f"Document specific index watcher starting in PID {os.getpid()}")
 
-        while True:
+        while stop_event is None or not stop_event.is_set():
             process = multiprocessing.Process(
                 target=_doc_type_worker,
                 args=(db, generator_config, health_state, indexing_enabled),
+                kwargs={"stop_event": stop_event},
             )
             process.start()
             process.join()
@@ -231,7 +249,7 @@ def _doc_type_watcher(db: str, generator_config: GeneratorConfig, health_state=N
             if exitcode != 0 and (health_state is None or health_state.is_set()):
                 break
             if health_state is not None:
-                _wait_for_health(health_state)
+                _wait_for_health(health_state, stop_event)
 
     except KeyboardInterrupt:
         pass
@@ -249,7 +267,7 @@ def _doc_type_watcher(db: str, generator_config: GeneratorConfig, health_state=N
 
 
 def start_ingest_worker(db: str, generator_config: GeneratorConfig, pool_size: int = 1, health_state=None,
-                        indexing_enabled=None, log_timestamp: str | None = None) -> Tuple[
+                        indexing_enabled=None, log_timestamp: str | None = None, stop_event=None) -> Tuple[
     persistqueue.SQLiteAckQueue, "TaskPool"]:
     from shyhurricane.task_queue.types import TaskPool
 
@@ -257,20 +275,26 @@ def start_ingest_worker(db: str, generator_config: GeneratorConfig, pool_size: i
     processes = []
 
     if get_server_config().low_power:
-        logger.warning("low_power: document type indexing is initialized but paused; queued items will be processed when disabled")
+        logger.warning(
+            "low_power: document type indexing is initialized but paused; queued items will be processed when disabled"
+        )
     for idx in range(pool_size):
         # These processes initialize their pipelines immediately, then wait before claiming work if paused.
         process = multiprocessing.Process(
             target=_doc_type_watcher,
             args=(db, generator_config, health_state, indexing_enabled),
+            kwargs={"stop_event": stop_event},
         )
-        process._shyhurricane_monitor_process_group = os.environ.get("SHYHURRICANE_MONITOR") == "1"
+        process._shyhurricane_monitor_process_group = hasattr(os, "setsid")
         process.start()
         processes.append(process)
 
     # this is a light-weight process, we only need one
-    ingest_process = multiprocessing.Process(target=_ingest_watcher, args=(db, generator_config, health_state, log_timestamp))
-    ingest_process._shyhurricane_monitor_process_group = os.environ.get("SHYHURRICANE_MONITOR") == "1"
+    ingest_process = multiprocessing.Process(
+        target=_ingest_watcher, args=(db, generator_config, health_state, log_timestamp),
+        kwargs={"stop_event": stop_event},
+    )
+    ingest_process._shyhurricane_monitor_process_group = hasattr(os, "setsid")
     ingest_process.start()
     processes.append(ingest_process)
 

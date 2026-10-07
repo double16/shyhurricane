@@ -1,3 +1,6 @@
+from threading import Event
+from unittest.mock import Mock
+
 import pytest
 
 import shyhurricane.mcp_server.server_context as server_context
@@ -9,6 +12,9 @@ class Closeable:
         self.fail = fail
         self.closed = False
         self.items = []
+
+    def cancel_join_thread(self):
+        pass
 
     def close(self):
         if self.fail:
@@ -48,10 +54,11 @@ def test_server_context_close_closes_pools_and_queues():
     assert ctx.task_pool.closed is True
     assert ctx.ingest_pool.closed is True
     assert ctx.ingest_queue.items == []
-    assert ctx.task_queue.items == [None]
-    assert ctx.spider_result_queue.items == [None]
-    assert ctx.port_scan_result_queue.items == [None]
+    assert ctx.task_queue.items == []
+    assert ctx.spider_result_queue.items == []
+    assert ctx.port_scan_result_queue.items == []
     assert ctx.ingest_queue.closed is True
+    assert ctx.dir_busting_result_queue.closed is True
 
 
 def test_server_context_close_swallows_queue_errors():
@@ -61,6 +68,38 @@ def test_server_context_close_swallows_queue_errors():
 
     assert ctx.task_pool.closed is True
     assert ctx.ingest_pool.closed is True
+
+
+def test_context_shutdown_shares_deadline_and_is_idempotent(monkeypatch):
+    ctx = make_context()
+    ctx.stop_event = Event()
+    ctx.task_pool = Mock()
+    ctx.ingest_pool = Mock()
+    ctx.worker_manager = Mock()
+    ctx.health_monitor = Mock()
+    monkeypatch.setattr(server_context.time, "monotonic", lambda: 10)
+    ctx.close()
+    ctx.close()
+    assert ctx.stop_event.is_set()
+    ctx.task_pool.close.assert_called_once_with(deadline=310)
+    ctx.ingest_pool.close.assert_called_once_with(deadline=310)
+    ctx.worker_manager.shutdown.assert_called_once()
+    ctx.health_monitor.close.assert_called_once()
+
+
+def test_context_shutdown_continues_after_pool_and_manager_errors():
+    ctx = make_context()
+    ctx.stop_event = Event()
+    ctx.task_pool = Mock()
+    ctx.task_pool.close.side_effect = RuntimeError("pool failed")
+    ctx.ingest_pool = Mock()
+    ctx.worker_manager = Mock()
+    ctx.worker_manager.shutdown.side_effect = RuntimeError("manager failed")
+    ctx.task_queue.cancel_join_thread = Mock(side_effect=RuntimeError("feeder failed"))
+    ctx.close()
+    ctx.ingest_pool.close.assert_called_once()
+    assert ctx.task_queue.closed
+    assert ctx.dir_busting_result_queue.closed
 
 
 @pytest.mark.asyncio
@@ -133,3 +172,33 @@ def test_server_context_low_power_toggle_without_indexing_event():
     ctx.set_low_power(True)
 
     assert ctx.low_power is True
+
+
+@pytest.mark.asyncio
+async def test_enqueue_ingest_uses_durable_writer_and_closes_it(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    writer = Mock(put=AsyncMock())
+    factory = Mock(return_value=writer)
+    monkeypatch.setattr(server_context, "AsyncIngestWriter", factory)
+    ctx = make_context()
+    ctx.ingest_queue.path = "/tmp/queue"
+    await ctx.enqueue_ingest("first")
+    await ctx.enqueue_ingest("second")
+    factory.assert_called_once_with("/tmp/queue")
+    assert [call.args for call in writer.put.await_args_list] == [("first",), ("second",)]
+    ctx.close()
+    writer.close.assert_called_once()
+    assert 0 < writer.close.call_args.kwargs["timeout"] <= 300
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await ctx.enqueue_ingest("rejected")
+
+
+def test_writer_close_failure_does_not_skip_other_shutdown(caplog):
+    ctx = make_context()
+    ctx._ingest_writer = Mock()
+    ctx._ingest_writer.close.side_effect = RuntimeError("writer failed")
+    ctx.close()
+    assert ctx.ingest_pool.closed
+    assert ctx.ingest_queue.closed
+    assert "Failed to close ingest writer" in caplog.text

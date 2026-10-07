@@ -1,4 +1,8 @@
 import multiprocessing
+import signal
+from unittest.mock import Mock
+
+import pytest
 
 import shyhurricane.task_queue.types as types
 from shyhurricane.task_queue.types import (
@@ -90,14 +94,24 @@ class FakeProcess:
     def __init__(self, fail=False):
         self.fail = fail
         self.calls = []
+        self.alive = True
 
     def terminate(self):
         self.calls.append("terminate")
         if self.fail:
             raise RuntimeError("already closed")
 
-    def join(self):
+    def is_alive(self):
+        return self.alive
+
+    def kill(self):
+        self.calls.append("kill")
+        self.alive = False
+
+    def join(self, timeout=None):
         self.calls.append("join")
+        if not self.fail:
+            self.alive = False
 
     def close(self):
         self.calls.append("close")
@@ -109,8 +123,8 @@ def test_task_pool_close_terminates_joins_and_closes_processes():
 
     TaskPool([first, second]).close()
 
-    assert first.calls == ["terminate", "join", "close"]
-    assert second.calls == ["terminate", "join", "close"]
+    assert first.calls == ["terminate", "join", "join", "close"]
+    assert second.calls == ["terminate", "join", "join", "close"]
 
 
 def test_task_pool_close_continues_when_process_raises():
@@ -119,8 +133,8 @@ def test_task_pool_close_continues_when_process_raises():
 
     TaskPool([broken, healthy]).close()
 
-    assert broken.calls == ["terminate"]
-    assert healthy.calls == ["terminate", "join", "close"]
+    assert broken.calls == ["terminate", "join", "kill", "join", "close"]
+    assert healthy.calls == ["terminate", "join", "join", "close"]
 
 
 def test_task_worker_ipc_stores_queue_references():
@@ -148,3 +162,78 @@ def test_task_worker_ipc_stores_queue_references():
         for queue in [task_queue, spider_result_queue, port_scan_result_queue, dir_busting_result_queue]:
             queue.close()
             queue.join_thread()
+
+
+def test_task_pool_graceful_close_and_repeated_cleanup(monkeypatch):
+    process = Mock()
+    process._shyhurricane_monitor_process_group = False
+    process.is_alive.return_value = False
+    monkeypatch.setattr(types.time, "monotonic", lambda: 10)
+    pool = TaskPool([process])
+    pool.close(deadline=310)
+    pool.close(deadline=310)
+    assert process.join.call_args_list[0].kwargs == {"timeout": 300}
+    process.terminate.assert_not_called()
+    process.kill.assert_not_called()
+    process.close.assert_called_once()
+
+
+@pytest.mark.parametrize("group_error", [ProcessLookupError, PermissionError])
+def test_task_pool_handles_group_signal_errors(monkeypatch, group_error):
+    process = Mock(pid=1234)
+    process._shyhurricane_monitor_process_group = True
+    process.is_alive.side_effect = [True, False] if group_error is ProcessLookupError else [False]
+    monkeypatch.setattr(types.os, "killpg", Mock(side_effect=group_error))
+    # Skip the polling interval; exercise the final signal and error handling.
+    ticks = iter([10, 20, 20])
+    monkeypatch.setattr(types.time, "monotonic", lambda: next(ticks))
+    TaskPool([process]).close()
+    if group_error is ProcessLookupError:
+        process.terminate.assert_called_once()
+    process.close.assert_called_once()
+
+
+def test_task_pool_kills_unresponsive_group_after_term(monkeypatch):
+    process = Mock(pid=1234)
+    process._shyhurricane_monitor_process_group = True
+    process.is_alive.return_value = True
+    signals = []
+    clock = [0.0]
+    monkeypatch.setattr(types.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(types.time, "sleep", lambda delay: clock.__setitem__(0, clock[0] + delay))
+    monkeypatch.setattr(types.os, "killpg", lambda pid, sig: signals.append(sig))
+    TaskPool([process]).close(deadline=0)
+    assert signals[0] == signal.SIGTERM
+    assert signals[-1] == signal.SIGKILL
+    assert clock[0] >= 5
+    process.kill.assert_called_once()
+    process.close.assert_called_once()
+
+
+def test_task_pool_continues_cleanup_after_join_and_close_errors(monkeypatch):
+    broken = Mock()
+    broken._shyhurricane_monitor_process_group = False
+    broken.join.side_effect = RuntimeError("join failed")
+    broken.close.side_effect = RuntimeError("close failed")
+    healthy = Mock()
+    healthy._shyhurricane_monitor_process_group = False
+    healthy.is_alive.return_value = False
+    TaskPool([broken, healthy]).close(deadline=0)
+    healthy.close.assert_called_once()
+
+
+def test_nested_worker_does_not_create_process_group(monkeypatch):
+    monkeypatch.setenv("SHYHURRICANE_MONITOR", "1")
+    setsid = Mock()
+    monkeypatch.setattr(types.os, "setsid", setsid)
+    monkeypatch.setattr(types.os, "dup2", Mock())
+    monkeypatch.setattr(types.signal, "signal", Mock())
+    types.prepare_worker_process(create_process_group=False)
+    setsid.assert_not_called()
+
+
+def test_worker_process_group_setup_failure_is_logged(monkeypatch, caplog):
+    monkeypatch.delenv("SHYHURRICANE_MONITOR", raising=False)
+    monkeypatch.setattr(types.os, "setsid", Mock(side_effect=OSError("unavailable")))
+    types.prepare_worker_process()
+    assert "Failed to create worker process group" in caplog.text

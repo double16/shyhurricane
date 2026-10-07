@@ -15,10 +15,10 @@ from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.persistent_queue import (
-    Base64QueueSerializer,
     QueueMaintenance,
     get_doc_type_queue,
     get_scan_finding_queue,
+    open_persistent_queue,
 )
 from shyhurricane.task_queue.dir_busting_worker import dir_busting_worker
 from shyhurricane.task_queue.finding_worker import FindingContext, save_finding_worker
@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 
 def start_task_worker(
-        db: str, ingest_queue_path: str, pool_size: int = 1, log_timestamp: str | None = None
+        db: str, ingest_queue_path: str, pool_size: int = 1, log_timestamp: str | None = None, stop_event=None
 ) -> TaskWorkerIPC:
     assert pool_size > 0
     log_timestamp = log_timestamp or get_log_timestamp()
@@ -60,8 +60,9 @@ def start_task_worker(
             "dir_busting_result_queue": dir_busting_result_queue,
             "generator_config": get_generator_config(),
             "log_timestamp": log_timestamp,
+            "stop_event": stop_event,
         })
-        proc._shyhurricane_monitor_process_group = os.environ.get("SHYHURRICANE_MONITOR") == "1"
+        proc._shyhurricane_monitor_process_group = hasattr(os, "setsid")
         proc.start()
         processes.append(proc)
     return TaskWorkerIPC(
@@ -81,6 +82,7 @@ def _task_router(db: str,
                  dir_busting_result_queue: Queue[DirBustingResultItem],
                  generator_config: GeneratorConfig,
                  log_timestamp: str | None = None,
+                 stop_event=None,
                  ):
     log_timestamp = log_timestamp or get_log_timestamp()
     prepare_worker_process()
@@ -90,9 +92,7 @@ def _task_router(db: str,
 
         embedder_cache = EmbedderCache(generator_config=generator_config)
 
-        ingest_queue = persistqueue.SQLiteAckQueue(
-            path=ingest_queue_path, auto_commit=True, serializer=Base64QueueSerializer
-        )
+        ingest_queue = open_persistent_queue(ingest_queue_path, auto_resume=False)
         atexit.register(ingest_queue.close)
 
         doc_type_queue = get_doc_type_queue(db)
@@ -105,7 +105,7 @@ def _task_router(db: str,
         atexit.register(scan_finding_queue.close)
         scan_maintenance = QueueMaintenance(scan_finding_queue)
 
-        while True:
+        while stop_event is None or not stop_event.is_set():
             scan_maintenance.check()
             queued_scan = False
             try:
@@ -114,11 +114,17 @@ def _task_router(db: str,
                 except TypeError:
                     item = task_queue.get()
             except Empty:
+                if stop_event is not None and stop_event.is_set():
+                    break
                 try:
                     item = scan_finding_queue.get(block=False)
                     queued_scan = True
                 except persistqueue.Empty:
                     continue
+            if stop_event is not None and stop_event.is_set():
+                if queued_scan:
+                    scan_finding_queue.nack(item)
+                break
             logger.info(f"Processing {item.__class__.__name__} in PID {os.getpid()}")
             try:
                 if isinstance(item, SpiderQueueItem):
@@ -156,4 +162,7 @@ def _task_router(db: str,
 
     except KeyboardInterrupt:
         pass
+    finally:
+        for result_queue in (spider_result_queue, port_scan_result_queue, dir_busting_result_queue):
+            result_queue.cancel_join_thread()
     logger.info(f"Finished task router in PID {os.getpid()}")

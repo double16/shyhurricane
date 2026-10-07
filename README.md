@@ -163,8 +163,12 @@ docker build -t ghcr.io/double16/shyhurricane_unix_command:main src/docker/unix_
 #### MCP Server
 
 When started from an interactive terminal, the server displays a `shyhurricane` monitoring dashboard with
-configuration, queue, database, indexing, and running MCP tool information. Press `q` to stop the
-dashboard and shut down the server. Non-interactive starts, including Docker Compose, continue to use normal logging output.
+configuration, queue, database, indexing, and running MCP tool information. It refreshes immediately
+on startup and every 30 seconds afterward. Press `r` to refresh immediately. Press `q` to stop the
+dashboard and shut down the server. Shutdown stops claiming new work and allows current operations
+up to five minutes to finish before terminating remaining workers. Pending persistent queue items
+remain available for the next startup. SIGINT and SIGTERM use the same shutdown behavior.
+Non-interactive starts, including Docker Compose, continue to use normal logging output.
 
 Ollama with `llama3.2:3b`:
 ```shell
@@ -229,11 +233,37 @@ uses the cached snapshot if an update fails.
 
 Indexing workers monitor Qdrant and LLM readiness. If either dependency is unhealthy, `/index` requests continue to be accepted into the persistent queue, but ingest and type-specific indexing pause before consuming new items. Workers resume automatically after both health checks recover; MCP tools retain their existing request and error behavior.
 
+Queue status counts use a covering SQLite index. Existing ingest, document-type, and scan-finding
+queues gain this index automatically during startup, before workers and HTTP serving begin. The first
+startup after upgrading scans each database to build the index and may take longer; logs report index
+creation and elapsed time. Queue records are preserved.
+New indexes include only `status`; SQLite implicitly includes the row ID, which aliases `_id`.
+Existing `ack_queue_status_id` indexes on `(status, _id)` remain unchanged.
+
+New and updated ingest, document-type, and scan-finding queue payloads use this storage format:
+`object → pickle bytes → zlib compression (level 1) → marker + compressed bytes → base64`.
+After base64 decoding, the versioned marker `b"SHQ\x01ZLIB\x00"` identifies compressed data;
+only marked payloads are decompressed before unpickling. Existing raw pickle and uncompressed
+base64 records remain readable and are compressed only when updated. Compression requires no
+additional dependencies or configuration. Older application versions cannot read compressed records.
+
+Dashboard and `/status` queue counts run in background threads using read-only connections. These reads
+do not resume items already being processed. HTTP ingestion uses a dedicated writer thread and awaits
+one durable commit per item, so queue reads and writes do not block the HTTP event loop. `/index`
+returns HTTP 201 after all submitted items commit. If a later item fails or the request is cancelled,
+items already committed remain queued; retrying the request can enqueue them again. Shutdown rejects
+new writes and drains submitted writes within the existing five-minute shutdown deadline.
+
 At server startup, ingest, document-type, and scan-finding queues discard all successfully acknowledged records
-and vacuum reclaimed space. Runtime cleanup retains the latest 200 successful acknowledgements by queue insertion
+without vacuuming. Runtime cleanup retains the latest 200 successful acknowledgements by queue insertion
 order and removes the entire older history without a fixed deletion limit. Cleanup runs after 1,000 processed
-items (100 for document-type indexing) or on a 60-second maintenance interval while consumers are running.
+items (100 for document-type indexing) or on a 10-minute maintenance interval while consumers are running.
 Failed acknowledgements, pending items, and items being processed are retained.
+Runtime maintenance vacuums when SQLite reports at least 64 MiB of free pages and those pages represent
+at least 25% of the database, or when free pages exceed 1 GiB regardless of the ratio.
+These thresholds exclude WAL file size and include space freed by earlier cleanup,
+including startup cleanup. Until vacuum runs, free pages remain available for new queue entries. Vacuum can run
+while work is pending and may pause processing; its logs report reclaimable space and completion time.
 
 ```shell
 curl -X POST -H "Content-Type: application/json" http://127.0.0.1:8000/index @katana.json

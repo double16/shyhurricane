@@ -121,84 +121,97 @@ async def main():
     ))
     server_context = await get_server_context()
 
-    #
-    # MCP Server
-    #
-    mcp_instance.open_world = _str_to_bool(args.open_world)
-
-    mcp_app = build_mcp_app(args.transport, args.host)
-
-    mcp_app = CORSMiddleware(
-        mcp_app,
-        allow_origins=["*"],
-        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-        allow_headers=["*"],
-        expose_headers=["Mcp-Session-Id"],
-    )
-
-    uv_cfg = Config(
-        app=mcp_app,
-        host=args.host,
-        port=args.port,
-        loop="asyncio",
-        lifespan="on",
-        log_level="critical" if is_tty else "info",
-        access_log=not is_tty,
-        log_config=None if is_tty else uvicorn.config.LOGGING_CONFIG,
-    )
-    uv_server = Server(uv_cfg)
-    uv_task = asyncio.create_task(uv_server.serve())
-
-    #
-    # Proxy Server
-    #
-    proxy_server = await run_proxy_server(
-        server_context.db, args.host, args.proxy_port,
-        get_state_path(server_context.db, "certs"),
-        server_context,
-    )
-    proxy_task = asyncio.create_task(proxy_server.serve_forever())
-
+    uv_server = None
+    uv_task = None
+    proxy_server = None
+    proxy_task = None
     monitor_task = None
-    if is_tty:
-        monitor_task = asyncio.create_task(run_monitor(server_context, args.host, args.port, mcp_instance))
+    stop_task = None
+    try:
+        #
+        # MCP Server
+        #
+        mcp_instance.open_world = _str_to_bool(args.open_world)
 
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, stop.set)
-        except NotImplementedError:
-            # Windows: no add_signal_handler for SIGTERM; fall back to Ctrl+C only
-            pass
-    if monitor_task is None:
-        await stop.wait()
-    else:
-        stop_task = asyncio.create_task(stop.wait())
-        done, pending = await asyncio.wait(
-            [stop_task, monitor_task], return_when=asyncio.FIRST_COMPLETED
+        mcp_app = build_mcp_app(args.transport, args.host)
+
+        mcp_app = CORSMiddleware(
+            mcp_app,
+            allow_origins=["*"],
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+            allow_headers=["*"],
+            expose_headers=["Mcp-Session-Id"],
         )
-        for task in done:
-            task.result()
-        for task in pending:
-            task.cancel()
-        for task in pending:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-    proxy_server.close()
-    server_context.close()
 
-    #
-    # Wait for servers to exit
-    #
-    uv_server.should_exit = True
-    await uv_task
-    proxy_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await proxy_task
-    if monitor_task is not None:
-        with contextlib.suppress(asyncio.CancelledError):
-            await monitor_task
+        uv_cfg = Config(
+            app=mcp_app,
+            host=args.host,
+            port=args.port,
+            loop="asyncio",
+            lifespan="on",
+            log_level="critical" if is_tty else "info",
+            access_log=not is_tty,
+            log_config=None if is_tty else uvicorn.config.LOGGING_CONFIG,
+            timeout_graceful_shutdown=300,
+        )
+        uv_server = Server(uv_cfg)
+        uv_task = asyncio.create_task(uv_server.serve())
+
+        #
+        # Proxy Server
+        #
+        proxy_server = await run_proxy_server(
+            server_context.db, args.host, args.proxy_port,
+            get_state_path(server_context.db, "certs"),
+            server_context,
+        )
+        proxy_task = asyncio.create_task(proxy_server.serve_forever())
+
+        monitor_task = None
+        if is_tty:
+            monitor_task = asyncio.create_task(run_monitor(server_context, args.host, args.port, mcp_instance))
+
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, stop.set)
+            except NotImplementedError:
+                # Windows: no add_signal_handler for SIGTERM; fall back to Ctrl+C only
+                pass
+        if monitor_task is None:
+            await stop.wait()
+        else:
+            stop_task = asyncio.create_task(stop.wait())
+            done, pending = await asyncio.wait(
+                [stop_task, monitor_task], return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done:
+                task.result()
+            for task in pending:
+                task.cancel()
+            for task in pending:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+    finally:
+        if uv_server is not None:
+            uv_server.should_exit = True
+        if proxy_server is not None:
+            try:
+                proxy_server.close()
+            except Exception:
+                logger.exception("Failed to close proxy listener")
+        for task in (stop_task, monitor_task, proxy_task):
+            if task is not None:
+                task.cancel()
+        try:
+            await asyncio.to_thread(server_context.close)
+        finally:
+            for task in (stop_task, monitor_task, proxy_task, uv_task):
+                if task is not None:
+                    with contextlib.suppress(asyncio.CancelledError):
+                        # Retrieve failures without interrupting the remaining cleanup.
+                        await asyncio.gather(task, return_exceptions=True)
 
 
 if __name__ == "__main__":

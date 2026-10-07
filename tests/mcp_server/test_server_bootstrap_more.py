@@ -34,9 +34,14 @@ def test_task_pool_terminates_monitor_worker_process_groups(monkeypatch):
     calls = []
     process = SimpleNamespace(pid=1234, _shyhurricane_monitor_process_group=True,
                               terminate=lambda: pytest.fail("terminate should not be called"),
-                              join=lambda: None, close=lambda: None)
+                              join=lambda timeout=None: None, close=lambda: None, is_alive=lambda: False)
     monkeypatch.setenv("SHYHURRICANE_MONITOR", "1")
-    monkeypatch.setattr("shyhurricane.task_queue.types.os.killpg", lambda pid, sig: calls.append((pid, sig)))
+    def killpg(pid, sig):
+        if sig == 0:
+            raise ProcessLookupError
+        calls.append((pid, sig))
+
+    monkeypatch.setattr("shyhurricane.task_queue.types.os.killpg", killpg)
 
     TaskPool([process]).close()
 
@@ -52,7 +57,7 @@ def test_run_worker_silences_output_in_monitor_mode(monkeypatch):
 
     run_worker(lambda: calls.append("worker"))
 
-    assert calls == [(signal.SIGINT, signal.SIG_IGN), "setsid", 1, 2, "worker"]
+    assert calls == ["setsid", (signal.SIGINT, signal.SIG_IGN), 1, 2, "worker"]
 
 
 @pytest.mark.asyncio
@@ -136,12 +141,15 @@ async def test_same_tool_stays_visible_until_all_calls_finish_or_cancel(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path):
+@pytest.mark.parametrize("pipeline_error", [None, RuntimeError, asyncio.CancelledError])
+async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path, pipeline_error):
     monkeypatch.setattr(server_context, "_server_context", None)
     monkeypatch.setenv("TOOL_CACHE", str(tmp_path))
     monkeypatch.setenv("DISABLE_ELICITATION", "")
     stores = {"content": object()}
     doc_stores = []
+    pool_closes = []
+    stop_events = []
 
     class Config:
         database = "db"
@@ -165,8 +173,8 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
         path = "/queue"
 
     class Pool:
-        def close(self):
-            pass
+        def close(self, deadline=None):
+            pool_closes.append(deadline)
 
     class RuntimeEvent:
         def __init__(self):
@@ -206,9 +214,11 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
         assert startup_events == [("cleanup", "db")]
         startup_events.append(("ingest", "db"))
         log_timestamps.append(kwargs["log_timestamp"])
+        stop_events.append(kwargs["stop_event"])
         return Queue(), Pool()
 
-    def start_task_worker(*args):
+    def start_task_worker(*args, stop_event=None):
+        assert stop_event is not None
         assert startup_events == [("cleanup", "db"), ("ingest", "db")]
         assert args[3] == log_timestamps[0]
         return SimpleNamespace(
@@ -220,6 +230,8 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
         )
 
     async def build_document_pipeline(db, generator_config):
+        if pipeline_error is not None:
+            raise pipeline_error("pipeline interrupted")
         return object(), None, stores
 
     import shyhurricane.index.web_resources as web_resources
@@ -238,6 +250,15 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
     monkeypatch.setattr(server_context.asyncio, "create_subprocess_exec", create_subprocess_exec)
     monkeypatch.setattr(web_resources, "start_ingest_worker", start_ingest_worker)
     monkeypatch.setattr(task_queue, "start_task_worker", start_task_worker)
+
+    if pipeline_error is not None:
+        with pytest.raises(pipeline_error, match="pipeline interrupted"):
+            await server_context.get_server_context()
+        assert server_context._server_context is None
+        assert stop_events[0].is_set()
+        assert len(pool_closes) == 2
+        assert pool_closes[0] == pool_closes[1]
+        return
 
     ctx = await server_context.get_server_context()
 

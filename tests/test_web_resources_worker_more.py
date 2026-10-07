@@ -1,9 +1,16 @@
 import json
+from threading import Event
+from unittest.mock import Mock
 
 import pytest
 from haystack import Document
 
 import shyhurricane.index.web_resources as web_resources
+
+
+@pytest.fixture(autouse=True)
+def isolate_process_setup(monkeypatch):
+    monkeypatch.setattr(web_resources, "prepare_worker_process", lambda **kwargs: None)
 
 
 class Queue:
@@ -62,6 +69,70 @@ def finite_queue(items):
     raise KeyboardInterrupt
 
 
+@pytest.mark.parametrize("waiter", [web_resources._wait_for_health, web_resources._wait_for_indexing_enabled])
+@pytest.mark.parametrize("already_stopping", [True, False])
+def test_dependency_wait_exits_when_stopping(waiter, already_stopping):
+    stop = Event()
+    state = Mock()
+    state.is_set.return_value = False
+    state.wait.side_effect = lambda timeout: stop.set()
+    if already_stopping:
+        stop.set()
+    assert waiter(state, stop) is False
+    assert state.wait.call_count == (0 if already_stopping else 1)
+
+
+@pytest.mark.parametrize("watcher", [web_resources._ingest_watcher, web_resources._doc_type_watcher])
+@pytest.mark.parametrize("already_stopping", [True, False])
+def test_watchers_do_not_restart_during_shutdown(monkeypatch, watcher, already_stopping):
+    stop = Event()
+    if already_stopping:
+        stop.set()
+    process = Mock(exitcode=0)
+    process.join.side_effect = stop.set
+    factory = Mock(return_value=process)
+    monkeypatch.setattr(web_resources.multiprocessing, "Process", factory)
+    monkeypatch.setattr(web_resources.faulthandler, "register", Mock())
+    watcher("db", object(), stop_event=stop)
+    if already_stopping:
+        factory.assert_not_called()
+    else:
+        factory.assert_called_once()
+        assert factory.call_args.kwargs["kwargs"]["stop_event"] is stop
+        process.close.assert_called_once()
+
+
+@pytest.mark.parametrize("doc_type", [True, False])
+def test_index_workers_finish_current_item_and_leave_pending(monkeypatch, tmp_path, doc_type):
+    stop = Event()
+    queue = Queue()
+    first = Document(content="first", meta={"url": "https://example.com", "content_type": "text/plain"})
+    second = Document(content="second")
+    pending = [first, second] if doc_type else ["first", "second"]
+
+    def queue_items(q, shrink_count, stop_event):
+        while pending and not stop_event.is_set():
+            yield pending.pop(0)
+
+    pipeline = Mock()
+    pipeline.run.side_effect = lambda data: stop.set() or {"output": {"documents": []}}
+    monkeypatch.setattr(web_resources, "persistent_queue_get", queue_items)
+    monkeypatch.setattr(web_resources, "get_log_path", lambda *args: tmp_path / "index.jsonl")
+    monkeypatch.setattr(web_resources, "get_ingest_queue", lambda db: queue)
+    monkeypatch.setattr(web_resources, "get_doc_type_queue", lambda db: queue)
+    monkeypatch.setattr(web_resources, "build_ingest_pipeline", lambda **kwargs: pipeline)
+    monkeypatch.setattr(web_resources, "build_doc_type_pipeline", lambda **kwargs: pipeline)
+    monkeypatch.setattr(web_resources.faulthandler, "register", Mock())
+    monkeypatch.setattr(web_resources, "log_heap_stats", Mock())
+    monkeypatch.setattr(web_resources, "log_gpu_memory_summary", Mock())
+    monkeypatch.setattr(web_resources, "is_current_process_in_bad_state", lambda: False)
+    worker = web_resources._doc_type_worker if doc_type else web_resources._ingest_worker
+    worker("db", object(), stop_event=stop)
+    assert queue.acked == ([first] if doc_type else ["first"])
+    assert pending == ([second] if doc_type else ["second"])
+    pipeline.run.assert_called_once()
+
+
 def test_wait_for_health_blocks_until_state_recovers():
     health_state = HealthState()
 
@@ -113,7 +184,7 @@ def test_ingest_worker_acks_and_queues_content_documents(monkeypatch, tmp_path, 
     monkeypatch.setattr(web_resources, "get_doc_type_queue", lambda db: doc_type_queue)
     monkeypatch.setattr(web_resources, "get_log_path", lambda db, name: tmp_path / name)
     monkeypatch.setattr(web_resources, "build_ingest_pipeline", lambda **kwargs: pipeline)
-    monkeypatch.setattr(web_resources, "persistent_queue_get", lambda queue, shrink_count: finite_queue([item]))
+    monkeypatch.setattr(web_resources, "persistent_queue_get", lambda queue, shrink_count, stop_event=None: finite_queue([item]))
 
     monkeypatch.setattr(web_resources, "get_log_timestamp", lambda: "202610051234")
     expected = timestamp or "202610051234"
@@ -148,7 +219,7 @@ def test_ingest_worker_scans_javascript_even_in_low_power(monkeypatch, tmp_path)
     monkeypatch.setattr(web_resources, "get_server_config", lambda: type("Config", (), {
         "open_world": False, "low_power": True})())
     monkeypatch.setattr(web_resources, "analyze_document", lambda *args: calls.append(args))
-    monkeypatch.setattr(web_resources, "persistent_queue_get", lambda queue, shrink_count: finite_queue([item]))
+    monkeypatch.setattr(web_resources, "persistent_queue_get", lambda queue, shrink_count, stop_event=None: finite_queue([item]))
 
     web_resources._ingest_worker("db", object())
 
@@ -168,7 +239,7 @@ def test_ingest_worker_marks_failures(monkeypatch):
     monkeypatch.setattr(web_resources, "get_doc_type_queue", lambda db: doc_type_queue)
     monkeypatch.setattr(web_resources, "get_log_path", lambda db, name: None)
     monkeypatch.setattr(web_resources, "build_ingest_pipeline", lambda **kwargs: Pipeline(exc=RuntimeError("boom")))
-    monkeypatch.setattr(web_resources, "persistent_queue_get", lambda queue, shrink_count: finite_queue([item]))
+    monkeypatch.setattr(web_resources, "persistent_queue_get", lambda queue, shrink_count, stop_event=None: finite_queue([item]))
 
     web_resources._ingest_worker("db", object())
 
@@ -194,7 +265,7 @@ def test_doc_type_worker_success_failure_and_bad_state(monkeypatch):
     monkeypatch.setattr(web_resources.faulthandler, "register", lambda *args, **kwargs: None)
     monkeypatch.setattr(web_resources, "get_doc_type_queue", lambda db: queue)
     monkeypatch.setattr(web_resources, "build_doc_type_pipeline", lambda **kwargs: pipeline)
-    monkeypatch.setattr(web_resources, "persistent_queue_get", lambda q, shrink_count: finite_queue([second, first]))
+    monkeypatch.setattr(web_resources, "persistent_queue_get", lambda q, shrink_count, stop_event=None: finite_queue([second, first]))
     monkeypatch.setattr(web_resources, "log_heap_stats", lambda: None)
     monkeypatch.setattr(web_resources, "log_gpu_memory_summary", lambda: None)
     monkeypatch.setattr(web_resources, "is_current_process_in_bad_state", lambda: next(bad_state_calls))
@@ -212,7 +283,7 @@ def test_start_ingest_worker_starts_paused_doc_type_watchers_in_low_power(monkey
         low_power = True
 
     class Process:
-        def __init__(self, target, args):
+        def __init__(self, target, args, kwargs=None):
             self.target = target
             self.args = args
             self.started = False
@@ -242,7 +313,7 @@ def test_start_ingest_worker_starts_doc_type_watchers_when_enabled(monkeypatch):
         low_power = False
 
     class Process:
-        def __init__(self, target, args):
+        def __init__(self, target, args, kwargs=None):
             self.target = target
             self.args = args
             processes.append(self)
@@ -270,7 +341,7 @@ def test_doc_type_watcher_restarts_on_zero_exit_and_closes(monkeypatch):
     exitcodes = iter([0, 1])
 
     class Process:
-        def __init__(self, target, args):
+        def __init__(self, target, args, kwargs=None):
             self.target = target
             self.args = args
             self.exitcode = next(exitcodes)
@@ -314,7 +385,7 @@ def test_ingest_watcher_restarts_after_health_recovers(monkeypatch):
             self.healthy = True
 
     class Process:
-        def __init__(self, target, args):
+        def __init__(self, target, args, kwargs=None):
             self.args = args
             self.exitcode = next(exitcodes)
             self.closed = False

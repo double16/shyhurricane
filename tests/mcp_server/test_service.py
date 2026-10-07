@@ -103,6 +103,7 @@ async def test_main_uses_environment_transport_and_closes_servers(service_runtim
     service_runtime.context.close.assert_called_once()
     config = service_runtime.configs[0]
     assert config["lifespan"] == "on"
+    assert config["timeout_graceful_shutdown"] == 300
     assert config["access_log"] is True
     assert len(service_runtime.signals) == 2
     assert service.set_server_config.call_args.args[0].low_power is True
@@ -153,3 +154,50 @@ async def test_tty_monitor_and_signal_shutdown(service_runtime, monkeypatch, mon
     assert config["log_level"] == "critical"
     assert config["access_log"] is False
     service_runtime.proxy.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_monitor_failure_still_closes_workers_and_servers(service_runtime, monkeypatch):
+    for stream in [service.sys.stdin, service.sys.stdout, service.sys.stderr]:
+        monkeypatch.setattr(stream, "isatty", lambda: True)
+
+    async def monitor(*args):
+        raise RuntimeError("monitor failed")
+
+    monkeypatch.setattr(service, "run_monitor", monitor)
+    with pytest.raises(RuntimeError, match="monitor failed"):
+        await service.main()
+    service_runtime.context.close.assert_called_once()
+    service_runtime.proxy.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_proxy_startup_failure_still_closes_context(service_runtime, monkeypatch):
+    monkeypatch.setattr(service, "run_proxy_server", AsyncMock(side_effect=RuntimeError("proxy failed")))
+    with pytest.raises(RuntimeError, match="proxy failed"):
+        await service.main()
+    service_runtime.context.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_still_closes_context(service_runtime, monkeypatch):
+    started = asyncio.Event()
+
+    async def start_proxy(*args):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(service, "run_proxy_server", start_proxy)
+    task = asyncio.create_task(service.main())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    service_runtime.context.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_proxy_close_failure_still_closes_context(service_runtime):
+    service_runtime.proxy.close.side_effect = RuntimeError("listener failed")
+    await service.main()
+    service_runtime.context.close.assert_called_once()
