@@ -24,6 +24,9 @@ class ServerContext:
     def __init__(self):
         self.ingest_queue = Queue()
 
+    async def enqueue_ingest(self, item):
+        self.ingest_queue.put(item)
+
 
 class FakeRequest:
     def __init__(self, chunks):
@@ -201,3 +204,58 @@ async def test_index_http_url_returns_none_for_request_exception(monkeypatch):
     monkeypatch.setattr(indexers.httpx, "AsyncClient", lambda: FailingClient())
 
     assert await indexers.index_http_url(None, "https://example.com/") is None
+
+
+@pytest.mark.asyncio
+async def test_ingest_waits_for_durable_write_without_blocking_http_loop(tmp_path, monkeypatch):
+    import asyncio
+    from threading import Event
+
+    from shyhurricane.persistent_queue import AsyncIngestWriter, open_persistent_queue, read_active_queue_size
+
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release = Event()
+    queue = open_persistent_queue(str(tmp_path))
+    queue.close()
+    writer = AsyncIngestWriter(str(tmp_path))
+    original_put = writer._put
+
+    def slow_put(item):
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(5)
+        return original_put(item)
+
+    monkeypatch.setattr(writer, "_put", slow_put)
+    ctx = ServerContext()
+    ctx.enqueue_ingest = writer.put
+    patch_context(monkeypatch, ctx)
+    task = asyncio.create_task(indexers.index_request_body(FakeRequest([b"raw body"])))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        assert not task.done()
+        assert read_active_queue_size(tmp_path) == 0
+        release.set()
+        assert (await task).status_code == 201
+        assert read_active_queue_size(tmp_path) == 1
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        await asyncio.to_thread(writer.close)
+
+
+@pytest.mark.asyncio
+async def test_ingest_propagates_partial_write_failure(monkeypatch):
+    ctx = ServerContext()
+
+    async def enqueue(item):
+        if ctx.ingest_queue.items:
+            raise OSError("disk full")
+        ctx.ingest_queue.put(item)
+
+    ctx.enqueue_ingest = enqueue
+    patch_context(monkeypatch, ctx)
+    first = json.dumps({"request": {"endpoint": "https://example.com"}, "response": {}, "timestamp": "now"})
+    with pytest.raises(OSError, match="disk full"):
+        await indexers.index_request_body(FakeRequest([f"{first}\n{first}".encode()]))
+    assert ctx.ingest_queue.items == [first]

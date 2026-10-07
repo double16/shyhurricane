@@ -14,9 +14,13 @@ The `${HOME}/.local/state/shyhurricane` directory holds other data needed by the
 MCP servers are identified by their database path or URL. There is a directory named by the URL to prevent files being
 overwritten.
 
+Log filenames use a shared UTC server-start timestamp with minute precision. Starts within the same minute
+append to the same files; files are created on the first write.
+
 Files worth pointing out that may be useful to the user:
-- `logs/index.txt` holds all indexed katana JSON so that it may re-indexed later
-- `logs/finding.jsonl` holds all saved findings because there isn't a great way for users to see them
+
+- `logs/index-YYYYMMddHHmm.jsonl` holds all indexed katana JSON so that it may be re-indexed later
+- `logs/finding-YYYYMMddHHmm.jsonl` holds all saved findings because there isn't a great way for users to see them
 
 # haystack-ai
 

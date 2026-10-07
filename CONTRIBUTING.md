@@ -20,6 +20,21 @@ Start MCP Inspector:
 npx @modelcontextprotocol/inspector
 ```
 
+The default transport retains legacy HTTP sessions. To exercise modern request-local workflows:
+
+```shell
+UV_CACHE_DIR="$PWD/.uv-cache" uv run python mcp_service.py --transport streamable-http-modern
+```
+
+Connect a client supporting protocol 2026-07-28 to `/mcp`. With MCP SDK 2.2, `Client(url)` discovers modern
+support and `Client(url, mode="legacy")` uses the legacy initialization handshake. Set
+`DISABLE_ELICITATION=False` and provide an elicitation callback to test target selection and scan confirmation.
+Persistent registration tools are available only to clients with legacy sessions. Use `--transport sse` and
+`/sse` to test legacy SSE clients.
+
+The transport tests bind localhost sockets. Run them in an environment that permits loopback listening.
+Include `--cov=mcp_service` when collecting coverage to measure the service entry point alongside the package.
+
 ## colima docker build cache
 
 The `shyhurricane_unix_command` image can be large (~6GB) and the build cache size may need to be increased. For `colima`, use the following

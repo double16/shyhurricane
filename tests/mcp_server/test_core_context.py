@@ -1,5 +1,5 @@
 import pytest
-from mcp import McpError
+from mcp import MCPError
 
 import shyhurricane.mcp_server as mcp_server
 from shyhurricane.mcp_server.server_context import ServerContext
@@ -41,7 +41,7 @@ def test_assert_elicitation_raises_when_disabled():
         disable_elicitation=True,
     )
 
-    with pytest.raises(McpError):
+    with pytest.raises(MCPError):
         mcp_server.assert_elicitation(ctx)
 
 
