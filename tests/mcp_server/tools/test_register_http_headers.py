@@ -1,9 +1,8 @@
 import unittest
+from unittest.mock import AsyncMock, Mock, patch
 
-from mcp.server.fastmcp import Context
-from mcp.shared.context import RequestContext
-
-from unittest.mock import patch, AsyncMock, Mock
+from mcp.server import ServerRequestContext as RequestContext
+from mcp.server.mcpserver import Context
 
 from shyhurricane.mcp_server.tools.register_http_headers import register_http_headers
 
@@ -18,6 +17,8 @@ class TestRegisterHttpHeaders(unittest.IsolatedAsyncioTestCase):
         server_context.http_headers = {}
         return Context(request_context=RequestContext(
             request_id="unittest",
+            protocol_version="2025-11-25",
+            method="tools/call",
             meta=None,
             session=Mock(),
             lifespan_context=server_context

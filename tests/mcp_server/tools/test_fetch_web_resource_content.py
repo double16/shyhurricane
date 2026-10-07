@@ -125,5 +125,5 @@ async def test_web_resource_returns_full_text_resource(monkeypatch):
     result = await fetch.web_resource("content", "doc-1")
 
     assert str(result.uri) == "web://content/doc-1"
-    assert result.mimeType == "application/javascript"
+    assert result.mime_type == "application/javascript"
     assert result.text == "full"

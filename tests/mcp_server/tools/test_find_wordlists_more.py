@@ -1,5 +1,5 @@
 import pytest
-from mcp import McpError
+from mcp.server.mcpserver.exceptions import ToolError
 
 import shyhurricane.mcp_server.tools.find_wordlists as wordlists
 
@@ -61,5 +61,5 @@ async def test_find_wordlists_without_query_and_error(monkeypatch):
     assert await wordlists.find_wordlists(object(), "", limit=2) == ["one", "two"]
 
     monkeypatch.setattr(wordlists, "_run_unix_command", run_bad)
-    with pytest.raises(McpError, match="Failed to find word lists"):
+    with pytest.raises(ToolError, match="Failed to find word lists"):
         await wordlists.find_wordlists(object(), "sql", limit=5)

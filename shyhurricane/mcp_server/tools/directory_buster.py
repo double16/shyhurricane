@@ -4,20 +4,30 @@ import os.path
 import queue
 import time
 from multiprocessing import Queue
-from typing import List, Optional, Dict, Annotated, Union
+from typing import Annotated, Dict, List, Optional, Union
 
-from mcp import McpError
-from mcp.server.fastmcp import Context
+from mcp import MCPError
+from mcp.server.mcpserver import Context
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context, get_additional_hosts, \
-    AdditionalHostsField, CookiesField, RequestParamsField, get_additional_http_headers
+from shyhurricane.mcp_server import (
+    AdditionalHostsField,
+    CookiesField,
+    RequestParamsField,
+    get_additional_hosts,
+    get_additional_http_headers,
+    get_server_context,
+    log_tool_history,
+    mcp_instance,
+)
+from shyhurricane.mcp_server.session_state import ensure_work_path
 from shyhurricane.mcp_server.tools.find_wordlists import find_wordlists
-from ..run_unix_command import _run_unix_command
 from shyhurricane.rate_limit import get_rate_limit_requests_per_second
 from shyhurricane.task_queue import DirBustingQueueItem, DirBustingResultItem
-from shyhurricane.utils import coerce_to_list, coerce_to_dict
+from shyhurricane.utils import coerce_to_dict, coerce_to_list
+
+from ..run_unix_command import _run_unix_command
 
 logger = logging.getLogger(__name__)
 
@@ -48,10 +58,10 @@ class DirBusterResults(BaseModel):
 @mcp_instance.tool(
     annotations=ToolAnnotations(
         title="Directory Buster",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=True),
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True),
 )
 async def directory_buster(
         ctx: Context,
@@ -160,7 +170,7 @@ async def directory_buster(
         params=params,
         additional_hosts=get_additional_hosts(ctx, additional_hosts),
         mcp_session_volume=server_ctx.mcp_session_volume,
-        work_path=ctx.request_context.lifespan_context.work_path,
+        work_path=await ensure_work_path(ctx),
         rate_limit_requests_per_second=rate_limit_requests_per_second,
     )
     await asyncio.to_thread(task_queue.put, queue_item)
@@ -221,6 +231,6 @@ async def validate_wordlist(ctx: Context, wordlist: str) -> Union[str, None]:
                     # exact filename, different path
                     break
             logger.info("Corrected wordlist from %s to %s", original_wordlist, wordlist)
-    except McpError as e:
+    except MCPError as e:
         logger.warning("Could not validate wordlist, using as given: %s", e)
     return wordlist
