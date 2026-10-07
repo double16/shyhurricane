@@ -1,13 +1,14 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from textual.widgets import Static
 
 from shyhurricane.db import get_domain_and_host_counts
-from shyhurricane.server_config import ServerConfig
+from shyhurricane.health import HealthMonitor
 from shyhurricane.monitor import (
-    MonitorData,
     MonitorApp,
+    MonitorData,
     certificate_fingerprint,
     collect_monitor_data,
     format_configuration_panel,
@@ -17,7 +18,7 @@ from shyhurricane.monitor import (
     queue_size,
     top_counts,
 )
-from shyhurricane.health import HealthMonitor
+from shyhurricane.server_config import ServerConfig
 
 
 class Queue:
@@ -357,7 +358,7 @@ async def test_collect_monitor_data_includes_runtime_configuration_and_statistic
             "five.third.test": 1,
         }
 
-    monkeypatch.setattr("shyhurricane.monitor.get_doc_type_queue", lambda db: Queue(5))
+    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_sizes", AsyncMock(return_value=(3, 5)))
     monkeypatch.setattr(
         "shyhurricane.monitor.get_generator_config",
         lambda: SimpleNamespace(describe=lambda: "OpenAI gpt-5-nano"),
@@ -419,7 +420,7 @@ async def test_collect_monitor_data_tolerates_unavailable_qdrant_document_counts
         health_monitor=SimpleNamespace(llm_healthy=True, qdrant_healthy=False),
     )
 
-    monkeypatch.setattr("shyhurricane.monitor.get_doc_type_queue", lambda db: Queue(0))
+    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_sizes", AsyncMock(return_value=(0, 0)))
     monkeypatch.setattr(
         "shyhurricane.monitor.get_generator_config",
         lambda: SimpleNamespace(describe=lambda: "model"),
@@ -456,7 +457,7 @@ async def test_collect_monitor_data_tolerates_unavailable_optional_data(monkeypa
         health_monitor=None,
     )
 
-    monkeypatch.setattr("shyhurricane.monitor.get_doc_type_queue", lambda db: Queue(0))
+    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_sizes", AsyncMock(return_value=(0, 0)))
     monkeypatch.setattr(
         "shyhurricane.monitor.get_generator_config",
         lambda: SimpleNamespace(describe=lambda: "Ollama llama3.2:3b at localhost:11434"),
@@ -520,7 +521,7 @@ async def test_collect_monitor_data_reads_low_power_from_context_and_config(monk
         health_monitor=None,
     )
 
-    monkeypatch.setattr("shyhurricane.monitor.get_doc_type_queue", lambda db: Queue(0))
+    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_sizes", AsyncMock(return_value=(0, 0)))
     monkeypatch.setattr(
         "shyhurricane.monitor.get_generator_config",
         lambda: SimpleNamespace(describe=lambda: "model"),
@@ -537,6 +538,31 @@ async def test_collect_monitor_data_reads_low_power_from_context_and_config(monk
     )
     data2 = await collect_monitor_data(context_without_low_power, "127.0.0.1", 8000, [])
     assert data2.low_power is True
+
+
+@pytest.mark.asyncio
+async def test_monitor_refreshes_immediately_then_every_thirty_seconds(monkeypatch):
+    app = MonitorApp(SimpleNamespace(), "127.0.0.1", 8000, SimpleNamespace(running_tools=[]))
+    refresh = AsyncMock()
+    schedule = Mock()
+    monkeypatch.setattr(app, "refresh_data", refresh)
+    monkeypatch.setattr(app, "set_interval", schedule)
+
+    await app.on_mount()
+
+    refresh.assert_awaited_once_with()
+    schedule.assert_called_once_with(30, refresh)
+
+
+@pytest.mark.asyncio
+async def test_monitor_refresh_action_awaits_data_refresh(monkeypatch):
+    app = MonitorApp(SimpleNamespace(), "127.0.0.1", 8000, SimpleNamespace(running_tools=[]))
+    refresh = AsyncMock()
+    monkeypatch.setattr(app, "refresh_data", refresh)
+
+    await app.action_refresh()
+
+    refresh.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -559,7 +585,7 @@ async def test_monitor_app_toggle_low_power_action(monkeypatch):
         low_power=False,
     )
     server = SimpleNamespace(running_tools=[])
-    monkeypatch.setattr("shyhurricane.monitor.get_doc_type_queue", lambda db: Queue(0))
+    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_sizes", AsyncMock(return_value=(0, 0)))
     monkeypatch.setattr(
         "shyhurricane.monitor.get_generator_config",
         lambda: SimpleNamespace(describe=lambda: "model"),
@@ -637,7 +663,7 @@ async def test_monitor_app_key_press_toggles_low_power(monkeypatch):
         low_power=False,
     )
     server = SimpleNamespace(running_tools=[])
-    monkeypatch.setattr("shyhurricane.monitor.get_doc_type_queue", lambda db: Queue(0))
+    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_sizes", AsyncMock(return_value=(0, 0)))
     monkeypatch.setattr(
         "shyhurricane.monitor.get_generator_config",
         lambda: SimpleNamespace(describe=lambda: "model"),
@@ -655,3 +681,54 @@ async def test_monitor_app_key_press_toggles_low_power(monkeypatch):
         assert context.low_power is True
         assert server_config.low_power is True
         assert "Low power: enabled" in app.query_one("#configuration", Static).content
+
+
+@pytest.mark.asyncio
+async def test_monitor_refresh_key_updates_data_and_ignores_unrelated_keys(monkeypatch):
+    server_config = ServerConfig(low_power=False)
+    monkeypatch.setattr("shyhurricane.monitor.get_server_config", lambda: server_config)
+    context = SimpleNamespace(
+        db="qdrant:6333",
+        ingest_queue=Queue(0),
+        task_queue=Queue(0),
+        spider_result_queue=Queue(0),
+        port_scan_result_queue=Queue(0),
+        dir_busting_result_queue=Queue(0),
+        stores={},
+        proxy_host=None,
+        proxy_port=None,
+        proxy_ca_cert_path=None,
+        qdrant_client=object(),
+        health_monitor=None,
+        low_power=False,
+    )
+    server = SimpleNamespace(running_tools=[])
+    queue_sizes = AsyncMock(return_value=(0, 0))
+    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_sizes", queue_sizes)
+    monkeypatch.setattr(
+        "shyhurricane.monitor.get_generator_config",
+        lambda: SimpleNamespace(describe=lambda: "model"),
+    )
+    monkeypatch.setattr("shyhurricane.monitor.get_recent_indexed_urls", lambda *args, **kwargs: [])
+    monkeypatch.setattr("shyhurricane.monitor.get_domain_and_host_counts", lambda *args, **kwargs: ({}, {}))
+
+    app = MonitorApp(context, "127.0.0.1", 8000, server)
+    async with app.run_test() as pilot:
+        queue_sizes.reset_mock()
+        server.running_tools = ["port_scan"]
+
+        await pilot.press("x")
+        queue_sizes.assert_not_awaited()
+        assert "No MCP tools running" in app.query_one("#tools", Static).content
+
+        await pilot.press("r")
+        queue_sizes.assert_awaited_once()
+        assert "port_scan" in app.query_one("#tools", Static).content
+        assert server_config.low_power is False
+        assert not getattr(server, "should_exit", False)
+
+        server.running_tools = ["spider_website"]
+        await pilot.press("r")
+        assert queue_sizes.await_count == 2
+        assert "spider_website" in app.query_one("#tools", Static).content
+        assert "port_scan" not in app.query_one("#tools", Static).content

@@ -2,12 +2,13 @@ import re
 from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Iterable, List
 
-from mcp import McpError
-from mcp.server.fastmcp import Context
-from mcp.types import ToolAnnotations, ErrorData, INTERNAL_ERROR
+from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from shyhurricane.mcp_server import mcp_instance, log_tool_history
+from shyhurricane.mcp_server import log_tool_history, mcp_instance
+
 from ..run_unix_command import RunUnixCommand, _run_unix_command
 
 
@@ -79,8 +80,8 @@ def rank_wordlists(paths: Iterable[str], query: str, limit: int = 20) -> List[st
 @mcp_instance.tool(
     annotations=ToolAnnotations(
         title="List Wordlists",
-        readOnlyHint=True,
-        openWorldHint=False),
+        read_only_hint=True,
+        open_world_hint=False),
 )
 async def find_wordlists(
         ctx: Context,
@@ -102,7 +103,7 @@ async def find_wordlists(
             command += f" -ipath '*{query_part}*'"
     result: RunUnixCommand = await _run_unix_command(ctx, command, None)
     if result.return_code != 0:
-        raise McpError(ErrorData(code=INTERNAL_ERROR, message=f"Failed to find word lists: {result.error}"))
+        raise ToolError(f"Failed to find word lists: {result.error}")
     all_results = result.output.splitlines()
     if query_clean:
         return rank_wordlists(all_results, query_clean, limit)

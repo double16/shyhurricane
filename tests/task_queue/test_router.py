@@ -1,13 +1,22 @@
-import pytest
 from queue import Empty
+from threading import Event
+from unittest.mock import Mock
+
+import pytest
 
 import shyhurricane.task_queue as task_queue
+from shyhurricane.persistent_queue import QueueMaintenance
 from shyhurricane.task_queue.types import (
     DirBustingQueueItem,
     PortScanQueueItem,
     SaveFindingQueueItem,
     SpiderQueueItem,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_process_setup(monkeypatch):
+    monkeypatch.setattr(task_queue, "prepare_worker_process", lambda: None)
 
 
 class FakeQueue:
@@ -20,8 +29,60 @@ class FakeQueue:
             raise KeyboardInterrupt
         return self.items.pop(0)
 
+    def cancel_join_thread(self):
+        pass
+
     def close(self):
         self.closed = True
+
+    path = "/tmp/scan_finding_queue"
+
+    def resume_unack_tasks(self):
+        pass
+
+
+@pytest.mark.parametrize("mode", ["already_stopping", "claimed_task", "claimed_scan", "completed", "idle"])
+def test_router_shutdown_stops_claiming_work_and_finishes_current_item(monkeypatch, mode):
+    stop = Event()
+    if mode == "already_stopping":
+        stop.set()
+    item = SpiderQueueItem("ctx", "https://example.com")
+
+    def get_task(timeout):
+        if mode == "claimed_task":
+            stop.set()
+        if mode in {"claimed_scan", "idle"}:
+            if mode == "idle":
+                stop.set()
+            raise Empty
+        return item
+
+    def get_scan(block):
+        stop.set()
+        return item
+
+    task = Mock(get=get_task)
+    scan = Mock(path="scan", get=get_scan)
+    doc = FakeQueue()
+    results = [Mock(), Mock(), Mock()]
+    run = Mock(side_effect=lambda *args: stop.set())
+    monkeypatch.setattr(task_queue.faulthandler, "register", Mock())
+    monkeypatch.setattr(task_queue.atexit, "register", Mock())
+    monkeypatch.setattr(task_queue, "open_persistent_queue", lambda *args, **kwargs: FakeQueue())
+    monkeypatch.setattr(task_queue, "get_doc_type_queue", lambda db: doc)
+    monkeypatch.setattr(task_queue, "get_scan_finding_queue", lambda db: scan)
+    monkeypatch.setattr(task_queue, "spider_worker", run)
+    task_queue._task_router("db", "/queue", task, *results, "generator", stop_event=stop)
+    if mode == "completed":
+        run.assert_called_once()
+    else:
+        run.assert_not_called()
+    if mode == "claimed_scan":
+        scan.nack.assert_called_once_with(item)
+    else:
+        scan.nack.assert_not_called()
+    for queue in results:
+        queue.cancel_join_thread.assert_called_once()
 
 
 class FakeProcess:
@@ -46,12 +107,13 @@ def test_start_task_worker_creates_queues_and_processes(monkeypatch):
     monkeypatch.setattr(task_queue, "Process", process_factory)
     monkeypatch.setattr(task_queue, "get_generator_config", lambda: "generator")
 
-    ipc = task_queue.start_task_worker("db", "/tmp/queue", pool_size=2)
+    ipc = task_queue.start_task_worker("db", "/tmp/queue", pool_size=2, log_timestamp="202610051234")
 
     assert len(created_processes) == 2
     assert all(process.started for process in created_processes)
     assert created_processes[0].kwargs["db"] == "db"
     assert created_processes[0].kwargs["ingest_queue_path"] == "/tmp/queue"
+    assert all(process.kwargs["log_timestamp"] == "202610051234" for process in created_processes)
     assert ipc.task_pool.processes == created_processes
 
 
@@ -72,7 +134,9 @@ def test_task_router_dispatches_all_known_items(monkeypatch):
     ]
 
     class AckQueue(FakeQueue):
-        def __init__(self, path, auto_commit):
+        def __init__(self, path, auto_resume):
+            assert auto_resume is False
+            auto_commit = True
             super().__init__()
             self.path = path
             self.auto_commit = auto_commit
@@ -88,7 +152,8 @@ def test_task_router_dispatches_all_known_items(monkeypatch):
             calls.append(("port_warm",))
 
     class FindingContext:
-        def __init__(self, db, generator_config, embedder_cache, doc_type_queue):
+        def __init__(self, db, generator_config, embedder_cache, doc_type_queue, log_timestamp=None):
+            assert log_timestamp == "202610051234"
             calls.append(("finding_ctx", db, generator_config, doc_type_queue.__class__.__name__))
 
         def warm_up(self):
@@ -96,8 +161,9 @@ def test_task_router_dispatches_all_known_items(monkeypatch):
 
     monkeypatch.setattr(task_queue.faulthandler, "register", lambda signal: None)
     monkeypatch.setattr(task_queue.atexit, "register", lambda func: None)
-    monkeypatch.setattr(task_queue.persistqueue, "SQLiteAckQueue", AckQueue)
+    monkeypatch.setattr(task_queue, "open_persistent_queue", AckQueue)
     monkeypatch.setattr(task_queue, "get_doc_type_queue", lambda db: DocTypeQueue())
+    monkeypatch.setattr(task_queue, "get_scan_finding_queue", lambda db: FakeQueue())
     monkeypatch.setattr(task_queue, "PortScanContext", PortScanContext)
     monkeypatch.setattr(task_queue, "FindingContext", FindingContext)
     monkeypatch.setattr(task_queue, "spider_worker",
@@ -116,6 +182,7 @@ def test_task_router_dispatches_all_known_items(monkeypatch):
         port_scan_result_queue=FakeQueue(),
         dir_busting_result_queue=FakeQueue(),
         generator_config="generator",
+        log_timestamp="202610051234",
     )
 
     assert ("spider", "https://example.com") in calls
@@ -140,6 +207,8 @@ def test_task_router_consumes_durable_scan_finding(monkeypatch):
             raise KeyboardInterrupt
 
     class ScanQueue:
+        path = "/tmp/scan_finding_queue"
+
         def __init__(self):
             self.acked = []
 
@@ -166,7 +235,7 @@ def test_task_router_consumes_durable_scan_finding(monkeypatch):
     scan_queue = ScanQueue()
     monkeypatch.setattr(task_queue.faulthandler, "register", lambda *args: None)
     monkeypatch.setattr(task_queue.atexit, "register", lambda *args: None)
-    monkeypatch.setattr(task_queue.persistqueue, "SQLiteAckQueue", lambda **kwargs: FakeQueue())
+    monkeypatch.setattr(task_queue, "open_persistent_queue", lambda *args, **kwargs: FakeQueue())
     monkeypatch.setattr(task_queue, "get_doc_type_queue", lambda db: FakeQueue())
     monkeypatch.setattr(task_queue, "get_scan_finding_queue", lambda db: scan_queue)
     monkeypatch.setattr(task_queue, "FindingContext", Context)
@@ -176,3 +245,78 @@ def test_task_router_consumes_durable_scan_finding(monkeypatch):
 
     assert calls == ["resumed", "Scan finding"]
     assert scan_queue.acked == [finding]
+
+
+@pytest.mark.parametrize("mode", ["processed", "idle", "busy", "failed"])
+def test_scan_finding_maintenance_during_router_iterations(monkeypatch, mode):
+    import shyhurricane.persistent_queue as persistent_queue
+
+    clock = [0.0]
+    finding = SaveFindingQueueItem("https://example.com/a.js", "# finding", "Scan")
+    calls = []
+
+    class TaskQueue:
+        def get(self, timeout):
+            if calls:
+                raise KeyboardInterrupt
+            calls.append("task")
+            if mode != "processed":
+                clock[0] = 601
+            if mode == "busy":
+                return finding
+            raise Empty
+
+    class ScanQueue(FakeQueue):
+        def get(self, block):
+            if mode == "idle":
+                raise task_queue.persistqueue.Empty
+            return finding
+
+        def ack(self, item):
+            calls.append("ack")
+
+        def ack_failed(self, item):
+            calls.append("failed")
+
+        def acked_count(self):
+            return 1500
+
+        def clear_acked_data(self, max_delete, keep_latest):
+            calls.append((max_delete, keep_latest))
+
+        def shrink_disk_usage(self):
+            calls.append("vacuum")
+
+    class Context:
+        def __init__(self, **kwargs):
+            pass
+
+        def warm_up(self):
+            pass
+
+    def save(ctx, item):
+        if mode == "failed":
+            raise RuntimeError("finding failed")
+
+    monkeypatch.setattr(persistent_queue.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(persistent_queue, "log_heap_stats", lambda: None)
+    monkeypatch.setattr(persistent_queue, "log_gpu_memory_summary", lambda: None)
+    monkeypatch.setattr(persistent_queue, "_vacuum_persistent_queue", lambda queue, name: queue.shrink_disk_usage())
+    monkeypatch.setattr(task_queue, "QueueMaintenance", lambda queue: QueueMaintenance(queue, shrink_count=1))
+    monkeypatch.setattr(task_queue.faulthandler, "register", lambda *args: None)
+    monkeypatch.setattr(task_queue.atexit, "register", lambda *args: None)
+    monkeypatch.setattr(task_queue, "open_persistent_queue", lambda *args, **kwargs: FakeQueue())
+    monkeypatch.setattr(task_queue, "get_doc_type_queue", lambda db: FakeQueue())
+    monkeypatch.setattr(task_queue, "get_scan_finding_queue", lambda db: ScanQueue())
+    monkeypatch.setattr(task_queue, "FindingContext", Context)
+    monkeypatch.setattr(task_queue, "save_finding_worker", save)
+
+    task_queue._task_router("db", "/tmp/ingest", TaskQueue(), FakeQueue(), FakeQueue(), FakeQueue(), "generator")
+
+    assert (1500, 200) in calls
+    assert calls.count("vacuum") == 1
+    if mode == "processed":
+        assert calls.index("ack") < calls.index("vacuum")
+    if mode == "failed":
+        assert "failed" in calls
+        assert "ack" not in calls

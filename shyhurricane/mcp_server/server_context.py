@@ -6,22 +6,23 @@ import os
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from multiprocessing import Queue
-from typing import Optional, Dict, List, TYPE_CHECKING
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 import persistqueue
 from haystack import Pipeline
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 from qdrant_client import AsyncQdrantClient
 
-from shyhurricane.doc_type_model_map import doc_type_to_model
-from shyhurricane.server_config import get_server_config
-from shyhurricane.mcp_server.generator_config import get_generator_config
-from shyhurricane.retrieval_pipeline import build_document_pipeline, build_website_context_pipeline
 from shyhurricane.db import create_qdrant_client, create_qdrant_document_store, qdrant_host_port
-from shyhurricane.utils import unix_command_image
+from shyhurricane.doc_type_model_map import doc_type_to_model
 from shyhurricane.health import HealthMonitor, qdrant_probe
+from shyhurricane.mcp_server.generator_config import get_generator_config
+from shyhurricane.persistent_queue import AsyncIngestWriter, cleanup_persistent_queues_on_startup
+from shyhurricane.retrieval_pipeline import build_document_pipeline, build_website_context_pipeline
+from shyhurricane.server_config import get_server_config
+from shyhurricane.utils import get_log_timestamp, unix_command_image
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,16 @@ class ServerContext:
     low_power: bool = False
     indexing_enabled: Optional[object] = None
     worker_manager: Optional[object] = None
+    stop_event: Optional[object] = None
+    _closed: bool = field(default=False, init=False)
+    _ingest_writer: AsyncIngestWriter | None = field(default=None, init=False)
+
+    async def enqueue_ingest(self, item) -> None:
+        if self._closed:
+            raise RuntimeError("Server is shutting down")
+        if self._ingest_writer is None:
+            self._ingest_writer = AsyncIngestWriter(self.ingest_queue.path)
+        await self._ingest_writer.put(item)
 
     def set_low_power(self, enabled: bool) -> None:
         self.low_power = enabled
@@ -90,23 +101,48 @@ class ServerContext:
                 self.stores = stores
 
     def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        deadline = time.monotonic() + 300
+        if self.stop_event is not None:
+            self.stop_event.set()
+        if self._ingest_writer is not None:
+            try:
+                self._ingest_writer.close(timeout=max(0, deadline - time.monotonic()))
+            except Exception:
+                logger.exception("Failed to close ingest writer")
         if self.health_monitor is not None:
-            self.health_monitor.close()
-        logger.info("Terminating task pool")
-        self.task_pool.close()
-        logger.info("Terminating ingest pool")
-        self.ingest_pool.close()
+            try:
+                self.health_monitor.close()
+            except Exception:
+                logger.exception("Failed to close health monitor")
+        for pool in (self.task_pool, self.ingest_pool):
+            try:
+                if self.stop_event is None:
+                    pool.close()
+                else:
+                    pool.close(deadline=deadline)
+            except Exception:
+                logger.exception("Failed to close worker pool")
         if self.worker_manager is not None:
-            self.worker_manager.shutdown()
+            try:
+                self.worker_manager.shutdown()
+            except Exception:
+                logger.exception("Failed to shut down worker manager")
         logger.info("Closing queues ...")
         # The ingest queue is persistent. Adding a sentinel after terminating its
         # workers leaves an unprocessed active item for the next server startup.
-        for q in [self.task_queue, self.spider_result_queue, self.port_scan_result_queue]:
+        for q in [self.task_queue, self.spider_result_queue, self.port_scan_result_queue,
+                  self.dir_busting_result_queue]:
             try:
-                q.put(None)
+                q.cancel_join_thread()
+            except Exception:
+                logger.exception("Failed to cancel queue feeder join")
+            try:
                 q.close()
             except Exception:
-                pass
+                logger.exception("Failed to close multiprocessing queue")
         try:
             self.ingest_queue.close()
         except Exception:
@@ -117,6 +153,11 @@ class ServerContext:
 _server_context: Optional[ServerContext] = None
 
 
+def _elicitation_disabled() -> bool:
+    value = os.environ.get("DISABLE_ELICITATION", "False").strip().lower()
+    return value not in {"", "false", "0", "no", "off"}
+
+
 async def get_server_context() -> ServerContext:
     global _server_context
     if _server_context is not None:
@@ -124,6 +165,7 @@ async def get_server_context() -> ServerContext:
     from shyhurricane.index.web_resources import start_ingest_worker
     from shyhurricane.task_queue import start_task_worker
 
+    log_timestamp = get_log_timestamp()
     server_config = get_server_config()
 
     db = server_config.database or os.environ.get('QDRANT', 'shyhurricane.db')
@@ -142,7 +184,7 @@ async def get_server_context() -> ServerContext:
 
     cache_path: str = os.path.join(os.environ.get('TOOL_CACHE', os.environ.get('TMPDIR', '/tmp')), 'tool_cache')
     os.makedirs(cache_path, exist_ok=True)
-    disable_elicitation = bool(os.environ.get('DISABLE_ELICITATION', 'False'))
+    disable_elicitation = _elicitation_disabled()
     qdrant_client = await create_qdrant_client(db=db)
     qdrant_host, qdrant_port = qdrant_host_port(db)
     health_monitor = HealthMonitor(lambda: qdrant_probe(qdrant_host, qdrant_port), lambda: True)
@@ -179,32 +221,29 @@ async def get_server_context() -> ServerContext:
     # loading can take minutes, and must not stall an existing indexing backlog.
     generator_config = get_generator_config()
     worker_manager = multiprocessing.Manager()
+    stop_event = multiprocessing.Event()
     indexing_enabled = worker_manager.Event()
     if not server_config.low_power:
         indexing_enabled.set()
 
+    cleanup_persistent_queues_on_startup(db)
     ingest_queue, ingest_pool = start_ingest_worker(
         db=db,
         generator_config=generator_config,
         pool_size=server_config.ingest_pool_size,
         health_state=health_monitor.ready,
         indexing_enabled=indexing_enabled,
+        log_timestamp=log_timestamp,
+        stop_event=stop_event,
     )
-    task_worker_ipc = start_task_worker(db, ingest_queue.path, server_config.task_pool_size)
-
-    document_pipeline, _, stores = await build_document_pipeline(
-        db=db,
-        generator_config=generator_config,
-    )
-    website_context_pipeline = build_website_context_pipeline(
-        generator_config=generator_config,
-    )
+    task_worker_ipc = start_task_worker(db, ingest_queue.path, server_config.task_pool_size, log_timestamp,
+                                       stop_event=stop_event)
 
     _server_context = ServerContext(
         db=db,
         cache_path=cache_path,
-        document_pipeline=document_pipeline,
-        website_context_pipeline=website_context_pipeline,
+        document_pipeline=None,
+        website_context_pipeline=None,
         ingest_queue=ingest_queue,
         ingest_pool=ingest_pool,
         task_queue=task_worker_ipc.task_queue,
@@ -212,7 +251,7 @@ async def get_server_context() -> ServerContext:
         spider_result_queue=task_worker_ipc.spider_result_queue,
         port_scan_result_queue=task_worker_ipc.port_scan_result_queue,
         dir_busting_result_queue=task_worker_ipc.dir_busting_result_queue,
-        stores=stores,
+        stores={},
         qdrant_client=qdrant_client,
         mcp_session_volume=mcp_session_volume,
         qdrant_host=qdrant_host,
@@ -223,7 +262,21 @@ async def get_server_context() -> ServerContext:
         low_power=server_config.low_power,
         indexing_enabled=indexing_enabled,
         worker_manager=worker_manager,
+        stop_event=stop_event,
     )
+    try:
+        document_pipeline, _, stores = await build_document_pipeline(
+            db=db,
+            generator_config=generator_config,
+        )
+        _server_context.document_pipeline = document_pipeline
+        _server_context.stores = stores
+        _server_context.website_context_pipeline = build_website_context_pipeline(
+            generator_config=generator_config,
+        )
+    except BaseException:
+        await asyncio.to_thread(close_server_context)
+        raise
 
     return _server_context
 

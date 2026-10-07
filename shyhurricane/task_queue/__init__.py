@@ -6,28 +6,45 @@ import logging
 import multiprocessing
 import os
 import signal
+from multiprocessing import Process, Queue
 from queue import Empty
-from multiprocessing import Queue, Process
 
 import persistqueue
 
 from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import GeneratorConfig
-from shyhurricane.persistent_queue import get_doc_type_queue, get_scan_finding_queue
 from shyhurricane.mcp_server.generator_config import get_generator_config
+from shyhurricane.persistent_queue import (
+    QueueMaintenance,
+    get_doc_type_queue,
+    get_scan_finding_queue,
+    open_persistent_queue,
+)
 from shyhurricane.task_queue.dir_busting_worker import dir_busting_worker
-from shyhurricane.task_queue.finding_worker import save_finding_worker, FindingContext
-from shyhurricane.task_queue.port_scan_worker import port_scan_worker, PortScanContext
+from shyhurricane.task_queue.finding_worker import FindingContext, save_finding_worker
+from shyhurricane.task_queue.port_scan_worker import PortScanContext, port_scan_worker
 from shyhurricane.task_queue.spider_worker import spider_worker
-from shyhurricane.task_queue.types import SpiderQueueItem, PortScanQueueItem, TaskWorkerIPC, DirBustingQueueItem, \
-    TaskPool, SaveFindingQueueItem, SpiderResultItem, DirBustingResultItem, prepare_worker_process
-from shyhurricane.utils import PortScanResults
+from shyhurricane.task_queue.types import (
+    DirBustingQueueItem,
+    DirBustingResultItem,
+    PortScanQueueItem,
+    SaveFindingQueueItem,
+    SpiderQueueItem,
+    SpiderResultItem,
+    TaskPool,
+    TaskWorkerIPC,
+    prepare_worker_process,
+)
+from shyhurricane.utils import PortScanResults, get_log_timestamp
 
 logger = logging.getLogger(__name__)
 
 
-def start_task_worker(db: str, ingest_queue_path: str, pool_size: int = 1) -> TaskWorkerIPC:
+def start_task_worker(
+        db: str, ingest_queue_path: str, pool_size: int = 1, log_timestamp: str | None = None, stop_event=None
+) -> TaskWorkerIPC:
     assert pool_size > 0
+    log_timestamp = log_timestamp or get_log_timestamp()
     task_queue = multiprocessing.Queue()
     spider_result_queue = multiprocessing.Queue()
     port_scan_result_queue = multiprocessing.Queue()
@@ -42,8 +59,10 @@ def start_task_worker(db: str, ingest_queue_path: str, pool_size: int = 1) -> Ta
             "port_scan_result_queue": port_scan_result_queue,
             "dir_busting_result_queue": dir_busting_result_queue,
             "generator_config": get_generator_config(),
+            "log_timestamp": log_timestamp,
+            "stop_event": stop_event,
         })
-        proc._shyhurricane_monitor_process_group = os.environ.get("SHYHURRICANE_MONITOR") == "1"
+        proc._shyhurricane_monitor_process_group = hasattr(os, "setsid")
         proc.start()
         processes.append(proc)
     return TaskWorkerIPC(
@@ -62,7 +81,10 @@ def _task_router(db: str,
                  port_scan_result_queue: Queue[PortScanResults],
                  dir_busting_result_queue: Queue[DirBustingResultItem],
                  generator_config: GeneratorConfig,
+                 log_timestamp: str | None = None,
+                 stop_event=None,
                  ):
+    log_timestamp = log_timestamp or get_log_timestamp()
     prepare_worker_process()
     try:
         faulthandler.register(signal.SIGUSR1)
@@ -70,7 +92,7 @@ def _task_router(db: str,
 
         embedder_cache = EmbedderCache(generator_config=generator_config)
 
-        ingest_queue = persistqueue.SQLiteAckQueue(path=ingest_queue_path, auto_commit=True)
+        ingest_queue = open_persistent_queue(ingest_queue_path, auto_resume=False)
         atexit.register(ingest_queue.close)
 
         doc_type_queue = get_doc_type_queue(db)
@@ -78,9 +100,13 @@ def _task_router(db: str,
 
         port_scan_ctx = None
         finding_ctx = None
-        scan_finding_queue = None
+        scan_finding_queue = get_scan_finding_queue(db)
+        scan_finding_queue.resume_unack_tasks()
+        atexit.register(scan_finding_queue.close)
+        scan_maintenance = QueueMaintenance(scan_finding_queue)
 
-        while True:
+        while stop_event is None or not stop_event.is_set():
+            scan_maintenance.check()
             queued_scan = False
             try:
                 try:
@@ -88,15 +114,17 @@ def _task_router(db: str,
                 except TypeError:
                     item = task_queue.get()
             except Empty:
-                if scan_finding_queue is None:
-                    scan_finding_queue = get_scan_finding_queue(db)
-                    scan_finding_queue.resume_unack_tasks()
-                    atexit.register(scan_finding_queue.close)
+                if stop_event is not None and stop_event.is_set():
+                    break
                 try:
                     item = scan_finding_queue.get(block=False)
                     queued_scan = True
                 except persistqueue.Empty:
                     continue
+            if stop_event is not None and stop_event.is_set():
+                if queued_scan:
+                    scan_finding_queue.nack(item)
+                break
             logger.info(f"Processing {item.__class__.__name__} in PID {os.getpid()}")
             try:
                 if isinstance(item, SpiderQueueItem):
@@ -117,12 +145,13 @@ def _task_router(db: str,
                             db=db,
                             generator_config=generator_config,
                             embedder_cache=embedder_cache,
-                            doc_type_queue=doc_type_queue)
+                            doc_type_queue=doc_type_queue, log_timestamp=log_timestamp)
                         finding_ctx.warm_up()
                     save_finding_worker(finding_ctx, item)
 
                 if queued_scan:
                     scan_finding_queue.ack(item)
+                    scan_maintenance.count += 1
 
             except KeyboardInterrupt:
                 break
@@ -133,4 +162,7 @@ def _task_router(db: str,
 
     except KeyboardInterrupt:
         pass
+    finally:
+        for result_queue in (spider_result_queue, port_scan_result_queue, dir_busting_result_queue):
+            result_queue.cancel_join_thread()
     logger.info(f"Finished task router in PID {os.getpid()}")
