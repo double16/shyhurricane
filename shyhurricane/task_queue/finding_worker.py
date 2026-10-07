@@ -5,18 +5,21 @@ import logging
 import time
 from dataclasses import replace
 
+import persistqueue
 from haystack import Document
 from haystack.document_stores.types import DuplicatePolicy
 
-import persistqueue
-
 from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import GeneratorConfig
-from shyhurricane.index.web_resources_pipeline import GenerateTitleAndDescription, build_stores, build_embedders, \
-    build_splitters
+from shyhurricane.index.web_resources_pipeline import (
+    GenerateTitleAndDescription,
+    build_embedders,
+    build_splitters,
+    build_stores,
+)
 from shyhurricane.target_info import parse_target_info
 from shyhurricane.task_queue.types import SaveFindingQueueItem
-from shyhurricane.utils import get_log_path
+from shyhurricane.utils import get_log_path, get_log_timestamp
 
 logger = logging.getLogger(__name__)
 
@@ -30,14 +33,15 @@ class FindingContext:
             db: str,
             generator_config: GeneratorConfig,
             embedder_cache: EmbedderCache,
-            doc_type_queue: persistqueue.SQLiteAckQueue
+            doc_type_queue: persistqueue.SQLiteAckQueue,
+            log_timestamp: str | None = None,
     ):
         self.stores = build_stores(db, {"finding"})
         self.embedders = build_embedders(doc_types={"finding"}, embedder_cache=embedder_cache)
         self.splitters = build_splitters(self.embedders)
         self.doc_type_queue = doc_type_queue
         self.gen_title = GenerateTitleAndDescription(generator_config)
-        self.finding_log_path = get_log_path(db, "finding.jsonl")
+        self.finding_log_path = get_log_path(db, f"finding-{log_timestamp or get_log_timestamp()}.jsonl")
 
     def warm_up(self):
         for embedder in self.embedders.values():

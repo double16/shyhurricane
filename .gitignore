@@ -171,3 +171,4 @@ node_modules/
 qdrant_store*
 db/
 /coverage.json
+:memory:.ses

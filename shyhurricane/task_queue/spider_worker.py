@@ -4,16 +4,14 @@ import json
 import logging
 import subprocess
 from multiprocessing import Queue
-from typing import Optional, List
+from typing import List, Optional
 
 import persistqueue
 from mcp import Resource
-from pydantic import AnyUrl
 
-from shyhurricane.index.input_documents import KatanaDocument, IngestableRequestResponse
-from shyhurricane.task_queue.types import SpiderQueueItem, SpiderResultItem, DEFAULT_USER_AGENT
-from shyhurricane.utils import BeautifulSoupExtractor, urlparse_ext, HttpResource, \
-    extract_domain, unix_command_image
+from shyhurricane.index.input_documents import IngestableRequestResponse, KatanaDocument
+from shyhurricane.task_queue.types import DEFAULT_USER_AGENT, SpiderQueueItem, SpiderResultItem
+from shyhurricane.utils import BeautifulSoupExtractor, HttpResource, extract_domain, unix_command_image, urlparse_ext
 
 logger = logging.getLogger(__name__)
 
@@ -83,10 +81,10 @@ def _katana_ingest(
 
                         resource = Resource(
                             name=url,
-                            uri=AnyUrl(url),
+                            uri=str(url),
                             title=title,
                             description=description,
-                            mimeType=parsed.response_headers.get('Content-Type', ''),
+                            mime_type=parsed.response_headers.get('Content-Type', ''),
                             size=parsed.response_headers.get('Content-Length', None),
                         )
                         try:

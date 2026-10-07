@@ -1,26 +1,33 @@
 import json
 import logging
 from datetime import datetime
-from typing import Optional, Annotated
+from typing import Annotated, Optional
 
 import httpx
-import persistqueue
 import requests
-from mcp.server.fastmcp import Context
-from mcp.types import ToolAnnotations, TextResourceContents
-from pydantic import AnyUrl, Field
+from mcp.server.mcpserver import Context
+from mcp.types import TextResourceContents, ToolAnnotations
+from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import Response
 
 from shyhurricane.doc_type_model_map import map_mime_to_type
+from shyhurricane.http_csv import http_csv_generator, is_http_csv
 from shyhurricane.index.web_resources_pipeline import is_binary
-from shyhurricane.mcp_server import mcp_instance, get_server_context, log_tool_history, get_additional_hosts, \
-    UserAgentField, CookiesField, RequestHeadersField, AdditionalHostsField, RequestParamsField, \
-    get_additional_http_headers
+from shyhurricane.mcp_server import (
+    AdditionalHostsField,
+    CookiesField,
+    RequestHeadersField,
+    RequestParamsField,
+    UserAgentField,
+    get_additional_hosts,
+    get_additional_http_headers,
+    get_server_context,
+    log_tool_history,
+    mcp_instance,
+)
 from shyhurricane.mcp_server.tools.deobfuscate_javascript import deobfuscate_javascript
-from shyhurricane.utils import stream_lines, is_katana_jsonl, HttpResource, urlparse_ext, \
-    extract_domain, coerce_to_dict
-from shyhurricane.http_csv import is_http_csv, http_csv_generator
+from shyhurricane.utils import HttpResource, coerce_to_dict, extract_domain, is_katana_jsonl, stream_lines, urlparse_ext
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +42,6 @@ async def index_request_body(request: Request) -> Response:
     {"request": {"headers": {"sec_fetch_mode": "navigate", "priority": "u=0, i", "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "sec_fetch_dest": "document", "host": "target.local", "accept_language": "en-US,en;q=0.5", "connection": "keep-alive", "sec_fetch_site": "none", "upgrade_insecure_requests": "1", "sec_fetch_user": "?1", "user_agent": "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0"}, "method": "GET", "source": "katana", "body": "", "endpoint": "https://target.local/", "tag": "katana", "attribute": "http"}, "response": {"headers": {"date": "Sun, 29 Jun 2025 03:44:52 GMT", "content_type": "text/html", "connection": "keep-alive", "location": "https://www.target.local/", "content_length": "169"}, "status_code": 301, "body": "<html>\r\n<head><title>301 Moved Permanently</title></head>\r\n<body>\r\n<center><h1>301 Moved Permanently</h1></center>\r\n<hr><center>nginx/1.20.1</center>\r\n</body>\r\n</html>\r\n"}, "timestamp": "2025-06-28T22:44:52.798000"}
     """
     server_ctx = await get_server_context()
-    ingest_queue: persistqueue.SQLiteAckQueue = server_ctx.ingest_queue
     line_generator = stream_lines(request.stream())
     first = await anext(line_generator, "")
     second = await anext(line_generator, "")
@@ -44,11 +50,11 @@ async def index_request_body(request: Request) -> Response:
     if is_katana_jsonl(first):
         logger.info("Indexing katana JSONL")
         # each line is a request/response
-        ingest_queue.put(first)
+        await server_ctx.enqueue_ingest(first)
         if second:
-            ingest_queue.put(second)
+            await server_ctx.enqueue_ingest(second)
         async for line in line_generator:
-            ingest_queue.put(line)
+            await server_ctx.enqueue_ingest(line)
     elif is_http_csv(first, second):
         logger.info("Indexing CSV")
         # each line is a request/response
@@ -59,7 +65,7 @@ async def index_request_body(request: Request) -> Response:
         async for line in line_generator:
             lines.append(line)
         for rr in http_csv_generator(lines):
-            ingest_queue.put(rr.to_katana())
+            await server_ctx.enqueue_ingest(rr.to_katana())
     else:
         logger.info("Indexing entire body as single request")
         # send entire body
@@ -68,7 +74,7 @@ async def index_request_body(request: Request) -> Response:
             lines.append(second)
         async for line in line_generator:
             lines.append(line)
-        ingest_queue.put("\n".join(lines))
+        await server_ctx.enqueue_ingest("\n".join(lines))
 
     return Response(status_code=201)
 
@@ -76,10 +82,10 @@ async def index_request_body(request: Request) -> Response:
 @mcp_instance.tool(
     annotations=ToolAnnotations(
         title="Index HTTP URL",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=True),
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True),
 )
 async def index_http_url(
         ctx: Context,
@@ -125,7 +131,6 @@ async def index_http_url(
     server_ctx = await get_server_context()
     assert server_ctx.open_world
 
-    ingest_queue: persistqueue.SQLiteAckQueue = server_ctx.ingest_queue
     additional_hosts = get_additional_hosts(ctx, additional_hosts)
     if follow_redirects is None:
         follow_redirects = False
@@ -161,7 +166,7 @@ async def index_http_url(
                 if content_length < content_length_limit:
                     body = response.text
 
-        ingest_queue.put(json.dumps({
+        await server_ctx.enqueue_ingest(json.dumps({
             "timestamp": datetime.now().isoformat(),
             "request": {
                 "endpoint": url,
@@ -181,8 +186,8 @@ async def index_http_url(
 
         if body:
             contents = TextResourceContents(
-                uri=AnyUrl(url),
-                mimeType=response.headers.get("Content-Type", ""),
+                uri=str(url),
+                mime_type=response.headers.get("Content-Type", ""),
                 text=body,
             )
         else:

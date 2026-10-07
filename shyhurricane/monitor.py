@@ -12,7 +12,7 @@ from textual.widgets import Footer, Header, Static
 from shyhurricane.db import get_domain_and_host_counts
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server.generator_config import get_generator_config
-from shyhurricane.persistent_queue import active_queue_size, get_doc_type_queue
+from shyhurricane.persistent_queue import active_queue_size, persistent_queue_sizes
 from shyhurricane.server_config import get_server_config
 
 logger = logging.getLogger(__name__)
@@ -138,9 +138,10 @@ async def collect_monitor_data(server_context, host: str, port: int, running_too
         except Exception:
             logger.debug("Unable to load document count for %s", collection_name, exc_info=True)
             document_counts[collection_name] = 0
+    ingest_size, doc_type_size = await persistent_queue_sizes(server_context.db)
     queues = {
-        "index": queue_size(server_context.ingest_queue),
-        "type-specific index": queue_size(get_doc_type_queue(server_context.db)),
+        "index": ingest_size,
+        "type-specific index": doc_type_size,
         "tasks": queue_size(server_context.task_queue),
         "spider results": queue_size(server_context.spider_result_queue),
         "port scan results": queue_size(server_context.port_scan_result_queue),
@@ -201,6 +202,7 @@ class MonitorApp(App[None]):
     """
     BINDINGS = [
         Binding("q", "quit", "Quit"),
+        Binding("r", "refresh", "Refresh"),
         Binding("l", "toggle_low_power", "Toggle low power"),
     ]
 
@@ -224,7 +226,7 @@ class MonitorApp(App[None]):
 
     async def on_mount(self) -> None:
         await self.refresh_data()
-        self.set_interval(5, self.refresh_data)
+        self.set_interval(30, self.refresh_data)
 
     async def refresh_data(self) -> None:
         data = await collect_monitor_data(
@@ -241,6 +243,9 @@ class MonitorApp(App[None]):
         self.query_one("#urls", Static).update(f"[b]Last five URLs indexed[/b]\n{urls}")
         tools = "\n".join(data.running_tools) or "No MCP tools running"
         self.query_one("#tools", Static).update(f"[b]Running MCP tools[/b]\n{tools}")
+
+    async def action_refresh(self) -> None:
+        await self.refresh_data()
 
     async def action_toggle_low_power(self) -> None:
         current_low_power = getattr(self.server_context, "low_power", None)

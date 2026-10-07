@@ -1,8 +1,8 @@
 import pytest
 from haystack import Document
-from shyhurricane.task_queue.types import SpiderResultItem
 
 import shyhurricane.mcp_server.tools.find_web_resources as resources
+from shyhurricane.task_queue.types import SpiderResultItem
 
 
 def make_doc(doc_id, url, content="body", score=1.0, **meta):
@@ -520,7 +520,7 @@ async def test_find_web_resources_missing_target_open_world_branches(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_find_web_resources_starts_spider_when_elicitation_unavailable(monkeypatch):
+async def test_find_web_resources_does_not_spider_when_elicitation_unavailable(monkeypatch):
     server_ctx = FullServerContext(
         AsyncStore([[], [], []]),
         '{"target": ["missing.example.com"], "content": [], "response_codes": []}',
@@ -533,8 +533,8 @@ async def test_find_web_resources_starts_spider_when_elicitation_unavailable(mon
         return Netlocs([])
 
     def raise_mcp_error(server_ctx):
-        from mcp.types import ErrorData, INTERNAL_ERROR
-        raise resources.McpError(ErrorData(code=INTERNAL_ERROR, message="nope"))
+        from mcp.types import INTERNAL_ERROR
+        raise resources.MCPError(INTERNAL_ERROR, "nope")
 
     monkeypatch.setattr(resources, "find_netloc", find_netloc)
     monkeypatch.setattr(resources, "assert_elicitation", raise_mcp_error)
@@ -547,4 +547,4 @@ async def test_find_web_resources_starts_spider_when_elicitation_unavailable(mon
 
     await resources.find_web_resources(ToolCtx(), "missing.example.com", limit=10)
 
-    assert spidered == ["http://missing.example.com:80", "https://missing.example.com:443"]
+    assert spidered == []

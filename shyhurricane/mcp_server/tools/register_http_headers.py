@@ -1,10 +1,10 @@
 from typing import Annotated, Dict
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from shyhurricane.mcp_server import mcp_instance, log_tool_history
+from shyhurricane.mcp_server import log_tool_history, mcp_instance
 
 #
 # For some models, returning the headers that were registered causes it to rethink its task. It sees
@@ -18,10 +18,10 @@ register_http_headers_instructions = "The HTTP headers have been successfully re
 @mcp_instance.tool(
     annotations=ToolAnnotations(
         title="Register HTTP Headers",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=False),
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False),
 )
 async def register_http_headers(
         ctx: Context,

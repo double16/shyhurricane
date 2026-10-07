@@ -1,10 +1,10 @@
 from typing import Annotated
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_additional_hosts
+from shyhurricane.mcp_server import get_additional_hosts, log_tool_history, mcp_instance
 
 #
 # For some models, returning the hostname and IP address that was registered causes it to rethink its task. It sees
@@ -24,10 +24,10 @@ register_hostname_address_instructions_error = "The hostname or IP address was m
 @mcp_instance.tool(
     annotations=ToolAnnotations(
         title="Register Hostname Address",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=False),
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=True,
+        open_world_hint=False),
 )
 async def register_hostname_address(
         ctx: Context,

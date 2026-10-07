@@ -1,11 +1,12 @@
 import logging
 from typing import Annotated
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-from shyhurricane.mcp_server import mcp_instance, log_tool_history
+from shyhurricane.mcp_server import log_tool_history, mcp_instance
+
 from ..run_unix_command import _run_unix_command
 
 logger = logging.getLogger(__name__)
@@ -14,8 +15,8 @@ logger = logging.getLogger(__name__)
 @mcp_instance.tool(
     annotations=ToolAnnotations(
         title="De-obfuscate Javascript",
-        readOnlyHint=True,
-        openWorldHint=False),
+        read_only_hint=True,
+        open_world_hint=False),
 )
 async def deobfuscate_javascript(
         ctx: Context,

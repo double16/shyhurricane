@@ -1,12 +1,12 @@
 import unittest
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
-from mcp import McpError
-from mcp.server.fastmcp import Context
-from mcp.shared.context import RequestContext
+from mcp.server import ServerRequestContext as RequestContext
+from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.exceptions import ToolError
 
 from shyhurricane.mcp_server.tools.find_wordlists import find_wordlists, rank_wordlists, score_path
-from unittest.mock import patch, AsyncMock, Mock
 
 
 class TestWordlistRanking(unittest.TestCase):
@@ -65,6 +65,8 @@ class TestFindWordlists(unittest.IsolatedAsyncioTestCase):
         server_context.cached_get_additional_hosts = {}
         return Context(request_context=RequestContext(
             request_id="unittest",
+            protocol_version="2025-11-25",
+            method="tools/call",
             meta=None,
             session=Mock(),
             lifespan_context=server_context
@@ -136,7 +138,7 @@ class TestFindWordlists(unittest.IsolatedAsyncioTestCase):
         mock_run.return_value = type("R", (), {"return_code": 1, "output": "", "error": "boom"})
         ctx = self.new_context()
 
-        with self.assertRaises(McpError):
+        with self.assertRaises(ToolError):
             await find_wordlists(ctx, query="sql", limit=5)
 
 if __name__ == "__main__":
