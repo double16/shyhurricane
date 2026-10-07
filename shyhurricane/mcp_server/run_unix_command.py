@@ -1,15 +1,16 @@
 import asyncio
 import logging
 import uuid
-from typing import Optional, Dict
+from typing import Dict, Optional
 
 import aiofiles
-from mcp import McpError, ErrorData
-from mcp.server.fastmcp import Context
+from mcp import MCPError
+from mcp.server.mcpserver import Context
 from mcp.types import INVALID_REQUEST
 from pydantic import BaseModel, Field
 
-from shyhurricane.mcp_server import get_server_context, get_additional_hosts, log_history
+from shyhurricane.mcp_server import get_additional_hosts, get_server_context, log_history
+from shyhurricane.mcp_server.session_state import ensure_work_path
 from shyhurricane.utils import read_last_text_bytes, unix_command_image
 
 logger = logging.getLogger(__name__)
@@ -54,7 +55,7 @@ async def _run_unix_command(
 ) -> Optional[RunUnixCommand]:
     command = command.strip()
     if not command:
-        raise McpError(ErrorData(code=INVALID_REQUEST, message="command required"))
+        raise MCPError(INVALID_REQUEST, "command required")
 
     logger.info(f"_run_unix_command {command}")
 
@@ -76,7 +77,7 @@ async def _run_unix_command(
     async with aiofiles.tempfile.TemporaryFile(mode="w+b") as stdout_file:
         async with aiofiles.tempfile.TemporaryFile(mode="w+b") as stderr_file:
             # Use a common working directory for the session to chain together commands
-            work_path = ctx.request_context.lifespan_context.work_path
+            work_path = await ensure_work_path(ctx)
             docker_command = ["docker", "run", "--rm"]
 
             if server_ctx.open_world:

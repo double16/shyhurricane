@@ -3,18 +3,28 @@ import logging
 import queue
 import time
 from multiprocessing import Queue
-from typing import Optional, List, Annotated, Union
+from typing import Annotated, List, Optional, Union
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context, get_additional_hosts, \
-    AdditionalHostsField
+from shyhurricane.mcp_server import (
+    AdditionalHostsField,
+    get_additional_hosts,
+    get_server_context,
+    log_tool_history,
+    mcp_instance,
+)
 from shyhurricane.task_queue import PortScanQueueItem
 from shyhurricane.task_queue.port_scan_worker import get_stored_port_scan_results
-from shyhurricane.utils import filter_hosts_and_addresses, filter_ip_networks, PortScanResults, coerce_to_list, \
-    coerce_to_dict
+from shyhurricane.utils import (
+    PortScanResults,
+    coerce_to_dict,
+    coerce_to_list,
+    filter_hosts_and_addresses,
+    filter_ip_networks,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,10 +47,10 @@ class PortScanToolResult(BaseModel):
 @mcp_instance.tool(
     annotations=ToolAnnotations(
         title="Perform port scanning and service identification on target(s)",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=True),
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True),
 )
 async def port_scan(
         ctx: Context,

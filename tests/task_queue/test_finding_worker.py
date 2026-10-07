@@ -1,8 +1,10 @@
 import json
 from dataclasses import replace
 
+import pytest
 from haystack import Document
 
+import shyhurricane.task_queue.finding_worker as finding_worker
 from shyhurricane.task_queue.finding_worker import FindingContext, save_finding_worker
 from shyhurricane.task_queue.types import SaveFindingQueueItem
 
@@ -119,3 +121,21 @@ def test_save_finding_worker_skips_disabled_log(tmp_path):
 
     assert ctx.stores["finding"].written
     assert not (tmp_path / "findings.jsonl").exists()
+
+
+@pytest.mark.parametrize("timestamp", ["202601020304", None])
+def test_finding_context_uses_run_timestamp(monkeypatch, tmp_path, timestamp):
+    monkeypatch.setattr(finding_worker, "build_stores", lambda *args: {"finding": Store()})
+    monkeypatch.setattr(finding_worker, "build_embedders", lambda **kwargs: {"finding": Embedder()})
+    monkeypatch.setattr(finding_worker, "build_splitters", lambda *args: {"finding": Splitter()})
+    monkeypatch.setattr(finding_worker, "GenerateTitleAndDescription", lambda *args: TitleGenerator())
+    monkeypatch.setattr(finding_worker, "get_log_path", lambda db, name: tmp_path / name)
+    monkeypatch.setattr(finding_worker, "get_log_timestamp", lambda: "202612312359")
+
+    ctx = FindingContext("db", object(), object(), DocTypeQueue(), log_timestamp=timestamp)
+    expected = timestamp or "202612312359"
+    assert ctx.finding_log_path.name == f"finding-{expected}.jsonl"
+    assert not ctx.finding_log_path.exists()
+    for title in ["First", "Second"]:
+        save_finding_worker(ctx, SaveFindingQueueItem("example.com", "# finding", title))
+    assert [json.loads(line)["title"] for line in ctx.finding_log_path.read_text().splitlines()] == ["First", "Second"]

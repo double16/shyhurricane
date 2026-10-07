@@ -8,13 +8,13 @@ import re
 import time
 from itertools import islice, zip_longest
 from pathlib import Path
-from typing import Optional, Dict, Union, List, Tuple, AsyncGenerator, Any, Iterable, Type
+from typing import Any, AsyncGenerator, Dict, Iterable, List, Optional, Tuple, Type, Union
 from urllib.parse import ParseResult, urlparse
 from zoneinfo import ZoneInfo
 
 import torch
 import validators
-from bs4 import SoupStrainer, BeautifulSoup
+from bs4 import BeautifulSoup, SoupStrainer
 from haystack import Document
 from mcp import Resource
 from mcp.types import TextResourceContents
@@ -531,6 +531,11 @@ def get_state_path(db: str, state_name: str) -> Path:
         path = Path(Path.home(), ".local", "state", "shyhurricane", re.sub(r'[^A-Za-z0-9_.-]', '_', db), state_name)
     os.makedirs(path, mode=0o755, exist_ok=True)
     return path
+
+
+def get_log_timestamp() -> str:
+    """Return the current UTC minute for a run's log filenames."""
+    return datetime.datetime.now(datetime.UTC).strftime("%Y%m%d%H%M")
 
 
 def get_log_path(db: str, log_name: str) -> Path:

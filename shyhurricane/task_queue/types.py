@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import multiprocessing
 import os
 import signal
@@ -10,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional
 from shyhurricane.utils import HttpResource, PortScanResults
 
 DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/67.0.3396.99 Safari/537.36"
+logger = logging.getLogger(__name__)
 
 
 class PortScanQueueItem:
@@ -124,28 +126,79 @@ class SaveFindingQueueItem:
 class TaskPool:
     def __init__(self, processes: List[Process]):
         self.processes = processes
+        self._closed = False
 
-    def close(self):
+    def close(self, deadline: float | None = None):
+        if self._closed:
+            return
+        self._closed = True
+        if deadline is not None:
+            for process in self.processes:
+                try:
+                    process.join(timeout=max(0, deadline - time.monotonic()))
+                except Exception:
+                    logger.exception("Failed to wait for current worker operation")
+        groups = []
         for process in self.processes:
             try:
                 if getattr(process, "_shyhurricane_monitor_process_group", False):
-                    os.killpg(process.pid, signal.SIGTERM)
-                else:
+                    groups.append(process.pid)
+                    try:
+                        os.killpg(process.pid, signal.SIGTERM)
+                    except ProcessLookupError:
+                        if process.is_alive():
+                            process.terminate()
+                elif process.is_alive():
                     process.terminate()
-                process.join()
+            except Exception:
+                logger.exception("Failed to terminate worker")
+        terminate_deadline = time.monotonic() + 5
+        for process in self.processes:
+            try:
+                process.join(timeout=max(0, terminate_deadline - time.monotonic()))
+            except Exception:
+                logger.exception("Failed to join worker")
+        # A watcher can exit before its child. Give the entire group time to stop.
+        while groups and time.monotonic() < terminate_deadline:
+            remaining = []
+            for group in groups:
+                try:
+                    os.killpg(group, 0)
+                    remaining.append(group)
+                except ProcessLookupError:
+                    pass
+                except OSError:
+                    logger.exception("Failed to inspect worker group %s", group)
+                    remaining.append(group)
+            groups = remaining
+            if groups:
+                time.sleep(min(0.05, max(0, terminate_deadline - time.monotonic())))
+        for group in groups:
+            try:
+                os.killpg(group, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                logger.exception("Failed to kill worker group %s", group)
+        for process in self.processes:
+            try:
+                if process.is_alive():
+                    process.kill()
+                process.join(timeout=5)
                 process.close()
             except Exception:
-                pass
+                logger.exception("Failed to release worker")
 
 
-def prepare_worker_process() -> None:
-    """Detach a monitor worker from the terminal before it starts processing tasks."""
-    if os.environ.get("SHYHURRICANE_MONITOR") == "1":
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
+def prepare_worker_process(create_process_group: bool = True) -> None:
+    """Isolate top-level workers and silence terminal output in monitor mode."""
+    if create_process_group and hasattr(os, "setsid"):
         try:
             os.setsid()
         except OSError:
-            pass
+            logger.exception("Failed to create worker process group")
+    if os.environ.get("SHYHURRICANE_MONITOR") == "1":
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
         with open(os.devnull, "w") as null_output:
             os.dup2(null_output.fileno(), 1)
             os.dup2(null_output.fileno(), 2)
