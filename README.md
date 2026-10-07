@@ -120,6 +120,10 @@ callback; modern clients answer the SDK's multi-round input requests. If elicita
 declined, or cancelled, retrieval returns guidance without automatically starting a scan. Explicit scan tools
 remain available when open-world access is enabled.
 
+Search, spidering, and directory busting send status messages through MCP progress notifications.
+Clients must request progress updates to receive these messages; server logging remains available.
+Progress values count status events and do not estimate the total work.
+
 Modern continuation tokens expire after ten minutes between rounds and are protected with a process-local key.
 An interaction interrupted by a server restart must start again. Run one server process; legacy sessions require
 requests to reach the process that created them. Streamable HTTP MCP request bodies have the SDK's 4 MiB limit;

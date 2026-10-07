@@ -105,6 +105,34 @@ async def test_real_modern_client_has_fresh_state_and_no_registration(workflow_s
 
 
 @pytest.mark.asyncio
+@pytest.mark.filterwarnings("error::mcp.shared.exceptions.MCPDeprecationWarning")
+@pytest.mark.parametrize("mode", ["legacy", "2026-07-28"])
+@pytest.mark.parametrize("with_progress", [True, False])
+async def test_search_progress_without_deprecated_logging(workflow_server, mode, with_progress):
+    server, _ = workflow_server
+    updates = []
+
+    async def progress(value, total, message):
+        updates.append((value, total, message))
+
+    async def answer(ctx, params):
+        return ElicitResult(action="accept", content={"confirm": True})
+
+    async with Client(server, mode=mode, elicitation_callback=answer) as client:
+        result = await client.call_tool(
+            "find_web_resources",
+            {"query": "missing.example.com"},
+            progress_callback=progress if with_progress else None,
+        )
+    assert not result.is_error
+    expected = [(1, None, "Determining target(s)"), (2, None, "Searching for missing.example.com")]
+    if mode != "legacy":
+        # Modern elicitation resumes in a new inbound request and prepares the search again.
+        expected.insert(0, (1, None, "Determining target(s)"))
+    assert updates == (expected if with_progress else [])
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["legacy", "modern"])
 @pytest.mark.parametrize(
     "action,confirm,scans", [("accept", True, 2), ("accept", False, 0), ("decline", None, 0), ("cancel", None, 0)]
