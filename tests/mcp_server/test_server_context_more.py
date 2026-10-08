@@ -1,4 +1,4 @@
-from threading import Event
+from threading import Event, get_ident
 from unittest.mock import Mock
 
 import pytest
@@ -126,6 +126,7 @@ def test_close_server_context_closes_and_clears_global(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_server_context_ensure_retrieval_pipelines(monkeypatch):
+    request_thread = get_ident()
     ctx = make_context()
     doc_pipeline = object()
     ctx_pipeline = object()
@@ -134,12 +135,17 @@ async def test_server_context_ensure_retrieval_pipelines(monkeypatch):
     monkeypatch.setattr(server_context, "get_generator_config", lambda: "gen_config")
 
     async def mock_build_doc_pipe(db, generator_config):
+        assert get_ident() != request_thread
         assert db == "db"
         assert generator_config == "gen_config"
         return doc_pipeline, None, stores
 
     monkeypatch.setattr(server_context, "build_document_pipeline", mock_build_doc_pipe)
-    monkeypatch.setattr(server_context, "build_website_context_pipeline", lambda generator_config: ctx_pipeline)
+    def mock_build_context_pipe(generator_config):
+        assert get_ident() != request_thread
+        return ctx_pipeline
+
+    monkeypatch.setattr(server_context, "build_website_context_pipeline", mock_build_context_pipe)
 
     assert ctx.document_pipeline is None
     assert ctx.website_context_pipeline is None

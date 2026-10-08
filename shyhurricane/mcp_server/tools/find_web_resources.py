@@ -6,11 +6,13 @@ import time
 from dataclasses import dataclass, field
 from multiprocessing import Queue
 from typing import Annotated, Any, Dict, List, Optional, Union
+from urllib.parse import urlsplit
 
 from haystack import Document, Pipeline
 from mcp import MCPError, Resource
 from mcp.server.elicitation import AcceptedElicitation, DeclinedElicitation, ElicitationResult
 from mcp.server.mcpserver import Context, Elicit, Resolve
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from mcp.types.version import MODERN_PROTOCOL_VERSIONS
 from pydantic import BaseModel, Field
@@ -34,9 +36,11 @@ from shyhurricane.mcp_server import (
 )
 from shyhurricane.mcp_server.progress import progress_scope, report_progress
 from shyhurricane.mcp_server.tools.find_indexed_metadata import find_netloc
+from shyhurricane.predicate_search import candidate_filters, load_candidates, select_candidates
 from shyhurricane.rate_limit import get_rate_limit_requests_per_second
+from shyhurricane.search_predicates import Predicate, parse_predicates
 from shyhurricane.server_config import get_server_config
-from shyhurricane.target_info import TargetInfo, parse_target_info
+from shyhurricane.target_info import TargetInfo, filter_targets_query, parse_target_info
 from shyhurricane.task_queue import SpiderQueueItem
 from shyhurricane.task_queue.types import SpiderResultItem
 from shyhurricane.utils import (
@@ -222,7 +226,13 @@ class FindWebResourcesResult(BaseModel):
 
 
 find_web_resources_instructions = "These resources were found by searching the indexed resources using the given query."
-find_web_resources_instructions_not_found = "No indexed resources were found using the query. Use the spider_website, directory_buster or index_http_url tools to populate the index."
+find_web_resources_instructions_not_found = (
+    "No documents are indexed for the requested target. Use the spider_website, "
+    "directory_buster or index_http_url tools to populate the index."
+)
+find_web_resources_instructions_no_matches = (
+    "No indexed resources matched the query. Try broadening the query or relaxing its filters."
+)
 find_web_resources_instructions_need_target = "Include a target URL, IP address or hostname in query."
 find_web_resources_instructions_low_power = "No indexed resources were considered due to low power mode. Include only hostnames, IP addresses or URLs in the query."
 
@@ -232,9 +242,12 @@ def find_web_resources_result(
         http_methods: Optional[List[str]],
         limit: int,
         results: List[HttpResource],
+        target_indexed: bool = True,
 ) -> FindWebResourcesResult:
     return FindWebResourcesResult(
-        instructions=find_web_resources_instructions if results else find_web_resources_instructions_not_found,
+        instructions=find_web_resources_instructions if results else (
+            find_web_resources_instructions_no_matches if target_indexed else find_web_resources_instructions_not_found
+        ),
         query=query,
         http_methods=http_methods,
         limit=limit,
@@ -258,11 +271,14 @@ class SearchPreparation:
     filter_netloc: list[str] = field(default_factory=list)
     filter_domain: set[str] = field(default_factory=set)
     missing_targets: list[TargetInfo] = field(default_factory=list)
+    predicates: list[Predicate] = field(default_factory=list)
+    semantic_query: Optional[str] = None
+    has_indexed_targets: bool = False
 
 
 async def _determine_targets(ctx: Context, search: SearchPreparation, target_query: str):
     await report_progress(ctx, "Determining target(s)")
-    result = search.server_ctx.website_context_pipeline.run({"builder": {"query": target_query}})
+    result = await search.server_ctx.website_context_pipeline.run_async({"builder": {"query": target_query}})
     reply = result.get("llm", {}).get("replies", [""])[0]
     if reply:
         try:
@@ -287,6 +303,34 @@ async def _prepare_search(
     query = query.strip()
     limit = min(1000, max(10, limit or 100))
     logger.info("finding web resources for %s up to %d results", query, limit)
+
+    try:
+        semantic_query, predicates = parse_predicates(query)
+    except ValueError as error:
+        raise ToolError(f"Invalid search predicate: {error}") from error
+    if predicates:
+        search = SearchPreparation(query, limit, http_methods, server_ctx,
+                                   predicates=predicates, semantic_query=semantic_query)
+        sites = [predicate.value for predicate in predicates if predicate.operator == "site" and not predicate.exclude]
+        low_power = server_ctx.low_power
+        if semantic_query:
+            if low_power:
+                return FindWebResourcesResult(
+                    instructions=find_web_resources_instructions_low_power,
+                    query=query, http_methods=http_methods, limit=limit,
+                )
+            await server_ctx.ensure_retrieval_pipelines()
+            if server_ctx.website_context_pipeline is None or server_ctx.document_pipeline is None:
+                return FindWebResourcesResult(
+                    instructions=find_web_resources_instructions_low_power,
+                    query=query, http_methods=http_methods, limit=limit,
+                )
+            await _determine_targets(ctx, search, semantic_query)
+        if sites:
+            search.targets = sites
+        if not search.targets:
+            search.targets.extend(await _find_recommended_urls(ctx) or [])
+        return search
 
     if resources_by_url := await _find_web_resources_by_url(ctx, query, limit):
         return find_web_resources_result(results=resources_by_url, query=query, http_methods=http_methods, limit=limit)
@@ -368,7 +412,10 @@ async def _prepare_targets(
     if isinstance(search, FindWebResourcesResult):
         return search
     if not search.targets and isinstance(target_answer, AcceptedElicitation) and target_answer.data.data:
-        await _determine_targets(ctx, search, target_answer.data.data)
+        if search.predicates and not search.semantic_query:
+            search.targets.extend(filter_targets_query(target_answer.data.data))
+        else:
+            await _determine_targets(ctx, search, target_answer.data.data)
     if not search.targets:
         return FindWebResourcesResult(
             instructions=find_web_resources_instructions_need_target,
@@ -377,6 +424,27 @@ async def _prepare_targets(
             limit=search.limit,
         )
     targets = search.targets
+    sites = [predicate for predicate in search.predicates if predicate.operator == "site" and not predicate.exclude]
+    if sites:
+        # Resolve host scope independently of the legacy parent-domain fallback.
+        known = (await find_netloc(ctx, "")).network_locations
+        search.has_indexed_targets = any(site.matches_netloc(netloc) for site in sites for netloc in known)
+        search.filter_netloc = [netloc for netloc in known if all(site.matches_netloc(netloc) for site in sites)]
+        if not search.filter_netloc:
+            # Distinguish an absent target from contradictory site constraints.
+            for site in sites:
+                target = urlsplit(site.value if "://" in site.value else f"//{site.value}")
+                host = f"[{target.hostname}]" if ":" in target.hostname else target.hostname
+                if not any(site.matches_netloc(netloc) for netloc in known):
+                    search.missing_targets.append(TargetInfo(
+                        url=site.value if target.scheme else (
+                            f"http://{target.netloc}" if ":" in target.hostname else None
+                        ),
+                        host=target.hostname, port=target.port,
+                        netloc=f"{host}:{target.port}" if target.port else None,
+                        domain=extract_domain(target.hostname),
+                    ))
+        return search
     parsed_targets: List[TargetInfo] = []
     for target in targets:
         try:
@@ -393,7 +461,14 @@ async def _prepare_targets(
 
     # check if we have data
     missing_netloc = set(filter_netloc.copy())
-    for known_netloc in (await find_netloc(ctx, "")).network_locations:
+    known_netlocs = (await find_netloc(ctx, "")).network_locations
+    search.has_indexed_targets = any(
+        known_netloc in filter_netloc or any(
+            known_netloc.split(":")[0].endswith("." + target.host) for target in parsed_targets
+        )
+        for known_netloc in known_netlocs
+    )
+    for known_netloc in known_netlocs:
         try:
             missing_netloc.remove(known_netloc)
         except KeyError:
@@ -444,18 +519,23 @@ async def _execute_search(
             or not isinstance(scan_answer, AcceptedElicitation)
             or not scan_answer.data.confirm
         ):
-            return FindWebResourcesResult(
-                instructions=find_web_resources_instructions_not_found,
-                query=query,
-                http_methods=http_methods,
-                limit=limit,
-            )
-        for target in search.missing_targets:
-            await spider_website(ctx, target.to_url())
+            if not search.has_indexed_targets:
+                return find_web_resources_result(query, http_methods, limit, [], target_indexed=False)
+        else:
+            for target in search.missing_targets:
+                await spider_website(ctx, target.to_url())
+            # A completed scan may have queued documents that are not searchable yet.
+            search.has_indexed_targets = True
+            if search.predicates:
+                search.filter_netloc.clear()
+                search.missing_targets.clear()
+                await _prepare_targets(ctx, search, AcceptedElicitation(data=RequestTargetUrl()))
     filter_netloc, filter_domain = search.filter_netloc, search.filter_domain
     methods, response_codes, doc_types = http_methods or [], search.response_codes, search.doc_types
     targets = search.targets
     document_pipeline = search.server_ctx.document_pipeline
+    if search.predicates:
+        return await _execute_predicate_search(ctx, search)
     conditions = [{"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION}]
     if filter_netloc:
         _append_in_filter(conditions, "meta.netloc", filter_netloc)
@@ -506,7 +586,60 @@ async def _execute_search(
     logger.info(f"Found {len(documents)} documents")
 
     return find_web_resources_result(
-        results=_documents_to_http_resources(documents), query=query, http_methods=http_methods, limit=limit
+        results=_documents_to_http_resources(documents), query=query, http_methods=http_methods, limit=limit,
+        target_indexed=search.has_indexed_targets,
+    )
+
+
+async def _execute_predicate_search(ctx: Context, search: SearchPreparation) -> FindWebResourcesResult:
+    explicit_sites = any(predicate.operator == "site" and not predicate.exclude for predicate in search.predicates)
+    if explicit_sites and not search.filter_netloc:
+        return find_web_resources_result(
+            search.query, search.http_methods, search.limit, [], target_indexed=search.has_indexed_targets,
+        )
+    must = [qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION))]
+    if search.filter_netloc:
+        must.append(qm.FieldCondition(key="meta.netloc", match=qm.MatchAny(any=search.filter_netloc)))
+    elif search.filter_domain:
+        must.append(qm.FieldCondition(key="meta.domain", match=qm.MatchAny(any=list(search.filter_domain))))
+    predicates = search.predicates.copy()
+    if search.response_codes and not any(predicate.operator == "status" for predicate in predicates):
+        must.append(qm.FieldCondition(key="meta.status_code", match=qm.MatchAny(any=search.response_codes)))
+
+    async def progress(message):
+        await report_progress(ctx, message)
+
+    methods = [method.upper() for method in search.http_methods or []]
+    client = search.server_ctx.qdrant_client
+    async with asyncio.timeout(300):
+        collections = [collection.name for collection in (await client.get_collections()).collections]
+        selected = await select_candidates(client, collections, predicates, qm.Filter(must=must), methods, progress)
+        if not search.semantic_query:
+            documents = await load_candidates(client, selected, search.limit)
+        elif not any(selected.values()):
+            documents = []
+        else:
+            loop = asyncio.get_running_loop()
+
+            def progress_callback(message):
+                asyncio.run_coroutine_threadsafe(progress(message), loop).result()
+
+            result = await asyncio.to_thread(
+                search.server_ctx.document_pipeline.run,
+                data={"query": {
+                    "text": search.semantic_query,
+                    "filters": {"predicate_filters": candidate_filters(selected)},
+                    "max_results": search.limit,
+                    "targets": search.filter_netloc + list(search.filter_domain),
+                    "doc_types": search.doc_types,
+                    "progress_callback": progress_callback,
+                }},
+                include_outputs_from={"combine"},
+            )
+            documents = documents_sort_unique(result.get("combine", {}).get("documents", []), search.limit)
+    return find_web_resources_result(
+        search.query, search.http_methods, search.limit, _documents_to_http_resources(documents),
+        target_indexed=search.has_indexed_targets,
     )
 
 
@@ -587,6 +720,13 @@ async def find_web_resources_tool(
         7. http://target.local/account/dashboard?page=account
 
     A target URL or hostname is required. Always include your target URLs. http://target.local is only an example, do not use it as a URL.
+
+    Optional hard filters: site:example.com (including subdomains), inurl:admin,
+    filetype:js (alias ext:js), mime:application/json, method:POST, status:403,
+    type:javascript. Types: html, javascript, css, xml, json, network, forms, content, default.
+    Combine predicates with AND; exclude with a leading minus and quote values containing spaces.
+    Example: site:example.com filetype:js -inurl:vendor potential unsafe eval calls.
+    Predicate-only queries work without an LLM, including in low-power mode.
     """
 
     return await _execute_search(ctx, search, scan_answer)

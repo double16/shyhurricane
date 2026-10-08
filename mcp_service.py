@@ -48,6 +48,17 @@ def configure_tty_logging() -> None:
         logger.propagate = False
 
 
+def configure_shutdown_logging() -> None:
+    """Make shutdown progress visible once the dashboard releases the terminal."""
+    logging.disable(logging.NOTSET)
+    handler = logging.StreamHandler(sys.stderr)
+    handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+    logger.handlers.clear()
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+
 def _str_to_bool(bool_as_str: str) -> bool:
     if bool_as_str in ["False", "false", "0", "no", ""]:
         return False
@@ -196,14 +207,19 @@ async def main():
     finally:
         if uv_server is not None:
             uv_server.should_exit = True
+        for task in (stop_task, monitor_task, proxy_task):
+            if task is not None:
+                task.cancel()
+        if monitor_task is not None:
+            await asyncio.gather(monitor_task, return_exceptions=True)
+        if is_tty:
+            configure_shutdown_logging()
+        logger.info("Shutting down: waiting up to 5 minutes (300 seconds) for current operations to finish.")
         if proxy_server is not None:
             try:
                 proxy_server.close()
             except Exception:
                 logger.exception("Failed to close proxy listener")
-        for task in (stop_task, monitor_task, proxy_task):
-            if task is not None:
-                task.cancel()
         try:
             await asyncio.to_thread(server_context.close)
         finally:

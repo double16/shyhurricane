@@ -7,6 +7,8 @@ import pytest
 
 import mcp_service as service
 
+SHUTDOWN_MESSAGE = "Shutting down: waiting up to 5 minutes (300 seconds) for current operations to finish."
+
 
 @pytest.mark.parametrize(
     "value,expected", [("False", False), ("false", False), ("0", False), ("no", False), ("", False), ("true", True)]
@@ -43,8 +45,30 @@ def test_tty_logging_configuration(monkeypatch):
     assert all(logger.handlers == [] and not logger.propagate for logger in loggers.values())
 
 
+def test_shutdown_logging_reenables_info_without_duplicate_output(monkeypatch, capsys):
+    logger = logging.getLogger("shutdown-test")
+    monkeypatch.setattr(logger, "handlers", [])
+    monkeypatch.setattr(logger, "level", logging.NOTSET)
+    monkeypatch.setattr(logger, "propagate", True)
+    logger.addHandler(logging.StreamHandler())
+    monkeypatch.setattr(service, "logger", logger)
+    previous_disable = logging.root.manager.disable
+    try:
+        logging.disable(logging.CRITICAL)
+        logger.info("dashboard is active")
+        assert capsys.readouterr().err == ""
+        service.configure_shutdown_logging()
+        service.configure_shutdown_logging()
+        logger.info(SHUTDOWN_MESSAGE)
+        assert capsys.readouterr().err == f"INFO: {SHUTDOWN_MESSAGE}\n"
+        assert logger.propagate is False
+    finally:
+        logging.disable(previous_disable)
+
+
 @pytest.fixture
 async def service_runtime(monkeypatch, tmp_path):
+    monkeypatch.setattr(service, "logger", logging.Logger("service-test"))
     monkeypatch.setenv("QDRANT", str(tmp_path / "db"))
     monkeypatch.delenv("MCP_TRANSPORT", raising=False)
     monkeypatch.delenv("LOW_POWER", raising=False)
@@ -94,9 +118,21 @@ async def service_runtime(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("transport", service.TRANSPORTS)
-async def test_main_uses_environment_transport_and_closes_servers(service_runtime, monkeypatch, transport):
+async def test_main_uses_environment_transport_and_closes_servers(service_runtime, monkeypatch, transport, caplog):
     monkeypatch.setenv("MCP_TRANSPORT", transport)
+    shutdown_logging = Mock()
+    monkeypatch.setattr(service, "configure_shutdown_logging", shutdown_logging)
+    # Use the existing console logging configuration for non-interactive starts.
+    monkeypatch.setattr(service, "logger", logging.getLogger("service-test-noninteractive"))
+    caplog.set_level(logging.INFO, logger="service-test-noninteractive")
+
+    def close():
+        assert SHUTDOWN_MESSAGE in caplog.messages
+
+    service_runtime.context.close.side_effect = close
     await service.main()
+    shutdown_logging.assert_not_called()
+    assert caplog.messages.count(SHUTDOWN_MESSAGE) == 1
     service.build_mcp_app.assert_called_once_with(transport, "127.0.0.1")
     service.run_proxy_server.assert_awaited_once()
     service_runtime.proxy.close.assert_called_once()
@@ -132,13 +168,29 @@ async def test_invalid_environment_transport_fails_before_startup(service_runtim
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("monitor_finishes", [True, False])
-async def test_tty_monitor_and_signal_shutdown(service_runtime, monkeypatch, monitor_finishes):
+async def test_tty_monitor_and_signal_shutdown(service_runtime, monkeypatch, monitor_finishes, capsys):
     for stream in [service.sys.stdin, service.sys.stdout, service.sys.stderr]:
         monkeypatch.setattr(stream, "isatty", lambda: True)
 
+    monitor_closed = False
+
     async def monitor(*args):
-        if not monitor_finishes:
-            await asyncio.Event().wait()
+        nonlocal monitor_closed
+        try:
+            assert capsys.readouterr().err == ""
+            if not monitor_finishes:
+                await asyncio.Event().wait()
+        finally:
+            # Terminal teardown may require another event-loop iteration.
+            await asyncio.sleep(0)
+            assert capsys.readouterr().err == ""
+            monitor_closed = True
+
+    def close():
+        assert monitor_closed
+        assert capsys.readouterr().err == f"INFO: {SHUTDOWN_MESSAGE}\n"
+
+    service_runtime.context.close.side_effect = close
 
     monkeypatch.setattr(service, "run_monitor", monitor)
     if monitor_finishes:
@@ -154,6 +206,34 @@ async def test_tty_monitor_and_signal_shutdown(service_runtime, monkeypatch, mon
     assert config["log_level"] == "critical"
     assert config["access_log"] is False
     service_runtime.proxy.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_waits_for_monitor_before_logging(service_runtime, monkeypatch, capsys):
+    for stream in [service.sys.stdin, service.sys.stdout, service.sys.stderr]:
+        monkeypatch.setattr(stream, "isatty", lambda: True)
+    monkeypatch.setattr(service_runtime.loop, "add_signal_handler", lambda *args: None)
+    started = asyncio.Event()
+    closed = asyncio.Event()
+
+    async def monitor(*args):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0)
+            assert capsys.readouterr().err == ""
+            closed.set()
+
+    monkeypatch.setattr(service, "run_monitor", monitor)
+    task = asyncio.create_task(service.main())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert closed.is_set()
+    assert capsys.readouterr().err == f"INFO: {SHUTDOWN_MESSAGE}\n"
+    service_runtime.context.close.assert_called_once()
 
 
 @pytest.mark.asyncio

@@ -87,12 +87,12 @@ class ServerContext:
     async def ensure_retrieval_pipelines(self) -> None:
         if self.document_pipeline is None or self.website_context_pipeline is None:
             generator_config = get_generator_config()
-            document_pipeline, _, stores = await build_document_pipeline(
-                db=self.db,
-                generator_config=generator_config,
+            # The async builder initializes synchronous providers and embedding models.
+            document_pipeline, _, stores = await asyncio.to_thread(
+                asyncio.run, build_document_pipeline(db=self.db, generator_config=generator_config),
             )
-            website_context_pipeline = build_website_context_pipeline(
-                generator_config=generator_config,
+            website_context_pipeline = await asyncio.to_thread(
+                build_website_context_pipeline, generator_config=generator_config,
             )
             self.document_pipeline = document_pipeline
             self.website_context_pipeline = website_context_pipeline

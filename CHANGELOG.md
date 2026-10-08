@@ -4,6 +4,8 @@
 
 ### Features
 
+- Add hard search predicates to `find_web_resources`: `site:`, `inurl:`, `filetype:`/`ext:`, `mime:`,
+  `method:`, `status:`, and `type:`, with quoted values, exclusions, and predicate-only low-power retrieval.
 - Add an `r` keyboard shortcut to refresh the monitoring dashboard immediately.
 - Accept Burp Suite request/response XML exports in `ingest.py` with `--burp-xml`.
 - Use a shared UTC startup timestamp for index and finding JSONL log filenames.
@@ -26,6 +28,10 @@
 
 ### Fixes
 
+- Distinguish queries with no matches from targets with no indexed documents in `find_web_resources`;
+  recommend populating the index only for unindexed targets.
+- Send idle MCP progress every 20 seconds for scans, search, JavaScript deobfuscation, and URL indexing;
+  existing progress resets the deadline, and search target detection runs asynchronously.
 - Upgrade Haystack to 3.3 with native document IDs and splitting behavior while retaining provider
   settings and synchronous pipelines; release provider resources after workers drain.
 - Replace deprecated MCP client logging with progress notifications for search, spidering, and directory busting.
