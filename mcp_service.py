@@ -10,16 +10,9 @@ from pathlib import Path
 
 import torch
 import uvicorn
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.cors import CORSMiddleware
 from uvicorn import Config, Server
-
-from shyhurricane.config import configure
-from shyhurricane.generator_config import GeneratorConfig, add_generator_args
-from shyhurricane.mcp_server import mcp_instance, get_server_context
-from shyhurricane.mcp_server.generator_config import set_generator_config
-from shyhurricane.monitor import run_monitor
-from shyhurricane.proxy_server.proxy_server import run_proxy_server
-from shyhurricane.server_config import ServerConfig, set_server_config
 
 import shyhurricane.mcp_server.tools.deobfuscate_javascript  # noqa: F401
 import shyhurricane.mcp_server.tools.directory_buster  # noqa: F401
@@ -33,6 +26,13 @@ import shyhurricane.mcp_server.tools.port_scan  # noqa: F401
 import shyhurricane.mcp_server.tools.register_hostname_address  # noqa: F401
 import shyhurricane.mcp_server.tools.register_http_headers  # noqa: F401
 import shyhurricane.mcp_server.tools.status  # noqa: F401
+from shyhurricane.config import configure
+from shyhurricane.generator_config import GeneratorConfig, add_generator_args
+from shyhurricane.mcp_server import get_server_context, mcp_instance
+from shyhurricane.mcp_server.generator_config import set_generator_config
+from shyhurricane.monitor import run_monitor
+from shyhurricane.proxy_server.proxy_server import run_proxy_server
+from shyhurricane.server_config import ServerConfig, set_server_config
 from shyhurricane.utils import get_state_path
 
 logger = logging.getLogger(__name__)
@@ -52,6 +52,24 @@ def _str_to_bool(bool_as_str: str) -> bool:
     if bool_as_str in ["False", "false", "0", "no", ""]:
         return False
     return True
+
+
+TRANSPORTS = ("streamable-http", "sse", "streamable-http-modern")
+
+
+def build_mcp_app(transport: str, host: str):
+    """Build the selected HTTP preset while retaining custom application routes."""
+    if transport not in TRANSPORTS:
+        raise ValueError(f"Unknown transport: {transport}")
+    options = {
+        "host": host,
+        "transport_security": TransportSecuritySettings(enable_dns_rebinding_protection=False),
+    }
+    if transport == "sse":
+        return mcp_instance.sse_app(**options)
+    return mcp_instance.streamable_http_app(
+        stateless_http=transport == "streamable-http-modern", **options,
+    )
 
 
 async def main():
@@ -74,9 +92,9 @@ async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--transport",
-        choices=["streamable-http", "sse"],
-        default="streamable-http",
-        help="Transport method to use: streamable-http or sse"
+        choices=TRANSPORTS,
+        default=os.environ.get("MCP_TRANSPORT", "streamable-http"),
+        help="Transport: streamable-http (default), sse, or streamable-http-modern (stateless)"
     )
     ap.add_argument("--database", default=default_database, help="Database location: path or host:port of qdrant server")
     ap.add_argument("--host", default="127.0.0.1", help="Host to listen on")
@@ -91,6 +109,8 @@ async def main():
     add_generator_args(ap)
 
     args = ap.parse_args()
+    if args.transport not in TRANSPORTS:
+        ap.error(f"Invalid MCP_TRANSPORT: {args.transport}")
     set_generator_config(GeneratorConfig.from_args(args).apply_summarizing_default().check())
     set_server_config(ServerConfig(
         database=args.database,
@@ -101,91 +121,97 @@ async def main():
     ))
     server_context = await get_server_context()
 
-    #
-    # MCP Server
-    #
-    mcp_instance.open_world = _str_to_bool(args.open_world)
-
-    match args.transport:
-        case "sse":
-            mcp_app = mcp_instance.sse_app(None)
-        case "streamable-http":
-            mcp_app = mcp_instance.streamable_http_app()
-        case _:
-            print("Unknown transport:", args.transport, file=sys.stderr)
-            sys.exit(1)
-
-    mcp_app = CORSMiddleware(
-        mcp_app,
-        allow_origins=["*"],
-        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
-        allow_headers=["*"],
-        expose_headers=["Mcp-Session-Id"],
-    )
-
-    uv_cfg = Config(
-        app=mcp_app,
-        host=args.host,
-        port=args.port,
-        loop="asyncio",
-        lifespan="on",
-        log_level="critical" if is_tty else "info",
-        access_log=not is_tty,
-        log_config=None if is_tty else uvicorn.config.LOGGING_CONFIG,
-    )
-    uv_server = Server(uv_cfg)
-    uv_task = asyncio.create_task(uv_server.serve())
-
-    #
-    # Proxy Server
-    #
-    proxy_server = run_proxy_server(
-        server_context.db, args.host, args.proxy_port,
-        get_state_path(server_context.db, "certs"),
-        server_context,
-    )
-    proxy_task = asyncio.create_task(proxy_server)
-
+    uv_server = None
+    uv_task = None
+    proxy_server = None
+    proxy_task = None
     monitor_task = None
-    if is_tty:
-        monitor_task = asyncio.create_task(run_monitor(server_context, args.host, args.port, mcp_instance))
+    stop_task = None
+    try:
+        #
+        # MCP Server
+        #
+        mcp_instance.open_world = _str_to_bool(args.open_world)
 
-    stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, stop.set)
-        except NotImplementedError:
-            # Windows: no add_signal_handler for SIGTERM; fall back to Ctrl+C only
-            pass
-    if monitor_task is None:
-        await stop.wait()
-    else:
-        stop_task = asyncio.create_task(stop.wait())
-        done, pending = await asyncio.wait(
-            [stop_task, monitor_task], return_when=asyncio.FIRST_COMPLETED
+        mcp_app = build_mcp_app(args.transport, args.host)
+
+        mcp_app = CORSMiddleware(
+            mcp_app,
+            allow_origins=["*"],
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+            allow_headers=["*"],
+            expose_headers=["Mcp-Session-Id"],
         )
-        for task in done:
-            task.result()
-        for task in pending:
-            task.cancel()
-        for task in pending:
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
-    proxy_server.close()
-    server_context.close()
 
-    #
-    # Wait for servers to exit
-    #
-    uv_server.should_exit = True
-    await uv_task
-    proxy_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await proxy_task
-    if monitor_task is not None:
-        with contextlib.suppress(asyncio.CancelledError):
-            await monitor_task
+        uv_cfg = Config(
+            app=mcp_app,
+            host=args.host,
+            port=args.port,
+            loop="asyncio",
+            lifespan="on",
+            log_level="critical" if is_tty else "info",
+            access_log=not is_tty,
+            log_config=None if is_tty else uvicorn.config.LOGGING_CONFIG,
+            timeout_graceful_shutdown=300,
+        )
+        uv_server = Server(uv_cfg)
+        uv_task = asyncio.create_task(uv_server.serve())
+
+        #
+        # Proxy Server
+        #
+        proxy_server = await run_proxy_server(
+            server_context.db, args.host, args.proxy_port,
+            get_state_path(server_context.db, "certs"),
+            server_context,
+        )
+        proxy_task = asyncio.create_task(proxy_server.serve_forever())
+
+        monitor_task = None
+        if is_tty:
+            monitor_task = asyncio.create_task(run_monitor(server_context, args.host, args.port, mcp_instance))
+
+        stop = asyncio.Event()
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, stop.set)
+            except NotImplementedError:
+                # Windows: no add_signal_handler for SIGTERM; fall back to Ctrl+C only
+                pass
+        if monitor_task is None:
+            await stop.wait()
+        else:
+            stop_task = asyncio.create_task(stop.wait())
+            done, pending = await asyncio.wait(
+                [stop_task, monitor_task], return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done:
+                task.result()
+            for task in pending:
+                task.cancel()
+            for task in pending:
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+    finally:
+        if uv_server is not None:
+            uv_server.should_exit = True
+        if proxy_server is not None:
+            try:
+                proxy_server.close()
+            except Exception:
+                logger.exception("Failed to close proxy listener")
+        for task in (stop_task, monitor_task, proxy_task):
+            if task is not None:
+                task.cancel()
+        try:
+            await asyncio.to_thread(server_context.close)
+        finally:
+            for task in (stop_task, monitor_task, proxy_task, uv_task):
+                if task is not None:
+                    with contextlib.suppress(asyncio.CancelledError):
+                        # Retrieve failures without interrupting the remaining cleanup.
+                        await asyncio.gather(task, return_exceptions=True)
 
 
 if __name__ == "__main__":

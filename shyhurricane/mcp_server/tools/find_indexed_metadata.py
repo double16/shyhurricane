@@ -1,16 +1,16 @@
 import logging
-from typing import Optional, List, Any, Annotated, TypeAlias
+from typing import Annotated, Any, List, Optional, TypeAlias
 
-from mcp.server.fastmcp import Context
+from mcp.server.mcpserver import Context
 from mcp.types import ToolAnnotations
 from openai import BaseModel
 from pydantic import Field
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models as qm
 
-from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
-from shyhurricane.mcp_server import mcp_instance, log_tool_history, get_server_context
 from shyhurricane.db import scroll_qdrant_collection
+from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
+from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
 from shyhurricane.utils import query_to_netloc
 
 logger = logging.getLogger(__name__)
@@ -38,8 +38,8 @@ DomainQueryField: TypeAlias = Annotated[str,
 @mcp_instance.tool(
     annotations=ToolAnnotations(
         title="List Indexed Domains",
-        readOnlyHint=True,
-        openWorldHint=False),
+        read_only_hint=True,
+        open_world_hint=False),
 )
 async def find_domains(
         ctx: Context,
@@ -87,8 +87,8 @@ class FindHostsResult(BaseModel):
 @mcp_instance.tool(
     annotations=ToolAnnotations(
         title="List Indexed Hostnames",
-        readOnlyHint=True,
-        openWorldHint=False),
+        read_only_hint=True,
+        open_world_hint=False),
 )
 async def find_hosts(
         ctx: Context,
@@ -138,8 +138,8 @@ class FindNetworkLocationResult(BaseModel):
 @mcp_instance.tool(
     annotations=ToolAnnotations(
         title="List Indexed Network Locations (host:port)",
-        readOnlyHint=True,
-        openWorldHint=False),
+        read_only_hint=True,
+        open_world_hint=False),
 )
 async def find_netloc(
         ctx: Context,
@@ -188,8 +188,8 @@ class FindURLsResult(BaseModel):
 @mcp_instance.tool(
     annotations=ToolAnnotations(
         title="List Indexed URLs",
-        readOnlyHint=True,
-        openWorldHint=False),
+        read_only_hint=True,
+        open_world_hint=False),
 )
 async def find_urls(
         ctx: Context,

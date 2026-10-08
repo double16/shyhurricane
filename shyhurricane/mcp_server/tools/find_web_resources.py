@@ -3,31 +3,53 @@ import json
 import logging
 import queue
 import time
+from dataclasses import dataclass, field
 from multiprocessing import Queue
-from typing import List, Dict, Any, Optional, Annotated, Union
+from typing import Annotated, Any, Dict, List, Optional, Union
 
 from haystack import Document, Pipeline
-from mcp import Resource, McpError
-from mcp.server.elicitation import AcceptedElicitation, DeclinedElicitation, CancelledElicitation
-from mcp.server.fastmcp import Context
+from mcp import MCPError, Resource
+from mcp.server.elicitation import AcceptedElicitation, DeclinedElicitation, ElicitationResult
+from mcp.server.mcpserver import Context, Elicit, Resolve
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, Field, AnyUrl
+from mcp.types.version import MODERN_PROTOCOL_VERSIONS
+from pydantic import BaseModel, Field
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models as qm
 
+from shyhurricane.db import scroll_qdrant_collection
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
-from shyhurricane.mcp_server import get_server_context, mcp_instance, log_tool_history, assert_elicitation, \
-    ServerContext, get_additional_hosts, AdditionalHostsField, CookiesField, UserAgentField, RequestHeadersField, \
-    get_additional_http_headers
-from shyhurricane.server_config import get_server_config
+from shyhurricane.mcp_server import (
+    AdditionalHostsField,
+    CookiesField,
+    RequestHeadersField,
+    ServerContext,
+    UserAgentField,
+    assert_elicitation,
+    get_additional_hosts,
+    get_additional_http_headers,
+    get_server_context,
+    log_tool_history,
+    mcp_instance,
+)
+from shyhurricane.mcp_server.progress import progress_scope, report_progress
 from shyhurricane.mcp_server.tools.find_indexed_metadata import find_netloc
 from shyhurricane.rate_limit import get_rate_limit_requests_per_second
-from shyhurricane.db import scroll_qdrant_collection
-from shyhurricane.target_info import parse_target_info, TargetInfo
+from shyhurricane.server_config import get_server_config
+from shyhurricane.target_info import TargetInfo, parse_target_info
 from shyhurricane.task_queue import SpiderQueueItem
 from shyhurricane.task_queue.types import SpiderResultItem
-from shyhurricane.utils import HttpResource, urlparse_ext, documents_sort_unique, extract_domain, query_to_netloc, \
-    munge_urls, filter_hosts_and_addresses, coerce_to_list, coerce_to_dict
+from shyhurricane.utils import (
+    HttpResource,
+    coerce_to_dict,
+    coerce_to_list,
+    documents_sort_unique,
+    extract_domain,
+    filter_hosts_and_addresses,
+    munge_urls,
+    query_to_netloc,
+    urlparse_ext,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +74,8 @@ def _documents_to_http_resources(documents: List[Document]) -> List[HttpResource
                 name=doc.meta['url'],
                 title=doc.meta.get('title', None),
                 description=doc.meta.get('description', None),
-                uri=AnyUrl(f"web://{doc.meta['type']}/{doc.id}"),
-                mimeType=doc.meta.get('content_type', 'text/plain'),
+                uri=f"web://{doc.meta['type']}/{doc.id}",
+                mime_type=doc.meta.get('content_type', 'text/plain'),
                 size=len(doc.content),
             )
         else:
@@ -220,54 +242,47 @@ def find_web_resources_result(
     )
 
 
-@mcp_instance.tool(
-    annotations=ToolAnnotations(
-        title="Find Web Resources",
-        readOnlyHint=True,
-        openWorldHint=False),
-)
-async def find_web_resources(
-        ctx: Context,
-        query: str,
-        limit: Annotated[int, Field(100, description="Limit how many results are returned", ge=10, le=1000)] = 100,
-        http_methods: Annotated[
-            Optional[Union[List[str], str]],
-            Field(description="Limit results to requests made with the listed HTTP methods. If not specified all methods will be considered.")
-        ] = None,
-) -> FindWebResourcesResult:
-    """Query indexed resources about a website using natural language and return the URL, request and response bodies,
-    request and response headers, HTTP method, MIME type, HTTP status code, technologies found. This tool will
-    search using several parameters including response body matching, URL matching, MIME type matching of the response,
-    and HTTP response body matching.
+class SpiderConfirmation(BaseModel):
+    confirm: bool = Field(description="Confirm spider?", default=False)
 
-    Invoke this tool when the user asks about vulnerabilities,
-    misconfigurations or exploit techniques **specific to a target website**
-    (e.g. XSS, CSP issues, IDOR paths, outdated JS libs). Including the user's query will improve
-    the results.
 
-    Invoke this tool when the user asks for summary information about a website, such as technology in use, and type of responses.
+@dataclass
+class SearchPreparation:
+    query: str
+    limit: int
+    http_methods: Optional[List[str]]
+    server_ctx: ServerContext
+    doc_types: list[str] = field(default_factory=list)
+    targets: list[str] = field(default_factory=list)
+    response_codes: list[int] = field(default_factory=list)
+    filter_netloc: list[str] = field(default_factory=list)
+    filter_domain: set[str] = field(default_factory=set)
+    missing_targets: list[TargetInfo] = field(default_factory=list)
 
-    Do NOT use it for generic cyber-security theory.
 
-    If there is content available for the results, there will be a resource_link object containing
-    a URI. The URI can use the fetch_web_resource_content tool to get the content.
+async def _determine_targets(ctx: Context, search: SearchPreparation, target_query: str):
+    await report_progress(ctx, "Determining target(s)")
+    result = search.server_ctx.website_context_pipeline.run({"builder": {"query": target_query}})
+    reply = result.get("llm", {}).get("replies", [""])[0]
+    if reply:
+        try:
+            data = json.loads(reply)
+            search.targets.extend(data.get("target", []))
+            search.doc_types.extend(data.get("content", []))
+            search.response_codes.extend(data.get("response_codes", []))
+        except json.JSONDecodeError:
+            pass
 
-    Example queries (replace http://target.local with your target URL(s)):
-        1. Find pages with HTML forms on http://target.local
-        2. Find Javascript libraries on http://target.local
-        3. What pages on http://target.local have potential XSS vulnerabilities?
-        4. Find Javascript with eval() calls on http://target.local
-        5. Find URLs with possible IDOR vulnerabilities on http://target.local
-        6. http://target.local/
-        7. http://target.local/account/dashboard?page=account
 
-    A target URL or hostname is required. Always include your target URLs. http://target.local is only an example, do not use it as a URL.
-    """
-
+async def _prepare_search(
+    ctx: Context,
+    query: str,
+    limit: int,
+    http_methods: Optional[Union[List[str], str]],
+) -> Union[SearchPreparation, FindWebResourcesResult]:
     # coerce types
     http_methods = coerce_to_list(http_methods)
 
-    await log_tool_history(ctx, "find_web_resources", query=query, limit=limit)
     server_ctx = await get_server_context()
     query = query.strip()
     limit = min(1000, max(10, limit or 100))
@@ -276,15 +291,17 @@ async def find_web_resources(
     if resources_by_url := await _find_web_resources_by_url(ctx, query, limit):
         return find_web_resources_result(results=resources_by_url, query=query, http_methods=http_methods, limit=limit)
     if resources_by_netloc := await _find_web_resources_by_netloc(ctx, query, limit):
-        return find_web_resources_result(results=resources_by_netloc, query=query, http_methods=http_methods,
-                                         limit=limit)
+        return find_web_resources_result(
+            results=resources_by_netloc, query=query, http_methods=http_methods, limit=limit
+        )
     if resources_by_hostname := await _find_web_resources_by_hostname(ctx, query, limit):
-        return find_web_resources_result(results=resources_by_hostname, query=query, http_methods=http_methods,
-                                         limit=limit)
+        return find_web_resources_result(
+            results=resources_by_hostname, query=query, http_methods=http_methods, limit=limit
+        )
 
     low_power = getattr(server_ctx, "low_power", None)
     if low_power is None:
-        low_power = getattr(get_server_config(), "low_power", False)
+        low_power = get_server_config().low_power
 
     if low_power:
         logger.warning("low_power: embedding based-retrieval disabled")
@@ -299,8 +316,8 @@ async def find_web_resources(
     if hasattr(server_ctx, "ensure_retrieval_pipelines"):
         await server_ctx.ensure_retrieval_pipelines()
 
-    document_pipeline: Optional[Pipeline] = getattr(server_ctx, "document_pipeline", None)
-    website_context_pipeline: Optional[Pipeline] = getattr(server_ctx, "website_context_pipeline", None)
+    document_pipeline: Optional[Pipeline] = server_ctx.document_pipeline
+    website_context_pipeline: Optional[Pipeline] = server_ctx.website_context_pipeline
 
     if website_context_pipeline is None or document_pipeline is None:
         logger.warning("low_power: embedding based-retrieval disabled")
@@ -312,54 +329,54 @@ async def find_web_resources(
             resources=[],
         )
 
-    doc_types: list[str] = []
-    targets: list[str] = []
-    methods: list[str] = http_methods or []
-    response_codes: list[str] = []
+    search = SearchPreparation(query, limit, http_methods, server_ctx)
+    await _determine_targets(ctx, search, query)
+    if not search.targets:
+        search.targets.extend(await _find_recommended_urls(ctx) or [])
+    return search
 
-    async def determine_targets(target_query: str):
-        await ctx.info("Determining target(s)")
-        target_result = \
-            website_context_pipeline.run({'builder': {'query': target_query}}).get('llm', {}).get('replies', [""])[0]
-        if target_result:
-            logger.info("Target result: %s", repr(target_result))
-            try:
-                target_json = json.loads(target_result)
-                targets.extend(target_json.get('target', []))
-                doc_types.extend(target_json.get('content', []))
-                # methods.extend(target_json.get('methods', [])) # may be too limiting, or maybe ignore for certain doc types
-                response_codes.extend(target_json.get('response_codes', []))
-            except json.decoder.JSONDecodeError:
-                pass
 
-    await determine_targets(query)
+def _can_elicit(ctx: Context, server_ctx: ServerContext) -> bool:
+    if server_ctx.disable_elicitation:
+        return False
+    if ctx.protocol_version not in MODERN_PROTOCOL_VERSIONS and not ctx.session.can_send_request:
+        return False
+    capabilities = ctx.session.client_capabilities
+    return (
+        capabilities is not None
+        and capabilities.elicitation is not None
+        and (capabilities.elicitation.form is not None)
+    )
 
-    if not targets:
-        if recommended_urls := await _find_recommended_urls(ctx):
-            targets.extend(recommended_urls)
 
-    if not targets:
-        try:
-            logger.info("Asking user for URL(s)")
-            assert_elicitation(server_ctx)
-            target_elicit_result = await ctx.elicit(
-                message="What URL(s) should we look for?", schema=RequestTargetUrl
-            )
-            match target_elicit_result:
-                case AcceptedElicitation(data=data):
-                    if data.data:
-                        logger.info("User provided answer for URL request")
-                        await determine_targets(data.data)
-        except McpError:
-            logger.info("elicit not supported, returning")
-        if not targets:
-            return FindWebResourcesResult(
-                instructions=find_web_resources_instructions_need_target,
-                query=query,
-                http_methods=http_methods,
-                limit=limit,
-            )
+async def _request_target(
+    ctx: Context,
+    search: Annotated[Union[SearchPreparation, FindWebResourcesResult], Resolve(_prepare_search)],
+) -> Union[RequestTargetUrl, Elicit[RequestTargetUrl]]:
+    if isinstance(search, FindWebResourcesResult) or search.targets:
+        return RequestTargetUrl()
+    if not _can_elicit(ctx, search.server_ctx):
+        return RequestTargetUrl()
+    return Elicit("What URL(s) should we look for?", RequestTargetUrl)
 
+
+async def _prepare_targets(
+    ctx: Context,
+    search: Annotated[Union[SearchPreparation, FindWebResourcesResult], Resolve(_prepare_search)],
+    target_answer: Annotated[ElicitationResult[RequestTargetUrl], Resolve(_request_target)],
+) -> Union[SearchPreparation, FindWebResourcesResult]:
+    if isinstance(search, FindWebResourcesResult):
+        return search
+    if not search.targets and isinstance(target_answer, AcceptedElicitation) and target_answer.data.data:
+        await _determine_targets(ctx, search, target_answer.data.data)
+    if not search.targets:
+        return FindWebResourcesResult(
+            instructions=find_web_resources_instructions_need_target,
+            query=search.query,
+            http_methods=search.http_methods,
+            limit=search.limit,
+        )
+    targets = search.targets
     parsed_targets: List[TargetInfo] = []
     for target in targets:
         try:
@@ -394,44 +411,52 @@ async def find_web_resources(
         for target in parsed_targets:
             if target.netloc in missing_netloc:
                 missing_targets.append(target)
-    if missing_targets:
-        missing_targets_str = ", ".join(map(str, missing_targets))
+    search.filter_netloc = filter_netloc
+    search.filter_domain = filter_domain
+    search.missing_targets = missing_targets
+    return search
 
-        if not server_ctx.open_world:
+
+async def _request_scan(
+    ctx: Context,
+    search: Annotated[Union[SearchPreparation, FindWebResourcesResult], Resolve(_prepare_targets)],
+) -> Union[SpiderConfirmation, Elicit[SpiderConfirmation]]:
+    if isinstance(search, FindWebResourcesResult) or not search.missing_targets or not search.server_ctx.open_world:
+        return SpiderConfirmation(confirm=False)
+    if not _can_elicit(ctx, search.server_ctx):
+        return SpiderConfirmation(confirm=False)
+    targets = ", ".join(map(str, search.missing_targets))
+    return Elicit(f"There is no data for {targets}. Would you like to start a scan?", SpiderConfirmation)
+
+
+async def _execute_search(
+    ctx: Context,
+    search: Union[SearchPreparation, FindWebResourcesResult],
+    scan_answer: ElicitationResult[SpiderConfirmation],
+) -> FindWebResourcesResult:
+    if isinstance(search, FindWebResourcesResult):
+        return search
+    query, limit, http_methods = search.query, search.limit, search.http_methods
+    await log_tool_history(ctx, "find_web_resources", query=query, limit=limit)
+    if search.missing_targets:
+        if (
+            not search.server_ctx.open_world
+            or not isinstance(scan_answer, AcceptedElicitation)
+            or not scan_answer.data.confirm
+        ):
             return FindWebResourcesResult(
                 instructions=find_web_resources_instructions_not_found,
                 query=query,
                 http_methods=http_methods,
                 limit=limit,
             )
-
-        logger.info(f"Asking user to spider {missing_targets_str}")
-        try:
-            assert_elicitation(server_ctx)
-            spider_elicit_result = await ctx.elicit(
-                message=f"There is no data for {missing_targets_str}. Would you like to start a scan?",
-                schema=RequestTargetUrl
-            )
-            match spider_elicit_result:
-                case AcceptedElicitation():
-                    for target in missing_targets:
-                        await spider_website(ctx, target.to_url())
-                case DeclinedElicitation(), CancelledElicitation():
-                    return FindWebResourcesResult(
-                        instructions=find_web_resources_instructions_not_found,
-                        query=query,
-                        http_methods=http_methods,
-                        limit=limit,
-                    )
-        except McpError:
-            await ctx.info(f"Spidering {missing_targets_str}")
-            logger.warning("elicit not supported, starting spider")
-            for target in missing_targets:
-                await spider_website(ctx, target.to_url())
-
-    conditions = [
-        {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION}
-    ]
+        for target in search.missing_targets:
+            await spider_website(ctx, target.to_url())
+    filter_netloc, filter_domain = search.filter_netloc, search.filter_domain
+    methods, response_codes, doc_types = http_methods or [], search.response_codes, search.doc_types
+    targets = search.targets
+    document_pipeline = search.server_ctx.document_pipeline
+    conditions = [{"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION}]
     if filter_netloc:
         _append_in_filter(conditions, "meta.netloc", filter_netloc)
     elif filter_domain:
@@ -450,34 +475,121 @@ async def find_web_resources(
         }
 
     logger.info(f"Searching for {', '.join(targets)} with filter {repr(filters)}")
-    await ctx.info(f"Searching for {', '.join(targets)}")
+    await report_progress(ctx, f"Searching for {', '.join(targets)}")
 
     loop = asyncio.get_running_loop()
 
     def progress_callback(message: str):
         try:
-            asyncio.run_coroutine_threadsafe(ctx.info(message), loop).result()
+            asyncio.run_coroutine_threadsafe(report_progress(ctx, message), loop).result()
         except Exception as e:
             logger.warning(f"Error reporting progress: {e}")
 
     async with asyncio.timeout(300):
-        res = await asyncio.to_thread(document_pipeline.run,
-                                      data={"query": {"text": query, "filters": filters, "max_results": limit,
-                                                      "targets": filter_netloc + list(filter_domain),
-                                                      "doc_types": doc_types,
-                                                      "progress_callback": progress_callback}},
-                                      include_outputs_from={"combine"})
+        res = await asyncio.to_thread(
+            document_pipeline.run,
+            data={
+                "query": {
+                    "text": query,
+                    "filters": filters,
+                    "max_results": limit,
+                    "targets": filter_netloc + list(filter_domain),
+                    "doc_types": doc_types,
+                    "progress_callback": progress_callback,
+                }
+            },
+            include_outputs_from={"combine"},
+        )
 
     documents = documents_sort_unique(res.get("combine", {}).get("documents", []), limit)
 
     logger.info(f"Found {len(documents)} documents")
 
-    return find_web_resources_result(results=_documents_to_http_resources(documents), query=query,
-                                     http_methods=http_methods, limit=limit)
+    return find_web_resources_result(
+        results=_documents_to_http_resources(documents), query=query, http_methods=http_methods, limit=limit
+    )
 
 
-class SpiderConfirmation(BaseModel):
-    confirm: bool = Field(description="Confirm spider?", default=True)
+@progress_scope()
+async def find_web_resources(
+    ctx: Context,
+    query: str,
+    limit: int = 100,
+    http_methods: Optional[Union[List[str], str]] = None,
+) -> FindWebResourcesResult:
+    """Run indexed retrieval directly inside another tool's existing request."""
+    search = await _prepare_search(ctx, query, limit, http_methods)
+    if isinstance(search, FindWebResourcesResult):
+        return search
+    answer = AcceptedElicitation(data=RequestTargetUrl())
+    if not search.targets:
+        try:
+            assert_elicitation(search.server_ctx)
+            answer = await ctx.elicit("What URL(s) should we look for?", RequestTargetUrl)
+        except MCPError:
+            answer = DeclinedElicitation()
+    search = await _prepare_targets(ctx, search, answer)
+    scan_answer = DeclinedElicitation()
+    if isinstance(search, SearchPreparation) and search.missing_targets and search.server_ctx.open_world:
+        try:
+            assert_elicitation(search.server_ctx)
+            targets = ", ".join(map(str, search.missing_targets))
+            scan_answer = await ctx.elicit(
+                f"There is no data for {targets}. Would you like to start a scan?",
+                SpiderConfirmation,
+            )
+        except MCPError:
+            pass
+    return await _execute_search(ctx, search, scan_answer)
+
+
+@mcp_instance.tool(
+    name="find_web_resources",
+    annotations=ToolAnnotations(title="Find Web Resources", read_only_hint=True, open_world_hint=False),
+)
+async def find_web_resources_tool(
+    ctx: Context,
+    query: str,
+    search: Annotated[Union[SearchPreparation, FindWebResourcesResult], Resolve(_prepare_targets)],
+    scan_answer: Annotated[ElicitationResult[SpiderConfirmation], Resolve(_request_scan)],
+    limit: Annotated[int, Field(100, description="Limit how many results are returned", ge=10, le=1000)] = 100,
+    http_methods: Annotated[
+        Optional[Union[List[str], str]],
+        Field(
+            description="Limit results to requests made with the listed HTTP methods. If not specified all methods will be considered."
+        ),
+    ] = None,
+) -> FindWebResourcesResult:
+    """Query indexed resources about a website using natural language and return the URL, request and response bodies,
+    request and response headers, HTTP method, MIME type, HTTP status code, technologies found. This tool will
+    search using several parameters including response body matching, URL matching, MIME type matching of the response,
+    and HTTP response body matching.
+
+    Invoke this tool when the user asks about vulnerabilities,
+    misconfigurations or exploit techniques **specific to a target website**
+    (e.g. XSS, CSP issues, IDOR paths, outdated JS libs). Including the user's query will improve
+    the results.
+
+    Invoke this tool when the user asks for summary information about a website, such as technology in use, and type of responses.
+
+    Do NOT use it for generic cyber-security theory.
+
+    If there is content available for the results, there will be a resource_link object containing
+    a URI. The URI can use the fetch_web_resource_content tool to get the content.
+
+    Example queries (replace http://target.local with your target URL(s)):
+        1. Find pages with HTML forms on http://target.local
+        2. Find Javascript libraries on http://target.local
+        3. What pages on http://target.local have potential XSS vulnerabilities?
+        4. Find Javascript with eval() calls on http://target.local
+        5. Find URLs with possible IDOR vulnerabilities on http://target.local
+        6. http://target.local/
+        7. http://target.local/account/dashboard?page=account
+
+    A target URL or hostname is required. Always include your target URLs. http://target.local is only an example, do not use it as a URL.
+    """
+
+    return await _execute_search(ctx, search, scan_answer)
 
 
 spider_results_instructions_found = "These resources were found by navigating a web server using links in the returned content."
@@ -553,11 +665,12 @@ async def is_spider_time_recent(server_ctx: ServerContext, url: str) -> Optional
 @mcp_instance.tool(
     annotations=ToolAnnotations(
         title="Spider Website",
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=True),
+        read_only_hint=False,
+        destructive_hint=False,
+        idempotent_hint=False,
+        open_world_hint=True),
 )
+@progress_scope()
 async def spider_website(
         ctx: Context,
         url: str,
@@ -644,7 +757,7 @@ async def spider_website(
             break
         logger.debug(f"{http_resource} has been retrieved")
         results.append(http_resource)
-        await ctx.info(f"Found: {http_resource.url}")
+        await report_progress(ctx, f"Found: {http_resource.url}")
 
     logger.info(f"spider_website for {url} returned {len(results)} results, has_more={has_more}")
     return SpiderResults(

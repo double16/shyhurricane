@@ -49,8 +49,8 @@ services:
       DOCKER_HOST: "tcp://dind:2375"
       QDRANT: "db:6333"
       TOOL_CACHE: "/tool_cache"
-      # no model seems to support this yet
-      DISABLE_ELICITATION: "True"
+      MCP_TRANSPORT: "${MCP_TRANSPORT:-streamable-http}"
+      DISABLE_ELICITATION: "${DISABLE_ELICITATION:-True}"
       OLLAMA_MODEL: "${OLLAMA_MODEL}"
       OLLAMA_HOST: "${OLLAMA_HOST:-ollama:11434}"
       GEMINI_API_KEY: "${GEMINI_API_KEY}"

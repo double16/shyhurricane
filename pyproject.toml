@@ -15,7 +15,7 @@ requires-python = ">=3.12"
 # see requirements.txt
 dependencies = [
     "haystack-ai>=2.31,<3.4",
-    "qdrant-haystack~=10.6.0",
+    "qdrant-haystack>=10.6,<11.2",
     "fastembed-haystack~=2.7.0",
     "numpy>=2.3.0",
     "ollama-haystack~=6.8.0",
@@ -24,7 +24,7 @@ dependencies = [
     "google-genai-haystack>=4.5,<4.9",
     "haystack-experimental~=0.19.0",
     "sentence-transformers~=5.7.0",
-    "mcp[cli]~=1.28.0",
+    "mcp[cli]~=2.2.0",
     "httpx~=0.28.1",
     "tldextract~=5.3.0",
     "validators~=0.35.0",
@@ -47,7 +47,7 @@ dependencies = [
     "cachetools>=7.1.7,<7.3.0",
     "pydantic",
     "litellm-haystack>=1.2.0",
-    "textual~=7.3.0",
+    "textual>=7.3,<8.3",
 ]
 
 [project.optional-dependencies]

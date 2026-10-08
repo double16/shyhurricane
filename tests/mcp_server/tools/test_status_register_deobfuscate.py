@@ -1,4 +1,5 @@
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -44,7 +45,7 @@ async def get_status_server_context():
 @pytest.mark.asyncio
 async def test_status_aggregates_counts_and_metadata(monkeypatch):
     monkeypatch.setattr(status_tool, "get_server_context", get_status_server_context)
-    monkeypatch.setattr(status_tool, "get_doc_type_queue", lambda db: Queue(5))
+    monkeypatch.setattr(status_tool, "persistent_queue_sizes", AsyncMock(return_value=(4, 5)))
 
     async def domain_and_host_counts(*args, **kwargs):
         return {"example.com": 2}, {"www.example.com": 1, "api.example.com": 2}
@@ -74,7 +75,7 @@ async def test_status_includes_proxy_ca_certificate(monkeypatch, tmp_path):
         return CertServerContext()
 
     monkeypatch.setattr(status_tool, "get_server_context", get_cert_context)
-    monkeypatch.setattr(status_tool, "get_doc_type_queue", lambda db: Queue(0))
+    monkeypatch.setattr(status_tool, "persistent_queue_sizes", AsyncMock(return_value=(4, 0)))
 
     async def empty_domain_and_host_counts(*args):
         return {}, {}

@@ -9,7 +9,7 @@ LLMs:
 2. Models will also enumerate websites with many curl commands. The server saves and indexes responses to return data without contacting the website repeatedly. Large sites, common with bug bounty programs, are not efficiently enumerated with individual curl commands. 
 3. Port scans may take a long time causing the LLM to assume the scan has failed and issue a repeated scan. The port_scan tool provided by the server addresses this.
 
-An important feature of the server is the indexing of website content using embedding models. The `find_web_resources` tool uses LLM prompts to find vulnerabilities specific to content type: html, javascript, css, xml, HTTP headers. The content is indexed when found by the tools. Content may also be indexed by feeding external data into the `/index` endpoint. Formats supported are `katana jsonl`, `hal json` and Burp Suite Logger++ CSV. Extensions exist for Burp Suite, ZAP, Firefox and Chrome to send requests to the server as the site is browsed.
+An important feature of the server is the indexing of website content using embedding models. The `find_web_resources` tool uses LLM prompts to find vulnerabilities specific to content type: html, javascript, css, xml, HTTP headers. The content is indexed when found by the tools. Content may also be indexed by feeding external data into the `/index` endpoint. Formats supported are `katana jsonl`, `hal json` and Burp Suite Logger++ CSV. The `ingest.py` script also converts Burp Suite request/response XML exports for indexing. Extensions exist for Burp Suite, ZAP, Firefox and Chrome to send requests to the server as the site is browsed.
 
 ## Tools
 
@@ -85,6 +85,50 @@ docker compose -f docker-compose.dev.yml up -d
 
 Add the MCP server to your client of choice at http://127.0.0.1:8000/mcp.
 
+### MCP transports and elicitation
+
+The server uses MCP Python SDK 2.2. Choose the transport with `--transport` or `MCP_TRANSPORT`.
+An explicit command-line argument overrides the environment setting.
+
+| Setting | Default | Description |
+| --- | --- | --- |
+| `MCP_TRANSPORT` | `streamable-http` | `streamable-http`, `sse`, or `streamable-http-modern` |
+| `DISABLE_ELICITATION` | `True` in Compose; enabled when unset in source runs | Set `False` to allow the client to ask for a target or scan confirmation |
+
+| Transport | Endpoint | Client state |
+| --- | --- | --- |
+| `streamable-http` | `/mcp` | Legacy client sessions retain registered headers, hostname mappings, and working directories |
+| `sse` | `/sse` | Legacy SSE connections retain client state |
+| `streamable-http-modern` | `/mcp` | Stateless preset; every tool call starts with fresh client state |
+
+Both HTTP presets accept legacy and modern protocol requests; the client's protocol version selects the workflow.
+Modern clients use the 2026-07-28 protocol and have request-local state under either HTTP preset. Persistent
+registration tools are unavailable to those clients. Supply `request_headers` and `additional_hosts` to each operation
+that needs them. Working files are removed when the modern call finishes; legacy files last until the session closes.
+
+Start the stateless preset from source:
+
+```shell
+UV_CACHE_DIR="$PWD/.uv-cache" uv run python mcp_service.py --transport streamable-http-modern
+```
+
+For Docker Compose, set `MCP_TRANSPORT=streamable-http-modern` in `.env` and restart the service. Use `.env.example`
+as an example of transport and model settings.
+
+Clients that support elicitation can supply missing target information and confirm scans. Legacy clients use a
+callback; modern clients answer the SDK's multi-round input requests. If elicitation is disabled, unsupported,
+declined, or cancelled, retrieval returns guidance without automatically starting a scan. Explicit scan tools
+remain available when open-world access is enabled.
+
+Search, spidering, and directory busting send status messages through MCP progress notifications.
+Clients must request progress updates to receive these messages; server logging remains available.
+Progress values count status events and do not estimate the total work.
+
+Modern continuation tokens expire after ten minutes between rounds and are protected with a process-local key.
+An interaction interrupted by a server restart must start again. Run one server process; legacy sessions require
+requests to reach the process that created them. Streamable HTTP MCP request bodies have the SDK's 4 MiB limit;
+the separate `/index` ingestion endpoint is unaffected.
+
 ### Run From Source
 
 #### Python Environment
@@ -123,8 +167,12 @@ docker build -t ghcr.io/double16/shyhurricane_unix_command:main src/docker/unix_
 #### MCP Server
 
 When started from an interactive terminal, the server displays a `shyhurricane` monitoring dashboard with
-configuration, queue, database, indexing, and running MCP tool information. Press `q` to stop the
-dashboard and shut down the server. Non-interactive starts, including Docker Compose, continue to use normal logging output.
+configuration, queue, database, indexing, and running MCP tool information. It refreshes immediately
+on startup and every 30 seconds afterward. Press `r` to refresh immediately. Press `q` to stop the
+dashboard and shut down the server. Shutdown stops claiming new work and allows current operations
+up to five minutes to finish before terminating remaining workers. Pending persistent queue items
+remain available for the next startup. SIGINT and SIGTERM use the same shutdown behavior.
+Non-interactive starts, including Docker Compose, continue to use normal logging output.
 
 Ollama with `llama3.2:3b`:
 ```shell
@@ -189,11 +237,44 @@ uses the cached snapshot if an update fails.
 
 Indexing workers monitor Qdrant and LLM readiness. If either dependency is unhealthy, `/index` requests continue to be accepted into the persistent queue, but ingest and type-specific indexing pause before consuming new items. Workers resume automatically after both health checks recover; MCP tools retain their existing request and error behavior.
 
+Queue status counts use a covering SQLite index. Existing ingest, document-type, and scan-finding
+queues gain this index automatically during startup, before workers and HTTP serving begin. The first
+startup after upgrading scans each database to build the index and may take longer; logs report index
+creation and elapsed time. Queue records are preserved.
+New indexes include only `status`; SQLite implicitly includes the row ID, which aliases `_id`.
+Existing `ack_queue_status_id` indexes on `(status, _id)` remain unchanged.
+
+New and updated ingest, document-type, and scan-finding queue payloads use this storage format:
+`object → pickle bytes → zlib compression (level 1) → marker + compressed bytes → base64`.
+After base64 decoding, the versioned marker `b"SHQ\x01ZLIB\x00"` identifies compressed data;
+only marked payloads are decompressed before unpickling. Existing raw pickle and uncompressed
+base64 records remain readable and are compressed only when updated. Compression requires no
+additional dependencies or configuration. Older application versions cannot read compressed records.
+
+Dashboard and `/status` queue counts run in background threads using read-only connections. These reads
+do not resume items already being processed. HTTP ingestion uses a dedicated writer thread and awaits
+one durable commit per item, so queue reads and writes do not block the HTTP event loop. `/index`
+returns HTTP 201 after all submitted items commit. If a later item fails or the request is cancelled,
+items already committed remain queued; retrying the request can enqueue them again. Shutdown rejects
+new writes and drains submitted writes within the existing five-minute shutdown deadline.
+
+At server startup, ingest, document-type, and scan-finding queues discard all successfully acknowledged records
+without vacuuming. Runtime cleanup retains the latest 200 successful acknowledgements by queue insertion
+order and removes the entire older history without a fixed deletion limit. Cleanup runs after 1,000 processed
+items (100 for document-type indexing) or on a 10-minute maintenance interval while consumers are running.
+Failed acknowledgements, pending items, and items being processed are retained.
+Runtime maintenance vacuums when SQLite reports at least 64 MiB of free pages and those pages represent
+at least 25% of the database, or when free pages exceed 1 GiB regardless of the ratio.
+These thresholds exclude WAL file size and include space freed by earlier cleanup,
+including startup cleanup. Until vacuum runs, free pages remain available for new queue entries. Vacuum can run
+while work is pending and may pause processing; its logs report reclaimable space and completion time.
+
 ```shell
 curl -X POST -H "Content-Type: application/json" http://127.0.0.1:8000/index @katana.json
 ```
 
-The `ingest.py` script makes using this endpoint more convenient. It isn't complicated to use directly. The supported data formats are inferred. Katana JSON is the preferred format.
+The `ingest.py` script makes using this endpoint more convenient. Select its input format with `--katana`, `--csv`, or
+`--burp-xml`. The `/index` endpoint infers its supported data formats. Katana JSON is the preferred format.
 
 ### katana
 
@@ -220,6 +301,19 @@ cat LoggerPlusPlus.csv | python3 ingest.py --mcp-url http://127.0.0.1:8000/ --cs
 # live ingestion using the auto-export feature of Logger++:
 tail -f LoggerPlusPlus.csv | python3 ingest.py --mcp-url http://127.0.0.1:8000/ --csv
 ```
+
+### Burp Suite request/response XML
+
+Export requests and responses as XML from Burp Suite, then ingest the complete export:
+
+```shell
+python3 ingest.py --mcp-url http://127.0.0.1:8000/ --burp-xml < export.xml
+```
+
+Both base64 and plain-text HTTP messages are supported. Each valid exchange is converted to Katana JSON and sent
+to `/index`. Invalid or incomplete items are reported to stderr and skipped. Malformed XML stops ingestion with a
+nonzero exit status; exchanges already queued remain queued. XML ingestion requires a complete export rather than
+a continuously appended stream. XML exports must be converted through `ingest.py` before submission to `/index`.
 
 ### Extensions
 

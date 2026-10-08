@@ -1,26 +1,21 @@
-import asyncio
 import ipaddress
 import json
 import logging
 import os
-import uuid
-from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import Dict, AsyncIterator, Any, Annotated, Optional, TypeAlias, Union
+from typing import Annotated, Any, Dict, Optional, TypeAlias, Union
 
 import aiofiles
 import validators
-from mcp import McpError, ErrorData
-from mcp.server import FastMCP
-from mcp.server.fastmcp import Context
-from mcp.server.transport_security import TransportSecuritySettings
+from mcp import MCPError
+from mcp.server import MCPServer
+from mcp.server.mcpserver import Context
 from mcp.types import INVALID_REQUEST, Tool
-from pydantic import ValidationError, Field
+from pydantic import Field, ValidationError
 
-from shyhurricane.mcp_server.app_context import AppContext
-from shyhurricane.server_config import get_server_config
-from shyhurricane.mcp_server.server_context import get_server_context, ServerContext
-from shyhurricane.utils import unix_command_image
+from shyhurricane.mcp_server.server_context import ServerContext
+from shyhurricane.mcp_server.server_context import get_server_context as get_server_context
+from shyhurricane.mcp_server.session_state import app_lifespan, client_state_middleware
 
 logger = logging.getLogger(__name__)
 
@@ -66,58 +61,12 @@ RequestParamsField: TypeAlias = Annotated[
     Field(description="name, value pairs for GET or POST parameters")
 ]
 
-@asynccontextmanager
-async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
-    """Manage application lifecycle (per session) with type-safe context"""
-    _server_config = get_server_config()
-    server_ctx = await get_server_context()
-    cache_path = server_ctx.cache_path
-
-    app_context_id = uuid.uuid4().hex
-
-    work_path = f"/work/{app_context_id}"
-    proc = await asyncio.create_subprocess_exec(
-        "docker", "run", "--rm",
-        "-v", f"{server_ctx.mcp_session_volume}:/work",
-        unix_command_image(),
-        # we're going to keep /tmp and /var/tmp in the volume because LLMs keep storing stuff there
-        "mkdir", "-p", work_path, work_path + "/.private/tmp",
-        work_path + "/.private/var/tmp",
-        stdout=asyncio.subprocess.DEVNULL,
-        stderr=asyncio.subprocess.DEVNULL,
-        )
-    return_code = await proc.wait()
-    if return_code != 0:
-        logger.error("Failed to create MCP session work dir %s", work_path)
-        work_path = "/var/tmp"
-
-    app_context = AppContext(
-        cache_path=cache_path,
-        app_context_id=app_context_id,
-        work_path=work_path,
-        cached_get_additional_hosts={},
-        http_headers={},
-    )
-
-    try:
-        yield app_context
-    finally:
-        # clean up work path
-        await asyncio.create_subprocess_exec(
-            "docker", "run", "--rm",
-            "-v", f"{server_ctx.mcp_session_volume}:/work",
-            unix_command_image(),
-            "rm", "-rf", work_path,
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-            )
-
-
-class ShyHurricaneFastMCP(FastMCP):
+class ShyHurricaneMCPServer(MCPServer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.open_world = True
         self.running_tools: set[str] = set()
+        self._running_tool_counts: dict[str, int] = {}
 
     async def list_tools(self) -> list[Tool]:
         logger.info("Listing tools")
@@ -129,19 +78,25 @@ class ShyHurricaneFastMCP(FastMCP):
                 if tool.annotations is None:
                     return True
                 if not self.open_world:
-                    if tool.annotations.openWorldHint:
+                    if tool.annotations.open_world_hint:
                         return False
                 return True
 
             tools = list(filter(tool_filter, tools))
         return tools
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]):
+    async def call_tool(self, name: str, arguments: dict[str, Any], context: Context | None = None):
         self.running_tools.add(name)
+        self._running_tool_counts[name] = self._running_tool_counts.get(name, 0) + 1
         try:
-            return await super().call_tool(name, arguments)
+            return await super().call_tool(name, arguments, context)
         finally:
-            self.running_tools.discard(name)
+            remaining = self._running_tool_counts[name] - 1
+            if remaining:
+                self._running_tool_counts[name] = remaining
+            else:
+                del self._running_tool_counts[name]
+                self.running_tools.discard(name)
 
 
 mcp_server_instructions = """
@@ -168,31 +123,17 @@ This server assists penetration testers, red team operators and security auditor
 """
 
 
-mcp_instance = ShyHurricaneFastMCP(
+mcp_instance = ShyHurricaneMCPServer(
     "shyhurricane",
     lifespan=app_lifespan,
     instructions=mcp_server_instructions,
-    transport_security=TransportSecuritySettings(
-        enable_dns_rebinding_protection=False,
-    )
-    # transport_security=TransportSecuritySettings(
-    #     enable_dns_rebinding_protection=True,
-    #     # allow localhost + your LAN IP on any port
-    #     allowed_hosts=[
-    #         "localhost:*",
-    #         "127.0.0.1:*",
-    #         "192.168.1.225:*",
-    #     ],
-    #     # optional: allowed_origins if you’re calling from a browser;
-    #     # for non-browser agents you can usually leave this empty.
-    #     allowed_origins=[],
-    # ),
+    middleware=[client_state_middleware],
 )
 
 
 def assert_elicitation(ctx: ServerContext):
     if ctx.disable_elicitation:
-        raise McpError(ErrorData(code=INVALID_REQUEST, message="elicitation disabled"))
+        raise MCPError(INVALID_REQUEST, "elicitation disabled")
 
 
 async def log_history(ctx: Context, data: Dict[str, Any]):
