@@ -6,28 +6,42 @@ import subprocess
 import sys
 from dataclasses import replace
 from math import floor
-from typing import List, Optional, Dict, Set
+from typing import Dict, List, Optional, Set
 
 from bs4 import SoupStrainer
 from cachetools import LRUCache
-from haystack import component, Document, Pipeline
+from haystack import Document, Pipeline, component
 from haystack.components.joiners import ListJoiner
-from haystack.components.preprocessors import DocumentSplitter, DocumentCleaner
+from haystack.components.preprocessors import DocumentCleaner, DocumentSplitter
 from haystack.components.routers import ConditionalRouter
 from haystack.core.component import Component
 from haystack.document_stores.types import DuplicatePolicy
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 
 from shyhurricane.clean_css import normalize_css
-from shyhurricane.cleaners import normalize_html, normalize_xml, normalize_json
-from shyhurricane.doc_type_model_map import map_mime_to_type, doc_type_to_model, \
-    get_qdrant_collection_name_by_doc_type_token_length, SPARSE_EMBEDDING_MODEL
+from shyhurricane.cleaners import normalize_html, normalize_json, normalize_xml
+from shyhurricane.db import create_qdrant_document_store
+from shyhurricane.doc_type_model_map import (
+    SPARSE_EMBEDDING_MODEL,
+    doc_type_to_model,
+    get_qdrant_collection_name_by_doc_type_token_length,
+    map_mime_to_type,
+)
 from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import GeneratorConfig
-from shyhurricane.index.input_documents import HarDocument, HttpRawDocument, KatanaDocument, IngestableRequestResponse
-from shyhurricane.db import create_qdrant_document_store
-from shyhurricane.utils import urlparse_ext, BeautifulSoupExtractor, extract_domain, \
-    parse_to_iso8601, remove_unencodable, is_katana_jsonl, is_har_json, is_http_raw, unix_command_image, batch_iterable
+from shyhurricane.index.input_documents import HarDocument, HttpRawDocument, IngestableRequestResponse, KatanaDocument
+from shyhurricane.utils import (
+    BeautifulSoupExtractor,
+    batch_iterable,
+    extract_domain,
+    is_har_json,
+    is_http_raw,
+    is_katana_jsonl,
+    parse_to_iso8601,
+    remove_unencodable,
+    unix_command_image,
+    urlparse_ext,
+)
 
 logger = logging.getLogger(__name__)
 

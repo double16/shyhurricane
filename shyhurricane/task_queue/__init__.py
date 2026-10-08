@@ -13,6 +13,7 @@ import persistqueue
 
 from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import GeneratorConfig
+from shyhurricane.haystack_lifecycle import close_haystack_resources
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.persistent_queue import (
     QueueMaintenance,
@@ -163,6 +164,7 @@ def _task_router(db: str,
     except KeyboardInterrupt:
         pass
     finally:
+        close_haystack_resources()
         for result_queue in (spider_result_queue, port_scan_result_queue, dir_busting_result_queue):
             result_queue.cancel_join_thread()
     logger.info(f"Finished task router in PID {os.getpid()}")

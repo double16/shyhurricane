@@ -2,8 +2,44 @@ import json
 import subprocess
 
 import pytest
+from haystack import Document
+from haystack.dataclasses import SparseEmbedding
+from haystack.document_stores.types import DuplicatePolicy
+from haystack_integrations.components.retrievers.qdrant import QdrantHybridRetriever
+from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 
 import shyhurricane.db as db
+
+
+def test_qdrant_persistence_overwrite_filter_and_hybrid_retrieval(tmp_path):
+    settings = dict(path=str(tmp_path), index="retrieval", embedding_dim=2,
+                    use_sparse_embeddings=True, return_embedding=True, similarity="dot_product")
+    document = Document(content="dense and sparse", meta={"type": "network"}, embedding=[0.1, 0.2],
+                        sparse_embedding=SparseEmbedding(indices=[1, 3], values=[0.5, 0.25]))
+    store = QdrantDocumentStore(**settings)
+    try:
+        store.write_documents([document], policy=DuplicatePolicy.OVERWRITE)
+    finally:
+        store.close()
+
+    store = QdrantDocumentStore(**settings)
+    try:
+        store.write_documents([document], policy=DuplicatePolicy.OVERWRITE)
+        assert store.count_documents() == 1
+        filters = {"field": "meta.type", "operator": "==", "value": "network"}
+        restored = store.filter_documents(filters)[0]
+        assert restored.id == document.id
+        assert restored.meta == document.meta
+        assert restored.embedding == pytest.approx(document.embedding)
+        assert restored.sparse_embedding == document.sparse_embedding
+        retriever = QdrantHybridRetriever(document_store=store, top_k=10)
+        result = retriever.run(query_embedding=document.embedding,
+                               query_sparse_embedding=document.sparse_embedding, filters=filters)
+        assert [doc.id for doc in result["documents"]] == [document.id]
+        assert retriever.run(query_embedding=document.embedding, query_sparse_embedding=document.sparse_embedding,
+                             filters={"field": "meta.type", "operator": "==", "value": "absent"}) == {"documents": []}
+    finally:
+        store.close()
 
 
 def test_qdrant_docker_info_http_url():

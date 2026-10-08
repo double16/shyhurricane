@@ -13,6 +13,7 @@ from haystack import Pipeline
 
 from shyhurricane.doc_type_model_map import map_mime_to_type
 from shyhurricane.generator_config import GeneratorConfig
+from shyhurricane.haystack_lifecycle import close_haystack_resources
 from shyhurricane.index.javascript_analysis import analyze_document, javascript_url_from_map, source_map_url
 from shyhurricane.index.web_resources_pipeline import build_doc_type_pipeline, build_ingest_pipeline, build_stores
 from shyhurricane.persistent_queue import (
@@ -116,6 +117,8 @@ def _ingest_worker(db: str, generator_config: GeneratorConfig, health_state=None
                              exc_info=e)
     except KeyboardInterrupt:
         pass
+    finally:
+        close_haystack_resources()
     logger.info(f"Index worker finished in PID {os.getpid()}")
 
 
@@ -218,6 +221,8 @@ def _doc_type_worker(db: str, generator_config: GeneratorConfig, health_state=No
                 logger.error(f"Error in document specific pipeline for {url}, {item.id}, {e}", exc_info=e)
     except KeyboardInterrupt:
         exit_code = 137
+    finally:
+        close_haystack_resources()
 
     logger.info(f"Document specific index worker finished in PID {os.getpid()}")
     return exit_code

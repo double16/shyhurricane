@@ -77,6 +77,9 @@ def test_context_shutdown_shares_deadline_and_is_idempotent(monkeypatch):
     ctx.ingest_pool = Mock()
     ctx.worker_manager = Mock()
     ctx.health_monitor = Mock()
+    cleanup = Mock()
+    monkeypatch.setattr(server_context, "close_haystack_resources", cleanup)
+    ctx.ingest_pool.close.side_effect = lambda **kwargs: cleanup.assert_not_called()
     monkeypatch.setattr(server_context.time, "monotonic", lambda: 10)
     ctx.close()
     ctx.close()
@@ -85,6 +88,7 @@ def test_context_shutdown_shares_deadline_and_is_idempotent(monkeypatch):
     ctx.ingest_pool.close.assert_called_once_with(deadline=310)
     ctx.worker_manager.shutdown.assert_called_once()
     ctx.health_monitor.close.assert_called_once()
+    cleanup.assert_called_once_with()
 
 
 def test_context_shutdown_continues_after_pool_and_manager_errors():

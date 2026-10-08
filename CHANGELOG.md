@@ -26,6 +26,8 @@
 
 ### Fixes
 
+- Upgrade Haystack to 3.3 with native document IDs and splitting behavior while retaining provider
+  settings and synchronous pipelines; release provider resources after workers drain.
 - Replace deprecated MCP client logging with progress notifications for search, spidering, and directory busting.
 - Refresh the monitoring dashboard every 30 seconds instead of every 5 seconds to reduce polling overhead.
 - Create new persistent queue indexes on `status` alone, retaining existing `(status, _id)` indexes.

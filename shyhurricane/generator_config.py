@@ -2,30 +2,38 @@ import argparse
 import logging
 import os
 from math import ceil
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, List, Optional
 
 import requests
 from google.genai import Client
 from google.genai.types import HttpOptions, HttpRetryOptions
-from haystack.components.embedders import SentenceTransformersDocumentEmbedder, SentenceTransformersTextEmbedder
+from haystack import Document, component
+from haystack.components.generators.chat import OpenAIChatGenerator
 from haystack.core.component import Component
-from haystack.utils import Secret
-from haystack import component, Document
 from haystack.dataclasses import ChatMessage, StreamingCallbackT
-from haystack_integrations.components.embedders.amazon_bedrock import AmazonBedrockDocumentEmbedder, \
-    AmazonBedrockTextEmbedder
-from haystack_integrations.components.embedders.fastembed import FastembedSparseDocumentEmbedder, \
-    FastembedSparseTextEmbedder
+from haystack.utils import Secret
+from haystack_integrations.components.embedders.amazon_bedrock import (
+    AmazonBedrockDocumentEmbedder,
+    AmazonBedrockTextEmbedder,
+)
+from haystack_integrations.components.embedders.fastembed import (
+    FastembedSparseDocumentEmbedder,
+    FastembedSparseTextEmbedder,
+)
 from haystack_integrations.components.embedders.google_genai import GoogleGenAIDocumentEmbedder, GoogleGenAITextEmbedder
 from haystack_integrations.components.embedders.ollama import OllamaDocumentEmbedder, OllamaTextEmbedder
+from haystack_integrations.components.embedders.sentence_transformers import (
+    SentenceTransformersDocumentEmbedder,
+    SentenceTransformersTextEmbedder,
+)
 from haystack_integrations.components.generators.amazon_bedrock import AmazonBedrockChatGenerator
 from haystack_integrations.components.generators.google_genai.chat.chat_generator import GoogleGenAIChatGenerator
 from haystack_integrations.components.generators.litellm import LiteLLMChatGenerator
 from haystack_integrations.components.generators.ollama import OllamaChatGenerator
-from haystack.components.generators.chat import OpenAIChatGenerator
 from pydantic import BaseModel, Field
 
 from shyhurricane.doc_type_model_map import ModelConfig
+from shyhurricane.haystack_lifecycle import GeneratorLifecycle, managed_resource, warmed_generator
 from shyhurricane.utils import process_cpu_count
 
 logger = logging.getLogger(__name__)
@@ -62,22 +70,29 @@ class GoogleGenAIChatGeneratorWithRetry(GoogleGenAIChatGenerator):
     def __init__(self,
                  api_key: Secret = Secret.from_env_var(["GOOGLE_API_KEY", "GEMINI_API_KEY"], strict=True),
                  **kwargs):
-        super().__init__(**kwargs)
-        self._client = Client(
-            api_key=api_key.resolve_value(),
-            http_options=HttpOptions(
-                retry_options=HttpRetryOptions(
-                    attempts=10,
-                    exp_base=4.0,
-                )
+        super().__init__(api_key=api_key, **kwargs)
+        original_client = self._client
+        try:
+            self._client = Client(
+                api_key=api_key.resolve_value(),
+                http_options=HttpOptions(
+                    retry_options=HttpRetryOptions(
+                        attempts=10,
+                        exp_base=4.0,
+                    )
+                ),
             )
-        )
+        finally:
+            original_client.close()
+
+    def close(self):
+        self._client.close()
 
 
 @component
-class ChatGeneratorCompatibilityWrapper:
+class ChatGeneratorCompatibilityWrapper(GeneratorLifecycle):
     def __init__(self, chat_generator):
-        self.chat_generator = chat_generator
+        self._initialize_lifecycle(chat_generator)
 
     @component.output_types(replies=List[str])
     def run(
@@ -87,6 +102,7 @@ class ChatGeneratorCompatibilityWrapper:
             generation_kwargs: Optional[Dict[str, Any]] = None,
             streaming_callback: Optional[StreamingCallbackT] = None,
     ) -> Dict[str, Any]:
+        self.warm_up()
         messages = []
         if system_prompt:
             messages.append(ChatMessage.from_system(system_prompt))
@@ -103,9 +119,9 @@ class ChatGeneratorCompatibilityWrapper:
 
 
 @component
-class GoogleGenAIGeneratorWithRetry:
+class GoogleGenAIGeneratorWithRetry(GeneratorLifecycle):
     def __init__(self, *args, **kwargs):
-        self.chat_generator = GoogleGenAIChatGeneratorWithRetry(*args, **kwargs)
+        self._initialize_lifecycle(GoogleGenAIChatGeneratorWithRetry(*args, **kwargs))
 
     @component.output_types(replies=List[str])
     def run(
@@ -116,6 +132,7 @@ class GoogleGenAIGeneratorWithRetry:
             safety_settings: Optional[List[Dict[str, Any]]] = None,
             streaming_callback: Optional[StreamingCallbackT] = None,
     ) -> Dict[str, Any]:
+        self.warm_up()
         messages = []
         if system_prompt:
             messages.append(ChatMessage.from_system(system_prompt))
@@ -211,6 +228,7 @@ class GeneratorConfig(BaseModel):
         else:
             return f"Ollama {self.ollama_model} at {self.ollama_host}"
 
+    @warmed_generator
     def create_generator(self,
                          temperature: Optional[float] = None,
                          generation_kwargs: Optional[Dict[str, Any]] = None):
@@ -332,6 +350,7 @@ class GeneratorConfig(BaseModel):
             case _:
                 return model_name
 
+    @managed_resource
     def create_document_embedder(self, model_config: ModelConfig):
         model_path = self._embedder_model_name_to_path(model_config.model_name)
         if self.openai_model:
@@ -370,6 +389,7 @@ class GeneratorConfig(BaseModel):
         )
         return embedder
 
+    @managed_resource
     def create_text_embedder(self, model_config: ModelConfig):
         model_path = self._embedder_model_name_to_path(model_config.model_name)
         if self.openai_model:
@@ -410,6 +430,7 @@ class GeneratorConfig(BaseModel):
             return os.path.join(os.environ["HOME"], ".cache/fastembed")
         return None
 
+    @managed_resource
     def create_sparse_document_embedder(self, model_config: ModelConfig):
         return FastembedSparseDocumentEmbedder(
             model=model_config.model_name,
@@ -420,6 +441,7 @@ class GeneratorConfig(BaseModel):
             progress_bar=False,
         )
 
+    @managed_resource
     def create_sparse_text_embedder(self, model_config: ModelConfig):
         return FastembedSparseTextEmbedder(
             model=model_config.model_name,

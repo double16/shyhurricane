@@ -17,6 +17,7 @@ from qdrant_client import AsyncQdrantClient
 
 from shyhurricane.db import create_qdrant_client, create_qdrant_document_store, qdrant_host_port
 from shyhurricane.doc_type_model_map import doc_type_to_model
+from shyhurricane.haystack_lifecycle import close_haystack_resources
 from shyhurricane.health import HealthMonitor, qdrant_probe
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.persistent_queue import AsyncIngestWriter, cleanup_persistent_queues_on_startup
@@ -130,6 +131,7 @@ class ServerContext:
                 self.worker_manager.shutdown()
             except Exception:
                 logger.exception("Failed to shut down worker manager")
+        close_haystack_resources()
         logger.info("Closing queues ...")
         # The ingest queue is persistent. Adding a sentinel after terminating its
         # workers leaves an unprocessed active item for the next server startup.
