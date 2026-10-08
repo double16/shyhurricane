@@ -3,10 +3,11 @@ import sys
 from collections import defaultdict
 from dataclasses import replace
 
+import pytest
 from haystack import Document
 
-from shyhurricane.index.input_documents import IngestableRequestResponse
 from shyhurricane.index import web_resources_pipeline as wrp
+from shyhurricane.index.input_documents import IngestableRequestResponse
 
 
 class Embedder:
@@ -316,6 +317,25 @@ def test_suffix_id_splitter_sets_child_ids_and_serializes_overlap(monkeypatch):
     assert [doc.id for doc in result] == ["parent_0", "parent_1"]
     assert result[0].meta["_split_overlap"] == '{"doc_id": "old"}'
     assert result[1].meta["_split_overlap"] == "ok"
+
+
+@pytest.mark.parametrize("content,config", [
+    ("a b c d ", {"split_length": 4, "split_overlap": 3}),
+    ("a b c d e", {"split_length": 4, "split_overlap": 1, "split_threshold": 3}),
+])
+def test_suffix_id_splitter_uses_native_chunk_boundaries(content, config):
+    splitter = wrp.SuffixIdSplitter(**config)
+    documents = splitter.run(documents=[Document(content=content, id="parent")])["documents"]
+    assert [doc.content for doc in documents] == [content]
+    assert [doc.id for doc in documents] == ["parent_0"]
+    assert documents[0].meta["_split_overlap"] == "[]"
+
+
+def test_suffix_id_splitter_rejects_missing_content_and_invalid_parameters():
+    with pytest.raises(ValueError, match="content.*None"):
+        wrp.SuffixIdSplitter().run(documents=[Document(id="empty")])
+    with pytest.raises(ValueError):
+        wrp.SuffixIdSplitter(split_length=0)
 
 
 def test_index_doc_type_documents_splits_embeds_and_stores(monkeypatch):

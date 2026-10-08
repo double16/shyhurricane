@@ -3,9 +3,9 @@ import logging
 import os
 import re
 from dataclasses import replace
-from typing import Dict, List, Optional, Any, Tuple, Iterable, Callable, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from haystack import Pipeline, component, Document
+from haystack import Document, Pipeline, component
 from haystack.components.builders import PromptBuilder
 from haystack.core.component import Component
 from haystack.dataclasses import ChatMessage
@@ -13,7 +13,7 @@ from haystack_integrations.components.retrievers.qdrant import QdrantHybridRetri
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 
 from shyhurricane.db import create_qdrant_document_store
-from shyhurricane.doc_type_model_map import doc_type_to_model, get_qdrant_collections, SPARSE_EMBEDDING_MODEL
+from shyhurricane.doc_type_model_map import SPARSE_EMBEDDING_MODEL, doc_type_to_model, get_qdrant_collections
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.utils import documents_sort_unique
 
@@ -656,8 +656,10 @@ class QueryExpander:
 
 @component
 class MultiQueryChromaRetriever:
-    def __init__(self, name: str, embedder: Component, sparse_embedder: Component, retriever: QdrantHybridRetriever):
+    def __init__(self, name: str, embedder: Component, sparse_embedder: Component, retriever: QdrantHybridRetriever,
+                 collection: Optional[str] = None):
         self.name = name
+        self.collection = collection or name
         self.embedder = embedder
         self.sparse_embedder = sparse_embedder
         self.retriever = retriever
@@ -676,6 +678,10 @@ class MultiQueryChromaRetriever:
             progress_callback: Optional[Callable[[str], None]] = None,
             ):
         top_k = min(1000, max(1, top_k))
+        if filters is not None and "predicate_filters" in filters:
+            filters = filters["predicate_filters"].get(self.collection)
+            if filters is None or not filters.must[0].has_id:
+                return {"documents": []}
         results = []
         ids = set()
         for query in queries:
@@ -829,7 +835,7 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
             stores[col] = store
             retriever = QdrantHybridRetriever(document_store=store)
             multiquery_retriever = MultiQueryChromaRetriever(doc_type_model.doc_type, embedder, sparse_embedder,
-                                                             retriever)
+                                                             retriever, collection=col)
             retrievers[col] = multiquery_retriever
 
             ret_name = f"ret_{col}"

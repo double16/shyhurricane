@@ -1,7 +1,11 @@
 import builtins
 
 from haystack import Document
-from haystack.dataclasses import ChatMessage
+from haystack.dataclasses import ChatMessage, SparseEmbedding
+from haystack_integrations.components.retrievers.qdrant import QdrantHybridRetriever
+from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
+from haystack_integrations.document_stores.qdrant.converters import convert_id
+from qdrant_client.http import models as qm
 
 from shyhurricane import retrieval_pipeline as rp
 
@@ -155,6 +159,44 @@ def test_multi_query_retriever_warms_deduplicates_and_reports_progress():
     assert len(result["documents"]) == 2
     assert [call["top_k"] for call in retriever.calls] == [1000, 1000]
     assert messages == ["Querying content: q1", "Querying content: q2"]
+
+
+def test_multi_query_retriever_applies_collection_candidate_filter_before_top_k():
+    retriever = Retriever()
+    component = rp.MultiQueryChromaRetriever(
+        "html", Warmable("embedding"), Warmable("sparse_embedding"), retriever, collection="html_256",
+    )
+    native = qm.Filter(must=[qm.HasIdCondition(has_id=[1])])
+    component.run(["query"], 10, filters={"predicate_filters": {"html_256": native}})
+    assert retriever.calls[0]["filters"] is native
+    assert retriever.calls[0]["top_k"] == 10
+    retriever.calls.clear()
+    for filters in [{}, {"html_256": qm.Filter(must=[qm.HasIdCondition(has_id=[])])}]:
+        assert component.run(["query"], 10, filters={"predicate_filters": filters}) == {"documents": []}
+    assert retriever.calls == []
+
+
+def test_candidate_id_filter_restricts_real_qdrant_hybrid_ranking(tmp_path):
+    sparse = SparseEmbedding(indices=[1], values=[1.0])
+    store = QdrantDocumentStore(
+        path=str(tmp_path), index="html_256", embedding_dim=2, use_sparse_embeddings=True,
+    )
+    try:
+        store.write_documents([
+            Document(id="excluded", content="top semantic match", embedding=[1.0, 0.0], sparse_embedding=sparse,
+                     meta={"url": "https://other.test/"}),
+            Document(id="allowed", content="allowed match", embedding=[0.0, 1.0], sparse_embedding=sparse,
+                     meta={"url": "https://example.com/"}),
+        ])
+        component = rp.MultiQueryChromaRetriever(
+            "html", Warmable("embedding", [[1.0, 0.0]]), Warmable("sparse_embedding", [sparse]),
+            QdrantHybridRetriever(document_store=store), collection="html_256",
+        )
+        native = qm.Filter(must=[qm.HasIdCondition(has_id=[convert_id("allowed")])])
+        result = component.run(["query"], 1, filters={"predicate_filters": {"html_256": native}})
+        assert [document.id for document in result["documents"]] == ["allowed"]
+    finally:
+        store.close()
 
 
 def test_chat_message_helpers_filter_merge_and_wrap(caplog):

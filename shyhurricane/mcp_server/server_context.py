@@ -17,6 +17,7 @@ from qdrant_client import AsyncQdrantClient
 
 from shyhurricane.db import create_qdrant_client, create_qdrant_document_store, qdrant_host_port
 from shyhurricane.doc_type_model_map import doc_type_to_model
+from shyhurricane.haystack_lifecycle import close_haystack_resources
 from shyhurricane.health import HealthMonitor, qdrant_probe
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.persistent_queue import AsyncIngestWriter, cleanup_persistent_queues_on_startup
@@ -86,12 +87,12 @@ class ServerContext:
     async def ensure_retrieval_pipelines(self) -> None:
         if self.document_pipeline is None or self.website_context_pipeline is None:
             generator_config = get_generator_config()
-            document_pipeline, _, stores = await build_document_pipeline(
-                db=self.db,
-                generator_config=generator_config,
+            # The async builder initializes synchronous providers and embedding models.
+            document_pipeline, _, stores = await asyncio.to_thread(
+                asyncio.run, build_document_pipeline(db=self.db, generator_config=generator_config),
             )
-            website_context_pipeline = build_website_context_pipeline(
-                generator_config=generator_config,
+            website_context_pipeline = await asyncio.to_thread(
+                build_website_context_pipeline, generator_config=generator_config,
             )
             self.document_pipeline = document_pipeline
             self.website_context_pipeline = website_context_pipeline
@@ -130,6 +131,7 @@ class ServerContext:
                 self.worker_manager.shutdown()
             except Exception:
                 logger.exception("Failed to shut down worker manager")
+        close_haystack_resources()
         logger.info("Closing queues ...")
         # The ingest queue is persistent. Adding a sentinel after terminating its
         # workers leaves an unprocessed active item for the next server startup.

@@ -14,7 +14,8 @@ license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.12"
 # see requirements.txt
 dependencies = [
-    "haystack-ai~=2.31.0",
+    "haystack-ai~=3.3.0",
+    "sentence-transformers-haystack~=0.2.0",
     "qdrant-haystack>=10.6,<11.2",
     "fastembed-haystack~=2.7.0",
     "numpy>=2.3.0",
@@ -22,7 +23,6 @@ dependencies = [
     "amazon-bedrock-haystack~=7.0",
     "openai~=2.53.0",
     "google-genai-haystack>=4.5,<4.9",
-    "haystack-experimental~=0.19.0",
     "sentence-transformers~=5.7.0",
     "mcp[cli]~=2.2.0",
     "httpx~=0.28.1",

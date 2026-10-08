@@ -16,11 +16,11 @@ from haystack.core.component import Component
 from haystack.document_stores.types import DuplicatePolicy
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 
+from shyhurricane.db import create_qdrant_document_store
 from shyhurricane.doc_type_model_map import doc_type_to_model
 from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import safe_embedder
-from shyhurricane.ports import parse_ports_spec, bitfield_to_ports, is_subset
-from shyhurricane.db import create_qdrant_document_store
+from shyhurricane.ports import bitfield_to_ports, is_subset, parse_ports_spec
 from shyhurricane.task_queue.types import PortScanQueueItem
 from shyhurricane.utils import PortScanResult, PortScanResults, unix_command_image
 

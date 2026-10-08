@@ -34,6 +34,44 @@ The following tools are provided:
 | query_findings              | Query for previous findings for a target.                                                           | No          |
 | deobfuscate_javascript      | De-obfuscate JavaScript content (automatically done during indexing)                                | No          |
 
+### Search predicates
+
+`find_web_resources` accepts hard filters alongside natural-language queries. Predicates apply before semantic
+ranking and are combined with AND, including repeated predicates. Prefix a predicate with `-` to exclude matches;
+quote values containing spaces. Content and title analysis remains part of the natural-language query.
+
+| Predicate | Meaning | Example |
+| --- | --- | --- |
+| `site:` | Hostname and its subdomains, or an exact IP; optionally restrict port, scheme, and URL path prefix | `site:example.com`, `site:example.com:8443`, `site:https://example.com/app/` |
+| `inurl:` | Case-sensitive literal substring anywhere in the URL, including the query string | `inurl:admin`, `-inurl:"logout page"` |
+| `filetype:`, `ext:` | Case-insensitive final path extension; ignores query strings and fragments | `filetype:js` |
+| `mime:` | Exact response MIME type, ignoring case and parameters | `mime:application/json` |
+| `method:` | HTTP request method, ignoring case; intersects with the `http_methods` argument | `method:POST` |
+| `status:` | Exact HTTP response status code from 100 to 599 | `status:403` |
+| `type:` | Indexed representation: `html`, `javascript`, `css`, `xml`, `json`, `network`, `forms`, `content`, `default` | `type:network` |
+
+Examples:
+
+```text
+site:example.com filetype:js -inurl:vendor potential unsafe eval calls
+site:example.com status:403 method:GET
+site:example.com mime:application/json -inurl:logout
+site:[::1]:8080 type:network
+```
+
+Positive `site:` predicates supply the target and take precedence over target inference. A hostname scope includes
+all indexed ports unless a port is specified. A URL scope additionally restricts scheme and path prefix.
+Other explicit predicates override inferred constraints for the same attribute. Conflicting filters return no matches.
+Exclusions alone do not supply a target; existing target selection and confirmation behavior still applies.
+
+Queries containing only predicates retrieve indexed results without LLM calls and work in low-power mode.
+Queries with remaining natural-language text use semantic retrieval and require normal power mode.
+These are Google-style conveniences with the semantics above; Boolean expressions, date and technology predicates,
+`intitle:`, and `intext:` are not parsed as hard filters. Unrecognized syntax remains in the natural-language query.
+Filtering uses existing indexed metadata without a migration; broad URL filtering can require a metadata scan.
+When a target has indexed documents but nothing matches, the tool suggests broadening the query or relaxing filters.
+Index-population guidance is reserved for targets with no indexed documents.
+
 ## Install
 
 The MCP server itself uses an LLM for light tasks such that the `llama3.2:3b` model is sufficient. Ollama is recommended but not required. OpenAI, Google AI, AWS Bedrock, and LiteLLM models are supported. Docker is required for tool specific commands such as spidering and directory busting.
@@ -121,6 +159,10 @@ declined, or cancelled, retrieval returns guidance without automatically startin
 remain available when open-world access is enabled.
 
 Search, spidering, and directory busting send status messages through MCP progress notifications.
+These tools, port scanning, JavaScript deobfuscation, and URL indexing also send a progress notification
+after 20 seconds without another progress update while a call is running. Informative updates reset
+the idle deadline, and nested operations share one timer. Quick tools such as `find_wordlists` do not
+send idle notifications. The interval depends on event-loop scheduling and transport availability.
 Clients must request progress updates to receive these messages; server logging remains available.
 Progress values count status events and do not estimate the total work.
 
@@ -169,9 +211,10 @@ docker build -t ghcr.io/double16/shyhurricane_unix_command:main src/docker/unix_
 When started from an interactive terminal, the server displays a `shyhurricane` monitoring dashboard with
 configuration, queue, database, indexing, and running MCP tool information. It refreshes immediately
 on startup and every 30 seconds afterward. Press `r` to refresh immediately. Press `q` to stop the
-dashboard and shut down the server. Shutdown stops claiming new work and allows current operations
-up to five minutes to finish before terminating remaining workers. Pending persistent queue items
-remain available for the next startup. SIGINT and SIGTERM use the same shutdown behavior.
+dashboard and shut down the server. After the dashboard closes, a log message reports that shutdown
+is waiting up to five minutes for current operations to finish. Shutdown stops claiming new work and
+allows current operations up to five minutes to finish before terminating remaining workers. Pending
+persistent queue items remain available for the next startup. SIGINT and SIGTERM use the same shutdown behavior.
 Non-interactive starts, including Docker Compose, continue to use normal logging output.
 
 Ollama with `llama3.2:3b`:

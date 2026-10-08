@@ -1,19 +1,21 @@
+import json
 import logging
 import os
 import re
-import json
 import socket
 import subprocess
 import time
-import requests
-from pathlib import Path
-from typing import Sequence, AsyncGenerator, List, Optional, Tuple
 from dataclasses import dataclass
+from pathlib import Path
+from typing import AsyncGenerator, List, Optional, Sequence, Tuple
 
+import requests
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.conversions import common_types as types
 from qdrant_client.http import models as qm
+
+from shyhurricane.haystack_lifecycle import managed_resource
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +254,7 @@ async def get_domain_and_host_counts(
     return domain_counts, host_counts
 
 
+@managed_resource
 def create_qdrant_document_store(db: str, **kwargs) -> QdrantDocumentStore:
     payload_fields_to_index = [
         {"field_name": "meta.version", "field_schema": "integer"},

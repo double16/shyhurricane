@@ -5,6 +5,7 @@ import pytest
 from haystack import Document
 
 import shyhurricane.mcp_server.tools.find_web_resources as resources
+from shyhurricane import predicate_search
 from shyhurricane.mcp_server.progress import progress_scope, report_progress
 from shyhurricane.task_queue.types import SpiderResultItem
 
@@ -168,7 +169,9 @@ def test_find_web_resources_result_and_spider_instructions():
     missing = resources.find_web_resources_result("query", None, 10, [])
 
     assert found.instructions == resources.find_web_resources_instructions
-    assert missing.instructions == resources.find_web_resources_instructions_not_found
+    assert missing.instructions == resources.find_web_resources_instructions_no_matches
+    unindexed = resources.find_web_resources_result("query", None, 10, [], target_indexed=False)
+    assert unindexed.instructions == resources.find_web_resources_instructions_not_found
     assert resources.spider_instructions([object()], True).endswith(resources.spider_results_instructions_has_more)
     assert resources.spider_instructions([], False) == resources.spider_results_instructions_not_found
 
@@ -390,6 +393,9 @@ async def test_spider_website_queues_work_requeues_other_context_and_collects_re
 
 
 class Pipeline:
+    async def run_async(self, data=None, include_outputs_from=None):
+        return self.run(data, include_outputs_from)
+
     def __init__(self, result):
         self.result = result
         self.calls = []
@@ -415,6 +421,234 @@ class FullServerContext(ServerContext):
 class Netlocs:
     def __init__(self, values):
         self.network_locations = values
+
+
+@pytest.fixture
+def predicate_context(monkeypatch):
+    from qdrant_client.local.payload_filters import check_filter
+
+    docs = [
+        make_doc("body", "https://example.com/app.js", timestamp="t", timestamp_float=2,
+                 version=resources.WEB_RESOURCE_VERSION, content_type="application/javascript"),
+        make_doc("sub", "https://sub.example.com:9443/admin.js", timestamp="t", timestamp_float=3,
+                 version=resources.WEB_RESOURCE_VERSION, content_type="application/javascript",
+                 netloc="sub.example.com:9443", host="sub.example.com", port=9443, status_code=403),
+        make_doc("other", "https://otherexample.com/app.js", timestamp="t", timestamp_float=4,
+                 version=resources.WEB_RESOURCE_VERSION, netloc="otherexample.com:443", host="otherexample.com",
+                 domain="otherexample.com"),
+        make_doc("headers", "https://example.com/app.js", timestamp="t", timestamp_float=2,
+                 version=resources.WEB_RESOURCE_VERSION, type="network", content_type="text/plain",
+                 response_headers='{"Content-Type":"application/javascript"}'),
+    ]
+    points = {
+        "content": [
+            SimpleNamespace(id=index, payload=doc.to_dict(flatten=False)) for index, doc in enumerate(docs[:3])
+        ],
+        "network": [SimpleNamespace(id=3, payload=docs[3].to_dict(flatten=False))],
+    }
+
+    class Client:
+        async def get_collections(self):
+            return SimpleNamespace(collections=[SimpleNamespace(name=name) for name in points])
+
+        async def retrieve(self, collection_name, ids, **kwargs):
+            return [point for point in points[collection_name] if point.id in ids]
+
+    scopes = []
+
+    async def scroll(client, collection, fields, scroll_filter):
+        scopes.append(scroll_filter)
+        for point in points[collection]:
+            if check_filter(scroll_filter, point.payload, point.id, {}):
+                yield point
+
+    async def netlocs(ctx, query):
+        return Netlocs(["example.com:443", "sub.example.com:9443", "otherexample.com:443"])
+
+    server_ctx = FullServerContext(
+        AsyncStore([]), '{"target": ["unrelated.test"], "content": ["network"], "response_codes": [500]}',
+        {"combine": {"documents": [docs[1]]}},
+    )
+    server_ctx.low_power = False
+    server_ctx.qdrant_client = Client()
+    server_ctx.ensure_retrieval_pipelines = noop
+    monkeypatch.setattr(predicate_search, "scroll_qdrant_collection", scroll)
+    monkeypatch.setattr(resources, "find_netloc", netlocs)
+    monkeypatch.setattr(resources, "log_tool_history", noop)
+    monkeypatch.setattr(resources, "report_progress", noop)
+    patch_server_context(monkeypatch, server_ctx)
+    return server_ctx, scopes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("low_power", [False, True])
+async def test_predicate_only_search_needs_no_llm_and_includes_nonstandard_ports(predicate_context, low_power):
+    server_ctx, scopes = predicate_context
+    server_ctx.low_power = low_power
+    server_ctx.ensure_retrieval_pipelines = None
+    result = await resources.find_web_resources(ToolCtx(), "site:example.com ext:js -inurl:admin")
+    assert [resource.url for resource in result.resources] == ["https://example.com/app.js"]
+    assert result.resources[0].resource.uri == "web://content/body"
+    assert result.query == "site:example.com ext:js -inurl:admin"
+    assert server_ctx.website_context_pipeline.calls == []
+    assert server_ctx.document_pipeline.calls == []
+    assert scopes[0].must[1].match.any == ["example.com:443", "sub.example.com:9443"]
+
+
+@pytest.mark.asyncio
+async def test_predicate_search_applies_status_mime_type_and_methods(predicate_context):
+    result = await resources.find_web_resources(
+        ToolCtx(), "site:example.com status:200 mime:application/javascript type:network method:get",
+        http_methods="GET",
+    )
+    assert len(result.resources) == 1
+    assert str(result.resources[0].resource.uri) == "web://network/headers"
+    conflict = await resources.find_web_resources(ToolCtx(), "site:example.com method:POST", http_methods=["GET"])
+    assert conflict.resources == []
+    excluded = await resources.find_web_resources(ToolCtx(), "site:example.com -site:sub.example.com -status:200")
+    assert excluded.resources == []
+
+
+@pytest.mark.asyncio
+async def test_mixed_predicates_override_inferred_target_status_and_use_residual_query(predicate_context):
+    server_ctx, _ = predicate_context
+    result = await resources.find_web_resources(ToolCtx(), "site:example.com status:403 unsafe eval calls")
+    assert result.resources[0].url == "https://sub.example.com:9443/admin.js"
+    data, _ = server_ctx.document_pipeline.calls[0]
+    assert data["query"]["text"] == "unsafe eval calls"
+    native = data["query"]["filters"]["predicate_filters"]
+    assert native["content"].must[0].has_id == [1]
+    assert native["network"].must[0].has_id == []
+    assert data["query"]["targets"] == ["example.com:443", "sub.example.com:9443"]
+    assert server_ctx.website_context_pipeline.calls[0][0]["builder"]["query"] == "unsafe eval calls"
+
+
+@pytest.mark.asyncio
+async def test_predicates_eliminating_candidates_do_not_scan_or_rank(predicate_context):
+    server_ctx, _ = predicate_context
+    result = await resources.find_web_resources(ToolCtx(), "site:example.com status:404 missing pages")
+    assert result.resources == []
+    assert result.instructions == resources.find_web_resources_instructions_no_matches
+    assert server_ctx.document_pipeline.calls == []
+    result = await resources.find_web_resources(ToolCtx(), "site:example.com site:otherexample.com")
+    assert result.resources == []
+    assert result.instructions == resources.find_web_resources_instructions_no_matches
+
+
+@pytest.mark.asyncio
+async def test_semantic_search_with_existing_target_and_no_matches(predicate_context):
+    server_ctx, _ = predicate_context
+    server_ctx.stores["content"] = AsyncStore([[], [], []])
+    server_ctx.website_context_pipeline = Pipeline({"llm": {"replies": ['{"target": ["https://example.com"]}']}})
+    server_ctx.document_pipeline = Pipeline({"combine": {"documents": []}})
+    result = await resources.find_web_resources(ToolCtx(), "find nonexistent vulnerabilities on example.com")
+    assert result.resources == []
+    assert result.instructions == resources.find_web_resources_instructions_no_matches
+    assert "populate" not in result.instructions
+
+
+@pytest.mark.asyncio
+async def test_partially_indexed_targets_are_searched_when_scan_is_unavailable(predicate_context):
+    server_ctx, _ = predicate_context
+    server_ctx.disable_elicitation = True
+    server_ctx.stores["content"] = AsyncStore([[], [], []])
+    server_ctx.website_context_pipeline = Pipeline({"llm": {"replies": [
+        '{"target": ["https://example.com", "https://missing.test"]}',
+    ]}})
+    server_ctx.document_pipeline = Pipeline({"combine": {"documents": []}})
+    result = await resources.find_web_resources(ToolCtx(), "find vulnerabilities on example.com and missing.test")
+    assert result.instructions == resources.find_web_resources_instructions_no_matches
+    assert len(server_ctx.document_pipeline.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_predicate_only_no_matches_on_indexed_target(predicate_context):
+    result = await resources.find_web_resources(ToolCtx(), "site:example.com status:404")
+    assert result.resources == []
+    assert result.instructions == resources.find_web_resources_instructions_no_matches
+
+
+@pytest.mark.asyncio
+async def test_predicate_missing_target_does_not_scan_without_confirmation(predicate_context):
+    server_ctx, _ = predicate_context
+    server_ctx.disable_elicitation = True
+    result = await resources.find_web_resources(ToolCtx(), "site:missing.example.com")
+    assert result.resources == []
+    assert result.instructions == resources.find_web_resources_instructions_not_found
+
+
+@pytest.mark.asyncio
+async def test_mixed_predicates_low_power_and_missing_pipelines(predicate_context):
+    server_ctx, _ = predicate_context
+    server_ctx.low_power = True
+    result = await resources.find_web_resources(ToolCtx(), "site:example.com unsafe calls")
+    assert result.instructions == resources.find_web_resources_instructions_low_power
+    server_ctx.low_power = False
+    server_ctx.document_pipeline = None
+    result = await resources.find_web_resources(ToolCtx(), "site:example.com unsafe calls")
+    assert result.instructions == resources.find_web_resources_instructions_low_power
+
+
+@pytest.mark.asyncio
+async def test_predicates_without_site_keep_target_recommendation_and_elicitation(predicate_context, monkeypatch):
+    server_ctx, _ = predicate_context
+
+    async def recommended(ctx):
+        return ["https://example.com:443"]
+
+    monkeypatch.setattr(resources, "_find_recommended_urls", recommended)
+    result = await resources.find_web_resources(ToolCtx(), "ext:js")
+    assert [resource.url for resource in result.resources] == ["https://example.com/app.js"]
+
+    async def no_recommendation(ctx):
+        return []
+
+    monkeypatch.setattr(resources, "_find_recommended_urls", no_recommendation)
+    server_ctx.disable_elicitation = True
+    result = await resources.find_web_resources(ToolCtx(), "-site:example.com")
+    assert result.instructions == resources.find_web_resources_instructions_need_target
+
+
+@pytest.mark.asyncio
+async def test_predicate_only_elicited_target_is_parsed_without_llm(predicate_context):
+    from mcp.server.elicitation import AcceptedElicitation
+
+    server_ctx, _ = predicate_context
+    server_ctx.low_power = True
+    server_ctx.website_context_pipeline = None
+    search = resources.SearchPreparation(
+        "ext:js", 10, None, server_ctx, predicates=[resources.Predicate("filetype", "js")], semantic_query="",
+    )
+    prepared = await resources._prepare_targets(
+        ToolCtx(), search, AcceptedElicitation(data=resources.RequestTargetUrl(data="https://example.com:443")),
+    )
+    assert prepared.targets == ["https://example.com:443"]
+    assert prepared.filter_netloc == ["example.com:443"]
+
+
+@pytest.mark.asyncio
+async def test_predicate_ipv6_site_resolution_and_missing_scan_url(predicate_context, monkeypatch):
+    from mcp.server.elicitation import DeclinedElicitation
+
+    server_ctx, _ = predicate_context
+
+    async def netlocs(ctx, query):
+        return Netlocs(["::1:8080"])
+
+    monkeypatch.setattr(resources, "find_netloc", netlocs)
+    search = resources.SearchPreparation(
+        "site:[::1]:8080", 10, None, server_ctx, targets=["[::1]:8080"],
+        predicates=[resources.Predicate("site", "[::1]:8080")], semantic_query="",
+    )
+    prepared = await resources._prepare_targets(ToolCtx(), search, DeclinedElicitation())
+    assert prepared.filter_netloc == ["::1:8080"]
+
+    async def empty(ctx, query):
+        return Netlocs([])
+
+    monkeypatch.setattr(resources, "find_netloc", empty)
+    prepared = await resources._prepare_targets(ToolCtx(), search, DeclinedElicitation())
+    assert prepared.missing_targets[0].to_url() == "http://[::1]:8080"
 
 
 @pytest.mark.asyncio
@@ -501,7 +735,7 @@ async def test_find_web_resources_elicits_missing_target_and_handles_decline(mon
 
     result = await resources.find_web_resources(ctx, "what is indexed?", limit=10)
 
-    assert result.instructions == resources.find_web_resources_instructions_not_found
+    assert result.instructions == resources.find_web_resources_instructions_no_matches
     assert "What URL(s) should we look for?" in ctx.messages
 
 
@@ -616,3 +850,57 @@ async def test_search_threaded_progress_after_nested_scan(monkeypatch, caplog, n
         assert len(ctx.progress) == 3
     else:
         assert ctx.progress[3] == (4, None, "Querying content")
+
+
+@pytest.mark.asyncio
+async def test_target_detection_async_pipeline_allows_idle_progress(monkeypatch):
+    import threading
+
+    from haystack import Pipeline as HaystackPipeline
+    from haystack import component
+
+    from shyhurricane.mcp_server import progress
+
+    released = threading.Event()
+    received = asyncio.Event()
+    updates = []
+
+    @component
+    class TargetGenerator:
+        @component.output_types(replies=list[str])
+        def run(self, query: str):
+            assert released.wait(timeout=5), "Progress timer did not run during target detection"
+            return {"replies": ['{"target": ["example.com"], "content": ["javascript"]}']}
+
+    pipeline = HaystackPipeline()
+    pipeline.add_component("llm", TargetGenerator())
+
+    class TargetPipeline:
+        async def run_async(self, data):
+            return await pipeline.run_async({"llm": data["builder"]})
+
+    async def send(value, *, message):
+        updates.append(message)
+        if message.endswith("is still running"):
+            released.set()
+            received.set()
+
+    ctx = SimpleNamespace(report_progress=send)
+    search = resources.SearchPreparation(
+        "query", 100, None, SimpleNamespace(website_context_pipeline=TargetPipeline())
+    )
+    monkeypatch.setattr(progress, "PROGRESS_INTERVAL_SECONDS", 0.01)
+
+    @progress_scope(fresh=True)
+    async def request():
+        async with progress.idle_progress(ctx, "find_web_resources"):
+            await resources._determine_targets(ctx, search, "query")
+
+    try:
+        await asyncio.wait_for(request(), timeout=5)
+    finally:
+        released.set()
+    assert received.is_set()
+    assert updates[0] == "Determining target(s)"
+    assert search.targets == ["example.com"]
+    assert search.doc_types == ["javascript"]
