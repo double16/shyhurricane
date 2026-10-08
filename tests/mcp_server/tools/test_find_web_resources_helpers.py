@@ -1,7 +1,11 @@
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 from haystack import Document
 
 import shyhurricane.mcp_server.tools.find_web_resources as resources
+from shyhurricane.mcp_server.progress import progress_scope, report_progress
 from shyhurricane.task_queue.types import SpiderResultItem
 
 
@@ -274,10 +278,12 @@ class ToolCtx:
 
     def __init__(self):
         self.messages = []
+        self.progress = []
         self.elicit_result = None
 
-    async def info(self, message):
+    async def report_progress(self, progress, total=None, message=None):
         self.messages.append(message)
+        self.progress.append((progress, total, message))
 
     async def elicit(self, message, schema):
         self.messages.append(message)
@@ -380,6 +386,7 @@ async def test_spider_website_queues_work_requeues_other_context_and_collects_re
     assert result.resources == [resource]
     assert result.has_more is False
     assert ctx.messages == ["Found: https://example.com/found"]
+    assert ctx.progress == [(1, None, "Found: https://example.com/found")]
 
 
 class Pipeline:
@@ -548,3 +555,64 @@ async def test_find_web_resources_does_not_spider_when_elicitation_unavailable(m
     await resources.find_web_resources(ToolCtx(), "missing.example.com", limit=10)
 
     assert spidered == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("notification_fails", [False, True])
+async def test_search_threaded_progress_after_nested_scan(monkeypatch, caplog, notification_fails):
+    ctx = ToolCtx()
+    loop = asyncio.get_running_loop()
+    original_report = ctx.report_progress
+
+    async def send(progress, total=None, message=None):
+        assert asyncio.get_running_loop() is loop
+        if notification_fails and message == "Querying content":
+            raise RuntimeError("notification failed")
+        await original_report(progress, total, message)
+
+    ctx.report_progress = send
+
+    class DocumentPipeline:
+        def run(self, data, **kwargs):
+            data["query"]["progress_callback"]("Querying content")
+            return {"combine": {"documents": []}}
+
+    search = resources.SearchPreparation(
+        query="example.com", limit=10, http_methods=None,
+        server_ctx=SimpleNamespace(open_world=True, document_pipeline=DocumentPipeline()),
+        targets=["example.com"], missing_targets=[resources.TargetInfo(hostname="example.com")],
+    )
+
+    @progress_scope()
+    async def scan(*args):
+        await report_progress(ctx, "Found: https://example.com/")
+
+    monkeypatch.setattr(resources, "spider_website", scan)
+    monkeypatch.setattr(resources, "log_tool_history", noop)
+
+    @progress_scope()
+    async def request():
+        await resources._determine_targets(
+            ctx,
+            resources.SearchPreparation(
+                query="", limit=10, http_methods=None,
+                server_ctx=SimpleNamespace(website_context_pipeline=Pipeline({"llm": {"replies": [""]}})),
+            ),
+            "example.com",
+        )
+        return await resources._execute_search(
+            ctx, search, resources.AcceptedElicitation(data=resources.SpiderConfirmation(confirm=True))
+        )
+
+    result = await request()
+    assert result.resources == []
+    assert ctx.progress[:3] == [
+        (1, None, "Determining target(s)"),
+        (2, None, "Found: https://example.com/"),
+        (3, None, "Searching for example.com"),
+    ]
+    if notification_fails:
+        assert "Error reporting progress: notification failed" in caplog.text
+        assert len(ctx.progress) == 3
+    else:
+        assert ctx.progress[3] == (4, None, "Querying content")

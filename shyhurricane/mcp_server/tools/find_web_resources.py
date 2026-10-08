@@ -32,6 +32,7 @@ from shyhurricane.mcp_server import (
     log_tool_history,
     mcp_instance,
 )
+from shyhurricane.mcp_server.progress import progress_scope, report_progress
 from shyhurricane.mcp_server.tools.find_indexed_metadata import find_netloc
 from shyhurricane.rate_limit import get_rate_limit_requests_per_second
 from shyhurricane.server_config import get_server_config
@@ -260,7 +261,7 @@ class SearchPreparation:
 
 
 async def _determine_targets(ctx: Context, search: SearchPreparation, target_query: str):
-    await ctx.info("Determining target(s)")
+    await report_progress(ctx, "Determining target(s)")
     result = search.server_ctx.website_context_pipeline.run({"builder": {"query": target_query}})
     reply = result.get("llm", {}).get("replies", [""])[0]
     if reply:
@@ -474,13 +475,13 @@ async def _execute_search(
         }
 
     logger.info(f"Searching for {', '.join(targets)} with filter {repr(filters)}")
-    await ctx.info(f"Searching for {', '.join(targets)}")
+    await report_progress(ctx, f"Searching for {', '.join(targets)}")
 
     loop = asyncio.get_running_loop()
 
     def progress_callback(message: str):
         try:
-            asyncio.run_coroutine_threadsafe(ctx.info(message), loop).result()
+            asyncio.run_coroutine_threadsafe(report_progress(ctx, message), loop).result()
         except Exception as e:
             logger.warning(f"Error reporting progress: {e}")
 
@@ -509,6 +510,7 @@ async def _execute_search(
     )
 
 
+@progress_scope()
 async def find_web_resources(
     ctx: Context,
     query: str,
@@ -668,6 +670,7 @@ async def is_spider_time_recent(server_ctx: ServerContext, url: str) -> Optional
         idempotent_hint=False,
         open_world_hint=True),
 )
+@progress_scope()
 async def spider_website(
         ctx: Context,
         url: str,
@@ -754,7 +757,7 @@ async def spider_website(
             break
         logger.debug(f"{http_resource} has been retrieved")
         results.append(http_resource)
-        await ctx.info(f"Found: {http_resource.url}")
+        await report_progress(ctx, f"Found: {http_resource.url}")
 
     logger.info(f"spider_website for {url} returned {len(results)} results, has_more={has_more}")
     return SpiderResults(
