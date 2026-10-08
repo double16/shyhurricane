@@ -5,6 +5,7 @@ import pickle
 import sqlite3
 import threading
 import zlib
+from contextlib import closing
 from pathlib import Path
 from threading import Event
 from unittest.mock import MagicMock, Mock
@@ -296,7 +297,7 @@ def test_queue_factories_store_base64_and_reopen(monkeypatch, tmp_path, factory)
     path = queue.path
     queue.close()
 
-    with sqlite3.connect(Path(path) / "data.db") as connection:
+    with closing(sqlite3.connect(Path(path) / "data.db")) as connection, connection:
         data, = connection.execute("SELECT data FROM ack_queue_default").fetchone()
     payload = base64.b64decode(data, validate=True)
     assert payload.startswith(persistent_queue.QUEUE_COMPRESSION_MARKER)
@@ -318,7 +319,7 @@ def test_base64_queue_handles_mixed_records_updates_and_acknowledgements(tmp_pat
     legacy_id = legacy.put({"format": "legacy"})
     legacy.close()
 
-    with sqlite3.connect(Path(path) / "data.db") as connection:
+    with closing(sqlite3.connect(Path(path) / "data.db")) as connection, connection:
         connection.execute(
             "INSERT INTO ack_queue_default (data, timestamp, status) VALUES (?, ?, ?)",
             (base64.b64encode(pickle.dumps({"format": "base64"}, protocol=4)), 0, 0),
@@ -345,7 +346,7 @@ def test_base64_queue_handles_mixed_records_updates_and_acknowledgements(tmp_pat
         queue.ack_failed(new)
         assert queue.acked_count() == 2
         assert queue.ack_failed_count() == 1
-        with sqlite3.connect(Path(path) / "data.db") as connection:
+        with closing(sqlite3.connect(Path(path) / "data.db")) as connection, connection:
             rows = connection.execute("SELECT data FROM ack_queue_default ORDER BY _id").fetchall()
         assert [persistent_queue.Base64QueueSerializer.loads(row[0]) for row in rows] == [
             {"format": "updated"}, {"format": "base64"}, {"format": "new"},

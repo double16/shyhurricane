@@ -17,6 +17,7 @@ from mcp.types import INVALID_PARAMS, ListToolsResult
 from mcp.types.version import MODERN_PROTOCOL_VERSIONS
 
 from shyhurricane.mcp_server.app_context import AppContext
+from shyhurricane.mcp_server.progress import progress_scope
 from shyhurricane.mcp_server.server_context import ServerContext, get_server_context
 from shyhurricane.utils import unix_command_image
 
@@ -114,6 +115,7 @@ async def ensure_work_path(ctx: Context) -> str:
     return state.work_path
 
 
+@progress_scope(fresh=True)
 async def client_state_middleware(ctx: ServerRequestContext, call_next: CallNext) -> HandlerResult:
     connection = get_connection(ctx)
     request_local = ctx.protocol_version in MODERN_PROTOCOL_VERSIONS or not ctx.session.can_send_request

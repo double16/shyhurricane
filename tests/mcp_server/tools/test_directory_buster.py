@@ -24,9 +24,11 @@ class Ctx:
 
     def __init__(self):
         self.messages = []
+        self.progress = []
 
-    async def info(self, message):
+    async def report_progress(self, progress, total=None, message=None):
         self.messages.append(message)
+        self.progress.append((progress, total, message))
 
 
 class Queue:
@@ -162,6 +164,7 @@ async def test_directory_buster_queues_work_and_collects_results(monkeypatch):
     assert result.urls == ["https://example.com/admin"]
     assert result.has_more is False
     assert ctx.messages == ["Found: https://example.com/admin"]
+    assert ctx.progress == [(1, None, "Found: https://example.com/admin")]
 
 
 @pytest.mark.asyncio

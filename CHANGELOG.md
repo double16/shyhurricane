@@ -26,11 +26,11 @@
 
 ### Fixes
 
+- Replace deprecated MCP client logging with progress notifications for search, spidering, and directory busting.
 - Refresh the monitoring dashboard every 30 seconds instead of every 5 seconds to reduce polling overhead.
 - Create new persistent queue indexes on `status` alone, retaining existing `(status, _id)` indexes.
 - Index persistent queue status counts and move HTTP ingest writes and queue reporting off the event loop
   to keep acceptance responsive with large queues; reporting no longer resumes processing items.
-
 - Shut down nested indexing workers without orphaned Python processes; allow current work up to five minutes
   to finish when quitting, and retain pending persistent queue items for restart.
 - Increase the default runtime queue cleanup interval from 60 seconds to 10 minutes.

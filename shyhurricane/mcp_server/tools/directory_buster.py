@@ -21,6 +21,7 @@ from shyhurricane.mcp_server import (
     log_tool_history,
     mcp_instance,
 )
+from shyhurricane.mcp_server.progress import progress_scope, report_progress
 from shyhurricane.mcp_server.session_state import ensure_work_path
 from shyhurricane.mcp_server.tools.find_wordlists import find_wordlists
 from shyhurricane.rate_limit import get_rate_limit_requests_per_second
@@ -63,6 +64,7 @@ class DirBusterResults(BaseModel):
         idempotent_hint=False,
         open_world_hint=True),
 )
+@progress_scope()
 async def directory_buster(
         ctx: Context,
         url: Annotated[str, Field(description=(
@@ -196,7 +198,7 @@ async def directory_buster(
             break
         logger.debug(f"{found_url} has been retrieved")
         results.append(found_url)
-        await ctx.info(f"Found: {found_url}")
+        await report_progress(ctx, f"Found: {found_url}")
 
     logger.info(f"directory_buster found {len(results)} results, has_more={has_more}")
     instructions = dirbuster_instructions(results, has_more)
