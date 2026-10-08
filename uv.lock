@@ -3433,15 +3433,15 @@ wheels = [
 
 [[package]]
 name = "qdrant-haystack"
-version = "10.6.0"
+version = "11.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "haystack-ai" },
     { name = "qdrant-client" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c3/9f/f1053a2610623bf87cc7a72b6d264765e9048a839c769240c9852b7a223c/qdrant_haystack-10.6.0.tar.gz", hash = "sha256:1c1f4617e5901396dd7cb6fd159fbb3fa12f5ab6944a58642b8cf4d27a2ce7c4", size = 46551, upload-time = "2026-09-01T13:36:39.697Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/22/14/7ac14458cccac0a46aa809e560bb9563d20fe3ca0521ed313ec32820779e/qdrant_haystack-11.1.0.tar.gz", hash = "sha256:ee18e08fc3d4546ebff71c05634cb8117ea3ddb89ffc1a110ffd6f51695429ec", size = 47452, upload-time = "2026-10-01T14:19:45.477Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/70/fa/2a76912b41006409955b2d654600384762e53fafedab76c96a67f93921ca/qdrant_haystack-10.6.0-py3-none-any.whl", hash = "sha256:9c54121da83cc35c5163959415ebdaffd00120cf734c5cd1ad73e3b1fecdd5e5", size = 30919, upload-time = "2026-09-01T13:36:38.44Z" },
+    { url = "https://files.pythonhosted.org/packages/48/ee/878131383aea8dc1f86ae41f771751abb999ec148b71c83490263f8eb50c/qdrant_haystack-11.1.0-py3-none-any.whl", hash = "sha256:e4b30d59c912d033aab18d30698d948baea2e0c4384ca7ca1370ab063da6982f", size = 31132, upload-time = "2026-10-01T14:19:44.077Z" },
 ]
 
 [[package]]
@@ -4001,7 +4001,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "pytest-mock", marker = "extra == 'dev'" },
-    { name = "qdrant-haystack", specifier = "~=10.6.0" },
+    { name = "qdrant-haystack", specifier = ">=10.6,<11.2" },
     { name = "requests", specifier = "~=2.34.2" },
     { name = "respx", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
