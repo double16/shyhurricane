@@ -227,16 +227,25 @@ class FindWebResourcesResult(BaseModel):
     resources: List[HttpResource] = Field(default_factory=list, description="List of web resources found")
 
 
-find_web_resources_instructions = "These resources were found by searching the indexed resources using the given query."
+find_web_resources_instructions = (
+    "These resources match the indexed search; matches are not confirmed vulnerabilities. "
+    "Read more saved matches with get_result_page(pagination.next_page_token), when present. "
+    "If pagination.retrieval_truncated is true, narrow the query to retrieve excluded matches. "
+    "Pass resource.uri to fetch_web_resource_content when available."
+)
 find_web_resources_instructions_not_found = (
-    "No documents are indexed for the requested target. Use the spider_website, "
-    "directory_buster or index_http_url tools to populate the index."
+    "No documents are indexed for the requested target. If indexing was recently queued, allow it "
+    "to finish. Otherwise use available spider_website, directory_buster or index_http_url tools "
+    "to populate the index only within the user-authorized scope."
 )
 find_web_resources_instructions_no_matches = (
     "No indexed resources matched the query. Try broadening the query or relaxing its filters."
 )
 find_web_resources_instructions_need_target = "Include a target URL, IP address or hostname in query."
-find_web_resources_instructions_low_power = "No indexed resources were considered due to low power mode. Include only hostnames, IP addresses or URLs in the query."
+find_web_resources_instructions_low_power = (
+    "Natural-language retrieval is unavailable in low-power mode. Retry with a target-only query "
+    "or predicates such as site:example.com status:403, replacing example.com with your target."
+)
 
 
 def find_web_resources_result(
@@ -707,10 +716,14 @@ async def find_web_resources_tool(
         ),
     ] = None,
 ) -> FindWebResourcesResult:
-    """Query indexed resources about a website using natural language and return the URL, request and response bodies,
-    request and response headers, HTTP method, MIME type, HTTP status code, technologies found. This tool will
-    search using several parameters including response body matching, URL matching, MIME type matching of the response,
-    and HTTP response body matching.
+    """Search indexed website resources using natural language or hard filters.
+
+    Returns URL, host, port, domain, HTTP method, status_code, response_headers and matching score.
+    Content may be included in contents or referenced by resource.uri.
+    Scores rank matches; they are not vulnerability confidence.
+    Missing targets can trigger spidering only after accepted scan confirmation.
+    Use get_result_page(pagination.next_page_token) for additional saved matches.
+    If pagination.retrieval_truncated is true, narrow the query to retrieve excluded matches.
 
     Invoke this tool when the user asks about vulnerabilities,
     misconfigurations or exploit techniques **specific to a target website**
@@ -721,8 +734,8 @@ async def find_web_resources_tool(
 
     Do NOT use it for generic cyber-security theory.
 
-    If there is content available for the results, there will be a resource_link object containing
-    a URI. The URI can use the fetch_web_resource_content tool to get the content.
+    When resource.uri is present, pass it as url to fetch_web_resource_content.
+    MCP resource-link content blocks may also expose that URI.
 
     Example queries (replace http://target.local with your target URL(s)):
         1. Find pages with HTML forms on http://target.local
@@ -749,8 +762,21 @@ async def find_web_resources_tool(
     return await paginate_result("find_web_resources", result, "resources", limit, truncated)
 
 
-spider_results_instructions_found = "These resources were found by navigating a web server using links in the returned content."
-spider_results_instructions_has_more = " This list isn't all of the results. Use the find_web_resources and find_urls tools to get more."
+spider_results_instructions_found = (
+    "These resources were found by navigating links or retrieved from the recent crawl cache. "
+    "Read additional saved results with get_result_page(pagination.next_page_token), when present. "
+    "Saved pages are fixed snapshots; scan_complete describes scan completion independently. "
+    "If retrieval_truncated is true, use indexed search for results excluded from this snapshot."
+)
+spider_results_instructions_has_more = (
+    " The scan is still running (scan_complete=false). Do not start another scan. "
+    "Query indexed resources for later discoveries; indexing may lag behind scanning."
+)
+spider_results_instructions_pending = (
+    "No resources are available yet. The scan is still running (scan_complete=false). "
+    "Do not infer that the site is unreachable or start another scan. "
+    "Discoveries may become searchable after indexing completes."
+)
 spider_results_instructions_not_found = "No resources were found by spidering the site. It may be there is no web server at the requested address and port."
 
 
@@ -759,6 +785,8 @@ def spider_instructions(results: List[HttpResource], has_more: bool) -> str:
         instructions = spider_results_instructions_found
         if has_more:
             instructions += spider_results_instructions_has_more
+    elif has_more:
+        instructions = spider_results_instructions_pending
     else:
         instructions = spider_results_instructions_not_found
     return instructions
@@ -851,12 +879,16 @@ async def spider_website(
     """Spider a website and index discovered resources for further analysis.
 
     Spider the website at the url and index the results for further analysis. The find_web_resources
-    tool can be used to continue the analysis. The find_hosts tool can be used to determine if
-    a website has already been spidered.
+    tool can be used to continue analysis. find_hosts reports indexed hosts;
+    it does not establish that a complete crawl has run.
 
     Invoke this tool when the user specifically asks to spider a URL or when the user wants to examine or analyze a site for which nothing has been indexed.
 
-    Returns a list of resources found, including URL, response code, content type, and content length. All resources are indexed and can be queried using the find_web_resources tool. Content can be returned using the returned URL and the fetch_web_resource_content tool.
+    Returns resource records with URL, HTTP method, status_code and available response headers.
+    Discoveries are queued for indexing and may not be searchable immediately.
+    Read saved pages using get_result_page(pagination.next_page_token). Pages are a fixed snapshot;
+    query find_urls or find_web_resources for later discoveries. scan_complete describes the scan,
+    independently of pagination. Do not restart an unfinished scan.
     """
 
     # coerce types
@@ -881,7 +913,7 @@ async def spider_website(
         resources = resources[:1000]
         return SpiderResults(
             url=url,
-            instructions=spider_instructions(resources, truncated),
+            instructions=spider_instructions(resources, False),
             resources=resources,
             has_more=False,
             scan_complete=True,

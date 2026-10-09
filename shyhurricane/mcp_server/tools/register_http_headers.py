@@ -12,7 +12,9 @@ from shyhurricane.mcp_server import log_tool_history, mcp_instance
 # it.
 #
 
-register_http_headers_instructions = "The HTTP headers have been successfully registered. Continue with your planned tasks."
+register_http_headers_instructions = (
+    "The HTTP headers are registered for this legacy session. Continue with your planned tasks."
+)
 
 
 @mcp_instance.tool(
@@ -29,8 +31,10 @@ async def register_http_headers(
 ) -> str:
     """Register HTTP headers to include with subsequent requests.
 
-    Registers HTTP headers to include with all HTTP requests. This is useful when the target requires testing identification, such
-    as bug bounty programs.
+    Registers headers for subsequent HTTP tool requests in the current legacy session only.
+    Per-call request_headers override registered values with the same key.
+    Unavailable to modern clients; supply request_headers on every call that needs them.
+    Use for testing identification or required authentication.
 
     Invoke this tool when the user asks to include HTTP headers in all requests.
     """

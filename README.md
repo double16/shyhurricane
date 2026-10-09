@@ -101,6 +101,26 @@ Binary responses return metadata only. `deobfuscate_javascript.output_length_lim
 Both preview overrides accept 1–4,194,304 characters. `fetch_web_resource_content` retains
 `output_start_position`, `output_length_limit`, and its existing partial-content fields.
 
+`deobfuscate_javascript.transformation_status` is `empty` for blank input, `succeeded` when
+the transformation command succeeds, and `failed` when it fails and returns the original input.
+Success does not guarantee complete source recovery. The status is preserved on saved pages.
+Older saved results without a status report `unknown`.
+Indexed JavaScript has already undergone automatic transformation; repeat it only when warranted.
+
+For `fetch_web_resource_content`, when `contents.has_more` is true, request the next chunk with
+`output_start_position = contents.offset + len(contents.text)`. This tool uses character offsets
+rather than saved-page tokens. It reads indexed content without contacting the target.
+
+Pending scans can return no resources while `scan_complete=false`; this does not establish that
+the target is unreachable. Avoid starting duplicate scans. `port_scan.retry` is deprecated and
+ignored; repeated calls with the same parameters retrieve cached or pending results, without a
+forced rescan. Indexing is asynchronous, so new discoveries may not be searchable immediately.
+
+Findings returned by `query_findings` may be unverified or outdated. Review their evidence before
+treating them as confirmed vulnerabilities. New findings should include
+evidence and verification status, with unavailable details marked explicitly. `save_finding`
+acknowledges queuing for asynchronous persistence; immediate queries may not include the finding.
+
 Saved pages live in `<server cache_path>/result_pages`, outside per-client working directories, and
 survive session closure and server restarts. Expiration is fixed at creation; reading pages does not
 extend it. Expired, missing, or corrupt results require repeating the original operation. Cleanup

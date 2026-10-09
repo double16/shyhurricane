@@ -174,6 +174,7 @@ def test_find_web_resources_result_and_spider_instructions():
     assert unindexed.instructions == resources.find_web_resources_instructions_not_found
     assert resources.spider_instructions([object()], True).endswith(resources.spider_results_instructions_has_more)
     assert resources.spider_instructions([], False) == resources.spider_results_instructions_not_found
+    assert resources.spider_instructions([], True) == resources.spider_results_instructions_pending
 
 
 @pytest.mark.asyncio
@@ -926,6 +927,7 @@ async def test_cached_spider_caps_retrieval_and_paginates(monkeypatch):
     assert first.pagination.total_items == 1000
     assert first.pagination.retrieval_truncated
     assert first.scan_complete
+    assert "still running" not in first.instructions
     assert not first.has_more
     second = (await get_result_page(None, first.pagination.next_page_token)).result
     assert second.resources[0].url == "https://example.com/50"

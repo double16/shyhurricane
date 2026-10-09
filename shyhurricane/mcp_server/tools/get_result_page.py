@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError
 
 from shyhurricane import result_pages
 from shyhurricane.mcp_server import mcp_instance
+from shyhurricane.mcp_server.tools.deobfuscate_javascript import DeobfuscationResult
 from shyhurricane.mcp_server.tools.directory_buster import DirBusterResults
 from shyhurricane.mcp_server.tools.find_indexed_metadata import (
     FindDomainsResult,
@@ -82,7 +83,7 @@ class IndexHttpUrlPage(BaseModel):
 
 class DeobfuscateJavascriptPage(BaseModel):
     source_tool: Literal["deobfuscate_javascript"]
-    result: SavedTextResult
+    result: DeobfuscationResult
 
 
 class PortScanXmlPage(BaseModel):
@@ -130,8 +131,12 @@ class ResultPage(RootModel[ResultPageValue]):
 async def get_result_page(ctx: Context, page_token: str) -> ResultPage:
     """Read a saved page using a next/previous token or an XML page token.
 
-    Tokens expire at the snapshot's expires_at time. XML pages contain text fragments;
-    concatenate their text fields to reconstruct the complete saved XML document.
+    Pass pagination.next_page_token, pagination.previous_page_token or nmap_xml_page_token.
+    Returns {source_tool, result}; result uses the original tool schema. Further navigation tokens
+    are in result.pagination. Pages are fixed snapshots and do not wait for new discoveries.
+    Tokens are private bearer capabilities and expire at expires_at.
+    XML pages contain fragments in result.text; concatenate them in page order.
+    Repeat the original operation only if the saved result is expired, missing or corrupt.
     """
     store = await result_pages.get_result_store()
     saved = await asyncio.to_thread(store.read, page_token)

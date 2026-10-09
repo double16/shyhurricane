@@ -68,6 +68,7 @@ def patch_context(monkeypatch, server_context):
 
 def test_dirbuster_instructions():
     assert directory.dirbuster_instructions([], False) == directory.dirbuster_results_instructions_not_found
+    assert directory.dirbuster_instructions([], True) == directory.dirbuster_results_instructions_pending
     assert directory.dirbuster_instructions(["https://example.com/admin"], False) == (
         directory.dirbuster_results_instructions_found
     )

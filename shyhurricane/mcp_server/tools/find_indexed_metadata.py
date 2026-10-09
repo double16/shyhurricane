@@ -16,8 +16,16 @@ from shyhurricane.utils import query_to_netloc
 
 logger = logging.getLogger(__name__)
 
-finder_instructions_found = "These are the {0} that have been indexed. find_web_resources can be used to search for resources on these {0}."
-finder_instructions_not_found = "No {0} matching the query have been indexed. Use the spider_website, directory_buster, or index_http_url tools to index resources."
+finder_instructions_found = (
+    "These are indexed {0}. Read additional saved results with "
+    "get_result_page(pagination.next_page_token), when present. "
+    "Use find_web_resources to search their indexed resources within the existing scope."
+)
+finder_instructions_not_found = (
+    "No indexed {0} matched this filter. Check or broaden the filter within the existing scope first. "
+    "An empty match does not establish that the target has no indexed data. If the target has no "
+    "indexed data, use available indexing tools only within the user-authorized scope."
+)
 
 
 def _finder_instructions(subject: str, results: Any) -> str:
@@ -55,6 +63,8 @@ async def find_domains(
     """List domains with indexed web resources.
 
     Query indexed resources for a list of domains that have resources that can be researched.
+
+    Use get_result_page(pagination.next_page_token) for additional saved results.
 
     Invoke this tool when the user asks about websites that have been scanned, spidered or indexed.
     """
@@ -105,6 +115,8 @@ async def find_hosts(
     """List indexed hosts for a domain.
 
     Query indexed resources for a list of hosts for the given domain.
+
+    Use get_result_page(pagination.next_page_token) for additional saved results.
 
     Invoke this tool when the user asks about websites that have been scanned, spidered or indexed.
     """
@@ -161,6 +173,8 @@ async def find_netloc(
 
     Query indexed resources for a list of network locations, i.e. host:port, for a given domain.
 
+    Use get_result_page(pagination.next_page_token) for additional saved results.
+
     Invoke this tool when the user asks about websites that have been scanned, spidered or indexed.
     """
     await log_tool_history(ctx, "find_netloc", domain_query=domain_query)
@@ -215,6 +229,8 @@ async def find_urls(
     """List indexed URLs for a host or domain.
 
     Query indexed resources for a list of URLs for the given host or domain.
+
+    Use get_result_page(pagination.next_page_token) for additional saved results.
 
     Invoke this tool when the user asks for page URLs that have been scanned, spidered or indexed.
 

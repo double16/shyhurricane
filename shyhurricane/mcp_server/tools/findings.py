@@ -21,8 +21,16 @@ from shyhurricane.utils import munge_urls, stream_lines
 logger = logging.getLogger(__name__)
 
 finding_target_invalid_instructions = "Target must be a valid URL, hostname, IP address, host:port or ip:port. Retry with a corrected target."
-finding_not_found_instructions = "No findings found for the target. Expand the target or hack more!"
-finding_instructions = "These are findings from previous scans for the target (they do not need to be saved again). They provide a good starting place to continue testing. Chaining findings together may produce higher severity findings."
+finding_not_found_instructions = (
+    "No saved findings matched this target. Check its format or review indexed evidence within the "
+    "existing scope. Queued findings may not be searchable yet. An empty result does not establish "
+    "that the target is secure."
+)
+finding_instructions = (
+    "These are previously saved findings; do not save them again. They may be unverified or outdated. "
+    "Review evidence and verification status before treating them as confirmed vulnerabilities. "
+    "Use get_result_page(pagination.next_page_token) for additional saved findings."
+)
 
 
 class SaveFindingResult(BaseModel):
@@ -51,6 +59,8 @@ async def save_finding(
     - **Title** – A concise, descriptive heading.
     - **Issue Summary** – What is wrong and why it is important.
     - **Discovery Method** – How the issue was found (tool or technique used).
+    - **Evidence** – Observed behavior and affected resource; redact sensitive values.
+    - **Verification Status** – Confirmed, suspected, or unverified, with supporting limitations.
     - **Reproduction Steps** – Step-by-step instructions to reproduce the issue.
     - **PoC** – Exploit code, request sample, or screenshot (if applicable).
     - **Fix** – Recommended remediation or mitigation.
@@ -61,10 +71,11 @@ async def save_finding(
 ) -> SaveFindingResult:
     """Save security finding associated with the current target.
 
-    Use this tool to save **every finding** associated with the current target.
-    A finding must be saved as soon as it is identified.
-
-    Do not skip or omit this tool. **All findings must be saved.**
+    Save each new finding within the user's task and scope, recording observed evidence and
+    verification status. Distinguish suspected issues from confirmed vulnerabilities.
+    Do not invent evidence, reproduction steps or references; mark unavailable details explicitly.
+    Do not re-save findings returned by query_findings.
+    Saving is asynchronous: success means queued, and immediate queries may not include it.
     """
     await log_tool_history(ctx, "save_finding", target=target, finding_title=title, markdown=len(markdown))
 
@@ -85,7 +96,7 @@ async def save_finding(
     ))
 
     return SaveFindingResult(
-        instructions="Finding has been saved and can be retrieved later.",
+        instructions="Finding is queued for saving; it may not be searchable immediately.",
         target=target,
         title=title,
     )

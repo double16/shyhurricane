@@ -111,7 +111,11 @@ async def index_http_url(
     Invoke this tool when the user needs one URL. Text is indexed completely and returned as saved
     preview pages. Binary content returns metadata only. content_length_limit controls preview characters.
 
-    If follow_redirects is true, redirects will be followed and the result is the destination of the redirect.
+    This contacts the live target; use fetch_web_resource_content for already indexed content.
+    Indexing is asynchronous; the returned response may not be searchable immediately.
+    Use get_result_page(pagination.next_page_token) for saved preview pages.
+    follow_redirects defaults to false. Enable it only when redirect destinations are in scope.
+    A null result indicates a request failure, not a successful empty response.
     """
 
     # coerce types

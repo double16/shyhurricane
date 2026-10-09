@@ -44,8 +44,12 @@ def indexed_metadata(monkeypatch):
 
 
 def test_finder_instructions_switches_on_results():
-    assert metadata._finder_instructions("domains", {"example.com"}).startswith("These are the domains")
-    assert metadata._finder_instructions("domains", set()).startswith("No domains")
+    found = metadata._finder_instructions("domains", {"example.com"})
+    assert found.startswith("These are indexed domains")
+    assert "get_result_page" in found
+    missing = metadata._finder_instructions("domains", set())
+    assert missing.startswith("No indexed domains")
+    assert "Check or broaden the filter within the existing scope first" in missing
 
 
 @pytest.mark.asyncio
@@ -54,7 +58,7 @@ async def test_find_domains_filters_contains_query(indexed_metadata):
 
     assert result.query == "example"
     assert result.domains == ["example.com"]
-    assert result.instructions.startswith("These are the domains")
+    assert result.instructions.startswith("These are indexed domains")
 
 
 @pytest.mark.asyncio

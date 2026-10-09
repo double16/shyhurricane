@@ -40,7 +40,8 @@ async def fetch_web_resource_content(
         url: Annotated[str, Field(description="""The URL may be a http:// or https:// URL of a website that has been indexed, spidered or scanned.
 
     The URL may be a web://{doc_type}/{doc_id} URL supplied by the
-    find_web_resources tool. The URL can be found in the resource_link JSON object.
+    find_web_resources tool. Pass resource.uri from the structured record, or the URI
+    from an MCP resource-link content block.
 """)],
         output_start_position: Annotated[
             int, Field(0, description="The character position in the resource to start output", ge=0)] = 0,
@@ -54,7 +55,12 @@ async def fetch_web_resource_content(
      - the user requests analysis of resource content that has already been indexed, spidered or scanned
      - the user requests content with a URL that starts with "web://"
 
-    Javascript has already been deobfuscated as well as can be, do not try to deobfuscate or deminify.
+    Indexed JavaScript has undergone automatic transformation, which may fail or be partial.
+    Avoid repeating transformation unless the content warrants it.
+    This reads the index and does not fetch the live URL. Null means no content was found.
+    When contents.has_more is true, request the next chunk with
+    output_start_position=contents.offset + len(contents.text). Offsets count Unicode characters.
+    This tool uses offsets rather than saved-page tokens.
     """
     await log_tool_history(ctx, "fetch_web_resource_content", url=url,
                            output_start_position=output_start_position, output_length_limit=output_length_limit)

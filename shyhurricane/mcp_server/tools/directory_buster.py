@@ -33,8 +33,20 @@ from ..run_unix_command import _run_unix_command
 
 logger = logging.getLogger(__name__)
 
-dirbuster_results_instructions_found = """These resources were found by brute-forcing the web server URL using a wordlist."""
-dirbuster_results_instructions_has_more = " This list isn't all of the results. Use the find_web_resources and find_urls tools to get more."
+dirbuster_results_instructions_found = (
+    "These resources were found by brute-forcing the web server URL using a wordlist. "
+    "Read additional saved URLs with get_result_page(pagination.next_page_token), when present. "
+    "Saved pages are fixed snapshots; scan_complete describes completion independently."
+)
+dirbuster_results_instructions_has_more = (
+    " The scan is still running (scan_complete=false). Do not start another scan. "
+    "Query indexed resources for later discoveries; indexing may lag behind scanning."
+)
+dirbuster_results_instructions_pending = (
+    "No resources are available yet. The scan is still running (scan_complete=false). "
+    "Do not infer that the site is unreachable or start another scan. "
+    "Discoveries may become searchable after indexing completes."
+)
 dirbuster_results_instructions_not_found = "No resources were found by directory busting (brute-forcing) the site. It may be there is no web server at the requested address and port or a different wordlist is needed."
 
 
@@ -43,6 +55,8 @@ def dirbuster_instructions(results: List[str], has_more: bool) -> str:
         instructions = dirbuster_results_instructions_found
         if has_more:
             instructions += dirbuster_results_instructions_has_more
+    elif has_more:
+        instructions = dirbuster_results_instructions_pending
     else:
         instructions = dirbuster_results_instructions_not_found
     return instructions
@@ -124,7 +138,10 @@ async def directory_buster(
     find_web_resources, find_urls and other tools that use indexed content. This tool is preferred over feroxbuster,
     gobuster, ffuf, wfuzz, and other like commands.
 
-    Returns a list of URLs found. Indexes each URL that can be queried using the find_web_resources and find_urls tools. URL content can be returned using the fetch_web_resource_content tool.
+    Returns discovered URLs queued for indexing; searchability may lag behind scanning.
+    Use get_result_page(pagination.next_page_token) to read additional saved URLs.
+    Saved pages are fixed snapshots; query find_urls or find_web_resources for later discoveries.
+    scan_complete describes completion independently of pagination. Do not restart a pending scan.
     """
 
     # coerce types

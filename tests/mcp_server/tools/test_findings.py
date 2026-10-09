@@ -60,7 +60,7 @@ async def test_save_finding_enqueues_valid_target(monkeypatch):
 
     result = await findings.save_finding(None, "https://example.com", "# finding", "Title")
 
-    assert result.instructions == "Finding has been saved and can be retrieved later."
+    assert result.instructions == "Finding is queued for saving; it may not be searchable immediately."
     assert ctx.task_queue.items[0].target == "https://example.com"
     assert ctx.task_queue.items[0].markdown == "# finding"
     assert ctx.task_queue.items[0].title == "Title"

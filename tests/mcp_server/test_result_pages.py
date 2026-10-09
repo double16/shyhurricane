@@ -11,6 +11,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel
 
 from shyhurricane import result_pages
+from shyhurricane.mcp_server.tools.deobfuscate_javascript import DeobfuscationResult
 from shyhurricane.mcp_server.tools.get_result_page import get_result_page
 from shyhurricane.result_pages import Pagination, ResultPageStore, SavedTextResult
 from shyhurricane.result_pages import get_result_store as real_get_result_store
@@ -258,6 +259,7 @@ async def test_text_reconstructs_unicode_and_get_page_returns_discriminated_resp
     while previous.pagination.next_page_token:
         page = await get_result_page(None, previous.pagination.next_page_token)
         assert page.source_tool == "deobfuscate_javascript"
+        assert page.result.transformation_status == "unknown"
         assert page.result.offset == sum(map(len, chunks))
         assert page.result.total_length == len(text)
         chunks.append(page.result.text)
@@ -268,6 +270,25 @@ async def test_text_reconstructs_unicode_and_get_page_returns_discriminated_resp
     _, token = snapshot(result_store)
     with pytest.raises(ToolError, match="corrupt"):
         await get_result_page(None, token)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["succeeded", "failed"])
+async def test_transformation_status_survives_saved_page_navigation(result_store, status):
+    result = await result_pages.paginate_result(
+        "deobfuscate_javascript",
+        DeobfuscationResult(
+            text="original or transformed", mime_type="application/javascript",
+            total_length=23, transformation_status=status,
+        ),
+        "text",
+        4,
+    )
+    assert result.transformation_status == status
+    while result.pagination.next_page_token:
+        page = await get_result_page(None, result.pagination.next_page_token)
+        assert page.result.transformation_status == status
+        result = page.result
 
 
 @pytest.mark.asyncio

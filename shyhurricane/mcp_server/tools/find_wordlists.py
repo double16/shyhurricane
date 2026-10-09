@@ -92,13 +92,18 @@ class FindWordlistsResult(BaseModel):
 @paged_results("paths")
 async def find_wordlists(
         ctx: Context,
-        query: Annotated[str, Field(description="""Substring search of the path. Examples: Web-Content, DNS, LFI, password, username""")],
+        query: Annotated[str, Field(description=(
+            "Case-insensitive path substrings; all whitespace-separated terms must match. "
+            "Examples: Web-Content, DNS, LFI, password, username. Paths are in the command container."
+        ))],
         limit: Annotated[int, Field(20, description="The maximum number of results to return", ge=1, le=1000)] = 20
 ) -> FindWordlistsResult:
     """Find available wordlists for scanning and directory discovery.
 
     Find available word lists. The results can be used with other commands that have options to
     accept word lists.
+
+    Use get_result_page(pagination.next_page_token) for additional saved results.
 
     Invoke this tool when the user wants to run a brute-forcing tool and needs to use a wordlist.
     """

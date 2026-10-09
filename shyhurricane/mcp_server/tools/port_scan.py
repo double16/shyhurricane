@@ -31,7 +31,10 @@ from shyhurricane.utils import (
 logger = logging.getLogger(__name__)
 
 port_scan_instructions = (
-    "These are structured port scan results. Retrieve saved XML text fragments using nmap_xml_page_token."
+    "These are structured port scan results. Read saved records using "
+    "get_result_page(pagination.next_page_token). If XML is needed and nmap_xml_page_token is "
+    "present, call get_result_page(page_token=nmap_xml_page_token). "
+    "Concatenate result.text fragments in page order."
 )
 port_scan_instructions_pending = (
     "These are partial structured port scan results. The scan is still running. "
@@ -92,7 +95,8 @@ async def port_scan(
         retry: Annotated[
             bool,
             Field(False,
-                  description="If the results are suspected to be invalid, such as a temporary network failure, set to true. Otherwise set to false to avoid unnecessary duplication of effort."
+                  description="Deprecated and ignored; leave false. Repeating the same parameters retrieves "
+                              "cached or pending results and does not request a forced rescan."
                   )
         ] = False,
         limit: Annotated[int, Field(100, ge=1, le=1000, description="Service records per page")] = 100,
@@ -110,7 +114,12 @@ async def port_scan(
     a list of IPv4 or IPv6 addresses. The ip_subnets parameter is a list of IPv4 or IPv6 subnets in CIDR notation, such
     as "192.168.1.0/24".
 
-    If the port scan reveals additional hostnames, virtual hosts or redirects, use the `register_hostname_address` tool to register them.
+    For additional in-scope hostnames, supply additional_hosts on calls that need them.
+    Legacy clients may instead use register_hostname_address for their current session.
+    retry is deprecated and ignored; this tool does not offer forced rescans.
+    Use get_result_page(pagination.next_page_token) for saved records. scan_complete is independent
+    of pagination. If XML is needed, pass nmap_xml_page_token to get_result_page and concatenate
+    result.text fragments in page order.
 
     The port scan may take a long time, and this tool may return before the scan is finished.
     If a timeout occurs, call this tool again with the same parameters, and it will return indexed results.
