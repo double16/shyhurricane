@@ -12,6 +12,7 @@ from starlette.responses import Response
 
 from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
 from shyhurricane.nuclei_findings import is_nuclei_finding, nuclei_finding_to_markdown
+from shyhurricane.result_pages import Pagination, paged_results
 from shyhurricane.target_info import filter_targets_str, parse_target_info
 from shyhurricane.task_queue import SaveFindingQueueItem
 from shyhurricane.task_queue.finding_worker import FINDING_VERSION
@@ -58,7 +59,8 @@ async def save_finding(
         title: Annotated[
             Optional[str], Field(description="""A short, descriptive summary of the issue (one line max).""")],
 ) -> SaveFindingResult:
-    """
+    """Save security finding associated with the current target.
+
     Use this tool to save **every finding** associated with the current target.
     A finding must be saved as soon as it is identified.
 
@@ -96,6 +98,7 @@ class Finding(BaseModel):
 
 
 class QueryFindingsResult(BaseModel):
+    pagination: Pagination | None = None
     instructions: str = Field(description="Instructions for processing the findings")
     target: str = Field(description="Target of the findings")
     limit: int = Field(description="Limit for the number of results")
@@ -109,12 +112,14 @@ class QueryFindingsResult(BaseModel):
         read_only_hint=True,
         open_world_hint=False),
 )
+@paged_results("findings")
 async def query_findings(
         ctx: Context,
         target: Annotated[str, Field(description="URL, hostname, IP address, or domain name")],
-        limit: Annotated[int, Field(100, ge=10, le=1000, description="The maximum number of findings to return")] = 100
+        limit: Annotated[int, Field(10, ge=1, le=1000, description="Findings per page")] = 10
 ) -> QueryFindingsResult:
-    """
+    """Query previously saved findings for a target.
+
     Query for previous findings for the target. The findings provide a good starting place to continue testing.
 
     Invoke this tool when the user asks for existing vulnerabilities or is looking for a direction for testing a target.
@@ -122,7 +127,6 @@ async def query_findings(
     """
     await log_tool_history(ctx, "query_findings", target=target, limit=limit)
     server_ctx = await get_server_context()
-    limit = min(1000, max(10, limit or 100))
 
     try:
         target_info = parse_target_info(target)
@@ -188,10 +192,8 @@ async def query_findings(
             title=doc.meta.get("title", ""),
             markdown=doc.content,
         ))
-        if len(findings) >= limit:
-            has_more = True
-            break
 
+    has_more = len(findings) > limit
     logger.info(f"Found {len(findings)} findings")
 
     return QueryFindingsResult(

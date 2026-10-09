@@ -33,6 +33,88 @@ The following tools are provided:
 | save_finding                | Save findings as a markdown.                                                                        | No          |
 | query_findings              | Query for previous findings for a target.                                                           | No          |
 | deobfuscate_javascript      | De-obfuscate JavaScript content (automatically done during indexing)                                | No          |
+| get_result_page             | Retrieve a saved page using an opaque navigation token.                                             | No          |
+
+### Result limits and saved pages
+
+List tools return a first page and optional `pagination` metadata. Use
+`get_result_page(page_token)` with `pagination.next_page_token` or
+`pagination.previous_page_token` to navigate the same saved result without repeating a query or scan.
+The paging tool returns `{ "source_tool": "...", "result": { ... } }`; `result` uses the producing
+tool's response schema. Tokens are opaque bearer capabilities: anyone holding a token can read its
+saved page through this server. Keep tokens private.
+
+| Tool                                        | Default page size   | Saved result                                               |
+|---------------------------------------------|---------------------|------------------------------------------------------------|
+| `find_web_resources`                        | 20 resources        | Up to `retrieval_limit` matches (default 1,000)            |
+| `query_findings`                            | 10 full findings    | All matching findings                                      |
+| `find_urls`                                 | 100 URLs            | All matching unique URLs                                   |
+| `find_wordlists`                            | 20 paths            | All matching ranked paths                                  |
+| `find_domains`, `find_hosts`, `find_netloc` | 100 records         | All matching unique records                                |
+| `spider_website`                            | 50 resources        | Results collected before this call returns                 |
+| `directory_buster`                          | 100 URLs            | Results collected before this call returns                 |
+| `port_scan`                                 | 100 service records | Available structured scan results                          |
+| `index_http_url`                            | 16,384 characters   | Complete textual response, after JavaScript transformation |
+| `deobfuscate_javascript`                    | 8,192 characters    | Complete transformed script, or original script on failure |
+| `fetch_web_resource_content`                | 4,096 characters    | Existing offset-based retrieval                            |
+
+List `limit` arguments control page size and accept 1–1,000. `find_web_resources` separately accepts
+`retrieval_limit` from 1–1,000; `pagination.retrieval_truncated` reports when additional matches were
+excluded by that cap. Narrow the query to retrieve other matches. Cached spider responses similarly
+save at most 1,000 resources. Results preserve their original ordering throughout navigation.
+Counts limit records, not total serialized bytes; full findings and headers can still be large.
+
+`pagination` includes one-based `page_number`, `page_size`, `total_items`, `total_pages`, `expires_at`,
+`next_page_token`, `previous_page_token`, and `retrieval_truncated`. Text totals and limits count
+Unicode characters. First pages have no previous token and last pages have no next token. Empty
+results have no snapshot and `pagination` is null. Nonempty single-page results are saved with both
+navigation tokens null.
+
+For example, call `find_urls` with:
+
+```json
+{"host_query": "example.com", "limit": 10}
+```
+
+Then pass the returned `pagination.next_page_token` to:
+
+```json
+{"page_token": "<opaque token from the response>"}
+```
+
+Scan `has_more` and `scan_complete` describe scan completion, independently of saved-page navigation.
+A page token accesses only results available when that snapshot was created. Scanning and indexing
+continue after a tool's wait timeout; later scan calls create separate snapshots. Use indexed search
+for discoveries made after the original call returned.
+
+`port_scan` now returns structured `results` instead of embedding XML (`nmap_xml` is null).
+Its `nmap_xml_page_token` retrieves the first saved XML fragment through `get_result_page`.
+Follow navigation tokens and concatenate the `result.text` fragments in order to reconstruct the
+complete XML; individual fragments need not be valid XML documents. XML fragments are 8,192 characters.
+
+`deobfuscate_javascript` now returns an object with `text`, `mime_type`, `offset`, `total_length`,
+`has_more`, and `pagination`. `find_wordlists` now returns `paths` and `pagination`.
+`index_http_url.content_length_limit` controls preview characters, default 16,384, and no longer
+omits large bodies or limits indexing. All textual response bodies are submitted for indexing,
+including responses without `Content-Length`. Preview limits apply after JavaScript transformation.
+Binary responses return metadata only. `deobfuscate_javascript.output_length_limit` defaults to 8,192.
+Both preview overrides accept 1–4,194,304 characters. `fetch_web_resource_content` retains
+`output_start_position`, `output_length_limit`, and its existing partial-content fields.
+
+Saved pages live in `<server cache_path>/result_pages`, outside per-client working directories, and
+survive session closure and server restarts. Expiration is fixed at creation; reading pages does not
+extend it. Expired, missing, or corrupt results require repeating the original operation. Cleanup
+runs before serving requests, at shutdown after workers drain, and before each new paginated query,
+scan, or content operation. Unexpired snapshots remain on shutdown. No periodic background cleanup
+runs while the server is idle. This store follows the server's single-process deployment model.
+
+| Environment variable      | Default                        | Description                                                                                                                                   |
+|---------------------------|--------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| `TOOL_CACHE`              | `TMPDIR`, or `/tmp` when unset | Parent directory for the server's `tool_cache` directory and saved pages; use persistent storage to retain pages across container replacement |
+| `TOOL_RESULT_TTL_SECONDS` | `86400`                        | Positive integer retention in seconds for newly created snapshots; existing expiration times remain unchanged                                 |
+
+For Docker Compose, set `TOOL_RESULT_TTL_SECONDS` in `.env` and restart the service. Both Compose
+configurations retain saved pages in the existing `tool_cache` volume.
 
 ### Search predicates
 
@@ -40,15 +122,15 @@ The following tools are provided:
 ranking and are combined with AND, including repeated predicates. Prefix a predicate with `-` to exclude matches;
 quote values containing spaces. Content and title analysis remains part of the natural-language query.
 
-| Predicate | Meaning | Example |
-| --- | --- | --- |
-| `site:` | Hostname and its subdomains, or an exact IP; optionally restrict port, scheme, and URL path prefix | `site:example.com`, `site:example.com:8443`, `site:https://example.com/app/` |
-| `inurl:` | Case-sensitive literal substring anywhere in the URL, including the query string | `inurl:admin`, `-inurl:"logout page"` |
-| `filetype:`, `ext:` | Case-insensitive final path extension; ignores query strings and fragments | `filetype:js` |
-| `mime:` | Exact response MIME type, ignoring case and parameters | `mime:application/json` |
-| `method:` | HTTP request method, ignoring case; intersects with the `http_methods` argument | `method:POST` |
-| `status:` | Exact HTTP response status code from 100 to 599 | `status:403` |
-| `type:` | Indexed representation: `html`, `javascript`, `css`, `xml`, `json`, `network`, `forms`, `content`, `default` | `type:network` |
+| Predicate           | Meaning                                                                                                      | Example                                                                      |
+|---------------------|--------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------|
+| `site:`             | Hostname and its subdomains, or an exact IP; optionally restrict port, scheme, and URL path prefix           | `site:example.com`, `site:example.com:8443`, `site:https://example.com/app/` |
+| `inurl:`            | Case-sensitive literal substring anywhere in the URL, including the query string                             | `inurl:admin`, `-inurl:"logout page"`                                        |
+| `filetype:`, `ext:` | Case-insensitive final path extension; ignores query strings and fragments                                   | `filetype:js`                                                                |
+| `mime:`             | Exact response MIME type, ignoring case and parameters                                                       | `mime:application/json`                                                      |
+| `method:`           | HTTP request method, ignoring case; intersects with the `http_methods` argument                              | `method:POST`                                                                |
+| `status:`           | Exact HTTP response status code from 100 to 599                                                              | `status:403`                                                                 |
+| `type:`             | Indexed representation: `html`, `javascript`, `css`, `xml`, `json`, `network`, `forms`, `content`, `default` | `type:network`                                                               |
 
 Examples:
 
@@ -97,13 +179,13 @@ It is best to run `nmap` on the host. If not installed on the host, the docker c
 
 Configure one desired provider and model in `.env`:
 
-| Provider | Model variable | Credential and connection variables |
-| --- | --- | --- |
-| Ollama | `OLLAMA_MODEL=llama3.2:3b` | `OLLAMA_HOST=192.168.253.100:11434` |
-| Google AI | `GEMINI_MODEL=gemini-2.5-pro` | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
-| OpenAI | `OPENAI_MODEL=gpt-5-nano` | `OPENAI_API_KEY` |
-| AWS Bedrock | `BEDROCK_MODEL=us.meta.llama3-2-3b-instruct-v1:0` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` |
-| LiteLLM | `LITELLM_MODEL=anthropic/claude-sonnet-4-6` | `LITELLM_API_KEY`; optionally `LITELLM_API_BASE` for a LiteLLM proxy |
+| Provider    | Model variable                                    | Credential and connection variables                                  |
+|-------------|---------------------------------------------------|----------------------------------------------------------------------|
+| Ollama      | `OLLAMA_MODEL=llama3.2:3b`                        | `OLLAMA_HOST=192.168.253.100:11434`                                  |
+| Google AI   | `GEMINI_MODEL=gemini-2.5-pro`                     | `GEMINI_API_KEY` or `GOOGLE_API_KEY`                                 |
+| OpenAI      | `OPENAI_MODEL=gpt-5-nano`                         | `OPENAI_API_KEY`                                                     |
+| AWS Bedrock | `BEDROCK_MODEL=us.meta.llama3-2-3b-instruct-v1:0` | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`                         |
+| LiteLLM     | `LITELLM_MODEL=anthropic/claude-sonnet-4-6`       | `LITELLM_API_KEY`; optionally `LITELLM_API_BASE` for a LiteLLM proxy |
 
 For a direct LiteLLM provider connection, omit `LITELLM_API_KEY` and supply the selected provider's
 standard credential environment variable, such as `ANTHROPIC_API_KEY`. When using Docker Compose, use
@@ -128,16 +210,16 @@ Add the MCP server to your client of choice at http://127.0.0.1:8000/mcp.
 The server uses MCP Python SDK 2.2. Choose the transport with `--transport` or `MCP_TRANSPORT`.
 An explicit command-line argument overrides the environment setting.
 
-| Setting | Default | Description |
-| --- | --- | --- |
-| `MCP_TRANSPORT` | `streamable-http` | `streamable-http`, `sse`, or `streamable-http-modern` |
+| Setting               | Default                                              | Description                                                              |
+|-----------------------|------------------------------------------------------|--------------------------------------------------------------------------|
+| `MCP_TRANSPORT`       | `streamable-http`                                    | `streamable-http`, `sse`, or `streamable-http-modern`                    |
 | `DISABLE_ELICITATION` | `True` in Compose; enabled when unset in source runs | Set `False` to allow the client to ask for a target or scan confirmation |
 
-| Transport | Endpoint | Client state |
-| --- | --- | --- |
-| `streamable-http` | `/mcp` | Legacy client sessions retain registered headers, hostname mappings, and working directories |
-| `sse` | `/sse` | Legacy SSE connections retain client state |
-| `streamable-http-modern` | `/mcp` | Stateless preset; every tool call starts with fresh client state |
+| Transport                | Endpoint | Client state                                                                                 |
+|--------------------------|----------|----------------------------------------------------------------------------------------------|
+| `streamable-http`        | `/mcp`   | Legacy client sessions retain registered headers, hostname mappings, and working directories |
+| `sse`                    | `/sse`   | Legacy SSE connections retain client state                                                   |
+| `streamable-http-modern` | `/mcp`   | Stateless preset; every tool call starts with fresh client state                             |
 
 Both HTTP presets accept legacy and modern protocol requests; the client's protocol version selects the workflow.
 Modern clients use the 2026-07-28 protocol and have request-local state under either HTTP preset. Persistent
@@ -180,6 +262,36 @@ $(command -v python3.14) -m venv .venv
 source .venv/bin/activate
 uv sync
 ```
+
+#### File logging
+
+Set `LOG_FILE` or pass `--log-file` to append Python logger messages at DEBUG and higher to a UTF-8
+file. The command-line option overrides the environment variable. Parent directories are created;
+an unwritable destination stops startup with an error. Each record includes its timestamp, severity,
+logger name, process name, and PID. Exceptions logged with exception details include their tracebacks.
+The file remains active while the interactive dashboard suppresses console output, and worker
+processes inherit the destination. Uvicorn access messages also reach the file during dashboard use.
+
+| Environment variable | Default                      | Description                                                                                                                                   |
+|----------------------|------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
+| `LOG_FILE`           | Unset; file logging disabled | Diagnostic log path, relative to the working directory or absolute; `~` is expanded. Includes all Python logger levels and logged tracebacks. |
+
+```shell
+UV_CACHE_DIR="$PWD/.uv-cache" uv run python mcp_service.py --log-file ./logs/server.log
+# Or configure the destination through the environment:
+LOG_FILE=./logs/server.log UV_CACHE_DIR="$PWD/.uv-cache" uv run python mcp_service.py
+```
+
+For Docker Compose, set `LOG_FILE=/tool_cache/logs/server.log` in `.env` and restart the service.
+Both Compose configurations preserve that location in the existing `tool_cache` volume. Read it with:
+
+```shell
+docker compose exec mcp tail -n 200 /tool_cache/logs/server.log
+```
+
+The file uses append mode and has no automatic rotation. It records Python logging output;
+raw subprocess stdout/stderr and exceptions handled without logging are not redirected into it.
+The cache's `history.jsonl` remains a separate record of tool calls.
 
 #### Ollama
 

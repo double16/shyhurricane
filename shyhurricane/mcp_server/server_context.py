@@ -21,6 +21,7 @@ from shyhurricane.haystack_lifecycle import close_haystack_resources
 from shyhurricane.health import HealthMonitor, qdrant_probe
 from shyhurricane.mcp_server.generator_config import get_generator_config
 from shyhurricane.persistent_queue import AsyncIngestWriter, cleanup_persistent_queues_on_startup
+from shyhurricane.result_pages import ResultPageStore
 from shyhurricane.retrieval_pipeline import build_document_pipeline, build_website_context_pipeline
 from shyhurricane.server_config import get_server_config
 from shyhurricane.utils import get_log_timestamp, unix_command_image
@@ -66,6 +67,7 @@ class ServerContext:
     indexing_enabled: Optional[object] = None
     worker_manager: Optional[object] = None
     stop_event: Optional[object] = None
+    result_store: ResultPageStore | None = None
     _closed: bool = field(default=False, init=False)
     _ingest_writer: AsyncIngestWriter | None = field(default=None, init=False)
 
@@ -149,6 +151,8 @@ class ServerContext:
             self.ingest_queue.close()
         except Exception:
             pass
+        if self.result_store is not None:
+            self.result_store.cleanup()
         logger.info("ServerContext closed")
 
 
@@ -170,6 +174,13 @@ async def get_server_context() -> ServerContext:
     log_timestamp = get_log_timestamp()
     server_config = get_server_config()
 
+    cache_path: str = os.path.join(os.environ.get('TOOL_CACHE', os.environ.get('TMPDIR', '/tmp')), 'tool_cache')
+    os.makedirs(cache_path, exist_ok=True)
+    result_store = await asyncio.to_thread(
+        ResultPageStore, cache_path, int(os.environ.get("TOOL_RESULT_TTL_SECONDS", "86400")),
+    )
+    await asyncio.to_thread(result_store.cleanup)
+
     db = server_config.database or os.environ.get('QDRANT', 'shyhurricane.db')
     logger.info("Using Qdrant database at %s", db)
     # ensure collections are created
@@ -184,8 +195,6 @@ async def get_server_context() -> ServerContext:
             else:
                 document_store.count_documents()
 
-    cache_path: str = os.path.join(os.environ.get('TOOL_CACHE', os.environ.get('TMPDIR', '/tmp')), 'tool_cache')
-    os.makedirs(cache_path, exist_ok=True)
     disable_elicitation = _elicitation_disabled()
     qdrant_client = await create_qdrant_client(db=db)
     qdrant_host, qdrant_port = qdrant_host_port(db)
@@ -244,6 +253,7 @@ async def get_server_context() -> ServerContext:
     _server_context = ServerContext(
         db=db,
         cache_path=cache_path,
+        result_store=result_store,
         document_pipeline=None,
         website_context_pipeline=None,
         ingest_queue=ingest_queue,

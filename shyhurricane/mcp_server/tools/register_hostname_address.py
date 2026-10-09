@@ -34,7 +34,8 @@ async def register_hostname_address(
         host: Annotated[str, Field(description="The hostname")],
         address: Annotated[str, Field(description="The IPv4 or IPv6 address")],
 ) -> str:
-    """
+    """Register a hostname-to-IP mapping for subsequent requests.
+
     Registers a hostname with an IP address. This is useful when a hostname does not resolve with DNS,
     and we know the IP address by other means. Especially useful in CTF or private networks.
 

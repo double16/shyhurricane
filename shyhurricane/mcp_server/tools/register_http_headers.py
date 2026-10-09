@@ -27,7 +27,8 @@ async def register_http_headers(
         ctx: Context,
         http_headers: Annotated[Dict[str, str], Field(description="HTTP name and value pairs")],
 ) -> str:
-    """
+    """Register HTTP headers to include with subsequent requests.
+
     Registers HTTP headers to include with all HTTP requests. This is useful when the target requires testing identification, such
     as bug bounty programs.
 

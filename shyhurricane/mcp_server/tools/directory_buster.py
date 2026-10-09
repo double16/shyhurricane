@@ -23,8 +23,9 @@ from shyhurricane.mcp_server import (
 )
 from shyhurricane.mcp_server.progress import progress_scope, report_progress
 from shyhurricane.mcp_server.session_state import ensure_work_path
-from shyhurricane.mcp_server.tools.find_wordlists import find_wordlists
+from shyhurricane.mcp_server.tools.find_wordlists import find_wordlists_all as find_wordlists
 from shyhurricane.rate_limit import get_rate_limit_requests_per_second
+from shyhurricane.result_pages import Pagination, paged_results
 from shyhurricane.task_queue import DirBustingQueueItem, DirBustingResultItem
 from shyhurricane.utils import coerce_to_dict, coerce_to_list
 
@@ -48,6 +49,8 @@ def dirbuster_instructions(results: List[str], has_more: bool) -> str:
 
 
 class DirBusterResults(BaseModel):
+    pagination: Pagination | None = None
+    scan_complete: bool = False
     instructions: str = Field(description="The instructions string for interpreting the results")
     starting_url: str = Field(description="The starting URL of the directory buster")
     wordlist: Optional[str] = Field(description="The wordlist used by the directory buster")
@@ -65,6 +68,7 @@ class DirBusterResults(BaseModel):
         open_world_hint=True),
 )
 @progress_scope()
+@paged_results("urls")
 async def directory_buster(
         ctx: Context,
         url: Annotated[str, Field(description=(
@@ -109,8 +113,10 @@ async def directory_buster(
                 ge=30, le=600,
             )
         ] = None,
+        limit: Annotated[int, Field(100, ge=1, le=1000, description="URLs per page")] = 100,
 ) -> DirBusterResults:
-    """
+    """Search a website for hidden directories and files using a wordlist.
+
     Search a website for hidden directories and files. This tool uses a wordlist to append each word to a URL and see if
     it responds.
 
@@ -207,6 +213,7 @@ async def directory_buster(
         starting_url=url,
         wordlist=wordlist,
         urls=results,
+        scan_complete=not has_more,
         has_more=has_more,
     )
 
@@ -219,7 +226,7 @@ async def validate_wordlist(ctx: Context, wordlist: str) -> Union[str, None]:
             if test_for_file.return_code == 0:
                 return wordlist
 
-        wordlist_results = await find_wordlists(ctx, wordlist_filename, 1000)
+        wordlist_results = (await find_wordlists(ctx, wordlist_filename)).paths
         if len(wordlist_results) == 0:
             logger.warning("No wordlists found for %s, using default", wordlist_filename)
             return None

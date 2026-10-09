@@ -35,9 +35,10 @@ from shyhurricane.mcp_server import (
     mcp_instance,
 )
 from shyhurricane.mcp_server.progress import progress_scope, report_progress
-from shyhurricane.mcp_server.tools.find_indexed_metadata import find_netloc
+from shyhurricane.mcp_server.tools.find_indexed_metadata import find_netloc_all as find_netloc
 from shyhurricane.predicate_search import candidate_filters, load_candidates, select_candidates
 from shyhurricane.rate_limit import get_rate_limit_requests_per_second
+from shyhurricane.result_pages import Pagination, paged_results, paginate_result, start_query
 from shyhurricane.search_predicates import Predicate, parse_predicates
 from shyhurricane.server_config import get_server_config
 from shyhurricane.target_info import TargetInfo, filter_targets_query, parse_target_info
@@ -218,6 +219,7 @@ async def _find_recommended_urls(ctx: Context) -> Optional[List[str]]:
 
 
 class FindWebResourcesResult(BaseModel):
+    pagination: Pagination | None = None
     instructions: str = Field(description="Instructions for using the results")
     query: str = Field(description="Search query used to find web resources")
     http_methods: Optional[List[str]] = Field(default=None, description="HTTP methods used to find web resources")
@@ -301,7 +303,7 @@ async def _prepare_search(
 
     server_ctx = await get_server_context()
     query = query.strip()
-    limit = min(1000, max(10, limit or 100))
+    limit = min(1001, max(1, limit or 100))
     logger.info("finding web resources for %s up to %d results", query, limit)
 
     try:
@@ -393,9 +395,20 @@ def _can_elicit(ctx: Context, server_ctx: ServerContext) -> bool:
     )
 
 
+async def _prepare_tool_search(
+    ctx: Context,
+    query: str,
+    limit: int = 20,
+    http_methods: Optional[Union[List[str], str]] = None,
+    retrieval_limit: Annotated[int, Field(1000, ge=1, le=1000)] = 1000,
+) -> Union[SearchPreparation, FindWebResourcesResult]:
+    await start_query()
+    return await _prepare_search(ctx, query, retrieval_limit + 1, http_methods)
+
+
 async def _request_target(
     ctx: Context,
-    search: Annotated[Union[SearchPreparation, FindWebResourcesResult], Resolve(_prepare_search)],
+    search: Annotated[Union[SearchPreparation, FindWebResourcesResult], Resolve(_prepare_tool_search)],
 ) -> Union[RequestTargetUrl, Elicit[RequestTargetUrl]]:
     if isinstance(search, FindWebResourcesResult) or search.targets:
         return RequestTargetUrl()
@@ -406,7 +419,7 @@ async def _request_target(
 
 async def _prepare_targets(
     ctx: Context,
-    search: Annotated[Union[SearchPreparation, FindWebResourcesResult], Resolve(_prepare_search)],
+    search: Annotated[Union[SearchPreparation, FindWebResourcesResult], Resolve(_prepare_tool_search)],
     target_answer: Annotated[ElicitationResult[RequestTargetUrl], Resolve(_request_target)],
 ) -> Union[SearchPreparation, FindWebResourcesResult]:
     if isinstance(search, FindWebResourcesResult):
@@ -685,7 +698,8 @@ async def find_web_resources_tool(
     query: str,
     search: Annotated[Union[SearchPreparation, FindWebResourcesResult], Resolve(_prepare_targets)],
     scan_answer: Annotated[ElicitationResult[SpiderConfirmation], Resolve(_request_scan)],
-    limit: Annotated[int, Field(100, description="Limit how many results are returned", ge=10, le=1000)] = 100,
+    limit: Annotated[int, Field(20, description="Resources per page", ge=1, le=1000)] = 20,
+    retrieval_limit: Annotated[int, Field(1000, ge=1, le=1000, description="Maximum matches to save")] = 1000,
     http_methods: Annotated[
         Optional[Union[List[str], str]],
         Field(
@@ -729,7 +743,10 @@ async def find_web_resources_tool(
     Predicate-only queries work without an LLM, including in low-power mode.
     """
 
-    return await _execute_search(ctx, search, scan_answer)
+    result = await _execute_search(ctx, search, scan_answer)
+    truncated = len(result.resources) > retrieval_limit
+    result = result.model_copy(update={"resources": result.resources[:retrieval_limit], "limit": limit})
+    return await paginate_result("find_web_resources", result, "resources", limit, truncated)
 
 
 spider_results_instructions_found = "These resources were found by navigating a web server using links in the returned content."
@@ -748,6 +765,9 @@ def spider_instructions(results: List[HttpResource], has_more: bool) -> str:
 
 
 class SpiderResults(BaseModel):
+    pagination: Pagination | None = None
+    scan_complete: bool = False
+    retrieval_truncated: bool = False
     url: str = Field(description="The starting URL of the spider")
     instructions: str = Field(default=spider_results_instructions_found)
     resources: List[HttpResource] = Field(description="The resources found by the spider")
@@ -811,6 +831,7 @@ async def is_spider_time_recent(server_ctx: ServerContext, url: str) -> Optional
         open_world_hint=True),
 )
 @progress_scope()
+@paged_results("resources")
 async def spider_website(
         ctx: Context,
         url: str,
@@ -825,8 +846,10 @@ async def spider_website(
                 ge=30, le=600,
             )
         ] = None,
+        limit: Annotated[int, Field(50, ge=1, le=1000, description="Resources per page")] = 50,
 ) -> SpiderResults:
-    """
+    """Spider a website and index discovered resources for further analysis.
+
     Spider the website at the url and index the results for further analysis. The find_web_resources
     tool can be used to continue the analysis. The find_hosts tool can be used to determine if
     a website has already been spidered.
@@ -853,12 +876,16 @@ async def spider_website(
     url = url.strip()
     if await is_spider_time_recent(server_ctx, url):
         logger.info(f"{url} has been recently spidered, returning saved results")
-        resources = (await find_web_resources(ctx, url, 100)).resources
+        resources = (await find_web_resources(ctx, url, 1001)).resources
+        truncated = len(resources) > 1000
+        resources = resources[:1000]
         return SpiderResults(
             url=url,
-            instructions=spider_instructions(resources, len(resources) >= 100),
+            instructions=spider_instructions(resources, truncated),
             resources=resources,
             has_more=False,
+            scan_complete=True,
+            retrieval_truncated=truncated,
         )
 
     context_id = ctx.request_context.lifespan_context.app_context_id
@@ -905,4 +932,5 @@ async def spider_website(
         instructions=spider_instructions(results, has_more),
         resources=results,
         has_more=has_more,
+        scan_complete=not has_more,
     )

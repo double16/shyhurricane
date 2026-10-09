@@ -3,6 +3,7 @@ import queue
 import pytest
 
 import shyhurricane.mcp_server.tools.directory_buster as directory
+from shyhurricane.mcp_server.tools.find_wordlists import FindWordlistsResult
 from shyhurricane.task_queue import DirBustingResultItem
 
 
@@ -96,8 +97,8 @@ async def test_validate_wordlist_corrects_to_found_wordlist(monkeypatch):
     async def run_command(*args, **kwargs):
         return Result()
 
-    async def find_wordlists(ctx, name, limit):
-        return ["/usr/share/wordlists/words.txt"]
+    async def find_wordlists(ctx, name):
+        return FindWordlistsResult(paths=["/usr/share/wordlists/words.txt"])
 
     monkeypatch.setattr(directory, "_run_unix_command", run_command)
     monkeypatch.setattr(directory, "find_wordlists", find_wordlists)
@@ -107,8 +108,8 @@ async def test_validate_wordlist_corrects_to_found_wordlist(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_validate_wordlist_uses_default_when_no_candidates_exist(monkeypatch):
-    async def find_wordlists(ctx, name, limit):
-        return []
+    async def find_wordlists(ctx, name):
+        return FindWordlistsResult(paths=[])
 
     monkeypatch.setattr(directory, "find_wordlists", find_wordlists)
 
@@ -117,8 +118,8 @@ async def test_validate_wordlist_uses_default_when_no_candidates_exist(monkeypat
 
 @pytest.mark.asyncio
 async def test_validate_wordlist_accepts_catalog_match(monkeypatch):
-    async def find_wordlists(ctx, name, limit):
-        return ["/usr/share/words.txt"]
+    async def find_wordlists(ctx, name):
+        return FindWordlistsResult(paths=["/usr/share/words.txt"])
 
     monkeypatch.setattr(directory, "find_wordlists", find_wordlists)
 
@@ -179,3 +180,24 @@ async def test_directory_buster_returns_pending_when_result_queue_is_empty(monke
     assert server_context.task_queue.put_items[0].user_agent == "agent"
     assert result.urls == []
     assert result.has_more is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finished", [True, False])
+async def test_directory_pages_collect_beyond_page_size(monkeypatch, finished):
+    from shyhurricane.mcp_server.tools.get_result_page import get_result_page
+
+    items = [DirBustingResultItem("ctx-1", f"https://example.com/{i}") for i in range(3)]
+    if finished:
+        items.append(DirBustingResultItem("ctx-1", None))
+    server_context = ServerContext(items)
+    patch_context(monkeypatch, server_context)
+    monkeypatch.setattr(directory, "validate_wordlist", noop)
+    first = await directory.directory_buster(Ctx(), "https://example.com/", limit=1, timeout_seconds=30)
+    assert first.urls == ["https://example.com/0"]
+    assert first.pagination.total_items == 3
+    assert first.scan_complete is finished
+    second = (await get_result_page(None, first.pagination.next_page_token)).result
+    assert second.urls == ["https://example.com/1"]
+    assert second.has_more is not finished
+    assert len(server_context.task_queue.put_items) == 1

@@ -130,16 +130,16 @@ class CommandResult:
 async def test_deobfuscate_javascript_handles_empty_failure_and_success(monkeypatch):
     monkeypatch.setattr(deobf, "log_tool_history", noop)
 
-    assert await deobf.deobfuscate_javascript(None, "   ") == ""
+    assert (await deobf.deobfuscate_javascript(None, "   ")).text == ""
 
     async def failed(*args, **kwargs):
         return CommandResult(1, "ignored")
 
     monkeypatch.setattr(deobf, "_run_unix_command", failed)
-    assert await deobf.deobfuscate_javascript(None, "var a=1;") == "var a=1;"
+    assert (await deobf.deobfuscate_javascript(None, "var a=1;")).text == "var a=1;"
 
     async def succeeded(*args, **kwargs):
         return CommandResult(0, "var readable = 1;")
 
     monkeypatch.setattr(deobf, "_run_unix_command", succeeded)
-    assert await deobf.deobfuscate_javascript(None, "eval('x')") == "var readable = 1;"
+    assert (await deobf.deobfuscate_javascript(None, "eval('x')")).text == "var readable = 1;"

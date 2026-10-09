@@ -78,5 +78,13 @@ async def test_find_urls_filters_path_and_applies_limit(indexed_metadata):
 
     assert result.host_query == "example.com"
     assert result.path_query == "admin"
-    assert result.limit == 10
+    assert result.limit == 1
     assert result.urls == ["https://api.example.com/admin"]
+
+
+@pytest.mark.asyncio
+async def test_internal_network_inventory_is_not_paginated(indexed_metadata, result_store):
+    result = await metadata.find_netloc_all(None, "example.com")
+    assert result.network_locations == ["api.example.com:8443", "www.example.com:443"]
+    assert result.pagination is None
+    assert not list(result_store.snapshots.iterdir())

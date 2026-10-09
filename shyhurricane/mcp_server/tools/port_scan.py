@@ -16,9 +16,11 @@ from shyhurricane.mcp_server import (
     log_tool_history,
     mcp_instance,
 )
+from shyhurricane.result_pages import Pagination, paged_results, save_text
 from shyhurricane.task_queue import PortScanQueueItem
 from shyhurricane.task_queue.port_scan_worker import get_stored_port_scan_results
 from shyhurricane.utils import (
+    PortScanResult,
     PortScanResults,
     coerce_to_dict,
     coerce_to_list,
@@ -28,12 +30,21 @@ from shyhurricane.utils import (
 
 logger = logging.getLogger(__name__)
 
-port_scan_instructions = "These are the port scan results formatted as nmap XML."
-port_scan_instructions_pending = "These are partial results from the port scan, formatted as nmap XML. The scan is still running. Running the port scan again with the same parameters will return indexed results."
+port_scan_instructions = (
+    "These are structured port scan results. Retrieve saved XML text fragments using nmap_xml_page_token."
+)
+port_scan_instructions_pending = (
+    "These are partial structured port scan results. The scan is still running. "
+    "Running the port scan again with the same parameters will return indexed results."
+)
 port_scan_instructions_no_results = "No port scan results are available at this time. The scan is still running. Running the port scan again with the same parameters will return indexed results."
 
 
 class PortScanToolResult(BaseModel):
+    pagination: Pagination | None = None
+    results: List[PortScanResult] = Field(default_factory=list)
+    scan_complete: bool = False
+    nmap_xml_page_token: str | None = None
     instructions: str = Field(description="The instructions for interpreting the results")
     hostnames: Optional[List[str]] = Field(description="The hostnames that were scanned")
     ip_addresses: Optional[List[str]] = Field(description="The IP addresses that were scanned")
@@ -52,6 +63,7 @@ class PortScanToolResult(BaseModel):
         idempotent_hint=False,
         open_world_hint=True),
 )
+@paged_results("results")
 async def port_scan(
         ctx: Context,
         hostnames: Optional[Union[List[str], str]] = None,
@@ -83,10 +95,12 @@ async def port_scan(
                   description="If the results are suspected to be invalid, such as a temporary network failure, set to true. Otherwise set to false to avoid unnecessary duplication of effort."
                   )
         ] = False,
+        limit: Annotated[int, Field(100, ge=1, le=1000, description="Service records per page")] = 100,
 ) -> PortScanToolResult:
-    """
+    """Scan target ports and identify running services.
+
     Performs a port scan and service identification on the target(s), similar to the functions of nmap.
-    The results are indexed to allow later retrieval. The output format is that of nmap.
+    The results are indexed. Returns paginated service records and a token for complete XML as text fragments.
 
     Invoke this tool when the user needs to identify which services are running on the targets in-scope.
     Use this tool instead of nmap or rustscan unless the user wants to run specific nmap NSE scripts.
@@ -149,6 +163,7 @@ async def port_scan(
             ports=ports_list,
             nmap_xml=None,
             has_more=False,
+            scan_complete=True,
         )
 
     if not retry:
@@ -158,13 +173,17 @@ async def port_scan(
                 server_ctx.stores["portscan"],
         ):
             logger.info("Returning stored port scan results for %s", port_scan_queue_item.targets)
+            _, xml_token = await save_text("port_scan_xml", stored_results.nmap_xml or "", "application/xml")
             return PortScanToolResult(
                 instructions=port_scan_instructions,
                 hostnames=hostnames,
                 ip_addresses=ip_addresses,
                 ip_subnets=ip_subnets,
                 ports=ports_list,
-                nmap_xml=stored_results.nmap_xml,
+                nmap_xml=None,
+                nmap_xml_page_token=xml_token,
+                results=stored_results.results,
+                scan_complete=True,
                 has_more=False,
             )
 
@@ -198,13 +217,17 @@ async def port_scan(
     else:
         instructions = port_scan_instructions_no_results
 
+    _, xml_token = await save_text("port_scan_xml", results.nmap_xml if results else "", "application/xml")
     pending_results = PortScanToolResult(
         instructions=instructions,
         hostnames=hostnames,
         ip_addresses=ip_addresses,
         ip_subnets=ip_subnets,
         ports=ports_list,
-        nmap_xml=results.nmap_xml if results else None,
+        nmap_xml=None,
+        nmap_xml_page_token=xml_token,
+        results=results.results if results else [],
+        scan_complete=not results.has_more if results else False,
         has_more=results.has_more if results else True,
     )
     logger.info("%s for %s", pending_results.instructions, port_scan_queue_item.targets)

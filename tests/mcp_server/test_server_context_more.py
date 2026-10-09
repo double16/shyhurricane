@@ -212,3 +212,21 @@ def test_writer_close_failure_does_not_skip_other_shutdown(caplog):
     assert ctx.ingest_pool.closed
     assert ctx.ingest_queue.closed
     assert "Failed to close ingest writer" in caplog.text
+
+
+def test_shutdown_cleans_saved_results_once_after_workers(result_store, monkeypatch):
+    from unittest.mock import Mock
+
+    ctx = make_context()
+    ctx.result_store = result_store
+    original_cleanup = result_store.cleanup
+
+    def cleanup():
+        assert ctx.task_pool.closed and ctx.ingest_pool.closed
+        original_cleanup()
+
+    spy = Mock(side_effect=cleanup)
+    monkeypatch.setattr(result_store, "cleanup", spy)
+    ctx.close()
+    ctx.close()
+    spy.assert_called_once()

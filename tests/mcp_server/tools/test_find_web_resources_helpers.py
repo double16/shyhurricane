@@ -185,7 +185,7 @@ async def test_find_web_resources_low_power_returns_without_pipelines(monkeypatc
     result = await resources.find_web_resources(None, "find things on invalid target", limit=1, http_methods="GET")
 
     assert result.instructions == resources.find_web_resources_instructions_low_power
-    assert result.limit == 10
+    assert result.limit == 1
     assert result.http_methods == ["GET"]
 
 
@@ -202,7 +202,7 @@ async def test_find_web_resources_low_power_flag_disables_retrieval_when_pipelin
     result = await resources.find_web_resources(None, "find things on invalid target", limit=1, http_methods="GET")
 
     assert result.instructions == resources.find_web_resources_instructions_low_power
-    assert result.limit == 10
+    assert result.limit == 1
     assert result.http_methods == ["GET"]
 
 
@@ -904,3 +904,30 @@ async def test_target_detection_async_pipeline_allows_idle_progress(monkeypatch)
     assert updates[0] == "Determining target(s)"
     assert search.targets == ["example.com"]
     assert search.doc_types == ["javascript"]
+
+
+@pytest.mark.asyncio
+async def test_cached_spider_caps_retrieval_and_paginates(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from shyhurricane.mcp_server.tools.get_result_page import get_result_page
+
+    docs = [make_doc(str(i), f"https://example.com/{i}") for i in range(1001)]
+    matches = resources._documents_to_http_resources(docs)
+    get_matches = AsyncMock(return_value=resources.FindWebResourcesResult(
+        instructions="", query="example.com", limit=1001, resources=matches,
+    ))
+    monkeypatch.setattr(resources, "get_server_context", AsyncMock(return_value=SpiderServerContext()))
+    monkeypatch.setattr(resources, "log_tool_history", noop)
+    monkeypatch.setattr(resources, "is_spider_time_recent", AsyncMock(return_value=True))
+    monkeypatch.setattr(resources, "find_web_resources", get_matches)
+    first = await resources.spider_website(ToolCtx(), "https://example.com/", limit=50)
+    assert len(first.resources) == 50
+    assert first.pagination.total_items == 1000
+    assert first.pagination.retrieval_truncated
+    assert first.scan_complete
+    assert not first.has_more
+    second = (await get_result_page(None, first.pagination.next_page_token)).result
+    assert second.resources[0].url == "https://example.com/50"
+    assert get_matches.await_count == 1
+    assert get_matches.call_args.args[2] == 1001

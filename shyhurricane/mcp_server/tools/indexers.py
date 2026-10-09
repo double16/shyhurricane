@@ -26,7 +26,8 @@ from shyhurricane.mcp_server import (
     log_tool_history,
     mcp_instance,
 )
-from shyhurricane.mcp_server.tools.deobfuscate_javascript import deobfuscate_javascript
+from shyhurricane.mcp_server.tools.deobfuscate_javascript import deobfuscate_javascript_full
+from shyhurricane.result_pages import paged_content
 from shyhurricane.utils import HttpResource, coerce_to_dict, extract_domain, is_katana_jsonl, stream_lines, urlparse_ext
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,7 @@ async def index_request_body(request: Request) -> Response:
         idempotent_hint=False,
         open_world_hint=True),
 )
+@paged_content("content_length_limit", "contents.text")
 async def index_http_url(
         ctx: Context,
         url: str,
@@ -98,13 +100,16 @@ async def index_http_url(
         params: RequestParamsField = None,
         request_body: Optional[str] = None,
         follow_redirects: Optional[bool] = None,
-        content_length_limit: Annotated[int, Field(200*1024, description="Content length limit, do not return content if over this length", ge=1, le=4*1024*1024)] = 200*1024,
+        content_length_limit: Annotated[
+            int, Field(16384, description="Response preview characters per page", ge=1, le=4 * 1024 * 1024)
+        ] = 16384,
 ) -> Optional[HttpResource]:
-    """
+    """Fetch and index an HTTP URL for further analysis.
+
     Index an HTTP URL to allow for further analysis and return the context, response code, response headers.
 
-    Invoke this tool when the user needs the content of one specific URL. If the content type is binary or over
-    the content_length_limit, content will not be returned.
+    Invoke this tool when the user needs one URL. Text is indexed completely and returned as saved
+    preview pages. Binary content returns metadata only. content_length_limit controls preview characters.
 
     If follow_redirects is true, redirects will be followed and the result is the destination of the redirect.
     """
@@ -158,13 +163,10 @@ async def index_http_url(
         status_code = response.status_code
         response_headers = dict(response.headers)
 
-        # check for binary content or large size
+        # Index complete textual content independently of the response preview size.
         body = None
         if not is_binary(None, response.headers.get("Content-Type")):
-            if response.headers.get("Content-Length"):
-                content_length = int(response.headers.get("Content-Length"))
-                if content_length < content_length_limit:
-                    body = response.text
+            body = response.text
 
         await server_ctx.enqueue_ingest(json.dumps({
             "timestamp": datetime.now().isoformat(),
@@ -182,7 +184,7 @@ async def index_http_url(
         }))
 
         if body and map_mime_to_type(response.headers.get("Content-Type")) == "javascript":
-            body = await deobfuscate_javascript(ctx, body)
+            body = await deobfuscate_javascript_full(ctx, body)
 
         if body:
             contents = TextResourceContents(

@@ -191,7 +191,10 @@ class TaskPool:
 
 
 def prepare_worker_process(create_process_group: bool = True) -> None:
-    """Isolate top-level workers and silence terminal output in monitor mode."""
+    """Isolate workers, configure their file logs, and silence monitor terminal output."""
+    from shyhurricane.logging_config import configure_file_logging
+
+    configure_file_logging(os.environ.get("LOG_FILE"), console_enabled=os.environ.get("SHYHURRICANE_MONITOR") != "1")
     if create_process_group and hasattr(os, "setsid"):
         try:
             os.setsid()

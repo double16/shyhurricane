@@ -151,7 +151,7 @@ async def test_index_http_url_fetches_indexes_and_deobfuscates(monkeypatch):
     async def deobfuscate(ctx, body):
         return "console.log('readable')"
 
-    monkeypatch.setattr(indexers, "deobfuscate_javascript", deobfuscate)
+    monkeypatch.setattr(indexers, "deobfuscate_javascript_full", deobfuscate)
 
     result = await indexers.index_http_url(
         None,
@@ -176,7 +176,7 @@ async def test_index_http_url_fetches_indexes_and_deobfuscates(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_index_http_url_omits_large_or_binary_body(monkeypatch):
+async def test_index_http_url_previews_large_body_without_losing_indexed_content(monkeypatch):
     ctx = ServerContext()
     patch_context(monkeypatch, ctx)
     monkeypatch.setattr(indexers, "log_tool_history", noop)
@@ -184,10 +184,16 @@ async def test_index_http_url_omits_large_or_binary_body(monkeypatch):
     monkeypatch.setattr(indexers, "get_additional_hosts", lambda ctx, additional=None: {})
     monkeypatch.setattr(indexers.httpx, "AsyncClient", lambda: FakeAsyncClient())
 
+    async def transform(ctx, body):
+        return body
+
+    monkeypatch.setattr(indexers, "deobfuscate_javascript_full", transform)
     result = await indexers.index_http_url(None, "https://example.com/app.js", content_length_limit=1)
 
-    assert result.contents is None
-    assert json.loads(ctx.ingest_queue.items[0])["response"]["body"] is None
+    assert result.contents.text == "c"
+    assert result.contents.has_more
+    assert result.pagination.total_items == len(FakeResponse.text)
+    assert json.loads(ctx.ingest_queue.items[0])["response"]["body"] == FakeResponse.text
 
 
 @pytest.mark.asyncio
@@ -259,3 +265,85 @@ async def test_ingest_propagates_partial_write_failure(monkeypatch):
     with pytest.raises(OSError, match="disk full"):
         await indexers.index_request_body(FakeRequest([f"{first}\n{first}".encode()]))
     assert ctx.ingest_queue.items == [first]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("length", [None, "wrong", "1", "999999"])
+async def test_index_body_pagination_ignores_content_length(monkeypatch, length, result_store):
+    from shyhurricane.mcp_server.tools.get_result_page import get_result_page
+
+    text = "π🙂<html>body</html>"
+
+    class Response:
+        status_code = 200
+        headers = {"Content-Type": "text/html", **({"Content-Length": length} if length is not None else {})}
+
+        def __init__(self):
+            self.text = text
+
+    class Client(FakeAsyncClient):
+        async def request(self, **kwargs):
+            return Response()
+
+    ctx = ServerContext()
+    patch_context(monkeypatch, ctx)
+    monkeypatch.setattr(indexers, "log_tool_history", noop)
+    monkeypatch.setattr(indexers, "get_additional_http_headers", lambda ctx, headers=None: headers or {})
+    monkeypatch.setattr(indexers, "get_additional_hosts", lambda ctx, additional=None: {})
+    monkeypatch.setattr(indexers.httpx, "AsyncClient", Client)
+    first = await indexers.index_http_url(None, "https://example.com/", content_length_limit=4)
+    assert first.contents.text == text[:4]
+    assert first.contents.offset == 0
+    assert first.contents.total_length == len(text)
+    assert json.loads(ctx.ingest_queue.items[0])["response"]["body"] == text
+    reconstructed = first.contents.text
+    current = first
+    while current.pagination.next_page_token:
+        current = (await get_result_page(None, current.pagination.next_page_token)).result
+        assert current.contents.offset == len(reconstructed)
+        reconstructed += current.contents.text
+    assert reconstructed == text
+    assert not current.contents.has_more
+    assert len(ctx.ingest_queue.items) == 1
+
+
+@pytest.mark.asyncio
+async def test_index_binary_body_returns_only_metadata(monkeypatch):
+    class BinaryClient(FakeAsyncClient):
+        async def request(self, **kwargs):
+            response = FakeResponse()
+            response.headers = {"Content-Type": "image/png"}
+            return response
+
+    ctx = ServerContext()
+    patch_context(monkeypatch, ctx)
+    monkeypatch.setattr(indexers, "log_tool_history", noop)
+    monkeypatch.setattr(indexers, "get_additional_http_headers", lambda ctx, headers=None: headers or {})
+    monkeypatch.setattr(indexers, "get_additional_hosts", lambda ctx, additional=None: {})
+    monkeypatch.setattr(indexers.httpx, "AsyncClient", BinaryClient)
+    result = await indexers.index_http_url(None, "https://example.com/image.png")
+    assert result.contents is None
+    assert result.pagination is None
+    assert json.loads(ctx.ingest_queue.items[0])["response"]["body"] is None
+
+
+@pytest.mark.asyncio
+async def test_index_preview_limit_applies_after_javascript_expansion(monkeypatch):
+    from shyhurricane.mcp_server.tools.get_result_page import get_result_page
+
+    ctx = ServerContext()
+    patch_context(monkeypatch, ctx)
+    monkeypatch.setattr(indexers, "log_tool_history", noop)
+    monkeypatch.setattr(indexers, "get_additional_http_headers", lambda ctx, headers=None: headers or {})
+    monkeypatch.setattr(indexers, "get_additional_hosts", lambda ctx, additional=None: {})
+    monkeypatch.setattr(indexers.httpx, "AsyncClient", FakeAsyncClient)
+
+    async def expand(ctx, body):
+        return "expanded" * 100
+
+    monkeypatch.setattr(indexers, "deobfuscate_javascript_full", expand)
+    first = await indexers.index_http_url(None, "https://example.com/a.js", content_length_limit=8)
+    assert first.contents.text == "expanded"
+    assert first.pagination.total_items == 800
+    assert (await get_result_page(None, first.pagination.next_page_token)).result.contents.text == "expanded"
+    assert json.loads(ctx.ingest_queue.items[0])["response"]["body"] == FakeResponse.text

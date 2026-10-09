@@ -41,7 +41,7 @@ async def test_find_wordlists_builds_query_command_and_ranks(monkeypatch):
     assert "-ipath '*web*'" in calls[0][0]
     assert "-ipath '*lfi*'" in calls[0][0]
     assert calls[0][1] is None
-    assert result == [
+    assert result.paths == [
         "/usr/share/seclists/Fuzzing/LFI/lfi.txt",
         "/usr/share/seclists/Discovery/Web-Content/raft-large-files.txt",
     ]
@@ -58,8 +58,21 @@ async def test_find_wordlists_without_query_and_error(monkeypatch):
     monkeypatch.setattr(wordlists, "log_tool_history", noop)
     monkeypatch.setattr(wordlists, "_run_unix_command", run_ok)
 
-    assert await wordlists.find_wordlists(object(), "", limit=2) == ["one", "two"]
+    assert (await wordlists.find_wordlists(object(), "", limit=2)).paths == ["one", "three"]
 
     monkeypatch.setattr(wordlists, "_run_unix_command", run_bad)
     with pytest.raises(ToolError, match="Failed to find word lists"):
         await wordlists.find_wordlists(object(), "sql", limit=5)
+
+
+@pytest.mark.asyncio
+async def test_internal_wordlist_loader_keeps_all_candidates_without_snapshots(monkeypatch, result_store):
+    async def run(ctx, command, env):
+        return Result(output="\n".join(f"/path/{i}" for i in range(1005)))
+
+    monkeypatch.setattr(wordlists, "log_tool_history", noop)
+    monkeypatch.setattr(wordlists, "_run_unix_command", run)
+    result = await wordlists.find_wordlists_all(None, "")
+    assert len(result.paths) == 1005
+    assert result.pagination is None
+    assert not list(result_store.snapshots.iterdir())

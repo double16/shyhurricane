@@ -1,0 +1,141 @@
+"""Read immutable saved pages without repeating their producing operation."""
+
+import asyncio
+from typing import Annotated, Literal, Union
+
+from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import ToolAnnotations
+from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError
+
+from shyhurricane import result_pages
+from shyhurricane.mcp_server import mcp_instance
+from shyhurricane.mcp_server.tools.directory_buster import DirBusterResults
+from shyhurricane.mcp_server.tools.find_indexed_metadata import (
+    FindDomainsResult,
+    FindHostsResult,
+    FindNetworkLocationResult,
+    FindURLsResult,
+)
+from shyhurricane.mcp_server.tools.find_web_resources import FindWebResourcesResult, SpiderResults
+from shyhurricane.mcp_server.tools.find_wordlists import FindWordlistsResult
+from shyhurricane.mcp_server.tools.findings import QueryFindingsResult
+from shyhurricane.mcp_server.tools.port_scan import PortScanToolResult
+from shyhurricane.result_pages import SavedTextResult
+from shyhurricane.utils import HttpResource
+
+
+class FindDomainsPage(BaseModel):
+    source_tool: Literal["find_domains"]
+    result: FindDomainsResult
+
+
+class FindHostsPage(BaseModel):
+    source_tool: Literal["find_hosts"]
+    result: FindHostsResult
+
+
+class FindNetlocPage(BaseModel):
+    source_tool: Literal["find_netloc"]
+    result: FindNetworkLocationResult
+
+
+class FindUrlsPage(BaseModel):
+    source_tool: Literal["find_urls"]
+    result: FindURLsResult
+
+
+class QueryFindingsPage(BaseModel):
+    source_tool: Literal["query_findings"]
+    result: QueryFindingsResult
+
+
+class FindWordlistsPage(BaseModel):
+    source_tool: Literal["find_wordlists"]
+    result: FindWordlistsResult
+
+
+class FindWebResourcesPage(BaseModel):
+    source_tool: Literal["find_web_resources"]
+    result: FindWebResourcesResult
+
+
+class SpiderWebsitePage(BaseModel):
+    source_tool: Literal["spider_website"]
+    result: SpiderResults
+
+
+class DirectoryBusterPage(BaseModel):
+    source_tool: Literal["directory_buster"]
+    result: DirBusterResults
+
+
+class PortScanPage(BaseModel):
+    source_tool: Literal["port_scan"]
+    result: PortScanToolResult
+
+
+class IndexHttpUrlPage(BaseModel):
+    source_tool: Literal["index_http_url"]
+    result: HttpResource
+
+
+class DeobfuscateJavascriptPage(BaseModel):
+    source_tool: Literal["deobfuscate_javascript"]
+    result: SavedTextResult
+
+
+class PortScanXmlPage(BaseModel):
+    source_tool: Literal["port_scan_xml"]
+    result: SavedTextResult
+
+
+ResultPageValue = Annotated[
+    Union[
+        FindDomainsPage,
+        FindHostsPage,
+        FindNetlocPage,
+        FindUrlsPage,
+        QueryFindingsPage,
+        FindWordlistsPage,
+        FindWebResourcesPage,
+        SpiderWebsitePage,
+        DirectoryBusterPage,
+        PortScanPage,
+        IndexHttpUrlPage,
+        DeobfuscateJavascriptPage,
+        PortScanXmlPage,
+    ],
+    Field(discriminator="source_tool"),
+]
+
+
+class ResultPage(RootModel[ResultPageValue]):
+    """Publish the discriminated object directly, without the SDK's union wrapper."""
+
+    model_config = ConfigDict(json_schema_extra={"type": "object"})
+
+    @property
+    def source_tool(self) -> str:
+        return self.root.source_tool
+
+    @property
+    def result(self):
+        return self.root.result
+
+
+@mcp_instance.tool(
+    annotations=ToolAnnotations(title="Get Saved Result Page", read_only_hint=True, open_world_hint=False),
+)
+async def get_result_page(ctx: Context, page_token: str) -> ResultPage:
+    """Read a saved page using a next/previous token or an XML page token.
+
+    Tokens expire at the snapshot's expires_at time. XML pages contain text fragments;
+    concatenate their text fields to reconstruct the complete saved XML document.
+    """
+    store = await result_pages.get_result_store()
+    saved = await asyncio.to_thread(store.read, page_token)
+    try:
+        return ResultPage.model_validate(saved)
+    except ValidationError as error:
+        raise ToolError("Saved result is corrupt. Repeat the original operation.") from error

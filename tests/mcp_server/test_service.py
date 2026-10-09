@@ -10,6 +10,19 @@ import mcp_service as service
 SHUTDOWN_MESSAGE = "Shutting down: waiting up to 5 minutes (300 seconds) for current operations to finish."
 
 
+@pytest.mark.asyncio
+async def test_registered_tools_publish_first_line_summaries(monkeypatch):
+    monkeypatch.setattr(service.mcp_instance, "open_world", True)
+    tools = await service.mcp_instance.list_tools()
+    assert len(tools) == 17
+    for tool in tools:
+        assert tool.description, tool.name
+        summary = tool.description.splitlines()[0]
+        assert summary.strip(), tool.name
+        assert summary == summary.strip(), tool.name
+        assert "\n\n" in tool.description, tool.name
+
+
 @pytest.mark.parametrize(
     "value,expected", [("False", False), ("false", False), ("0", False), ("no", False), ("", False), ("true", True)]
 )
@@ -72,6 +85,9 @@ async def service_runtime(monkeypatch, tmp_path):
     monkeypatch.setenv("QDRANT", str(tmp_path / "db"))
     monkeypatch.delenv("MCP_TRANSPORT", raising=False)
     monkeypatch.delenv("LOW_POWER", raising=False)
+    monkeypatch.delenv("LOG_FILE", raising=False)
+    monkeypatch.setattr(service, "configure_file_logging", Mock())
+    monkeypatch.setattr(service, "file_logging_enabled", lambda: False)
     monkeypatch.delenv("SHYHURRICANE_MONITOR", raising=False)
     monkeypatch.setattr(service.sys, "argv", ["mcp_service.py"])
     for stream in [service.sys.stdin, service.sys.stdout, service.sys.stderr]:
@@ -281,3 +297,32 @@ async def test_proxy_close_failure_still_closes_context(service_runtime):
     service_runtime.proxy.close.side_effect = RuntimeError("listener failed")
     await service.main()
     service_runtime.context.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cli", [False, True])
+async def test_log_file_option_and_environment_precedence(service_runtime, monkeypatch, cli):
+    monkeypatch.setenv("LOG_FILE", "/tmp/environment.log")
+    if cli:
+        monkeypatch.setattr(service.sys, "argv", ["mcp_service.py", "--log-file", "/tmp/command-line.log"])
+    monkeypatch.setattr(service, "file_logging_enabled", lambda: True)
+    await service.main()
+    service.configure_file_logging.assert_called_once_with(
+        "/tmp/command-line.log" if cli else "/tmp/environment.log", console_enabled=True,
+    )
+    config = service_runtime.configs[0]
+    assert config["log_level"] == "debug"
+    assert config["access_log"] is True
+    assert config["log_config"] is None
+
+
+@pytest.mark.asyncio
+async def test_unwritable_log_file_fails_before_services_start(service_runtime, monkeypatch, capsys):
+    monkeypatch.setenv("LOG_FILE", "/unwritable/server.log")
+    service.configure_file_logging.side_effect = PermissionError("permission denied")
+    with pytest.raises(SystemExit) as error:
+        await service.main()
+    assert error.value.code == 2
+    assert "Cannot open log file" in capsys.readouterr().err
+    service.get_server_context.assert_not_awaited()
+    service.set_generator_config.assert_not_called()

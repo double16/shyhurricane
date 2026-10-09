@@ -209,6 +209,14 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
 
     log_timestamps = []
     startup_events = []
+    page_cleanups = []
+    cleanup_pages = server_context.ResultPageStore.cleanup
+
+    def record_page_cleanup(store):
+        page_cleanups.append(store)
+        cleanup_pages(store)
+
+    monkeypatch.setattr(server_context.ResultPageStore, "cleanup", record_page_cleanup)
 
     def start_ingest_worker(**kwargs):
         assert startup_events == [("cleanup", "db")]
@@ -272,5 +280,18 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
     assert ctx.open_world is False
     assert ctx.disable_elicitation is False
     assert ctx.cache_path == os.path.join(str(tmp_path), "tool_cache")
+    assert page_cleanups == [ctx.result_store]
     assert doc_stores and all(store.initialized for store in doc_stores)
     ctx.close()
+    assert page_cleanups == [ctx.result_store, ctx.result_store]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ttl", ["0", "-1", "invalid"])
+async def test_invalid_result_ttl_fails_before_services_start(monkeypatch, tmp_path, ttl):
+    monkeypatch.setattr(server_context, "_server_context", None)
+    monkeypatch.setenv("TOOL_CACHE", str(tmp_path))
+    monkeypatch.setenv("TOOL_RESULT_TTL_SECONDS", ttl)
+    monkeypatch.setattr(server_context, "doc_type_to_model", lambda: pytest.fail("Services must not initialize"))
+    with pytest.raises(ValueError):
+        await server_context.get_server_context()

@@ -21,6 +21,8 @@ from mcp.types import TextResourceContents
 from pydantic import BaseModel, Field, ValidationError
 from tldextract import tldextract
 
+from shyhurricane.result_pages import Pagination
+
 logger = logging.getLogger(__name__)
 
 
@@ -38,6 +40,7 @@ class HttpResource(BaseModel):
     The "contents" field has the resource content if the tool provides the full content. The "resource" field has the
     content metadata and a URI that can be used to fetch the content.
     """
+    pagination: Pagination | None = None
     score: Optional[float] = Field(description="Matching score, higher is better")
     url: str = Field(description="The URL for the HTTP resource")
     host: str = Field(description="The hostname of the HTTP server")
@@ -46,7 +49,7 @@ class HttpResource(BaseModel):
     status_code: int = Field(description="The HTTP status code for the response")
     method: str = Field(description="The HTTP method that was used to request the resource")
     resource: Optional[Resource] = Field(description="A link to the resource content")
-    contents: Optional[TextResourceContents] = Field(description="The resource content")
+    contents: Optional[TextResourcePartialContents | TextResourceContents] = Field(description="The resource content")
     response_headers: Optional[Dict[str, str]] = Field(description="The HTTP response headers")
 
     @staticmethod
