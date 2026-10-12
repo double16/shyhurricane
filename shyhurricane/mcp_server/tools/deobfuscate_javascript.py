@@ -40,6 +40,7 @@ async def deobfuscate_javascript(
     a reason. transformation_status reports empty input, command success or failure. Success does
     not guarantee complete recovery. Failure returns original input.
     Use get_result_page(pagination.next_page_token) for additional saved text.
+    A null next_page_token means there are no additional saved pages.
     """
     await log_tool_history(ctx, "deobfuscate_javascript_content", content=(content or "")[0:128])
     text, status = await _transform_javascript(ctx, content)

@@ -104,6 +104,7 @@ async def find_wordlists(
     accept word lists.
 
     Use get_result_page(pagination.next_page_token) for additional saved results.
+    A null next_page_token means there are no additional saved pages.
 
     Invoke this tool when the user wants to run a brute-forcing tool and needs to use a wordlist.
     """

@@ -8,7 +8,7 @@ from pydantic import Field
 
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
-from shyhurricane.utils import HttpResource, TextResourcePartialContents
+from shyhurricane.utils import HttpResourceOffset, TextResourcePartialContents
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ async def fetch_web_resource_content(
         output_length_limit: Annotated[
             int, Field(4096, description="Output length limit, truncates output if over this length.", ge=1,
                        le=4 * 1024 * 1024)] = 4096,
-) -> Optional[HttpResource]:
+) -> Optional[HttpResourceOffset]:
     """Fetch the content of a web resource that has already been indexed.
 
     Invoke this tool when:
@@ -112,7 +112,7 @@ async def fetch_web_resource_content(
         offset=output_start_position,
         has_more=(output_start_position + output_length_limit < len(doc.content)),
     )
-    return HttpResource.from_doc(doc, contents=contents)
+    return HttpResourceOffset.from_doc(doc, contents=contents)
 
 
 @mcp_instance.resource("web://{doc_type}/{doc_id}", title="Web Resource")

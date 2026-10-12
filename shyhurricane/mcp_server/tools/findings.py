@@ -29,7 +29,8 @@ finding_not_found_instructions = (
 finding_instructions = (
     "These are previously saved findings; do not save them again. They may be unverified or outdated. "
     "Review evidence and verification status before treating them as confirmed vulnerabilities. "
-    "Use get_result_page(pagination.next_page_token) for additional saved findings."
+    "Use get_result_page(pagination.next_page_token) for additional saved findings. "
+    "A null next_page_token means there are no additional saved pages."
 )
 
 
@@ -114,7 +115,6 @@ class QueryFindingsResult(BaseModel):
     target: str = Field(description="Target of the findings")
     limit: int = Field(description="Limit for the number of results")
     findings: List[Finding] = Field(default=[], description="Findings associated with the target")
-    has_more: bool = Field(False, description="Whether there are more results")
 
 
 @mcp_instance.tool(
@@ -135,6 +135,8 @@ async def query_findings(
 
     Invoke this tool when the user asks for existing vulnerabilities or is looking for a direction for testing a target.
     Include findings when developing your test plan.
+    Use get_result_page(pagination.next_page_token) for additional saved findings.
+    A null next_page_token means there are no additional saved pages.
     """
     await log_tool_history(ctx, "query_findings", target=target, limit=limit)
     server_ctx = await get_server_context()
@@ -146,7 +148,6 @@ async def query_findings(
             instructions=finding_target_invalid_instructions,
             target=target,
             limit=limit,
-            has_more=False,
         )
 
     store = server_ctx.stores["finding"]
@@ -196,7 +197,6 @@ async def query_findings(
             docs.extend(await store.filter_documents_async(filters=filters))
 
     findings = []
-    has_more = False
     for doc in docs:
         findings.append(Finding(
             target=doc.meta.get("url", doc.meta.get("netloc", doc.meta.get("host", doc.meta.get("domain", target)))),
@@ -204,7 +204,6 @@ async def query_findings(
             markdown=doc.content,
         ))
 
-    has_more = len(findings) > limit
     logger.info(f"Found {len(findings)} findings")
 
     return QueryFindingsResult(
@@ -212,7 +211,6 @@ async def query_findings(
         target=target,
         limit=limit,
         findings=findings,
-        has_more=has_more,
     )
 
 

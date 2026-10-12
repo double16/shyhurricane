@@ -12,9 +12,57 @@ from pydantic import BaseModel
 
 from shyhurricane import result_pages
 from shyhurricane.mcp_server.tools.deobfuscate_javascript import DeobfuscationResult
-from shyhurricane.mcp_server.tools.get_result_page import get_result_page
+from shyhurricane.mcp_server.tools.directory_buster import DirBusterResults
+from shyhurricane.mcp_server.tools.find_web_resources import SpiderResults
+from shyhurricane.mcp_server.tools.findings import QueryFindingsResult
+from shyhurricane.mcp_server.tools.get_result_page import ResultPage, get_result_page
+from shyhurricane.mcp_server.tools.port_scan import PortScanToolResult
 from shyhurricane.result_pages import Pagination, ResultPageStore, SavedTextResult
 from shyhurricane.result_pages import get_result_store as real_get_result_store
+from shyhurricane.utils import HttpResource, HttpResourceOffset
+
+
+@pytest.mark.parametrize("model", [
+    QueryFindingsResult, SpiderResults, DirBusterResults, PortScanToolResult,
+    SavedTextResult, DeobfuscationResult, HttpResource, ResultPage,
+])
+def test_saved_result_schemas_expose_navigation_without_has_more(model):
+    schema = model.model_json_schema()
+    assert "has_more" not in json.dumps(schema)
+    assert "hasMore" not in json.dumps(schema)
+    pagination = schema["$defs"]["Pagination"]
+    assert "get_result_page" in pagination["properties"]["next_page_token"]["description"]
+    assert "null" in pagination["properties"]["next_page_token"]["description"]
+
+
+def test_offset_result_schema_keeps_content_continuation():
+    schema = HttpResourceOffset.model_json_schema()
+    assert "hasMore" in schema["$defs"]["TextResourcePartialContents"]["properties"]
+
+
+@pytest.mark.parametrize("module_name,tool_name,instruction_names", [
+    ("findings", "query_findings", ["finding_instructions"]),
+    ("find_web_resources", "find_web_resources_tool", ["find_web_resources_instructions"]),
+    ("find_web_resources", "spider_website", ["spider_results_instructions_found"]),
+    ("directory_buster", "directory_buster", ["dirbuster_results_instructions_found"]),
+    ("port_scan", "port_scan", [
+        "port_scan_instructions", "port_scan_instructions_pending", "port_scan_instructions_no_results",
+    ]),
+    ("indexers", "index_http_url", []),
+    ("deobfuscate_javascript", "deobfuscate_javascript", []),
+    ("get_result_page", "get_result_page", []),
+])
+def test_descriptions_and_instructions_explain_current_navigation(module_name, tool_name, instruction_names):
+    from importlib import import_module
+
+    module = import_module(f"shyhurricane.mcp_server.tools.{module_name}")
+    descriptions = [getattr(module, tool_name).__doc__]
+    descriptions.extend(getattr(module, name) for name in instruction_names)
+    for description in descriptions:
+        assert "has_more" not in description
+        assert "next_page_token" in description
+        assert "get_result_page" in description
+        assert "null" in description
 
 
 class Items(BaseModel):
@@ -265,7 +313,7 @@ async def test_text_reconstructs_unicode_and_get_page_returns_discriminated_resp
         chunks.append(page.result.text)
         previous = page.result
     assert "".join(chunks) == text
-    assert not previous.has_more
+    assert "has_more" not in previous.model_dump()
     assert previous.pagination.expires_at == result.pagination.expires_at
     _, token = snapshot(result_store)
     with pytest.raises(ToolError, match="corrupt"):

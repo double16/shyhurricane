@@ -84,7 +84,7 @@ async def test_port_scan_requires_target(monkeypatch):
     result = await port_scan.port_scan(Ctx(), hostnames="not a target", timeout_seconds=30)
 
     assert result.instructions.startswith("No targets")
-    assert result.has_more is False
+    assert result.scan_complete is True
     assert ctx.task_queue.items == []
 
 
@@ -101,7 +101,7 @@ async def test_port_scan_returns_stored_results(monkeypatch):
     assert result.nmap_xml is None
     assert result.nmap_xml_page_token is not None
     assert result.scan_complete
-    assert result.has_more is False
+    assert result.scan_complete is True
     assert ctx.task_queue.items == []
 
 
@@ -138,7 +138,7 @@ async def test_port_scan_returns_pending_without_results(monkeypatch):
     result = await port_scan.port_scan(Ctx(), ip_addresses="127.0.0.1", timeout_seconds=30)
 
     assert result.instructions == port_scan.port_scan_instructions_no_results
-    assert result.has_more is True
+    assert result.scan_complete is False
 
 
 @pytest.mark.asyncio
@@ -153,7 +153,7 @@ async def test_port_scan_discards_expired_and_mismatched_results_then_returns_pa
     result = await port_scan.port_scan(Ctx(), hostnames="example.com", timeout_seconds=30)
 
     assert result.instructions == port_scan.port_scan_instructions_pending
-    assert result.has_more is True
+    assert result.scan_complete is False
     assert ctx.port_scan_result_queue.requeued == []
 
 
@@ -171,11 +171,11 @@ async def test_port_scan_pages_do_not_repeat_work_and_keep_completion_separate(m
     patch_context(monkeypatch, server_context)
     first = await port_scan.port_scan(Ctx(), hostnames="example.com", limit=2, timeout_seconds=30)
     assert [item.port for item in first.results] == [80, 443]
-    assert first.has_more is partial
+    assert "has_more" not in first.model_dump()
     assert first.scan_complete is not partial
     last = (await get_result_page(None, first.pagination.next_page_token)).result
     assert [item.port for item in last.results] == [8080]
-    assert last.has_more is partial
+    assert "has_more" not in last.model_dump()
     assert last.scan_complete is not partial
     assert last.pagination.next_page_token is None
     assert (await get_result_page(None, first.nmap_xml_page_token)).result.text == "<nmaprun/>"

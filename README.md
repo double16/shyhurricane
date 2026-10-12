@@ -82,24 +82,34 @@ Then pass the returned `pagination.next_page_token` to:
 {"page_token": "<opaque token from the response>"}
 ```
 
-Scan `has_more` and `scan_complete` describe scan completion, independently of saved-page navigation.
+`scan_complete` describes scan completion, independently of saved-page navigation.
 A page token accesses only results available when that snapshot was created. Scanning and indexing
 continue after a tool's wait timeout; later scan calls create separate snapshots. Use indexed search
 for discoveries made after the original call returned.
 
-`port_scan` now returns structured `results` instead of embedding XML (`nmap_xml` is null).
+`port_scan` returns structured `results` instead of embedding XML (`nmap_xml` is null).
 Its `nmap_xml_page_token` retrieves the first saved XML fragment through `get_result_page`.
 Follow navigation tokens and concatenate the `result.text` fragments in order to reconstruct the
 complete XML; individual fragments need not be valid XML documents. XML fragments are 8,192 characters.
 
-`deobfuscate_javascript` now returns an object with `text`, `mime_type`, `offset`, `total_length`,
-`has_more`, and `pagination`. `find_wordlists` now returns `paths` and `pagination`.
+`deobfuscate_javascript` returns an object with `text`, `mime_type`, `offset`, `total_length`,
+`pagination`, and `transformation_status`. `find_wordlists` returns `paths` and `pagination`.
 `index_http_url.content_length_limit` controls preview characters, default 16,384, and no longer
 omits large bodies or limits indexing. All textual response bodies are submitted for indexing,
 including responses without `Content-Length`. Preview limits apply after JavaScript transformation.
 Binary responses return metadata only. `deobfuscate_javascript.output_length_limit` defaults to 8,192.
 Both preview overrides accept 1–4,194,304 characters. `fetch_web_resource_content` retains
-`output_start_position`, `output_length_limit`, and its existing partial-content fields.
+`output_start_position`, `output_length_limit`, and its offset-based partial-content fields, including `contents.has_more`.
+
+`index_http_url` treats a missing or empty `Content-Type` as unknown and includes the decoded body.
+It accepts HTTP and HTTPS URLs; invalid URLs and request inputs raise explicit tool errors, as does
+disabled open-world access. Connection failures, timeouts, protocol failures, and excessive redirects
+return null. HTTP 4xx/5xx responses are still indexed. Redirects are not followed by default; enable
+`follow_redirects` only when destinations are in scope.
+If JavaScript transformation encounters a filesystem or subprocess failure, the preview retains the
+original response text. Queue failures report that fetching succeeded but queueing failed.
+Preview storage failures report that ingestion was already queued; repeating the call may enqueue
+the same response again. These stages do not automatically retry.
 
 `deobfuscate_javascript.transformation_status` is `empty` for blank input, `succeeded` when
 the transformation command succeeds, and `failed` when it fails and returns the original input.

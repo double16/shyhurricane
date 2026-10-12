@@ -164,7 +164,7 @@ async def test_directory_buster_queues_work_and_collects_results(monkeypatch):
     assert queued.rate_limit_requests_per_second == 7
     assert server_context.dir_busting_result_queue.put_items[0].context_id == "other"
     assert result.urls == ["https://example.com/admin"]
-    assert result.has_more is False
+    assert result.scan_complete is True
     assert ctx.messages == ["Found: https://example.com/admin"]
     assert ctx.progress == [(1, None, "Found: https://example.com/admin")]
 
@@ -180,7 +180,7 @@ async def test_directory_buster_returns_pending_when_result_queue_is_empty(monke
 
     assert server_context.task_queue.put_items[0].user_agent == "agent"
     assert result.urls == []
-    assert result.has_more is True
+    assert result.scan_complete is False
 
 
 @pytest.mark.asyncio
@@ -200,5 +200,5 @@ async def test_directory_pages_collect_beyond_page_size(monkeypatch, finished):
     assert first.scan_complete is finished
     second = (await get_result_page(None, first.pagination.next_page_token)).result
     assert second.urls == ["https://example.com/1"]
-    assert second.has_more is not finished
+    assert second.scan_complete is finished
     assert len(server_context.task_queue.put_items) == 1

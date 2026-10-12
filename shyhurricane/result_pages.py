@@ -17,7 +17,7 @@ from inspect import signature
 from pathlib import Path
 
 from mcp.server.mcpserver.exceptions import ToolError
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 _IDENTIFIER = re.compile(r"[0-9a-f]{32}")
@@ -30,7 +30,9 @@ class Pagination(BaseModel):
     total_items: int
     total_pages: int
     expires_at: str
-    next_page_token: str | None = None
+    next_page_token: str | None = Field(
+        None, description="Pass to get_result_page for the next saved page; null means no additional saved page"
+    )
     previous_page_token: str | None = None
     retrieval_truncated: bool = False
 
@@ -40,7 +42,6 @@ class SavedTextResult(BaseModel):
     mime_type: str
     offset: int = 0
     total_length: int
-    has_more: bool = False
     pagination: Pagination | None = None
 
 
@@ -237,6 +238,7 @@ async def _save_pages(
     page_size: int,
     total_items: int,
     retrieval_truncated: bool = False,
+    save_failure_message: str | None = None,
 ):
     cancelled = threading.Event()
     task = asyncio.create_task(
@@ -260,11 +262,12 @@ async def _save_pages(
             pass
         raise
     except OSError as error:
-        raise ToolError("Unable to save result pages. Repeat the original operation.") from error
+        raise ToolError(save_failure_message or "Unable to save result pages. Repeat the original operation.") from error
 
 
 async def paginate_result(
-    source_tool: str, result: BaseModel, field: str, page_size: int, retrieval_truncated: bool = False
+    source_tool: str, result: BaseModel, field: str, page_size: int, retrieval_truncated: bool = False,
+    save_failure_message: str | None = None,
 ) -> BaseModel:
     store = await get_result_store()
     value = result.model_dump(mode="json")
@@ -281,21 +284,20 @@ async def paginate_result(
                     "text": chunk,
                     "offset": offset,
                     "total_length": len(items),
-                    "has_more": offset + page_size < len(items),
                 },
             }
         else:
             page = {**value, field: chunk}
         if "limit" in page:
             page["limit"] = page_size
-        if source_tool == "query_findings":
-            page["has_more"] = offset + page_size < len(items)
         if isinstance(result, SavedTextResult):
-            page.update(offset=offset, has_more=offset + page_size < len(items))
+            page.update(offset=offset)
         pages.append(page)
     if not pages:
         return result
-    first, _ = await _save_pages(store, source_tool, pages, page_size, len(items), retrieval_truncated)
+    first, _ = await _save_pages(
+        store, source_tool, pages, page_size, len(items), retrieval_truncated, save_failure_message
+    )
     return type(result).model_validate(first)
 
 
@@ -339,7 +341,6 @@ async def save_text(source_tool: str, text: str, mime_type: str, page_size: int 
                 update={
                     "text": text[offset : offset + page_size],
                     "offset": offset,
-                    "has_more": offset + page_size < len(text),
                 }
             ).model_dump(mode="json")
         )
@@ -347,7 +348,7 @@ async def save_text(source_tool: str, text: str, mime_type: str, page_size: int 
     return SavedTextResult.model_validate(first), token
 
 
-def paged_content(size_argument: str, field: str):
+def paged_content(size_argument: str, field: str, save_failure_message: str | None = None):
     def decorate(function):
         function_signature = signature(function)
 
@@ -362,7 +363,9 @@ def paged_content(size_argument: str, field: str):
             result = await function(*bound.args, **bound.kwargs)
             if result is None or (field == "contents.text" and result.contents is None):
                 return result
-            return await paginate_result(function.__name__, result, field, size)
+            return await paginate_result(
+                function.__name__, result, field, size, save_failure_message=save_failure_message
+            )
 
         return wrapped
 

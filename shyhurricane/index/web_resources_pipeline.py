@@ -49,10 +49,11 @@ logger = logging.getLogger(__name__)
 WEB_RESOURCE_VERSION = 1
 
 
-def is_binary(content: Optional[str], mime_type: str) -> bool:
+def is_binary(content: Optional[str], mime_type: Optional[str]) -> bool:
     """
     Detect if the content is binary based on the raw MIME type and content.
     """
+    mime_type = mime_type or ""
     mime_category = mime_type.split("/")[0]
     if mime_category == "text" or mime_category == "application/javascript":
         return False

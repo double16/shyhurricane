@@ -36,6 +36,7 @@ logger = logging.getLogger(__name__)
 dirbuster_results_instructions_found = (
     "These resources were found by brute-forcing the web server URL using a wordlist. "
     "Read additional saved URLs with get_result_page(pagination.next_page_token), when present. "
+    "A null next_page_token means there are no additional saved pages. "
     "Saved pages are fixed snapshots; scan_complete describes completion independently."
 )
 dirbuster_results_instructions_has_more = (
@@ -64,13 +65,13 @@ def dirbuster_instructions(results: List[str], has_more: bool) -> str:
 
 class DirBusterResults(BaseModel):
     pagination: Pagination | None = None
-    scan_complete: bool = False
+    scan_complete: bool = Field(
+        False, description="Whether the scan finished; independent of saved-page navigation"
+    )
     instructions: str = Field(description="The instructions string for interpreting the results")
     starting_url: str = Field(description="The starting URL of the directory buster")
     wordlist: Optional[str] = Field(description="The wordlist used by the directory buster")
     urls: List[str] = Field(description="The urls found by the directory buster")
-    has_more: bool = Field(
-        description="Whether the directory buster has more resources available that can be retrieved using the find_web_resources tool or listed by the find_urls tool")
 
 
 @mcp_instance.tool(
@@ -140,6 +141,7 @@ async def directory_buster(
 
     Returns discovered URLs queued for indexing; searchability may lag behind scanning.
     Use get_result_page(pagination.next_page_token) to read additional saved URLs.
+    A null next_page_token means there are no additional saved pages.
     Saved pages are fixed snapshots; query find_urls or find_web_resources for later discoveries.
     scan_complete describes completion independently of pagination. Do not restart a pending scan.
     """
@@ -231,7 +233,6 @@ async def directory_buster(
         wordlist=wordlist,
         urls=results,
         scan_complete=not has_more,
-        has_more=has_more,
     )
 
 

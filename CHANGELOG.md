@@ -36,6 +36,9 @@
 
 ### Fixes
 
+- Handle missing `Content-Type` in `index_http_url` and binary detection. Report invalid request
+  inputs, disabled network access, and ingestion failures as explicit tool errors; distinguish
+  preview storage failures after queueing and retain original JavaScript on operational command failures.
 - Index complete textual URL response bodies independently of preview size and `Content-Length`.
   Limit previews after JavaScript expansion without dropping indexed content.
 - Distinguish queries with no matches from targets with no indexed documents in `find_web_resources`;

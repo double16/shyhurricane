@@ -131,9 +131,11 @@ class ResultPage(RootModel[ResultPageValue]):
 async def get_result_page(ctx: Context, page_token: str) -> ResultPage:
     """Read a saved page using a next/previous token or an XML page token.
 
-    Pass pagination.next_page_token, pagination.previous_page_token or nmap_xml_page_token.
+    Call get_result_page with pagination.next_page_token, pagination.previous_page_token
+    or nmap_xml_page_token.
     Returns {source_tool, result}; result uses the original tool schema. Further navigation tokens
-    are in result.pagination. Pages are fixed snapshots and do not wait for new discoveries.
+    are in result.pagination. A null next_page_token means there are no additional saved pages.
+    Pages are fixed snapshots and do not wait for new discoveries.
     Tokens are private bearer capabilities and expire at expires_at.
     XML pages contain fragments in result.text; concatenate them in page order.
     Repeat the original operation only if the saved result is expired, missing or corrupt.

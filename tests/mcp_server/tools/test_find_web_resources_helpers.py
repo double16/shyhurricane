@@ -346,7 +346,7 @@ async def test_spider_website_returns_recent_indexed_results(monkeypatch):
 
     assert result.url == "https://example.com/"
     assert result.resources == [resource]
-    assert result.has_more is False
+    assert result.scan_complete is True
 
 
 @pytest.mark.asyncio
@@ -388,7 +388,7 @@ async def test_spider_website_queues_work_requeues_other_context_and_collects_re
     assert queued.rate_limit_requests_per_second == 9
     assert server_ctx.spider_result_queue.put_items[0].context_id == "other"
     assert result.resources == [resource]
-    assert result.has_more is False
+    assert result.scan_complete is True
     assert ctx.messages == ["Found: https://example.com/found"]
     assert ctx.progress == [(1, None, "Found: https://example.com/found")]
 
@@ -928,7 +928,7 @@ async def test_cached_spider_caps_retrieval_and_paginates(monkeypatch):
     assert first.pagination.retrieval_truncated
     assert first.scan_complete
     assert "still running" not in first.instructions
-    assert not first.has_more
+    assert "has_more" not in first.model_dump()
     second = (await get_result_page(None, first.pagination.next_page_token)).result
     assert second.resources[0].url == "https://example.com/50"
     assert get_matches.await_count == 1

@@ -81,7 +81,7 @@ async def test_query_findings_by_url_and_limit(monkeypatch):
 
     assert result.instructions == findings.finding_instructions
     assert result.limit == 1
-    assert result.has_more is True
+    assert result.pagination.next_page_token is not None
     assert [finding.title for finding in result.findings] == ["Finding"]
     assert result.pagination.total_items == 2
     assert store.filters[0]["conditions"][1]["field"] == "meta.url"
@@ -167,10 +167,10 @@ async def test_all_findings_are_saved_and_last_page_has_no_more(monkeypatch):
     first = await findings.query_findings(None, "https://example.com/a")
     assert len(first.findings) == 10
     assert first.pagination.total_items == 23
-    assert first.has_more
+    assert first.pagination.next_page_token is not None
     second = (await get_result_page(None, first.pagination.next_page_token)).result
-    assert len(second.findings) == 10 and second.has_more
+    assert len(second.findings) == 10 and second.pagination.next_page_token is not None
     last = (await get_result_page(None, second.pagination.next_page_token)).result
     assert [item.title for item in last.findings] == ["20", "21", "22"]
-    assert not last.has_more
+    assert last.pagination.next_page_token is None
     assert len(store.filters) == 1

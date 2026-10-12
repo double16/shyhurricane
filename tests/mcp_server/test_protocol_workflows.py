@@ -425,6 +425,7 @@ async def test_saved_search_pages_cross_calls_without_retrieval(workflow_server,
         listed = (await client.list_tools()).tools
         paging_schema = next(tool for tool in listed if tool.name == "get_result_page").output_schema
         assert "discriminator" in str(paging_schema)
+        assert "has_more" not in str(paging_schema)
         first = await client.call_tool("find_web_resources", {
             "query": "example.com", "limit": 2, "retrieval_limit": 5,
         })

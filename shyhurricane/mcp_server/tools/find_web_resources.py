@@ -230,6 +230,7 @@ class FindWebResourcesResult(BaseModel):
 find_web_resources_instructions = (
     "These resources match the indexed search; matches are not confirmed vulnerabilities. "
     "Read more saved matches with get_result_page(pagination.next_page_token), when present. "
+    "A null next_page_token means there are no additional saved pages. "
     "If pagination.retrieval_truncated is true, narrow the query to retrieve excluded matches. "
     "Pass resource.uri to fetch_web_resource_content when available."
 )
@@ -723,6 +724,7 @@ async def find_web_resources_tool(
     Scores rank matches; they are not vulnerability confidence.
     Missing targets can trigger spidering only after accepted scan confirmation.
     Use get_result_page(pagination.next_page_token) for additional saved matches.
+    A null next_page_token means there are no additional saved pages.
     If pagination.retrieval_truncated is true, narrow the query to retrieve excluded matches.
 
     Invoke this tool when the user asks about vulnerabilities,
@@ -765,6 +767,7 @@ async def find_web_resources_tool(
 spider_results_instructions_found = (
     "These resources were found by navigating links or retrieved from the recent crawl cache. "
     "Read additional saved results with get_result_page(pagination.next_page_token), when present. "
+    "A null next_page_token means there are no additional saved pages. "
     "Saved pages are fixed snapshots; scan_complete describes scan completion independently. "
     "If retrieval_truncated is true, use indexed search for results excluded from this snapshot."
 )
@@ -794,13 +797,13 @@ def spider_instructions(results: List[HttpResource], has_more: bool) -> str:
 
 class SpiderResults(BaseModel):
     pagination: Pagination | None = None
-    scan_complete: bool = False
+    scan_complete: bool = Field(
+        False, description="Whether the scan finished; independent of saved-page navigation"
+    )
     retrieval_truncated: bool = False
     url: str = Field(description="The starting URL of the spider")
     instructions: str = Field(default=spider_results_instructions_found)
     resources: List[HttpResource] = Field(description="The resources found by the spider")
-    has_more: bool = Field(
-        description="Whether the spider has more resources available that can be retrieved using the find_web_resources tool or listed by the find_urls tool")
 
 
 async def is_spider_time_recent(server_ctx: ServerContext, url: str) -> Optional[float]:
@@ -889,6 +892,7 @@ async def spider_website(
     Read saved pages using get_result_page(pagination.next_page_token). Pages are a fixed snapshot;
     query find_urls or find_web_resources for later discoveries. scan_complete describes the scan,
     independently of pagination. Do not restart an unfinished scan.
+    A null next_page_token means there are no additional saved pages.
     """
 
     # coerce types
@@ -915,7 +919,6 @@ async def spider_website(
             url=url,
             instructions=spider_instructions(resources, False),
             resources=resources,
-            has_more=False,
             scan_complete=True,
             retrieval_truncated=truncated,
         )
@@ -963,6 +966,5 @@ async def spider_website(
         url=url,
         instructions=spider_instructions(results, has_more),
         resources=results,
-        has_more=has_more,
         scan_complete=not has_more,
     )

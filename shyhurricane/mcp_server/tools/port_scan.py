@@ -34,19 +34,26 @@ port_scan_instructions = (
     "These are structured port scan results. Read saved records using "
     "get_result_page(pagination.next_page_token). If XML is needed and nmap_xml_page_token is "
     "present, call get_result_page(page_token=nmap_xml_page_token). "
-    "Concatenate result.text fragments in page order."
+    "Concatenate result.text fragments in page order. "
+    "A null next_page_token means there are no additional saved pages. "
+    "Saved pages are fixed snapshots and do not refresh discoveries."
 )
 port_scan_instructions_pending = (
-    "These are partial structured port scan results. The scan is still running. "
+    port_scan_instructions + " The scan is still running (scan_complete=false). "
     "Running the port scan again with the same parameters will return indexed results."
 )
-port_scan_instructions_no_results = "No port scan results are available at this time. The scan is still running. Running the port scan again with the same parameters will return indexed results."
+port_scan_instructions_no_results = (
+    port_scan_instructions + " No results are available yet; the scan is still running "
+    "(scan_complete=false). Repeat port_scan with the same parameters to check progress."
+)
 
 
 class PortScanToolResult(BaseModel):
     pagination: Pagination | None = None
     results: List[PortScanResult] = Field(default_factory=list)
-    scan_complete: bool = False
+    scan_complete: bool = Field(
+        False, description="Whether the scan finished; independent of saved-page navigation"
+    )
     nmap_xml_page_token: str | None = None
     instructions: str = Field(description="The instructions for interpreting the results")
     hostnames: Optional[List[str]] = Field(description="The hostnames that were scanned")
@@ -54,8 +61,6 @@ class PortScanToolResult(BaseModel):
     ip_subnets: Optional[List[str]] = Field(description="The IP subnets that were scanned")
     ports: List[str] = Field(description="The ports that were scanned")
     nmap_xml: Optional[str] = Field(description="The port scan results formatted as nmap XML")
-    has_more: bool = Field(
-        description="Whether the port scan has more results available that can be retrieved by calling port_scan with the same parameters again")
 
 
 @mcp_instance.tool(
@@ -117,8 +122,9 @@ async def port_scan(
     For additional in-scope hostnames, supply additional_hosts on calls that need them.
     Legacy clients may instead use register_hostname_address for their current session.
     retry is deprecated and ignored; this tool does not offer forced rescans.
-    Use get_result_page(pagination.next_page_token) for saved records. scan_complete is independent
-    of pagination. If XML is needed, pass nmap_xml_page_token to get_result_page and concatenate
+    Use get_result_page(pagination.next_page_token) for saved records.
+    A null next_page_token means there are no additional saved pages.
+    scan_complete describes completion independently of pagination. If XML is needed, pass nmap_xml_page_token to get_result_page and concatenate
     result.text fragments in page order.
 
     The port scan may take a long time, and this tool may return before the scan is finished.
@@ -171,7 +177,7 @@ async def port_scan(
             ip_subnets=ip_subnets,
             ports=ports_list,
             nmap_xml=None,
-            has_more=False,
+
             scan_complete=True,
         )
 
@@ -193,7 +199,6 @@ async def port_scan(
                 nmap_xml_page_token=xml_token,
                 results=stored_results.results,
                 scan_complete=True,
-                has_more=False,
             )
 
     await asyncio.to_thread(port_scan_queue.put, port_scan_queue_item)
@@ -237,7 +242,6 @@ async def port_scan(
         nmap_xml_page_token=xml_token,
         results=results.results if results else [],
         scan_complete=not results.has_more if results else False,
-        has_more=results.has_more if results else True,
     )
     logger.info("%s for %s", pending_results.instructions, port_scan_queue_item.targets)
     return pending_results

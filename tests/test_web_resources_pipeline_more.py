@@ -83,6 +83,12 @@ def test_binary_detection_cache_helpers_and_normalization_cache_key():
     assert wrp._cache_key_response_headers({"ETag": "abc", "X-Test": "no", "Cookie": "sid=1"}) == "abc,sid=1"
 
 
+@pytest.mark.parametrize("mime_type", [None, ""])
+@pytest.mark.parametrize("content, expected", [(None, False), ("", False), ("plain text", False), ("é" * 200, True)])
+def test_binary_detection_without_mime_type(mime_type, content, expected):
+    assert wrp.is_binary(content, mime_type) is expected
+
+
 def test_request_response_to_document_creates_content_network_and_form_docs():
     embedder = Embedder()
     sparse = Embedder()

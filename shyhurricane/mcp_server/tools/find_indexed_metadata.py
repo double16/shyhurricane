@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 finder_instructions_found = (
     "These are indexed {0}. Read additional saved results with "
     "get_result_page(pagination.next_page_token), when present. "
+    "A null next_page_token means there are no additional saved pages. "
     "Use find_web_resources to search their indexed resources within the existing scope."
 )
 finder_instructions_not_found = (
@@ -65,6 +66,7 @@ async def find_domains(
     Query indexed resources for a list of domains that have resources that can be researched.
 
     Use get_result_page(pagination.next_page_token) for additional saved results.
+    A null next_page_token means there are no additional saved pages.
 
     Invoke this tool when the user asks about websites that have been scanned, spidered or indexed.
     """
@@ -117,6 +119,7 @@ async def find_hosts(
     Query indexed resources for a list of hosts for the given domain.
 
     Use get_result_page(pagination.next_page_token) for additional saved results.
+    A null next_page_token means there are no additional saved pages.
 
     Invoke this tool when the user asks about websites that have been scanned, spidered or indexed.
     """
@@ -174,6 +177,7 @@ async def find_netloc(
     Query indexed resources for a list of network locations, i.e. host:port, for a given domain.
 
     Use get_result_page(pagination.next_page_token) for additional saved results.
+    A null next_page_token means there are no additional saved pages.
 
     Invoke this tool when the user asks about websites that have been scanned, spidered or indexed.
     """
@@ -231,6 +235,7 @@ async def find_urls(
     Query indexed resources for a list of URLs for the given host or domain.
 
     Use get_result_page(pagination.next_page_token) for additional saved results.
+    A null next_page_token means there are no additional saved pages.
 
     Invoke this tool when the user asks for page URLs that have been scanned, spidered or indexed.
 

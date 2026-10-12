@@ -26,10 +26,13 @@ from shyhurricane.result_pages import Pagination
 logger = logging.getLogger(__name__)
 
 
-class TextResourcePartialContents(TextResourceContents):
+class TextResourcePagedContents(TextResourceContents):
     total_length: int = Field(description="The total length of the resource")
     offset: int = Field(description="Offset into the resource of this content")
-    has_more: bool = Field(description="Whether there is more content after this")
+
+
+class TextResourcePartialContents(TextResourcePagedContents):
+    has_more: bool = Field(description="Whether there is more content after this offset")
 
 
 class HttpResource(BaseModel):
@@ -49,17 +52,21 @@ class HttpResource(BaseModel):
     status_code: int = Field(description="The HTTP status code for the response")
     method: str = Field(description="The HTTP method that was used to request the resource")
     resource: Optional[Resource] = Field(description="A link to the resource content")
-    contents: Optional[TextResourcePartialContents | TextResourceContents] = Field(description="The resource content")
+    contents: Optional[TextResourcePagedContents | TextResourceContents] = Field(
+        description="Saved preview content; navigate using pagination.next_page_token"
+    )
     response_headers: Optional[Dict[str, str]] = Field(description="The HTTP response headers")
 
-    @staticmethod
-    def from_doc(doc: Document, resource: Optional[Resource] = None, contents: Optional[TextResourceContents] = None) -> "HttpResource":
+    @classmethod
+    def from_doc(
+        cls, doc: Document, resource: Optional[Resource] = None, contents: Optional[TextResourceContents] = None
+    ) -> "HttpResource":
         try:
             response_headers = json.loads(doc.meta.get("response_headers", "{}"))
         except json.decoder.JSONDecodeError:
             response_headers = None
 
-        return HttpResource(
+        return cls(
             score=doc.score or 100,
             url=doc.meta['url'],
             host=doc.meta.get('host', ''),
@@ -71,6 +78,12 @@ class HttpResource(BaseModel):
             contents=contents,
             response_headers=response_headers,
         )
+
+
+class HttpResourceOffset(HttpResource):
+    contents: Optional[TextResourcePartialContents | TextResourceContents] = Field(
+        description="Indexed content; continue using character offsets when contents.has_more is true"
+    )
 
 
 SCHEME_TO_PORT = {
