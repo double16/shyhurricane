@@ -21,6 +21,7 @@ import shyhurricane.mcp_server.tools.find_indexed_metadata  # noqa: F401
 import shyhurricane.mcp_server.tools.find_web_resources  # noqa: F401
 import shyhurricane.mcp_server.tools.find_wordlists  # noqa: F401
 import shyhurricane.mcp_server.tools.findings  # noqa: F401
+import shyhurricane.mcp_server.tools.get_result_page  # noqa: F401
 import shyhurricane.mcp_server.tools.indexers  # noqa: F401
 import shyhurricane.mcp_server.tools.port_scan  # noqa: F401
 import shyhurricane.mcp_server.tools.register_hostname_address  # noqa: F401
@@ -28,6 +29,11 @@ import shyhurricane.mcp_server.tools.register_http_headers  # noqa: F401
 import shyhurricane.mcp_server.tools.status  # noqa: F401
 from shyhurricane.config import configure
 from shyhurricane.generator_config import GeneratorConfig, add_generator_args
+from shyhurricane.logging_config import (
+    configure_file_logging,
+    file_logging_enabled,
+    set_console_logging_enabled,
+)
 from shyhurricane.mcp_server import get_server_context, mcp_instance
 from shyhurricane.mcp_server.generator_config import set_generator_config
 from shyhurricane.monitor import run_monitor
@@ -41,6 +47,9 @@ configure()
 
 
 def configure_tty_logging() -> None:
+    if file_logging_enabled():
+        set_console_logging_enabled(False)
+        return
     logging.disable(logging.CRITICAL)
     for logger_name in ("uvicorn", "uvicorn.access", "uvicorn.error"):
         logger = logging.getLogger(logger_name)
@@ -50,6 +59,9 @@ def configure_tty_logging() -> None:
 
 def configure_shutdown_logging() -> None:
     """Make shutdown progress visible once the dashboard releases the terminal."""
+    if file_logging_enabled():
+        set_console_logging_enabled(True)
+        return
     logging.disable(logging.NOTSET)
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
@@ -87,11 +99,9 @@ async def main():
     is_tty = sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty()
     if is_tty:
         os.environ["SHYHURRICANE_MONITOR"] = "1"
-        configure_tty_logging()
     open_world_default = os.environ.get("OPEN_WORLD", "True")
 
     if torch.accelerator.device_count() == 0:
-        logger.info("low_power: CPU is the default pytorch device, defaulting to low power mode")
         low_power_default = os.environ.get("LOW_POWER", "True")
     else:
         low_power_default = os.environ.get("LOW_POWER", "False")
@@ -107,6 +117,8 @@ async def main():
         default=os.environ.get("MCP_TRANSPORT", "streamable-http"),
         help="Transport: streamable-http (default), sse, or streamable-http-modern (stateless)"
     )
+    ap.add_argument("--log-file", default=os.environ.get("LOG_FILE"),
+                    help="Append all Python logger messages and tracebacks to this file (or set LOG_FILE)")
     ap.add_argument("--database", default=default_database, help="Database location: path or host:port of qdrant server")
     ap.add_argument("--host", default="127.0.0.1", help="Host to listen on")
     ap.add_argument("--port", type=int, default=8000, help="Port to listen on for MCP")
@@ -122,6 +134,14 @@ async def main():
     args = ap.parse_args()
     if args.transport not in TRANSPORTS:
         ap.error(f"Invalid MCP_TRANSPORT: {args.transport}")
+    try:
+        configure_file_logging(args.log_file, console_enabled=not is_tty)
+    except OSError as error:
+        ap.error(f"Cannot open log file {args.log_file!r}: {error}")
+    if is_tty:
+        configure_tty_logging()
+    if torch.accelerator.device_count() == 0:
+        logger.info("low_power: CPU is the default pytorch device, defaulting to low power mode")
     set_generator_config(GeneratorConfig.from_args(args).apply_summarizing_default().check())
     set_server_config(ServerConfig(
         database=args.database,
@@ -160,9 +180,9 @@ async def main():
             port=args.port,
             loop="asyncio",
             lifespan="on",
-            log_level="critical" if is_tty else "info",
-            access_log=not is_tty,
-            log_config=None if is_tty else uvicorn.config.LOGGING_CONFIG,
+            log_level="debug" if file_logging_enabled() else "critical" if is_tty else "info",
+            access_log=not is_tty or file_logging_enabled(),
+            log_config=None if is_tty or file_logging_enabled() else uvicorn.config.LOGGING_CONFIG,
             timeout_graceful_shutdown=300,
         )
         uv_server = Server(uv_cfg)

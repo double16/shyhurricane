@@ -12,6 +12,7 @@ from starlette.responses import Response
 
 from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
 from shyhurricane.nuclei_findings import is_nuclei_finding, nuclei_finding_to_markdown
+from shyhurricane.result_pages import Pagination, paged_results
 from shyhurricane.target_info import filter_targets_str, parse_target_info
 from shyhurricane.task_queue import SaveFindingQueueItem
 from shyhurricane.task_queue.finding_worker import FINDING_VERSION
@@ -20,8 +21,17 @@ from shyhurricane.utils import munge_urls, stream_lines
 logger = logging.getLogger(__name__)
 
 finding_target_invalid_instructions = "Target must be a valid URL, hostname, IP address, host:port or ip:port. Retry with a corrected target."
-finding_not_found_instructions = "No findings found for the target. Expand the target or hack more!"
-finding_instructions = "These are findings from previous scans for the target (they do not need to be saved again). They provide a good starting place to continue testing. Chaining findings together may produce higher severity findings."
+finding_not_found_instructions = (
+    "No saved findings matched this target. Check its format or review indexed evidence within the "
+    "existing scope. Queued findings may not be searchable yet. An empty result does not establish "
+    "that the target is secure."
+)
+finding_instructions = (
+    "These are previously saved findings; do not save them again. They may be unverified or outdated. "
+    "Review evidence and verification status before treating them as confirmed vulnerabilities. "
+    "Use get_result_page(pagination.next_page_token) for additional saved findings. "
+    "A null next_page_token means there are no additional saved pages."
+)
 
 
 class SaveFindingResult(BaseModel):
@@ -50,6 +60,8 @@ async def save_finding(
     - **Title** – A concise, descriptive heading.
     - **Issue Summary** – What is wrong and why it is important.
     - **Discovery Method** – How the issue was found (tool or technique used).
+    - **Evidence** – Observed behavior and affected resource; redact sensitive values.
+    - **Verification Status** – Confirmed, suspected, or unverified, with supporting limitations.
     - **Reproduction Steps** – Step-by-step instructions to reproduce the issue.
     - **PoC** – Exploit code, request sample, or screenshot (if applicable).
     - **Fix** – Recommended remediation or mitigation.
@@ -58,11 +70,13 @@ async def save_finding(
         title: Annotated[
             Optional[str], Field(description="""A short, descriptive summary of the issue (one line max).""")],
 ) -> SaveFindingResult:
-    """
-    Use this tool to save **every finding** associated with the current target.
-    A finding must be saved as soon as it is identified.
+    """Save security finding associated with the current target.
 
-    Do not skip or omit this tool. **All findings must be saved.**
+    Save each new finding within the user's task and scope, recording observed evidence and
+    verification status. Distinguish suspected issues from confirmed vulnerabilities.
+    Do not invent evidence, reproduction steps or references; mark unavailable details explicitly.
+    Do not re-save findings returned by query_findings.
+    Saving is asynchronous: success means queued, and immediate queries may not include it.
     """
     await log_tool_history(ctx, "save_finding", target=target, finding_title=title, markdown=len(markdown))
 
@@ -83,7 +97,7 @@ async def save_finding(
     ))
 
     return SaveFindingResult(
-        instructions="Finding has been saved and can be retrieved later.",
+        instructions="Finding is queued for saving; it may not be searchable immediately.",
         target=target,
         title=title,
     )
@@ -96,11 +110,11 @@ class Finding(BaseModel):
 
 
 class QueryFindingsResult(BaseModel):
+    pagination: Pagination | None = None
     instructions: str = Field(description="Instructions for processing the findings")
     target: str = Field(description="Target of the findings")
     limit: int = Field(description="Limit for the number of results")
     findings: List[Finding] = Field(default=[], description="Findings associated with the target")
-    has_more: bool = Field(False, description="Whether there are more results")
 
 
 @mcp_instance.tool(
@@ -109,20 +123,23 @@ class QueryFindingsResult(BaseModel):
         read_only_hint=True,
         open_world_hint=False),
 )
+@paged_results("findings")
 async def query_findings(
         ctx: Context,
         target: Annotated[str, Field(description="URL, hostname, IP address, or domain name")],
-        limit: Annotated[int, Field(100, ge=10, le=1000, description="The maximum number of findings to return")] = 100
+        limit: Annotated[int, Field(10, ge=1, le=1000, description="Findings per page")] = 10
 ) -> QueryFindingsResult:
-    """
+    """Query previously saved findings for a target.
+
     Query for previous findings for the target. The findings provide a good starting place to continue testing.
 
     Invoke this tool when the user asks for existing vulnerabilities or is looking for a direction for testing a target.
     Include findings when developing your test plan.
+    Use get_result_page(pagination.next_page_token) for additional saved findings.
+    A null next_page_token means there are no additional saved pages.
     """
     await log_tool_history(ctx, "query_findings", target=target, limit=limit)
     server_ctx = await get_server_context()
-    limit = min(1000, max(10, limit or 100))
 
     try:
         target_info = parse_target_info(target)
@@ -131,7 +148,6 @@ async def query_findings(
             instructions=finding_target_invalid_instructions,
             target=target,
             limit=limit,
-            has_more=False,
         )
 
     store = server_ctx.stores["finding"]
@@ -181,16 +197,12 @@ async def query_findings(
             docs.extend(await store.filter_documents_async(filters=filters))
 
     findings = []
-    has_more = False
     for doc in docs:
         findings.append(Finding(
             target=doc.meta.get("url", doc.meta.get("netloc", doc.meta.get("host", doc.meta.get("domain", target)))),
             title=doc.meta.get("title", ""),
             markdown=doc.content,
         ))
-        if len(findings) >= limit:
-            has_more = True
-            break
 
     logger.info(f"Found {len(findings)} findings")
 
@@ -199,7 +211,6 @@ async def query_findings(
         target=target,
         limit=limit,
         findings=findings,
-        has_more=has_more,
     )
 
 

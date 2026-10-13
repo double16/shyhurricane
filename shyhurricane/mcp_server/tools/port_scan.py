@@ -16,9 +16,11 @@ from shyhurricane.mcp_server import (
     log_tool_history,
     mcp_instance,
 )
+from shyhurricane.result_pages import Pagination, paged_results, save_text
 from shyhurricane.task_queue import PortScanQueueItem
 from shyhurricane.task_queue.port_scan_worker import get_stored_port_scan_results
 from shyhurricane.utils import (
+    PortScanResult,
     PortScanResults,
     coerce_to_dict,
     coerce_to_list,
@@ -28,20 +30,37 @@ from shyhurricane.utils import (
 
 logger = logging.getLogger(__name__)
 
-port_scan_instructions = "These are the port scan results formatted as nmap XML."
-port_scan_instructions_pending = "These are partial results from the port scan, formatted as nmap XML. The scan is still running. Running the port scan again with the same parameters will return indexed results."
-port_scan_instructions_no_results = "No port scan results are available at this time. The scan is still running. Running the port scan again with the same parameters will return indexed results."
+port_scan_instructions = (
+    "These are structured port scan results. Read saved records using "
+    "get_result_page(pagination.next_page_token). If XML is needed and nmap_xml_page_token is "
+    "present, call get_result_page(page_token=nmap_xml_page_token). "
+    "Concatenate result.text fragments in page order. "
+    "A null next_page_token means there are no additional saved pages. "
+    "Saved pages are fixed snapshots and do not refresh discoveries."
+)
+port_scan_instructions_pending = (
+    port_scan_instructions + " The scan is still running (scan_complete=false). "
+    "Running the port scan again with the same parameters will return indexed results."
+)
+port_scan_instructions_no_results = (
+    port_scan_instructions + " No results are available yet; the scan is still running "
+    "(scan_complete=false). Repeat port_scan with the same parameters to check progress."
+)
 
 
 class PortScanToolResult(BaseModel):
+    pagination: Pagination | None = None
+    results: List[PortScanResult] = Field(default_factory=list)
+    scan_complete: bool = Field(
+        False, description="Whether the scan finished; independent of saved-page navigation"
+    )
+    nmap_xml_page_token: str | None = None
     instructions: str = Field(description="The instructions for interpreting the results")
     hostnames: Optional[List[str]] = Field(description="The hostnames that were scanned")
     ip_addresses: Optional[List[str]] = Field(description="The IP addresses that were scanned")
     ip_subnets: Optional[List[str]] = Field(description="The IP subnets that were scanned")
     ports: List[str] = Field(description="The ports that were scanned")
     nmap_xml: Optional[str] = Field(description="The port scan results formatted as nmap XML")
-    has_more: bool = Field(
-        description="Whether the port scan has more results available that can be retrieved by calling port_scan with the same parameters again")
 
 
 @mcp_instance.tool(
@@ -52,6 +71,7 @@ class PortScanToolResult(BaseModel):
         idempotent_hint=False,
         open_world_hint=True),
 )
+@paged_results("results")
 async def port_scan(
         ctx: Context,
         hostnames: Optional[Union[List[str], str]] = None,
@@ -80,13 +100,16 @@ async def port_scan(
         retry: Annotated[
             bool,
             Field(False,
-                  description="If the results are suspected to be invalid, such as a temporary network failure, set to true. Otherwise set to false to avoid unnecessary duplication of effort."
+                  description="Deprecated and ignored; leave false. Repeating the same parameters retrieves "
+                              "cached or pending results and does not request a forced rescan."
                   )
         ] = False,
+        limit: Annotated[int, Field(100, ge=1, le=1000, description="Service records per page")] = 100,
 ) -> PortScanToolResult:
-    """
+    """Scan target ports and identify running services.
+
     Performs a port scan and service identification on the target(s), similar to the functions of nmap.
-    The results are indexed to allow later retrieval. The output format is that of nmap.
+    The results are indexed. Returns paginated service records and a token for complete XML as text fragments.
 
     Invoke this tool when the user needs to identify which services are running on the targets in-scope.
     Use this tool instead of nmap or rustscan unless the user wants to run specific nmap NSE scripts.
@@ -96,7 +119,13 @@ async def port_scan(
     a list of IPv4 or IPv6 addresses. The ip_subnets parameter is a list of IPv4 or IPv6 subnets in CIDR notation, such
     as "192.168.1.0/24".
 
-    If the port scan reveals additional hostnames, virtual hosts or redirects, use the `register_hostname_address` tool to register them.
+    For additional in-scope hostnames, supply additional_hosts on calls that need them.
+    Legacy clients may instead use register_hostname_address for their current session.
+    retry is deprecated and ignored; this tool does not offer forced rescans.
+    Use get_result_page(pagination.next_page_token) for saved records.
+    A null next_page_token means there are no additional saved pages.
+    scan_complete describes completion independently of pagination. If XML is needed, pass nmap_xml_page_token to get_result_page and concatenate
+    result.text fragments in page order.
 
     The port scan may take a long time, and this tool may return before the scan is finished.
     If a timeout occurs, call this tool again with the same parameters, and it will return indexed results.
@@ -148,7 +177,8 @@ async def port_scan(
             ip_subnets=ip_subnets,
             ports=ports_list,
             nmap_xml=None,
-            has_more=False,
+
+            scan_complete=True,
         )
 
     if not retry:
@@ -158,14 +188,17 @@ async def port_scan(
                 server_ctx.stores["portscan"],
         ):
             logger.info("Returning stored port scan results for %s", port_scan_queue_item.targets)
+            _, xml_token = await save_text("port_scan_xml", stored_results.nmap_xml or "", "application/xml")
             return PortScanToolResult(
                 instructions=port_scan_instructions,
                 hostnames=hostnames,
                 ip_addresses=ip_addresses,
                 ip_subnets=ip_subnets,
                 ports=ports_list,
-                nmap_xml=stored_results.nmap_xml,
-                has_more=False,
+                nmap_xml=None,
+                nmap_xml_page_token=xml_token,
+                results=stored_results.results,
+                scan_complete=True,
             )
 
     await asyncio.to_thread(port_scan_queue.put, port_scan_queue_item)
@@ -198,14 +231,17 @@ async def port_scan(
     else:
         instructions = port_scan_instructions_no_results
 
+    _, xml_token = await save_text("port_scan_xml", results.nmap_xml if results else "", "application/xml")
     pending_results = PortScanToolResult(
         instructions=instructions,
         hostnames=hostnames,
         ip_addresses=ip_addresses,
         ip_subnets=ip_subnets,
         ports=ports_list,
-        nmap_xml=results.nmap_xml if results else None,
-        has_more=results.has_more if results else True,
+        nmap_xml=None,
+        nmap_xml_page_token=xml_token,
+        results=results.results if results else [],
+        scan_complete=not results.has_more if results else False,
     )
     logger.info("%s for %s", pending_results.instructions, port_scan_queue_item.targets)
     return pending_results

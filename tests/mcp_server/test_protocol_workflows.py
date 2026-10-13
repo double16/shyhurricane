@@ -172,7 +172,7 @@ async def test_two_questions_resolve_before_any_scanning(workflow_server, mode):
     async with Client(server, mode="2026-07-28" if mode == "modern" else mode, elicitation_callback=answer) as client:
         tools = (await client.list_tools()).tools
         tool = next(tool for tool in tools if tool.name == "find_web_resources")
-        assert set(tool.input_schema["properties"]) == {"query", "limit", "http_methods"}
+        assert set(tool.input_schema["properties"]) == {"query", "limit", "http_methods", "retrieval_limit"}
         result = await client.call_tool("find_web_resources", {"query": "find vulnerabilities"})
         assert not result.is_error
         assert len(questions) == 2
@@ -224,7 +224,7 @@ async def test_predicate_only_mcp_search_bypasses_llm_and_preserves_schema(workf
     )))
     async with Client(server, mode=mode) as client:
         tool = next(tool for tool in (await client.list_tools()).tools if tool.name == "find_web_resources")
-        assert set(tool.input_schema["properties"]) == {"query", "limit", "http_methods"}
+        assert set(tool.input_schema["properties"]) == {"query", "limit", "http_methods", "retrieval_limit"}
         result = await client.call_tool("find_web_resources", {"query": "site:example.com status:200"})
         assert not result.is_error
         assert result.structured_content["query"] == "site:example.com status:200"
@@ -400,3 +400,59 @@ async def test_idle_progress_through_middleware(workflow_server, monkeypatch, mo
         assert [value for value, _, _ in updates] == list(range(1, len(updates) + 1))
         assert all(total is None for _, total, _ in updates)
         assert any(message == f"{tool_name} is still running" for _, _, message in updates)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["legacy", "2026-07-28"])
+async def test_saved_search_pages_cross_calls_without_retrieval(workflow_server, mode, monkeypatch):
+    from haystack import Document
+
+    from shyhurricane.mcp_server.tools.get_result_page import get_result_page
+
+    server, _ = workflow_server
+    server.add_tool(get_result_page)
+    documents = [Document(id=str(i), content="body", meta={
+        "url": f"https://example.com/{i}", "type": "html",
+    }) for i in range(6)]
+    execute = AsyncMock(return_value=resources.FindWebResourcesResult(
+        query="example.com", instructions="saved", limit=6,
+        resources=resources._documents_to_http_resources(documents),
+    ))
+    prepare = AsyncMock(return_value=execute.return_value)
+    monkeypatch.setattr(resources, "_prepare_search", prepare)
+    monkeypatch.setattr(resources, "_execute_search", execute)
+    async with Client(server, mode=mode) as client:
+        listed = (await client.list_tools()).tools
+        paging_schema = next(tool for tool in listed if tool.name == "get_result_page").output_schema
+        assert "discriminator" in str(paging_schema)
+        assert "has_more" not in str(paging_schema)
+        first = await client.call_tool("find_web_resources", {
+            "query": "example.com", "limit": 2, "retrieval_limit": 5,
+        })
+        assert not first.is_error
+        first = first.structured_content
+        assert len(first["resources"]) == 2
+        assert first["limit"] == 2
+        assert first["pagination"]["total_items"] == 5
+        assert first["pagination"]["retrieval_truncated"]
+        assert prepare.call_args.args[2] == 6
+        second_response = await client.call_tool("get_result_page", {
+            "page_token": first["pagination"]["next_page_token"],
+        })
+        assert not second_response.is_error
+        second = second_response.structured_content
+        assert second["source_tool"] == "find_web_resources"
+        second = second["result"]
+        assert second["resources"][0]["url"] == "https://example.com/2"
+        last = await client.call_tool("get_result_page", {
+            "page_token": second["pagination"]["next_page_token"],
+        })
+        assert not last.is_error
+        assert len(last.structured_content["result"]["resources"]) == 1
+        previous = await client.call_tool("get_result_page", {
+            "page_token": second["pagination"]["previous_page_token"],
+        })
+        assert not previous.is_error
+        assert previous.structured_content["result"] == first
+    execute.assert_awaited_once()
+    prepare.assert_awaited_once()

@@ -12,7 +12,9 @@ from shyhurricane.mcp_server import get_additional_hosts, log_tool_history, mcp_
 # it.
 #
 
-register_hostname_address_lifetime_instructions = "Continue with your planned tasks."
+register_hostname_address_lifetime_instructions = (
+    "The mapping lasts for this legacy session. Continue with your planned tasks."
+)
 
 register_hostname_address_instructions = "The hostname has been successfully mapped to the IP address. " + register_hostname_address_lifetime_instructions
 
@@ -34,8 +36,11 @@ async def register_hostname_address(
         host: Annotated[str, Field(description="The hostname")],
         address: Annotated[str, Field(description="The IPv4 or IPv6 address")],
 ) -> str:
-    """
-    Registers a hostname with an IP address. This is useful when a hostname does not resolve with DNS,
+    """Register a hostname-to-IP mapping for subsequent requests.
+
+    Registers a hostname with an IP address for the current legacy session only.
+    Unavailable to modern clients; supply additional_hosts on every call that needs the mapping.
+    This is useful when a hostname does not resolve with DNS,
     and we know the IP address by other means. Especially useful in CTF or private networks.
 
     Invoke this tool when another tool has found an additional hostname or virtual hostname for a target IP address in-scope.

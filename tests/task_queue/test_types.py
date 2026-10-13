@@ -237,3 +237,17 @@ def test_worker_process_group_setup_failure_is_logged(monkeypatch, caplog):
     monkeypatch.setattr(types.os, "setsid", Mock(side_effect=OSError("unavailable")))
     types.prepare_worker_process()
     assert "Failed to create worker process group" in caplog.text
+
+
+def test_worker_preparation_inherits_file_destination(monkeypatch, tmp_path):
+    from unittest.mock import Mock
+
+    from shyhurricane import logging_config
+
+    destination = str(tmp_path / "worker.log")
+    monkeypatch.setenv("LOG_FILE", destination)
+    monkeypatch.delenv("SHYHURRICANE_MONITOR", raising=False)
+    configure = Mock()
+    monkeypatch.setattr(logging_config, "configure_file_logging", configure)
+    types.prepare_worker_process(create_process_group=False)
+    configure.assert_called_once_with(destination, console_enabled=True)

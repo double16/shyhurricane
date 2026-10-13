@@ -23,8 +23,9 @@ from shyhurricane.mcp_server import (
 )
 from shyhurricane.mcp_server.progress import progress_scope, report_progress
 from shyhurricane.mcp_server.session_state import ensure_work_path
-from shyhurricane.mcp_server.tools.find_wordlists import find_wordlists
+from shyhurricane.mcp_server.tools.find_wordlists import find_wordlists_all as find_wordlists
 from shyhurricane.rate_limit import get_rate_limit_requests_per_second
+from shyhurricane.result_pages import Pagination, paged_results
 from shyhurricane.task_queue import DirBustingQueueItem, DirBustingResultItem
 from shyhurricane.utils import coerce_to_dict, coerce_to_list
 
@@ -32,8 +33,21 @@ from ..run_unix_command import _run_unix_command
 
 logger = logging.getLogger(__name__)
 
-dirbuster_results_instructions_found = """These resources were found by brute-forcing the web server URL using a wordlist."""
-dirbuster_results_instructions_has_more = " This list isn't all of the results. Use the find_web_resources and find_urls tools to get more."
+dirbuster_results_instructions_found = (
+    "These resources were found by brute-forcing the web server URL using a wordlist. "
+    "Read additional saved URLs with get_result_page(pagination.next_page_token), when present. "
+    "A null next_page_token means there are no additional saved pages. "
+    "Saved pages are fixed snapshots; scan_complete describes completion independently."
+)
+dirbuster_results_instructions_has_more = (
+    " The scan is still running (scan_complete=false). Do not start another scan. "
+    "Query indexed resources for later discoveries; indexing may lag behind scanning."
+)
+dirbuster_results_instructions_pending = (
+    "No resources are available yet. The scan is still running (scan_complete=false). "
+    "Do not infer that the site is unreachable or start another scan. "
+    "Discoveries may become searchable after indexing completes."
+)
 dirbuster_results_instructions_not_found = "No resources were found by directory busting (brute-forcing) the site. It may be there is no web server at the requested address and port or a different wordlist is needed."
 
 
@@ -42,18 +56,22 @@ def dirbuster_instructions(results: List[str], has_more: bool) -> str:
         instructions = dirbuster_results_instructions_found
         if has_more:
             instructions += dirbuster_results_instructions_has_more
+    elif has_more:
+        instructions = dirbuster_results_instructions_pending
     else:
         instructions = dirbuster_results_instructions_not_found
     return instructions
 
 
 class DirBusterResults(BaseModel):
+    pagination: Pagination | None = None
+    scan_complete: bool = Field(
+        False, description="Whether the scan finished; independent of saved-page navigation"
+    )
     instructions: str = Field(description="The instructions string for interpreting the results")
     starting_url: str = Field(description="The starting URL of the directory buster")
     wordlist: Optional[str] = Field(description="The wordlist used by the directory buster")
     urls: List[str] = Field(description="The urls found by the directory buster")
-    has_more: bool = Field(
-        description="Whether the directory buster has more resources available that can be retrieved using the find_web_resources tool or listed by the find_urls tool")
 
 
 @mcp_instance.tool(
@@ -65,6 +83,7 @@ class DirBusterResults(BaseModel):
         open_world_hint=True),
 )
 @progress_scope()
+@paged_results("urls")
 async def directory_buster(
         ctx: Context,
         url: Annotated[str, Field(description=(
@@ -109,8 +128,10 @@ async def directory_buster(
                 ge=30, le=600,
             )
         ] = None,
+        limit: Annotated[int, Field(100, ge=1, le=1000, description="URLs per page")] = 100,
 ) -> DirBusterResults:
-    """
+    """Search a website for hidden directories and files using a wordlist.
+
     Search a website for hidden directories and files. This tool uses a wordlist to append each word to a URL and see if
     it responds.
 
@@ -118,7 +139,11 @@ async def directory_buster(
     find_web_resources, find_urls and other tools that use indexed content. This tool is preferred over feroxbuster,
     gobuster, ffuf, wfuzz, and other like commands.
 
-    Returns a list of URLs found. Indexes each URL that can be queried using the find_web_resources and find_urls tools. URL content can be returned using the fetch_web_resource_content tool.
+    Returns discovered URLs queued for indexing; searchability may lag behind scanning.
+    Use get_result_page(pagination.next_page_token) to read additional saved URLs.
+    A null next_page_token means there are no additional saved pages.
+    Saved pages are fixed snapshots; query find_urls or find_web_resources for later discoveries.
+    scan_complete describes completion independently of pagination. Do not restart a pending scan.
     """
 
     # coerce types
@@ -207,7 +232,7 @@ async def directory_buster(
         starting_url=url,
         wordlist=wordlist,
         urls=results,
-        has_more=has_more,
+        scan_complete=not has_more,
     )
 
 
@@ -219,7 +244,7 @@ async def validate_wordlist(ctx: Context, wordlist: str) -> Union[str, None]:
             if test_for_file.return_code == 0:
                 return wordlist
 
-        wordlist_results = await find_wordlists(ctx, wordlist_filename, 1000)
+        wordlist_results = (await find_wordlists(ctx, wordlist_filename)).paths
         if len(wordlist_results) == 0:
             logger.warning("No wordlists found for %s, using default", wordlist_filename)
             return None

@@ -62,6 +62,8 @@ services:
       DOCKER_HOST: "tcp://dind:2375"
       QDRANT: "db:6333"
       TOOL_CACHE: "/tool_cache"
+      LOG_FILE: "${LOG_FILE:-}"
+      TOOL_RESULT_TTL_SECONDS: "${TOOL_RESULT_TTL_SECONDS:-86400}"
       MCP_TRANSPORT: "${MCP_TRANSPORT:-streamable-http}"
       DISABLE_ELICITATION: "${DISABLE_ELICITATION:-True}"
       OLLAMA_MODEL: "${OLLAMA_MODEL}"

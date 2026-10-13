@@ -44,8 +44,12 @@ def indexed_metadata(monkeypatch):
 
 
 def test_finder_instructions_switches_on_results():
-    assert metadata._finder_instructions("domains", {"example.com"}).startswith("These are the domains")
-    assert metadata._finder_instructions("domains", set()).startswith("No domains")
+    found = metadata._finder_instructions("domains", {"example.com"})
+    assert found.startswith("These are indexed domains")
+    assert "get_result_page" in found
+    missing = metadata._finder_instructions("domains", set())
+    assert missing.startswith("No indexed domains")
+    assert "Check or broaden the filter within the existing scope first" in missing
 
 
 @pytest.mark.asyncio
@@ -54,7 +58,7 @@ async def test_find_domains_filters_contains_query(indexed_metadata):
 
     assert result.query == "example"
     assert result.domains == ["example.com"]
-    assert result.instructions.startswith("These are the domains")
+    assert result.instructions.startswith("These are indexed domains")
 
 
 @pytest.mark.asyncio
@@ -78,5 +82,13 @@ async def test_find_urls_filters_path_and_applies_limit(indexed_metadata):
 
     assert result.host_query == "example.com"
     assert result.path_query == "admin"
-    assert result.limit == 10
+    assert result.limit == 1
     assert result.urls == ["https://api.example.com/admin"]
+
+
+@pytest.mark.asyncio
+async def test_internal_network_inventory_is_not_paginated(indexed_metadata, result_store):
+    result = await metadata.find_netloc_all(None, "example.com")
+    assert result.network_locations == ["api.example.com:8443", "www.example.com:443"]
+    assert result.pagination is None
+    assert not list(result_store.snapshots.iterdir())

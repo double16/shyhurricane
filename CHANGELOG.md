@@ -4,6 +4,14 @@
 
 ### Features
 
+- Add `--log-file` and `LOG_FILE` for append-only diagnostic logs at all Python logger levels,
+  including logged tracebacks, server access messages, and worker-process logs during dashboard use.
+- Add filesystem-backed tool result pagination with opaque next/previous page tokens and `get_result_page`.
+  Preserve snapshots across calls and restarts for 24 hours by default; configure `TOOL_RESULT_TTL_SECONDS`.
+  Clean expired and corrupt results on startup, shutdown, and before new queries.
+- Reduce default search and finding pages to 20 and 10 records; cap enumeration and scan response pages.
+  Separate search retrieval depth from page size, and allow list limits down to one result.
+- Return structured JavaScript previews and port-scan summaries with saved content/XML navigation.
 - Add hard search predicates to `find_web_resources`: `site:`, `inurl:`, `filetype:`/`ext:`, `mime:`,
   `method:`, `status:`, and `type:`, with quoted values, exclusions, and predicate-only low-power retrieval.
 - Add an `r` keyboard shortcut to refresh the monitoring dashboard immediately.
@@ -28,6 +36,11 @@
 
 ### Fixes
 
+- Handle missing `Content-Type` in `index_http_url` and binary detection. Report invalid request
+  inputs, disabled network access, and ingestion failures as explicit tool errors; distinguish
+  preview storage failures after queueing and retain original JavaScript on operational command failures.
+- Index complete textual URL response bodies independently of preview size and `Content-Length`.
+  Limit previews after JavaScript expansion without dropping indexed content.
 - Distinguish queries with no matches from targets with no indexed documents in `find_web_resources`;
   recommend populating the index only for unindexed targets.
 - Send idle MCP progress every 20 seconds for scans, search, JavaScript deobfuscation, and URL indexing;

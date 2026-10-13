@@ -60,7 +60,7 @@ async def test_save_finding_enqueues_valid_target(monkeypatch):
 
     result = await findings.save_finding(None, "https://example.com", "# finding", "Title")
 
-    assert result.instructions == "Finding has been saved and can be retrieved later."
+    assert result.instructions == "Finding is queued for saving; it may not be searchable immediately."
     assert ctx.task_queue.items[0].target == "https://example.com"
     assert ctx.task_queue.items[0].markdown == "# finding"
     assert ctx.task_queue.items[0].title == "Title"
@@ -80,9 +80,10 @@ async def test_query_findings_by_url_and_limit(monkeypatch):
     result = await findings.query_findings(None, "https://example.com/a", limit=1)
 
     assert result.instructions == findings.finding_instructions
-    assert result.limit == 10
-    assert result.has_more is False
-    assert [finding.title for finding in result.findings] == ["Finding", "Second"]
+    assert result.limit == 1
+    assert result.pagination.next_page_token is not None
+    assert [finding.title for finding in result.findings] == ["Finding"]
+    assert result.pagination.total_items == 2
     assert store.filters[0]["conditions"][1]["field"] == "meta.url"
 
 
@@ -155,3 +156,21 @@ async def test_save_finding_api_rejects_bad_input(monkeypatch):
     assert (await findings.save_finding_api(
         FakeRequest("application/json", [json.dumps({"target": "", "markdown": ""}).encode()])
     )).status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_all_findings_are_saved_and_last_page_has_no_more(monkeypatch):
+    from shyhurricane.mcp_server.tools.get_result_page import get_result_page
+
+    store = Store([finding_doc(title=str(i)) for i in range(23)])
+    patch_context(monkeypatch, ServerContext(store))
+    first = await findings.query_findings(None, "https://example.com/a")
+    assert len(first.findings) == 10
+    assert first.pagination.total_items == 23
+    assert first.pagination.next_page_token is not None
+    second = (await get_result_page(None, first.pagination.next_page_token)).result
+    assert len(second.findings) == 10 and second.pagination.next_page_token is not None
+    last = (await get_result_page(None, second.pagination.next_page_token)).result
+    assert [item.title for item in last.findings] == ["20", "21", "22"]
+    assert last.pagination.next_page_token is None
+    assert len(store.filters) == 1

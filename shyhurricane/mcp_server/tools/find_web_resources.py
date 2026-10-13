@@ -35,9 +35,10 @@ from shyhurricane.mcp_server import (
     mcp_instance,
 )
 from shyhurricane.mcp_server.progress import progress_scope, report_progress
-from shyhurricane.mcp_server.tools.find_indexed_metadata import find_netloc
+from shyhurricane.mcp_server.tools.find_indexed_metadata import find_netloc_all as find_netloc
 from shyhurricane.predicate_search import candidate_filters, load_candidates, select_candidates
 from shyhurricane.rate_limit import get_rate_limit_requests_per_second
+from shyhurricane.result_pages import Pagination, paged_results, paginate_result, start_query
 from shyhurricane.search_predicates import Predicate, parse_predicates
 from shyhurricane.server_config import get_server_config
 from shyhurricane.target_info import TargetInfo, filter_targets_query, parse_target_info
@@ -218,6 +219,7 @@ async def _find_recommended_urls(ctx: Context) -> Optional[List[str]]:
 
 
 class FindWebResourcesResult(BaseModel):
+    pagination: Pagination | None = None
     instructions: str = Field(description="Instructions for using the results")
     query: str = Field(description="Search query used to find web resources")
     http_methods: Optional[List[str]] = Field(default=None, description="HTTP methods used to find web resources")
@@ -225,16 +227,26 @@ class FindWebResourcesResult(BaseModel):
     resources: List[HttpResource] = Field(default_factory=list, description="List of web resources found")
 
 
-find_web_resources_instructions = "These resources were found by searching the indexed resources using the given query."
+find_web_resources_instructions = (
+    "These resources match the indexed search; matches are not confirmed vulnerabilities. "
+    "Read more saved matches with get_result_page(pagination.next_page_token), when present. "
+    "A null next_page_token means there are no additional saved pages. "
+    "If pagination.retrieval_truncated is true, narrow the query to retrieve excluded matches. "
+    "Pass resource.uri to fetch_web_resource_content when available."
+)
 find_web_resources_instructions_not_found = (
-    "No documents are indexed for the requested target. Use the spider_website, "
-    "directory_buster or index_http_url tools to populate the index."
+    "No documents are indexed for the requested target. If indexing was recently queued, allow it "
+    "to finish. Otherwise use available spider_website, directory_buster or index_http_url tools "
+    "to populate the index only within the user-authorized scope."
 )
 find_web_resources_instructions_no_matches = (
     "No indexed resources matched the query. Try broadening the query or relaxing its filters."
 )
 find_web_resources_instructions_need_target = "Include a target URL, IP address or hostname in query."
-find_web_resources_instructions_low_power = "No indexed resources were considered due to low power mode. Include only hostnames, IP addresses or URLs in the query."
+find_web_resources_instructions_low_power = (
+    "Natural-language retrieval is unavailable in low-power mode. Retry with a target-only query "
+    "or predicates such as site:example.com status:403, replacing example.com with your target."
+)
 
 
 def find_web_resources_result(
@@ -301,7 +313,7 @@ async def _prepare_search(
 
     server_ctx = await get_server_context()
     query = query.strip()
-    limit = min(1000, max(10, limit or 100))
+    limit = min(1001, max(1, limit or 100))
     logger.info("finding web resources for %s up to %d results", query, limit)
 
     try:
@@ -393,9 +405,20 @@ def _can_elicit(ctx: Context, server_ctx: ServerContext) -> bool:
     )
 
 
+async def _prepare_tool_search(
+    ctx: Context,
+    query: str,
+    limit: int = 20,
+    http_methods: Optional[Union[List[str], str]] = None,
+    retrieval_limit: Annotated[int, Field(1000, ge=1, le=1000)] = 1000,
+) -> Union[SearchPreparation, FindWebResourcesResult]:
+    await start_query()
+    return await _prepare_search(ctx, query, retrieval_limit + 1, http_methods)
+
+
 async def _request_target(
     ctx: Context,
-    search: Annotated[Union[SearchPreparation, FindWebResourcesResult], Resolve(_prepare_search)],
+    search: Annotated[Union[SearchPreparation, FindWebResourcesResult], Resolve(_prepare_tool_search)],
 ) -> Union[RequestTargetUrl, Elicit[RequestTargetUrl]]:
     if isinstance(search, FindWebResourcesResult) or search.targets:
         return RequestTargetUrl()
@@ -406,7 +429,7 @@ async def _request_target(
 
 async def _prepare_targets(
     ctx: Context,
-    search: Annotated[Union[SearchPreparation, FindWebResourcesResult], Resolve(_prepare_search)],
+    search: Annotated[Union[SearchPreparation, FindWebResourcesResult], Resolve(_prepare_tool_search)],
     target_answer: Annotated[ElicitationResult[RequestTargetUrl], Resolve(_request_target)],
 ) -> Union[SearchPreparation, FindWebResourcesResult]:
     if isinstance(search, FindWebResourcesResult):
@@ -685,7 +708,8 @@ async def find_web_resources_tool(
     query: str,
     search: Annotated[Union[SearchPreparation, FindWebResourcesResult], Resolve(_prepare_targets)],
     scan_answer: Annotated[ElicitationResult[SpiderConfirmation], Resolve(_request_scan)],
-    limit: Annotated[int, Field(100, description="Limit how many results are returned", ge=10, le=1000)] = 100,
+    limit: Annotated[int, Field(20, description="Resources per page", ge=1, le=1000)] = 20,
+    retrieval_limit: Annotated[int, Field(1000, ge=1, le=1000, description="Maximum matches to save")] = 1000,
     http_methods: Annotated[
         Optional[Union[List[str], str]],
         Field(
@@ -693,10 +717,15 @@ async def find_web_resources_tool(
         ),
     ] = None,
 ) -> FindWebResourcesResult:
-    """Query indexed resources about a website using natural language and return the URL, request and response bodies,
-    request and response headers, HTTP method, MIME type, HTTP status code, technologies found. This tool will
-    search using several parameters including response body matching, URL matching, MIME type matching of the response,
-    and HTTP response body matching.
+    """Search indexed website resources using natural language or hard filters.
+
+    Returns URL, host, port, domain, HTTP method, status_code, response_headers and matching score.
+    Content may be included in contents or referenced by resource.uri.
+    Scores rank matches; they are not vulnerability confidence.
+    Missing targets can trigger spidering only after accepted scan confirmation.
+    Use get_result_page(pagination.next_page_token) for additional saved matches.
+    A null next_page_token means there are no additional saved pages.
+    If pagination.retrieval_truncated is true, narrow the query to retrieve excluded matches.
 
     Invoke this tool when the user asks about vulnerabilities,
     misconfigurations or exploit techniques **specific to a target website**
@@ -707,8 +736,8 @@ async def find_web_resources_tool(
 
     Do NOT use it for generic cyber-security theory.
 
-    If there is content available for the results, there will be a resource_link object containing
-    a URI. The URI can use the fetch_web_resource_content tool to get the content.
+    When resource.uri is present, pass it as url to fetch_web_resource_content.
+    MCP resource-link content blocks may also expose that URI.
 
     Example queries (replace http://target.local with your target URL(s)):
         1. Find pages with HTML forms on http://target.local
@@ -729,11 +758,28 @@ async def find_web_resources_tool(
     Predicate-only queries work without an LLM, including in low-power mode.
     """
 
-    return await _execute_search(ctx, search, scan_answer)
+    result = await _execute_search(ctx, search, scan_answer)
+    truncated = len(result.resources) > retrieval_limit
+    result = result.model_copy(update={"resources": result.resources[:retrieval_limit], "limit": limit})
+    return await paginate_result("find_web_resources", result, "resources", limit, truncated)
 
 
-spider_results_instructions_found = "These resources were found by navigating a web server using links in the returned content."
-spider_results_instructions_has_more = " This list isn't all of the results. Use the find_web_resources and find_urls tools to get more."
+spider_results_instructions_found = (
+    "These resources were found by navigating links or retrieved from the recent crawl cache. "
+    "Read additional saved results with get_result_page(pagination.next_page_token), when present. "
+    "A null next_page_token means there are no additional saved pages. "
+    "Saved pages are fixed snapshots; scan_complete describes scan completion independently. "
+    "If retrieval_truncated is true, use indexed search for results excluded from this snapshot."
+)
+spider_results_instructions_has_more = (
+    " The scan is still running (scan_complete=false). Do not start another scan. "
+    "Query indexed resources for later discoveries; indexing may lag behind scanning."
+)
+spider_results_instructions_pending = (
+    "No resources are available yet. The scan is still running (scan_complete=false). "
+    "Do not infer that the site is unreachable or start another scan. "
+    "Discoveries may become searchable after indexing completes."
+)
 spider_results_instructions_not_found = "No resources were found by spidering the site. It may be there is no web server at the requested address and port."
 
 
@@ -742,17 +788,22 @@ def spider_instructions(results: List[HttpResource], has_more: bool) -> str:
         instructions = spider_results_instructions_found
         if has_more:
             instructions += spider_results_instructions_has_more
+    elif has_more:
+        instructions = spider_results_instructions_pending
     else:
         instructions = spider_results_instructions_not_found
     return instructions
 
 
 class SpiderResults(BaseModel):
+    pagination: Pagination | None = None
+    scan_complete: bool = Field(
+        False, description="Whether the scan finished; independent of saved-page navigation"
+    )
+    retrieval_truncated: bool = False
     url: str = Field(description="The starting URL of the spider")
     instructions: str = Field(default=spider_results_instructions_found)
     resources: List[HttpResource] = Field(description="The resources found by the spider")
-    has_more: bool = Field(
-        description="Whether the spider has more resources available that can be retrieved using the find_web_resources tool or listed by the find_urls tool")
 
 
 async def is_spider_time_recent(server_ctx: ServerContext, url: str) -> Optional[float]:
@@ -811,6 +862,7 @@ async def is_spider_time_recent(server_ctx: ServerContext, url: str) -> Optional
         open_world_hint=True),
 )
 @progress_scope()
+@paged_results("resources")
 async def spider_website(
         ctx: Context,
         url: str,
@@ -825,15 +877,22 @@ async def spider_website(
                 ge=30, le=600,
             )
         ] = None,
+        limit: Annotated[int, Field(50, ge=1, le=1000, description="Resources per page")] = 50,
 ) -> SpiderResults:
-    """
+    """Spider a website and index discovered resources for further analysis.
+
     Spider the website at the url and index the results for further analysis. The find_web_resources
-    tool can be used to continue the analysis. The find_hosts tool can be used to determine if
-    a website has already been spidered.
+    tool can be used to continue analysis. find_hosts reports indexed hosts;
+    it does not establish that a complete crawl has run.
 
     Invoke this tool when the user specifically asks to spider a URL or when the user wants to examine or analyze a site for which nothing has been indexed.
 
-    Returns a list of resources found, including URL, response code, content type, and content length. All resources are indexed and can be queried using the find_web_resources tool. Content can be returned using the returned URL and the fetch_web_resource_content tool.
+    Returns resource records with URL, HTTP method, status_code and available response headers.
+    Discoveries are queued for indexing and may not be searchable immediately.
+    Read saved pages using get_result_page(pagination.next_page_token). Pages are a fixed snapshot;
+    query find_urls or find_web_resources for later discoveries. scan_complete describes the scan,
+    independently of pagination. Do not restart an unfinished scan.
+    A null next_page_token means there are no additional saved pages.
     """
 
     # coerce types
@@ -853,12 +912,15 @@ async def spider_website(
     url = url.strip()
     if await is_spider_time_recent(server_ctx, url):
         logger.info(f"{url} has been recently spidered, returning saved results")
-        resources = (await find_web_resources(ctx, url, 100)).resources
+        resources = (await find_web_resources(ctx, url, 1001)).resources
+        truncated = len(resources) > 1000
+        resources = resources[:1000]
         return SpiderResults(
             url=url,
-            instructions=spider_instructions(resources, len(resources) >= 100),
+            instructions=spider_instructions(resources, False),
             resources=resources,
-            has_more=False,
+            scan_complete=True,
+            retrieval_truncated=truncated,
         )
 
     context_id = ctx.request_context.lifespan_context.app_context_id
@@ -904,5 +966,5 @@ async def spider_website(
         url=url,
         instructions=spider_instructions(results, has_more),
         resources=results,
-        has_more=has_more,
+        scan_complete=not has_more,
     )

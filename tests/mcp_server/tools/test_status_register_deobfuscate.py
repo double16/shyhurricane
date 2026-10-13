@@ -130,16 +130,30 @@ class CommandResult:
 async def test_deobfuscate_javascript_handles_empty_failure_and_success(monkeypatch):
     monkeypatch.setattr(deobf, "log_tool_history", noop)
 
-    assert await deobf.deobfuscate_javascript(None, "   ") == ""
+    empty = await deobf.deobfuscate_javascript(None, "   ")
+    assert empty.text == ""
+    assert empty.transformation_status == "empty"
 
     async def failed(*args, **kwargs):
         return CommandResult(1, "ignored")
 
     monkeypatch.setattr(deobf, "_run_unix_command", failed)
-    assert await deobf.deobfuscate_javascript(None, "var a=1;") == "var a=1;"
+    failure = await deobf.deobfuscate_javascript(None, "var a=1;")
+    assert failure.text == "var a=1;"
+    assert failure.transformation_status == "failed"
+    assert await deobf.deobfuscate_javascript_full(None, "var a=1;") == "var a=1;"
+
+    monkeypatch.setattr(deobf, "_run_unix_command", AsyncMock(return_value=None))
+    assert (await deobf.deobfuscate_javascript(None, "var a=1;")).transformation_status == "failed"
 
     async def succeeded(*args, **kwargs):
         return CommandResult(0, "var readable = 1;")
 
     monkeypatch.setattr(deobf, "_run_unix_command", succeeded)
-    assert await deobf.deobfuscate_javascript(None, "eval('x')") == "var readable = 1;"
+    success = await deobf.deobfuscate_javascript(None, "eval('x')")
+    assert success.text == "var readable = 1;"
+    assert success.transformation_status == "succeeded"
+    assert await deobf.deobfuscate_javascript_full(None, "eval('x')") == "var readable = 1;"
+
+    monkeypatch.setattr(deobf, "_run_unix_command", AsyncMock(return_value=CommandResult(0, "same")))
+    assert (await deobf.deobfuscate_javascript(None, "same")).transformation_status == "succeeded"

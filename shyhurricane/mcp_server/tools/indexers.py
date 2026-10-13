@@ -1,11 +1,14 @@
 import json
 import logging
+import sqlite3
+import subprocess
 from datetime import datetime
 from typing import Annotated, Optional
 
 import httpx
 import requests
 from mcp.server.mcpserver import Context
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import TextResourceContents, ToolAnnotations
 from pydantic import Field
 from starlette.requests import Request
@@ -26,10 +29,20 @@ from shyhurricane.mcp_server import (
     log_tool_history,
     mcp_instance,
 )
-from shyhurricane.mcp_server.tools.deobfuscate_javascript import deobfuscate_javascript
+from shyhurricane.mcp_server.tools.deobfuscate_javascript import deobfuscate_javascript_full
+from shyhurricane.result_pages import paged_content
 from shyhurricane.utils import HttpResource, coerce_to_dict, extract_domain, is_katana_jsonl, stream_lines, urlparse_ext
 
 logger = logging.getLogger(__name__)
+
+
+def _request_mapping(value, name: str, kv_sep=None, element_sep=None) -> dict[str, str]:
+    mapping = coerce_to_dict(value, kv_sep, element_sep)
+    if not isinstance(mapping, dict) or any(
+        not isinstance(key, str) or not isinstance(item, str) for key, item in mapping.items()
+    ):
+        raise ToolError(f"{name} must contain string names and string values")
+    return mapping
 
 
 @mcp_instance.custom_route('/index', methods=['POST'])
@@ -87,6 +100,13 @@ async def index_request_body(request: Request) -> Response:
         idempotent_hint=False,
         open_world_hint=True),
 )
+@paged_content(
+    "content_length_limit", "contents.text",
+    save_failure_message=(
+        "Response queued for ingestion, but unable to save preview pages. "
+        "Repeating the call may enqueue the response again."
+    ),
+)
 async def index_http_url(
         ctx: Context,
         url: str,
@@ -98,22 +118,33 @@ async def index_http_url(
         params: RequestParamsField = None,
         request_body: Optional[str] = None,
         follow_redirects: Optional[bool] = None,
-        content_length_limit: Annotated[int, Field(200*1024, description="Content length limit, do not return content if over this length", ge=1, le=4*1024*1024)] = 200*1024,
+        content_length_limit: Annotated[
+            int, Field(16384, description="Response preview characters per page", ge=1, le=4 * 1024 * 1024)
+        ] = 16384,
 ) -> Optional[HttpResource]:
-    """
+    """Fetch and index an HTTP URL for further analysis.
+
     Index an HTTP URL to allow for further analysis and return the context, response code, response headers.
 
-    Invoke this tool when the user needs the content of one specific URL. If the content type is binary or over
-    the content_length_limit, content will not be returned.
+    Invoke this tool when the user needs one URL. Text is indexed completely and returned as saved
+    preview pages. Binary content returns metadata only. content_length_limit controls preview characters.
 
-    If follow_redirects is true, redirects will be followed and the result is the destination of the redirect.
+    This contacts the live target; use fetch_web_resource_content for already indexed content.
+    Indexing is asynchronous; the returned response may not be searchable immediately.
+    Use get_result_page(pagination.next_page_token) for saved preview pages.
+    A null next_page_token means there are no additional saved pages.
+    follow_redirects defaults to false. Enable it only when redirect destinations are in scope.
+    A null result indicates a request failure, not a successful empty response.
+    Invalid inputs and queue failures raise tool errors. Missing Content-Type is treated as unknown.
+    JavaScript command infrastructure failures return the original text. Preview storage errors
+    can occur after queueing succeeds; repeating the call may enqueue the response again.
     """
 
     # coerce types
-    additional_hosts = coerce_to_dict(additional_hosts)
-    cookies = coerce_to_dict(cookies, '=', ';')
-    request_headers = coerce_to_dict(request_headers, ':', '\n')
-    params = coerce_to_dict(params, '=', '&')
+    additional_hosts = _request_mapping(additional_hosts, "additional_hosts")
+    cookies = _request_mapping(cookies, "cookies", "=", ";")
+    request_headers = _request_mapping(request_headers, "request_headers", ":", "\n")
+    params = _request_mapping(params, "params", "=", "&")
 
     request_headers = get_additional_http_headers(ctx, request_headers)
 
@@ -129,7 +160,15 @@ async def index_http_url(
                            additional_hosts=additional_hosts,
                            )
     server_ctx = await get_server_context()
-    assert server_ctx.open_world
+    if not server_ctx.open_world:
+        raise ToolError("Network access has been disabled. Rely on indexed content.")
+
+    try:
+        parsed_url = urlparse_ext(url)
+        if parsed_url.scheme not in {"http", "https"}:
+            raise ValueError("Unsupported scheme")
+    except ValueError as error:
+        raise ToolError("url must be a valid HTTP or HTTPS URL with a valid port") from error
 
     additional_hosts = get_additional_hosts(ctx, additional_hosts)
     if follow_redirects is None:
@@ -138,7 +177,6 @@ async def index_http_url(
     if user_agent:
         the_headers['User-Agent'] = user_agent
     try:
-        parsed_url = urlparse_ext(url)
         if parsed_url.hostname in additional_hosts:
             the_headers['Host'] = parsed_url.hostname
             munged_url = url.replace(f"://{parsed_url.hostname}", f"://{additional_hosts[parsed_url.hostname]}", 1)
@@ -146,27 +184,30 @@ async def index_http_url(
         else:
             munged_url = url
         async with httpx.AsyncClient() as client:
-            response = await client.request(
-                url=munged_url,
-                method=method,
-                headers=the_headers,
-                cookies=cookies,
-                params=params,
-                content=request_body,
-                follow_redirects=follow_redirects,
-            )
+            try:
+                response = await client.request(
+                    url=munged_url,
+                    method=method,
+                    headers=the_headers,
+                    cookies=cookies,
+                    params=params,
+                    content=request_body,
+                    follow_redirects=follow_redirects,
+                )
+            except httpx.InvalidURL as error:
+                raise ToolError("HTTP client rejected the request URL") from error
+            except (TypeError, ValueError, UnicodeError) as error:
+                raise ToolError("Invalid HTTP request inputs; check headers, cookies, parameters, and body") from error
         status_code = response.status_code
         response_headers = dict(response.headers)
+        mime_type = response.headers.get("Content-Type", "")
 
-        # check for binary content or large size
+        # Index complete textual content independently of the response preview size.
         body = None
-        if not is_binary(None, response.headers.get("Content-Type")):
-            if response.headers.get("Content-Length"):
-                content_length = int(response.headers.get("Content-Length"))
-                if content_length < content_length_limit:
-                    body = response.text
+        if not is_binary(None, mime_type):
+            body = response.text
 
-        await server_ctx.enqueue_ingest(json.dumps({
+        ingest_item = json.dumps({
             "timestamp": datetime.now().isoformat(),
             "request": {
                 "endpoint": url,
@@ -179,15 +220,23 @@ async def index_http_url(
                 "headers": response_headers,
                 "body": body,
             }
-        }))
+        })
+        try:
+            await server_ctx.enqueue_ingest(ingest_item)
+        except (OSError, sqlite3.Error, RuntimeError) as error:
+            logger.exception("Failed to queue fetched HTTP response")
+            raise ToolError("Response fetched, but queueing for ingestion failed") from error
 
-        if body and map_mime_to_type(response.headers.get("Content-Type")) == "javascript":
-            body = await deobfuscate_javascript(ctx, body)
+        if body and map_mime_to_type(mime_type) == "javascript":
+            try:
+                body = await deobfuscate_javascript_full(ctx, body)
+            except (OSError, subprocess.SubprocessError):
+                logger.exception("JavaScript transformation failed; returning original response text")
 
         if body:
             contents = TextResourceContents(
                 uri=str(url),
-                mime_type=response.headers.get("Content-Type", ""),
+                mime_type=mime_type,
                 text=body,
             )
         else:

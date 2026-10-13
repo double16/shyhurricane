@@ -184,6 +184,7 @@ def _wait_for_indexing_enabled(indexing_enabled=None, stop_event=None) -> bool:
 
 def _doc_type_worker(db: str, generator_config: GeneratorConfig, health_state=None, indexing_enabled=None,
                      stop_event=None):
+    prepare_worker_process(create_process_group=False)
     exit_code = -1
     try:
         faulthandler.register(signal.SIGUSR1)

@@ -5,9 +5,10 @@ from typing import Annotated, Iterable, List
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import BaseModel, Field
 
 from shyhurricane.mcp_server import log_tool_history, mcp_instance
+from shyhurricane.result_pages import Pagination, paged_results
 
 from ..run_unix_command import RunUnixCommand, _run_unix_command
 
@@ -77,20 +78,33 @@ def rank_wordlists(paths: Iterable[str], query: str, limit: int = 20) -> List[st
     return list(map(lambda e: e[0], scored[:limit]))
 
 
+class FindWordlistsResult(BaseModel):
+    paths: List[str]
+    pagination: Pagination | None = None
+
+
 @mcp_instance.tool(
     annotations=ToolAnnotations(
         title="List Wordlists",
         read_only_hint=True,
         open_world_hint=False),
 )
+@paged_results("paths")
 async def find_wordlists(
         ctx: Context,
-        query: Annotated[str, Field(description="""Substring search of the path. Examples: Web-Content, DNS, LFI, password, username""")],
+        query: Annotated[str, Field(description=(
+            "Case-insensitive path substrings; all whitespace-separated terms must match. "
+            "Examples: Web-Content, DNS, LFI, password, username. Paths are in the command container."
+        ))],
         limit: Annotated[int, Field(20, description="The maximum number of results to return", ge=1, le=1000)] = 20
-) -> List[str]:
-    """
+) -> FindWordlistsResult:
+    """Find available wordlists for scanning and directory discovery.
+
     Find available word lists. The results can be used with other commands that have options to
     accept word lists.
+
+    Use get_result_page(pagination.next_page_token) for additional saved results.
+    A null next_page_token means there are no additional saved pages.
 
     Invoke this tool when the user wants to run a brute-forcing tool and needs to use a wordlist.
     """
@@ -106,6 +120,11 @@ async def find_wordlists(
         raise ToolError(f"Failed to find word lists: {result.error}")
     all_results = result.output.splitlines()
     if query_clean:
-        return rank_wordlists(all_results, query_clean, limit)
+        return FindWordlistsResult(paths=rank_wordlists(all_results, query_clean, len(all_results)))
     else:
-        return all_results[:limit]
+        return FindWordlistsResult(paths=sorted(all_results))
+
+
+async def find_wordlists_all(ctx: Context, query: str) -> FindWordlistsResult:
+    """Load all candidates for internal wordlist validation without creating pages."""
+    return await find_wordlists.__wrapped__(ctx, query)
