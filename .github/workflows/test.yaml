@@ -141,3 +141,10 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           outputs: type=image,oci-mediatypes=true,compression=zstd,compression-level=3,force-compression=true
+
+      - uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          package: shyhurricane,shyhurricane_unix_command
+          delete-untagged: true
+          delete-ghost-images: true
+          older-than: 7 days
