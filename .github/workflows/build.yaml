@@ -70,12 +70,6 @@ jobs:
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
-      - uses: dataaxiom/ghcr-cleanup-action@v1
-        with:
-          delete-ghost-images: true
-          delete-tags: pr-*
-          older-than: 7 days
-
   unix-command-image:
     runs-on: ubuntu-latest
     permissions:
@@ -142,9 +136,19 @@ jobs:
           subject-digest: ${{ steps.push.outputs.digest }}
           push-to-registry: true
 
+  image-cleanup:
+    runs-on: ubuntu-latest
+    needs: [mcp-image, unix-command-image]
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
       - uses: dataaxiom/ghcr-cleanup-action@v1
         with:
+          package: shyhurricane,shyhurricane_unix_command
+          delete-untagged: true
           delete-ghost-images: true
-          delete-tags: pr-*
+          delete-tags: pr-*,feature-*,bugfix-*,bug-*,chore-*
           older-than: 7 days
-
