@@ -141,3 +141,10 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           outputs: type=image,oci-mediatypes=true,compression=zstd,compression-level=3,force-compression=true
+
+      - uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          package: ${{ github.repository }},${{ github.repository }}_unix_command
+          delete-ghost-images: true
+          delete-tags: pr-*
+          older-than: 7 days
