@@ -145,6 +145,7 @@ jobs:
       - uses: dataaxiom/ghcr-cleanup-action@v1
         with:
           package: shyhurricane,shyhurricane_unix_command
+          delete-untagged: true
           delete-ghost-images: true
           delete-tags: pr-*
           older-than: 7 days
