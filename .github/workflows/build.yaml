@@ -21,6 +21,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      attestations: write
+      id-token: write
 
     env:
       IMAGE_NAME: ${{ github.repository }}
