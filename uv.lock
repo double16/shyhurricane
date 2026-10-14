@@ -2543,7 +2543,7 @@ wheels = [
 
 [[package]]
 name = "ollama-haystack"
-version = "6.8.0"
+version = "7.0.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "haystack-ai" },
@@ -2551,9 +2551,9 @@ dependencies = [
     { name = "pydantic" },
     { name = "tenacity" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/93/3e/0e17dd3423d2abf5cf99bb70972dc00a544732e1b63cd90c9f2cd14aab46/ollama_haystack-6.8.0.tar.gz", hash = "sha256:d13e80bbd4fb38a50294295c63892eccf7690aa6788ab93168c032534d6733cc", size = 103336, upload-time = "2026-07-17T06:54:07.97Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e1/d4/d552b838480ce31e2d798d22ca7c43976dd9595013936a78b89c23028e83/ollama_haystack-7.0.1.tar.gz", hash = "sha256:2e68d48be8e696b4626ed53374be2a7398691db2e907ce8c863a4ec373826573", size = 102184, upload-time = "2026-09-24T15:04:59.697Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0f/cd/ad0fffdb9d6065b60f81cbb0e10a73ba61d1499bab9031f7ae9e350e95b9/ollama_haystack-6.8.0-py3-none-any.whl", hash = "sha256:b451b617db6abdd26d1a7b4850e96fdfc25306a24720ade07b0534f4ee4c1ef5", size = 21679, upload-time = "2026-07-17T06:54:06.579Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/06/f7336b8029f2ce7302475ed1aeb4c865222ebfc49abe88ff84ca328d3ce9/ollama_haystack-7.0.1-py3-none-any.whl", hash = "sha256:8a1b65128a33c1bbf4903694c869cefe749e28ff73e615982711f365897bb530", size = 18828, upload-time = "2026-09-24T15:04:58.258Z" },
 ]
 
 [[package]]
@@ -4007,7 +4007,7 @@ requires-dist = [
     { name = "more-itertools", specifier = "~=11.1.0" },
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "numpy", specifier = ">=2.3.0" },
-    { name = "ollama-haystack", specifier = "~=6.8.0" },
+    { name = "ollama-haystack", specifier = ">=6.8,<7.1" },
     { name = "onnxruntime", specifier = ">=1.24.2,<1.31.0" },
     { name = "openai", specifier = "~=2.53.0" },
     { name = "optimum", extras = ["onnxruntime"], specifier = "~=2.1.0" },
