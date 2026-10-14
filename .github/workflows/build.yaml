@@ -54,6 +54,7 @@ jobs:
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v7
+        id: push
         with:
           context: .
           platforms: linux/amd64,linux/arm64
