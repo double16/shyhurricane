@@ -14,6 +14,8 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.cors import CORSMiddleware
 from uvicorn import Config, Server
 
+import shyhurricane.mcp_server.prompts  # noqa: F401
+import shyhurricane.mcp_server.tools.application_graph  # noqa: F401
 import shyhurricane.mcp_server.tools.deobfuscate_javascript  # noqa: F401
 import shyhurricane.mcp_server.tools.directory_buster  # noqa: F401
 import shyhurricane.mcp_server.tools.fetch_web_resource_content  # noqa: F401
@@ -120,6 +122,8 @@ async def main():
     ap.add_argument("--log-file", default=os.environ.get("LOG_FILE"),
                     help="Append all Python logger messages and tracebacks to this file (or set LOG_FILE)")
     ap.add_argument("--database", default=default_database, help="Database location: path or host:port of qdrant server")
+    ap.add_argument("--graph-database", default=os.environ.get("NEO4J", "shyhurricane.graph.db"),
+                    help="Neo4j storage directory or Bolt URI")
     ap.add_argument("--host", default="127.0.0.1", help="Host to listen on")
     ap.add_argument("--port", type=int, default=8000, help="Port to listen on for MCP")
     ap.add_argument("--proxy-port", type=int, default=8010, help="Port to listen on for HTTP/HTTPS proxy")
@@ -145,6 +149,7 @@ async def main():
     set_generator_config(GeneratorConfig.from_args(args).apply_summarizing_default().check())
     set_server_config(ServerConfig(
         database=args.database,
+        graph_database=args.graph_database,
         task_pool_size=args.task_pool_size,
         ingest_pool_size=args.index_pool_size,
         open_world=_str_to_bool(args.open_world),

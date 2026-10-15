@@ -4,6 +4,31 @@
 
 ### Features
 
+- Add persistent Neo4j application graph built incrementally from existing HTTP ingestion,
+  with versioned evidence, out-of-order reference reconciliation, shared JavaScript/source-map preparation,
+  browser/framework/Vite static analysis, and resumable offline backfill.
+- Add read-only graph tools for element discovery, relationships, data-flow traces, possible user journeys,
+  and evidence retrieval.
+- Rename the monitor tool panel to MCP tools and append the last five completed calls, with
+  yellow, green, and red dots for running, complete, and failed calls.
+- Add monitor `f` command to mark failed persistent queue items pending, with per-queue results.
+  Show scan-finding queue counts and append positive failed counts to persistent queue rows.
+- Replace `/status` fields `index_active` and `type_specific_index_active` with `queues`, containing
+  pending, processing, and failed counts for ingest, type-specific indexing, scan findings, and graph.
+  All queue count fields are present even when zero.
+- Add ten MCP assessment prompts for attack-surface mapping, focused vulnerability hunting,
+  authentication/configuration reviews, graph data-flow tracing, and vulnerability-chain analysis.
+  Accept scoped targets and optional analysis/active modes; render workflows without executing tools.
+
+### Fixes
+
+- Always show the primary Qdrant findings collection count first in dashboard database statistics,
+  including when it is zero or outside the top five collections.
+
+## 0.2.0
+
+### Features
+
 - Add `--log-file` and `LOG_FILE` for append-only diagnostic logs at all Python logger levels,
   including logged tracebacks, server access messages, and worker-process logs during dashboard use.
 - Add filesystem-backed tool result pagination with opaque next/previous page tokens and `get_result_page`.

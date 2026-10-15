@@ -423,7 +423,7 @@ def test_startup_cleans_all_queues_and_closes_connections(monkeypatch, tmp_path)
     monkeypatch.setattr(persistent_queue, "log_heap_stats", lambda: None)
     monkeypatch.setattr(persistent_queue, "log_gpu_memory_summary", lambda: None)
     queues = {}
-    for name in ("ingest_queue", "doc_type_queue", "scan_finding_queue"):
+    for name in ("ingest_queue", "doc_type_queue", "scan_finding_queue", "graph_queue"):
         queue = SQLiteAckQueue(path=str(tmp_path / name), auto_commit=True)
         for idx in range(1205):
             queue.ack(id=queue.put(idx))
@@ -439,7 +439,7 @@ def test_startup_cleans_all_queues_and_closes_connections(monkeypatch, tmp_path)
     monkeypatch.setattr(persistent_queue, "get_persistent_queue", get_queue)
     monkeypatch.setattr(SQLiteAckQueue, "shrink_disk_usage", lambda self: pytest.fail("Startup must not vacuum"))
     persistent_queue.cleanup_persistent_queues_on_startup("db")
-    assert len(queues) == 3
+    assert len(queues) == 4
     for name, queue in queues.items():
         with pytest.raises(sqlite3.ProgrammingError):
             queue.acked_count()
@@ -873,3 +873,79 @@ def wait_for_writer_close(writer):
     while not writer.closed and time.monotonic() < deadline:
         time.sleep(0.001)
     assert writer.closed
+
+
+@pytest.mark.asyncio
+async def test_queue_counts_and_retry_preserve_records(monkeypatch, tmp_path):
+    monkeypatch.setattr(persistent_queue, "persistent_queue_path", lambda db, name: tmp_path / name)
+    queues = []
+    before = {}
+    try:
+        for directory in persistent_queue.PERSISTENT_QUEUES.values():
+            path = tmp_path / directory
+            queue = persistent_queue.open_persistent_queue(str(path), auto_resume=False)
+            queues.append(queue)
+            for status in (0, 1, 2, 5, 9, 9):
+                row_id = queue.put({"status": status})
+                with queue._putter as connection:
+                    connection.execute("UPDATE ack_queue_default SET status=? WHERE _id=?", (status, row_id))
+            with closing(sqlite3.connect(path / "data.db")) as connection:
+                before[directory] = connection.execute(
+                    "SELECT _id, data, timestamp FROM ack_queue_default ORDER BY _id"
+                ).fetchall()
+        counts = await persistent_queue.persistent_queue_counts("db")
+        assert all(value == {"pending": 2, "processing": 1, "failed": 2} for value in counts.values())
+        assert await persistent_queue.retry_failed_queue_items("db") == dict.fromkeys(counts, 2)
+        assert await persistent_queue.retry_failed_queue_items("db") == dict.fromkeys(counts, 0)
+        counts = await persistent_queue.persistent_queue_counts("db")
+        assert all(value == {"pending": 4, "processing": 1, "failed": 0} for value in counts.values())
+        for directory, queue in zip(persistent_queue.PERSISTENT_QUEUES.values(), queues):
+            with closing(sqlite3.connect(tmp_path / directory / "data.db")) as connection:
+                assert connection.execute(
+                    "SELECT _id, data, timestamp FROM ack_queue_default ORDER BY _id"
+                ).fetchall() == before[directory]
+                assert [row[0] for row in connection.execute(
+                    "SELECT status FROM ack_queue_default ORDER BY _id"
+                )] == [0, 1, 2, 5, 1, 1]
+            assert [queue.get(block=False)["status"] for _ in range(4)] == [0, 1, 9, 9]
+    finally:
+        for queue in queues:
+            queue.close()
+
+
+@pytest.mark.asyncio
+async def test_queue_counts_and_retry_missing_and_broken_database(monkeypatch, tmp_path):
+    monkeypatch.setattr(persistent_queue, "persistent_queue_path", lambda db, name: tmp_path / name)
+    counts = await persistent_queue.persistent_queue_counts("db")
+    assert all(value == {"pending": 0, "processing": 0, "failed": 0} for value in counts.values())
+    assert await persistent_queue.retry_failed_queue_items("db") == dict.fromkeys(counts, 0)
+    assert list(tmp_path.iterdir()) == []
+    path = tmp_path / "ingest_queue"
+    path.mkdir()
+    (path / "data.db").write_bytes(b"broken sqlite")
+    with pytest.raises(sqlite3.DatabaseError):
+        await persistent_queue.persistent_queue_counts("db")
+    result = await persistent_queue.retry_failed_queue_items("db")
+    assert isinstance(result["ingest"], str)
+    assert result["scan_findings"] == result["type_specific_index"] == result["graph"] == 0
+
+
+@pytest.mark.asyncio
+async def test_queue_counts_use_background_thread_and_covering_index(monkeypatch, tmp_path):
+    queue = persistent_queue.open_persistent_queue(str(tmp_path))
+    try:
+        query = "SELECT status, COUNT(*) FROM ack_queue_default WHERE status IN (0, 1, 2, 9) GROUP BY status"
+        assert "COVERING INDEX" in str(queue._putter.execute(f"EXPLAIN QUERY PLAN {query}").fetchall())
+    finally:
+        queue.close()
+    original_read = persistent_queue.read_queue_counts
+    loop_thread = threading.get_ident()
+
+    def read(path):
+        assert threading.get_ident() != loop_thread
+        return original_read(path)
+
+    monkeypatch.setattr(persistent_queue, "persistent_queue_path", lambda *args: tmp_path)
+    monkeypatch.setattr(persistent_queue, "read_queue_counts", read)
+    counts = await persistent_queue.persistent_queue_counts("db")
+    assert all(value == {"pending": 0, "processing": 0, "failed": 0} for value in counts.values())

@@ -49,3 +49,21 @@ def test_health_monitor_handles_llm_failure_and_stable_state():
     stopped = health.HealthMonitor(lambda: True, lambda: True)
     stopped._stop.set()
     stopped._run()
+
+
+def test_neo4j_outage_pauses_all_consumers_and_recovers():
+    responses = iter([False, RuntimeError("down"), True])
+
+    def probe():
+        response = next(responses)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monitor = health.HealthMonitor(lambda: True, lambda: True, neo4j_probe=probe)
+    assert not monitor.check()
+    assert monitor.neo4j_healthy is False
+    assert not monitor.ready.is_set()
+    assert not monitor.check()
+    assert monitor.check()
+    assert monitor.ready.is_set()

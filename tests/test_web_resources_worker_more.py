@@ -36,6 +36,9 @@ class Queue:
     def ack_failed(self, item):
         self.failed.append(item)
 
+    def nack(self, item):
+        self.items.append(item)
+
 
 class Pipeline:
     def __init__(self, output=None, exc=None):
@@ -218,7 +221,8 @@ def test_ingest_worker_scans_javascript_even_in_low_power(monkeypatch, tmp_path)
     monkeypatch.setattr(web_resources, "build_stores", lambda *args: {"content": object()})
     monkeypatch.setattr(web_resources, "get_server_config", lambda: type("Config", (), {
         "open_world": False, "low_power": True})())
-    monkeypatch.setattr(web_resources, "analyze_document", lambda *args: calls.append(args))
+    monkeypatch.setattr(web_resources, "analyze_document", lambda *args, **kwargs: calls.append(args))
+    monkeypatch.setattr("shyhurricane.graph.artifacts.persistent_queue_path", lambda *args: tmp_path / "graph_state")
     monkeypatch.setattr(web_resources, "persistent_queue_get", lambda queue, shrink_count, stop_event=None: finite_queue([item]))
 
     web_resources._ingest_worker("db", object())
@@ -227,6 +231,53 @@ def test_ingest_worker_scans_javascript_even_in_low_power(monkeypatch, tmp_path)
     assert len(calls) == 1
     assert calls[0][1] is False
     assert calls[0][3] is finding_queue
+
+
+def test_graph_handoff_failure_retains_parent_ingest(monkeypatch):
+    queue = Queue()
+    pipeline = Pipeline(exc=web_resources.GraphCaptureError("disk unavailable"))
+    monkeypatch.setattr(web_resources.faulthandler, "register", lambda *args: None)
+    monkeypatch.setattr(web_resources, "get_ingest_queue", lambda db: queue)
+    monkeypatch.setattr(web_resources, "get_doc_type_queue", lambda db: Queue())
+    monkeypatch.setattr(web_resources, "get_log_path", lambda *args: None)
+    monkeypatch.setattr(web_resources, "build_ingest_pipeline", lambda **kwargs: pipeline)
+    monkeypatch.setattr(web_resources, "persistent_queue_get", lambda *args, **kwargs: finite_queue(["capture"]))
+    monkeypatch.setattr(web_resources.time, "sleep", lambda seconds: None)
+    web_resources._ingest_worker("db", object())
+    assert queue.items == ["capture"]
+    assert not queue.failed and not queue.acked
+
+
+@pytest.mark.parametrize("doc_type", [False, True])
+def test_health_loss_during_queue_wait_returns_unprocessed_item(monkeypatch, doc_type):
+    queue = Queue()
+    health = HealthState(True)
+    pipeline = Pipeline()
+
+    def items(*args, **kwargs):
+        health.healthy = False
+        yield "capture"
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(web_resources.faulthandler, "register", lambda *args: None)
+    monkeypatch.setattr(web_resources, "get_ingest_queue", lambda db: queue)
+    monkeypatch.setattr(web_resources, "get_doc_type_queue", lambda db: queue)
+    monkeypatch.setattr(web_resources, "get_log_path", lambda *args: None)
+    monkeypatch.setattr(web_resources, "build_ingest_pipeline", lambda **kwargs: pipeline)
+    monkeypatch.setattr(web_resources, "build_doc_type_pipeline", lambda **kwargs: pipeline)
+    monkeypatch.setattr(web_resources, "persistent_queue_get", items)
+    target = web_resources._doc_type_worker if doc_type else web_resources._ingest_worker
+    target("db", object(), health_state=health)
+    assert not pipeline.calls
+    assert queue.items == ["capture"]
+
+
+def test_spawned_ingest_watcher_receives_open_world_policy(monkeypatch):
+    process = Mock(exitcode=1)
+    factory = Mock(return_value=process)
+    monkeypatch.setattr(web_resources.multiprocessing, "Process", factory)
+    web_resources._ingest_watcher("db", object(), open_world=False)
+    assert factory.call_args.kwargs["kwargs"]["open_world"] is False
 
 
 def test_ingest_worker_marks_failures(monkeypatch):

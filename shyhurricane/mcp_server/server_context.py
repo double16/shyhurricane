@@ -17,6 +17,7 @@ from qdrant_client import AsyncQdrantClient
 
 from shyhurricane.db import create_qdrant_client, create_qdrant_document_store, qdrant_host_port
 from shyhurricane.doc_type_model_map import doc_type_to_model
+from shyhurricane.graph.database import GraphStore, graph_location
 from shyhurricane.haystack_lifecycle import close_haystack_resources
 from shyhurricane.health import HealthMonitor, qdrant_probe
 from shyhurricane.mcp_server.generator_config import get_generator_config
@@ -68,6 +69,7 @@ class ServerContext:
     worker_manager: Optional[object] = None
     stop_event: Optional[object] = None
     result_store: ResultPageStore | None = None
+    graph_store: GraphStore | None = None
     _closed: bool = field(default=False, init=False)
     _ingest_writer: AsyncIngestWriter | None = field(default=None, init=False)
 
@@ -153,6 +155,8 @@ class ServerContext:
             pass
         if self.result_store is not None:
             self.result_store.cleanup()
+        if self.graph_store is not None:
+            self.graph_store.close()
         logger.info("ServerContext closed")
 
 
@@ -198,7 +202,9 @@ async def get_server_context() -> ServerContext:
     disable_elicitation = _elicitation_disabled()
     qdrant_client = await create_qdrant_client(db=db)
     qdrant_host, qdrant_port = qdrant_host_port(db)
-    health_monitor = HealthMonitor(lambda: qdrant_probe(qdrant_host, qdrant_port), lambda: True)
+    graph_store = GraphStore(graph_location())
+    health_monitor = HealthMonitor(lambda: qdrant_probe(qdrant_host, qdrant_port), lambda: True,
+                                   neo4j_probe=graph_store.ready)
     health_monitor.start()
 
     mcp_session_volume = "mcp_session"
@@ -246,7 +252,12 @@ async def get_server_context() -> ServerContext:
         indexing_enabled=indexing_enabled,
         log_timestamp=log_timestamp,
         stop_event=stop_event,
+        open_world=server_config.open_world,
     )
+    from shyhurricane.graph.worker import start_graph_worker
+
+    ingest_pool.processes.append(start_graph_worker(db, graph_store.location, health_monitor.ready,
+                                                   stop_event, server_config.open_world))
     task_worker_ipc = start_task_worker(db, ingest_queue.path, server_config.task_pool_size, log_timestamp,
                                        stop_event=stop_event)
 
@@ -254,6 +265,7 @@ async def get_server_context() -> ServerContext:
         db=db,
         cache_path=cache_path,
         result_store=result_store,
+        graph_store=graph_store,
         document_pipeline=None,
         website_context_pipeline=None,
         ingest_queue=ingest_queue,

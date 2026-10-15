@@ -5,7 +5,28 @@ volumes:
   mcp_cache:
   ollama:
 
+  neo4j-data:
+  neo4j-logs:
+
 services:
+  graph:
+    image: neo4j:2026.09.0-community
+    environment:
+      NEO4J_AUTH: none
+      NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP_SIZE:-1g}
+      NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_SIZE:-1g}
+      NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE_SIZE:-256m}
+      NEO4J_dbms_memory_transaction_total_max: ${NEO4J_TRANSACTION_MEMORY_LIMIT:-}
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-a", "bolt://localhost:7687", "RETURN 1"]
+      interval: 30s
+      retries: 3
+      start_period: 30s
+      timeout: 10s
+
   db:
     image: qdrant/qdrant:latest
     volumes:
@@ -43,11 +64,14 @@ services:
     depends_on:
       - dind
       - db
+      - graph
       - ollama
       - ollama_pull
     environment:
       DOCKER_HOST: "tcp://dind:2375"
       QDRANT: "db:6333"
+      NEO4J: "bolt://graph:7687"
+      GRAPH_LIBRARY_ANALYSIS: "${GRAPH_LIBRARY_ANALYSIS:-summary}"
       TOOL_CACHE: "/tool_cache"
       LOG_FILE: "${LOG_FILE:-}"
       TOOL_RESULT_TTL_SECONDS: "${TOOL_RESULT_TTL_SECONDS:-86400}"

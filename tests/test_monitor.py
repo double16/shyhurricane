@@ -14,6 +14,7 @@ from shyhurricane.monitor import (
     format_configuration_panel,
     format_database_panel,
     format_domain_and_host_panel,
+    format_tools_panel,
     get_recent_indexed_urls,
     queue_size,
     top_counts,
@@ -61,7 +62,7 @@ def test_certificate_fingerprint_handles_missing_and_invalid_files(tmp_path, mon
 
 def test_monitor_app_stores_runtime_dependencies():
     context = object()
-    server = SimpleNamespace(running_tools=[])
+    server = SimpleNamespace(running_tools=[], recent_tools=[])
     app = MonitorApp(context, "127.0.0.1", 8000, server)
 
     assert app.server_context is context
@@ -114,9 +115,37 @@ def test_top_counts_limits_results_and_sorts_ties_by_name():
 
 def test_format_database_panel_sorts_counts_descending_with_name_tiebreaker():
     assert format_database_panel({"content": 8, "network": 12, "metadata": 12}) == (
-        "[b]Database statistics[/b]\nmetadata: 12\nnetwork: 12\ncontent: 8"
+        "[b]Database statistics[/b]\nFindings: 0\nmetadata: 12\nnetwork: 12\ncontent: 8"
     )
-    assert format_database_panel({}) == "[b]Database statistics[/b]\nNo collections"
+    assert format_database_panel({}) == "[b]Database statistics[/b]\nFindings: 0"
+
+
+@pytest.mark.parametrize("finding_count", [0, 2, 1000])
+def test_format_database_panel_pins_primary_findings_above_top_five_collections(finding_count):
+    counts = {"finding": finding_count, "finding_256": 200, **{f"collection_{i}": 100 + i for i in range(6)}}
+
+    lines = format_database_panel(counts).splitlines()
+
+    assert lines == [
+        "[b]Database statistics[/b]",
+        f"Findings: {finding_count}",
+        "finding_256: 200",
+        "collection_5: 105",
+        "collection_4: 104",
+        "collection_3: 103",
+        "collection_2: 102",
+    ]
+    assert counts["finding"] == finding_count
+
+
+def test_format_database_panel_with_only_findings():
+    assert format_database_panel({"finding": 7}) == "[b]Database statistics[/b]\nFindings: 7"
+
+
+def test_format_database_panel_does_not_use_chunks_when_primary_findings_missing():
+    assert format_database_panel({"finding_256": 23}) == (
+        "[b]Database statistics[/b]\nFindings: 0\nfinding_256: 23"
+    )
 
 
 def test_format_domain_and_host_panel_includes_top_counts_and_empty_states():
@@ -158,6 +187,7 @@ def test_format_configuration_panel_orders_dependencies_and_shows_health_indicat
         qdrant_host_bind="127.0.0.1",
         qdrant_http_port=49201,
         qdrant_health=False,
+        graph={"healthy": None, "queue_depth": 0},
         low_power=False,
         document_counts={},
         domain_count=0,
@@ -314,7 +344,8 @@ async def test_get_domain_and_host_counts_deduplicates_case_insensitively(monkey
 
 
 @pytest.mark.asyncio
-async def test_collect_monitor_data_includes_runtime_configuration_and_statistics(monkeypatch, tmp_path):
+@pytest.mark.parametrize("graph_depth", [0, 7])
+async def test_collect_monitor_data_includes_runtime_configuration_and_statistics(monkeypatch, tmp_path, graph_depth):
     certificate = tmp_path / "proxy-ca.pem"
     certificate.write_text(
         "-----BEGIN CERTIFICATE-----\n"
@@ -358,7 +389,9 @@ async def test_collect_monitor_data_includes_runtime_configuration_and_statistic
             "five.third.test": 1,
         }
 
-    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_sizes", AsyncMock(return_value=(3, 5)))
+    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_counts", AsyncMock(return_value=queue_counts(3, 5, graph_depth)))
+    graph_status = AsyncMock(return_value={"healthy": None, "queue_depth": graph_depth})
+    monkeypatch.setattr("shyhurricane.monitor.graph_status", graph_status)
     monkeypatch.setattr(
         "shyhurricane.monitor.get_generator_config",
         lambda: SimpleNamespace(describe=lambda: "OpenAI gpt-5-nano"),
@@ -366,7 +399,10 @@ async def test_collect_monitor_data_includes_runtime_configuration_and_statistic
     monkeypatch.setattr("shyhurricane.monitor.get_recent_indexed_urls", recent_urls)
     monkeypatch.setattr("shyhurricane.monitor.get_domain_and_host_counts", domain_and_host_counts)
 
-    data = await collect_monitor_data(context, "127.0.0.1", 8000, ["port_scan"])
+    data = await collect_monitor_data(
+        context, "127.0.0.1", 8000, ["port_scan"], [("find_urls", "complete")]
+    )
+    graph_status.assert_awaited_once_with(context)
 
     assert data == MonitorData(
         bound_address="127.0.0.1:8000",
@@ -379,6 +415,8 @@ async def test_collect_monitor_data_includes_runtime_configuration_and_statistic
         qdrant_http_port=49201,
         qdrant_health=False,
         low_power=False,
+        graph={"healthy": None, "queue_depth": graph_depth},
+        queue_failures={name: 0 for name in ("index", "type-specific index", "scan findings", "graph")},
         document_counts={"content": 12, "network": 8},
         domain_count=3,
         host_count=5,
@@ -393,6 +431,8 @@ async def test_collect_monitor_data_includes_runtime_configuration_and_statistic
         queue_sizes={
             "index": 3,
             "type-specific index": 5,
+            "scan findings": 0,
+            "graph": graph_depth,
             "tasks": 2,
             "spider results": 1,
             "port scan results": 0,
@@ -400,6 +440,7 @@ async def test_collect_monitor_data_includes_runtime_configuration_and_statistic
         },
         recent_urls=["https://example.test/second", "https://example.test/first"],
         running_tools=["port_scan"],
+        recent_tools=[("find_urls", "complete")],
     )
 
 
@@ -412,7 +453,7 @@ async def test_collect_monitor_data_tolerates_unavailable_qdrant_document_counts
         spider_result_queue=Queue(0),
         port_scan_result_queue=Queue(0),
         dir_busting_result_queue=Queue(0),
-        stores={"javascript": UnavailableStore()},
+        stores={"javascript": UnavailableStore(), "finding": UnavailableStore()},
         proxy_host=None,
         proxy_port=None,
         proxy_ca_cert_path=None,
@@ -420,7 +461,7 @@ async def test_collect_monitor_data_tolerates_unavailable_qdrant_document_counts
         health_monitor=SimpleNamespace(llm_healthy=True, qdrant_healthy=False),
     )
 
-    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_sizes", AsyncMock(return_value=(0, 0)))
+    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_counts", AsyncMock(return_value=queue_counts()))
     monkeypatch.setattr(
         "shyhurricane.monitor.get_generator_config",
         lambda: SimpleNamespace(describe=lambda: "model"),
@@ -431,12 +472,14 @@ async def test_collect_monitor_data_tolerates_unavailable_qdrant_document_counts
 
     monkeypatch.setattr("shyhurricane.monitor.get_recent_indexed_urls", recent_urls)
     monkeypatch.setattr(
-        "shyhurricane.monitor.get_domain_and_host_counts", lambda *args: ({}, {}),
+        "shyhurricane.monitor.get_domain_and_host_counts",
+        lambda *args: ({}, {}),
     )
 
     data = await collect_monitor_data(context, "127.0.0.1", 8000, [])
 
-    assert data.document_counts == {"javascript": 0}
+    assert data.document_counts == {"javascript": 0, "finding": 0}
+    assert format_database_panel(data.document_counts).splitlines()[1] == "Findings: 0"
     assert data.qdrant_health is False
 
 
@@ -457,7 +500,7 @@ async def test_collect_monitor_data_tolerates_unavailable_optional_data(monkeypa
         health_monitor=None,
     )
 
-    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_sizes", AsyncMock(return_value=(0, 0)))
+    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_counts", AsyncMock(return_value=queue_counts()))
     monkeypatch.setattr(
         "shyhurricane.monitor.get_generator_config",
         lambda: SimpleNamespace(describe=lambda: "Ollama llama3.2:3b at localhost:11434"),
@@ -470,9 +513,7 @@ async def test_collect_monitor_data_tolerates_unavailable_optional_data(monkeypa
         raise RuntimeError("database unavailable")
 
     monkeypatch.setattr("shyhurricane.monitor.get_recent_indexed_urls", unavailable_urls)
-    monkeypatch.setattr(
-        "shyhurricane.monitor.get_domain_and_host_counts", unavailable_domain_and_host_counts
-    )
+    monkeypatch.setattr("shyhurricane.monitor.get_domain_and_host_counts", unavailable_domain_and_host_counts)
 
     data = await collect_monitor_data(context, "0.0.0.0", 8000, [])
 
@@ -521,7 +562,7 @@ async def test_collect_monitor_data_reads_low_power_from_context_and_config(monk
         health_monitor=None,
     )
 
-    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_sizes", AsyncMock(return_value=(0, 0)))
+    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_counts", AsyncMock(return_value=queue_counts()))
     monkeypatch.setattr(
         "shyhurricane.monitor.get_generator_config",
         lambda: SimpleNamespace(describe=lambda: "model"),
@@ -542,7 +583,7 @@ async def test_collect_monitor_data_reads_low_power_from_context_and_config(monk
 
 @pytest.mark.asyncio
 async def test_monitor_refreshes_immediately_then_every_thirty_seconds(monkeypatch):
-    app = MonitorApp(SimpleNamespace(), "127.0.0.1", 8000, SimpleNamespace(running_tools=[]))
+    app = MonitorApp(SimpleNamespace(), "127.0.0.1", 8000, SimpleNamespace(running_tools=[], recent_tools=[]))
     refresh = AsyncMock()
     schedule = Mock()
     monkeypatch.setattr(app, "refresh_data", refresh)
@@ -556,7 +597,7 @@ async def test_monitor_refreshes_immediately_then_every_thirty_seconds(monkeypat
 
 @pytest.mark.asyncio
 async def test_monitor_refresh_action_awaits_data_refresh(monkeypatch):
-    app = MonitorApp(SimpleNamespace(), "127.0.0.1", 8000, SimpleNamespace(running_tools=[]))
+    app = MonitorApp(SimpleNamespace(), "127.0.0.1", 8000, SimpleNamespace(running_tools=[], recent_tools=[]))
     refresh = AsyncMock()
     monkeypatch.setattr(app, "refresh_data", refresh)
 
@@ -584,8 +625,8 @@ async def test_monitor_app_toggle_low_power_action(monkeypatch):
         health_monitor=None,
         low_power=False,
     )
-    server = SimpleNamespace(running_tools=[])
-    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_sizes", AsyncMock(return_value=(0, 0)))
+    server = SimpleNamespace(running_tools=[], recent_tools=[])
+    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_counts", AsyncMock(return_value=queue_counts()))
     monkeypatch.setattr(
         "shyhurricane.monitor.get_generator_config",
         lambda: SimpleNamespace(describe=lambda: "model"),
@@ -611,7 +652,7 @@ async def test_monitor_app_toggle_low_power_with_immutable_context(monkeypatch):
     server_config = ServerConfig(low_power=False)
     monkeypatch.setattr("shyhurricane.monitor.get_server_config", lambda: server_config)
     context = object()
-    server = SimpleNamespace(running_tools=[])
+    server = SimpleNamespace(running_tools=[], recent_tools=[])
 
     app = MonitorApp(context, "127.0.0.1", 8000, server)
 
@@ -662,8 +703,8 @@ async def test_monitor_app_key_press_toggles_low_power(monkeypatch):
         health_monitor=None,
         low_power=False,
     )
-    server = SimpleNamespace(running_tools=[])
-    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_sizes", AsyncMock(return_value=(0, 0)))
+    server = SimpleNamespace(running_tools=[], recent_tools=[])
+    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_counts", AsyncMock(return_value=queue_counts()))
     monkeypatch.setattr(
         "shyhurricane.monitor.get_generator_config",
         lambda: SimpleNamespace(describe=lambda: "model"),
@@ -702,9 +743,9 @@ async def test_monitor_refresh_key_updates_data_and_ignores_unrelated_keys(monke
         health_monitor=None,
         low_power=False,
     )
-    server = SimpleNamespace(running_tools=[])
-    queue_sizes = AsyncMock(return_value=(0, 0))
-    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_sizes", queue_sizes)
+    server = SimpleNamespace(running_tools=[], recent_tools=[])
+    queue_sizes = AsyncMock(return_value=queue_counts())
+    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_counts", queue_sizes)
     monkeypatch.setattr(
         "shyhurricane.monitor.get_generator_config",
         lambda: SimpleNamespace(describe=lambda: "model"),
@@ -719,7 +760,7 @@ async def test_monitor_refresh_key_updates_data_and_ignores_unrelated_keys(monke
 
         await pilot.press("x")
         queue_sizes.assert_not_awaited()
-        assert "No MCP tools running" in app.query_one("#tools", Static).content
+        assert "No MCP tools run" in app.query_one("#tools", Static).content
 
         await pilot.press("r")
         queue_sizes.assert_awaited_once()
@@ -727,8 +768,126 @@ async def test_monitor_refresh_key_updates_data_and_ignores_unrelated_keys(monke
         assert server_config.low_power is False
         assert not getattr(server, "should_exit", False)
 
+        server.recent_tools = [("port_scan", "complete")]
         server.running_tools = ["spider_website"]
         await pilot.press("r")
         assert queue_sizes.await_count == 2
         assert "spider_website" in app.query_one("#tools", Static).content
-        assert "port_scan" not in app.query_one("#tools", Static).content
+        content = app.query_one("#tools", Static).content
+        assert "[green]●[/green] port_scan" in content
+        assert content.index("spider_website") < content.index("port_scan")
+        assert app.query_one("#tools", Static).styles.overflow_y == "auto"
+
+        server.running_tools = []
+        await pilot.press("r")
+        content = app.query_one("#tools", Static).content
+        assert "[b]MCP tools[/b]" in content
+        assert "port_scan" in content
+        assert "No MCP tools run" not in content
+
+
+def test_graph_estimates_display_current_history_partial_stale_and_unavailable():
+    graph = {
+        "current": {
+            "entity_estimate": 12,
+            "relationship_estimate": 20,
+            "captures": 3,
+            "resources": 2,
+            "coverage_complete": False,
+            "covered_captures": 2,
+        },
+        "retained_history": {
+            "entity_estimate": None,
+            "relationship_estimate": None,
+            "captures": 4,
+            "resources": 2,
+            "coverage_complete": False,
+            "covered_captures": 0,
+        },
+        "statistics_stale": True,
+    }
+    text = format_database_panel({"network": 48}, graph)
+    assert "Current graph: ≈12 entities / ≈20 relationships" in text
+    assert "Retained history: unavailable" in text and "partial: 2 captures counted" in text
+    assert "stale" in text and "Captures: 3 / resources: 2" in text
+    graph["current"]["coverage_complete"] = True
+    assert "partial: 2" not in format_database_panel({}, graph)
+    assert "Current graph: unavailable" in format_database_panel({}, {"queue_depth": 1})
+
+
+def queue_counts(ingest=0, doc_type=0, graph=0):
+    return {name: {"pending": pending, "processing": 0, "failed": 0}
+            for name, pending in (("ingest", ingest), ("type_specific_index", doc_type),
+                                  ("scan_findings", 0), ("graph", graph))}
+
+
+def test_queue_panel_failed_counts():
+    from shyhurricane.monitor import format_queue_panel
+
+    assert format_queue_panel({"index": 0, "scan findings": 2, "graph": None},
+                              {"index": 3, "scan findings": 0}) == (
+        "index: 0, 3 failed\nscan findings: 2\ngraph: unavailable"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("result", [{"ingest": 0, "scan_findings": 3}, {"ingest": "database locked"}])
+async def test_monitor_retry_failed_action(monkeypatch, result):
+    retry = AsyncMock(return_value=result)
+    monkeypatch.setattr("shyhurricane.monitor.retry_failed_queue_items", retry)
+    app = MonitorApp(SimpleNamespace(db="db"), "localhost", 8000, SimpleNamespace())
+    app.notify = Mock()
+    app.refresh_data = AsyncMock()
+    await app.action_retry_failed()
+    retry.assert_awaited_once_with("db")
+    app.refresh_data.assert_awaited_once()
+    assert app._retrying_failed is False
+    assert app.notify.call_args.kwargs["severity"] == (
+        "warning" if isinstance(result["ingest"], str) else "information"
+    )
+    app._retrying_failed = True
+    await app.action_retry_failed()
+    retry.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_monitor_retry_error_and_key_binding(monkeypatch):
+    monkeypatch.setattr("shyhurricane.monitor.retry_failed_queue_items", AsyncMock(side_effect=OSError("failed")))
+    app = MonitorApp(SimpleNamespace(db="db"), "localhost", 8000, SimpleNamespace())
+    app.notify = Mock()
+    app.refresh_data = AsyncMock()
+    async with app.run_test() as pilot:
+        await pilot.press("f")
+    app.notify.assert_called_once_with("Unable to retry failed queue items; see logs", severity="error")
+    assert app._retrying_failed is False
+
+
+@pytest.mark.asyncio
+async def test_monitor_reports_queue_read_failures_as_unavailable(monkeypatch):
+    import sqlite3
+
+    context = SimpleNamespace(
+        db="db", stores={}, task_queue=Queue(0), spider_result_queue=Queue(0),
+        port_scan_result_queue=Queue(0), dir_busting_result_queue=Queue(0), proxy_host=None,
+        proxy_port=None, proxy_ca_cert_path=None, health_monitor=None, low_power=False,
+    )
+    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_counts",
+                        AsyncMock(side_effect=sqlite3.OperationalError("locked")))
+    monkeypatch.setattr("shyhurricane.monitor.graph_status", AsyncMock(return_value={}))
+    monkeypatch.setattr("shyhurricane.monitor.get_generator_config", lambda: SimpleNamespace(describe=lambda: "model"))
+    monkeypatch.setattr("shyhurricane.monitor.get_recent_indexed_urls", AsyncMock(return_value=[]))
+    monkeypatch.setattr("shyhurricane.monitor.get_domain_and_host_counts", AsyncMock(return_value=({}, {})))
+    data = await collect_monitor_data(context, "localhost", 8000, [])
+    assert all(data.queue_sizes[name] is None for name in ("index", "type-specific index", "scan findings", "graph"))
+    assert data.queue_failures == {}
+
+
+def test_format_tools_panel_status_order_empty_state_and_escaping():
+    assert format_tools_panel([], []) == "[b]MCP tools[/b]\nNo MCP tools run"
+    assert format_tools_panel(["scan"], [("scan", "failed"), ("[bold]", "complete")]) == (
+        "[b]MCP tools[/b]\n[yellow]●[/yellow] scan\n[red]●[/red] scan\n"
+        "[green]●[/green] " + "\\[bold]"
+    )
+    assert format_tools_panel([], [("scan", "complete")]) == (
+        "[b]MCP tools[/b]\n[green]●[/green] scan"
+    )

@@ -4,6 +4,7 @@ import signal
 from types import SimpleNamespace
 
 import pytest
+from mcp.types import CallToolResult
 
 import shyhurricane.mcp_server as mcp_server
 import shyhurricane.mcp_server.server_context as server_context
@@ -136,6 +137,7 @@ async def test_same_tool_stays_visible_until_all_calls_finish_or_cancel(monkeypa
     with pytest.raises(asyncio.CancelledError):
         await second
     assert server.running_tools == set()
+    assert list(server.recent_tools) == [("probe", "failed"), ("probe", "complete")]
     assert server._running_tool_counts == {}
     assert contexts == [context, context]
 
@@ -173,6 +175,9 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
         path = "/queue"
 
     class Pool:
+        def __init__(self):
+            self.processes = []
+
         def close(self, deadline=None):
             pool_closes.append(deadline)
 
@@ -258,6 +263,9 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
     monkeypatch.setattr(server_context.asyncio, "create_subprocess_exec", create_subprocess_exec)
     monkeypatch.setattr(web_resources, "start_ingest_worker", start_ingest_worker)
     monkeypatch.setattr(task_queue, "start_task_worker", start_task_worker)
+    monkeypatch.setattr("shyhurricane.graph.worker.start_graph_worker", lambda *args: object())
+    monkeypatch.setattr(server_context, "GraphStore", lambda location: SimpleNamespace(
+        location=location, ready=lambda: True, close=lambda: None))
 
     if pipeline_error is not None:
         with pytest.raises(pipeline_error, match="pipeline interrupted"):
@@ -295,3 +303,27 @@ async def test_invalid_result_ttl_fails_before_services_start(monkeypatch, tmp_p
     monkeypatch.setattr(server_context, "doc_type_to_model", lambda: pytest.fail("Services must not initialize"))
     with pytest.raises(ValueError):
         await server_context.get_server_context()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["complete", "error_result", "exception"])
+async def test_tool_history_records_outcomes_and_evicts_oldest(monkeypatch, outcome):
+    result = CallToolResult(content=[], is_error=outcome == "error_result")
+
+    async def call_tool(self, name, arguments, context):
+        if outcome == "exception":
+            raise RuntimeError("failure")
+        return result
+
+    monkeypatch.setattr(mcp_server.MCPServer, "call_tool", call_tool)
+    server = mcp_server.ShyHurricaneMCPServer("test")
+    assert list(server.recent_tools) == []
+    for index in range(7):
+        if outcome == "exception":
+            with pytest.raises(RuntimeError, match="failure"):
+                await server.call_tool(f"tool_{index}", {})
+        else:
+            assert await server.call_tool(f"tool_{index}", {}) is result
+    status = "complete" if outcome == "complete" else "failed"
+    assert list(server.recent_tools) == [(f"tool_{index}", status) for index in range(6, 1, -1)]
+    assert server.running_tools == set()

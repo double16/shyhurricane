@@ -1,4 +1,5 @@
 import json
+import sqlite3
 import subprocess
 
 import pytest
@@ -7,11 +8,15 @@ from haystack.dataclasses import SparseEmbedding
 from haystack.document_stores.types import DuplicatePolicy
 from haystack_integrations.components.retrievers.qdrant import QdrantHybridRetriever
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
+from qdrant_client.local.persistence import CollectionPersistence
 
 import shyhurricane.db as db
 
 
-def test_qdrant_persistence_overwrite_filter_and_hybrid_retrieval(tmp_path):
+def test_qdrant_persistence_overwrite_filter_and_hybrid_retrieval(tmp_path, monkeypatch):
+    # Qdrant's fallback probe uses a transaction context without closing its SQLite connection.
+    # Python 3.11+ reports the same build setting directly (3 means serialized/THREADSAFE=1).
+    monkeypatch.setattr(CollectionPersistence, "CHECK_SAME_THREAD", sqlite3.threadsafety != 3)
     settings = dict(path=str(tmp_path), index="retrieval", embedding_dim=2,
                     use_sparse_embeddings=True, return_embedding=True, similarity="dot_product")
     document = Document(content="dense and sparse", meta={"type": "network"}, embedding=[0.1, 0.2],

@@ -23,6 +23,12 @@ QUEUE_VACUUM_MIN_FREE_BYTES = 64 * 1024 * 1024
 QUEUE_VACUUM_MIN_FREE_RATIO = 0.25
 QUEUE_VACUUM_MAX_FREE_BYTES = 1024 * 1024 * 1024
 QUEUE_COMPRESSION_MARKER = b"SHQ\x01ZLIB\x00"
+PERSISTENT_QUEUES = {
+    "ingest": "ingest_queue",
+    "type_specific_index": "doc_type_queue",
+    "scan_findings": "scan_finding_queue",
+    "graph": "graph_queue",
+}
 
 
 class Base64QueueSerializer:
@@ -73,10 +79,10 @@ def open_persistent_queue(path: str, *, auto_resume: bool = True) -> persistqueu
         raise
 
 
-def get_persistent_queue(db: str, queue_name: str) -> persistqueue.SQLiteAckQueue:
+def get_persistent_queue(db: str, queue_name: str, *, auto_resume: bool = True) -> persistqueue.SQLiteAckQueue:
     path = persistent_queue_path(db, queue_name)
     os.makedirs(path, mode=0o755, exist_ok=True)
-    return open_persistent_queue(str(path))
+    return open_persistent_queue(str(path), auto_resume=auto_resume)
 
 
 def read_active_queue_size(path: Path) -> int:
@@ -97,6 +103,65 @@ async def persistent_queue_sizes(db: str) -> tuple[int, int]:
                      for name in ("ingest_queue", "doc_type_queue"))
 
     return await asyncio.to_thread(read)
+
+
+def read_queue_counts(path: Path) -> dict[str, int]:
+    """Count queue states without loading payloads or resuming processing items."""
+    counts = {"pending": 0, "processing": 0, "failed": 0}
+    database = path / "data.db"
+    if not database.exists():
+        return counts
+    connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=10)
+    try:
+        for status, count in connection.execute(
+            "SELECT status, COUNT(*) FROM ack_queue_default WHERE status IN (0, 1, 2, 9) GROUP BY status"
+        ):
+            if status in (0, 1):
+                counts["pending"] += count
+            elif status == 2:
+                counts["processing"] = count
+            else:
+                counts["failed"] = count
+        return counts
+    finally:
+        connection.close()
+
+
+async def persistent_queue_counts(db: str) -> dict[str, dict[str, int]]:
+    """Read each persistent queue off the event loop."""
+    def read():
+        return {name: read_queue_counts(persistent_queue_path(db, directory))
+                for name, directory in PERSISTENT_QUEUES.items()}
+
+    return await asyncio.to_thread(read)
+
+
+async def retry_failed_queue_items(db: str) -> dict[str, int | str]:
+    """Reset failed records per queue; report errors without interrupting other queues."""
+    def retry():
+        results = {}
+        for name, directory in PERSISTENT_QUEUES.items():
+            connection = None
+            try:
+                database = persistent_queue_path(db, directory) / "data.db"
+                if not database.exists():
+                    results[name] = 0
+                    continue
+                connection = sqlite3.connect(database.as_uri() + "?mode=rw", uri=True, timeout=10)
+                with connection:
+                    cursor = connection.execute(
+                        "UPDATE ack_queue_default SET status = 1 WHERE status = 9"
+                    )
+                    results[name] = cursor.rowcount
+            except (OSError, sqlite3.Error) as error:
+                logger.exception("Cannot retry failed items in %s", name)
+                results[name] = str(error)
+            finally:
+                if connection is not None:
+                    connection.close()
+        return results
+
+    return await asyncio.to_thread(retry)
 
 
 class AsyncIngestWriter:
@@ -194,7 +259,7 @@ def _shrink_persistent_queue(
 
 def cleanup_persistent_queues_on_startup(db: str):
     """Discard successful acknowledgement history before queue workers start."""
-    for queue_name in ("ingest_queue", "doc_type_queue", "scan_finding_queue"):
+    for queue_name in ("ingest_queue", "doc_type_queue", "scan_finding_queue", "graph_queue"):
         queue = get_persistent_queue(db, queue_name)
         try:
             _shrink_persistent_queue(queue, queue_name, keep_latest=0, vacuum=False)

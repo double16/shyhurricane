@@ -130,6 +130,7 @@ class FakeResponse:
 class FakeAsyncClient:
     def __init__(self):
         self.requests = []
+        self.cookies = httpx.Cookies()
 
     async def __aenter__(self):
         return self
@@ -174,6 +175,8 @@ async def test_index_http_url_fetches_indexes_and_deobfuscates(monkeypatch):
     assert result.response_headers["X-Test"] == "yes"
     assert client.requests[0]["url"] == "https://127.0.0.1/app.js"
     assert client.requests[0]["headers"]["Host"] == "example.com"
+    assert client.cookies["sid"] == "abc"
+    assert "cookies" not in client.requests[0]
     queued = json.loads(ctx.ingest_queue.items[0])
     assert queued["request"]["endpoint"] == "https://example.com/app.js"
     assert queued["response"]["body"] == "console.log('x')"
@@ -479,6 +482,28 @@ async def test_http_client_input_errors(monkeypatch, http_tool_context, error, m
 
 
 @pytest.mark.asyncio
+@pytest.mark.filterwarnings("error:Setting per-request cookies:DeprecationWarning")
+@pytest.mark.parametrize("cookies, expected_header", [(None, None), ({"sid": "abc"}, "sid=abc")])
+async def test_real_httpx_sends_client_cookies(monkeypatch, http_tool_context, cookies, expected_header):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, text="response body")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    monkeypatch.setattr(indexers.httpx, "AsyncClient", lambda: client)
+
+    result = await indexers.index_http_url(None, "https://example.com/", cookies=cookies)
+
+    assert result.contents.text == "response body"
+    assert requests[0].headers.get("cookie") == expected_header
+    assert len(http_tool_context.ingest_queue.items) == 1
+    assert client.is_closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings("error:Setting per-request cookies:DeprecationWarning")
 async def test_real_httpx_rejects_non_ascii_header(http_tool_context):
     with pytest.raises(ToolError, match="Invalid HTTP request inputs"):
         await indexers.index_http_url(None, "https://example.com/", request_headers={"X-Test": "é"})

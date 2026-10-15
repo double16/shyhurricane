@@ -185,11 +185,11 @@ async def index_http_url(
             munged_url = url
         async with httpx.AsyncClient() as client:
             try:
+                client.cookies.update(cookies)
                 response = await client.request(
                     url=munged_url,
                     method=method,
                     headers=the_headers,
-                    cookies=cookies,
                     params=params,
                     content=request_body,
                     follow_redirects=follow_redirects,

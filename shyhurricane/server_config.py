@@ -4,6 +4,7 @@ from dataclasses import dataclass
 @dataclass
 class ServerConfig:
     database: str = None
+    graph_database: str = None
     task_pool_size: int = 3
     ingest_pool_size: int = 1
     open_world: bool = True

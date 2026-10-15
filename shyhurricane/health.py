@@ -11,16 +11,19 @@ logger = logging.getLogger(__name__)
 class HealthMonitor:
     """Periodically checks indexing dependencies and exposes shared readiness."""
 
-    def __init__(self, qdrant_probe: Callable[[], object], llm_probe: Callable[[], object], interval: float = 10):
+    def __init__(self, qdrant_probe: Callable[[], object], llm_probe: Callable[[], object], interval: float = 10,
+                 neo4j_probe: Callable[[], object] | None = None):
         self.ready = multiprocessing.Event()
         self._qdrant_probe = qdrant_probe
         self._llm_probe = llm_probe
+        self._neo4j_probe = neo4j_probe
         self._interval = interval
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="health-monitor", daemon=True)
         self._last_state = None
         self.qdrant_healthy: bool | None = None
         self.llm_healthy: bool | None = None
+        self.neo4j_healthy: bool | None = None
 
     def start(self):
         self._thread.start()
@@ -42,7 +45,12 @@ class HealthMonitor:
             logger.warning("LLM health check failed", exc_info=True)
             llm_healthy = False
         self.llm_healthy = llm_healthy
-        healthy = qdrant_healthy and llm_healthy
+        try:
+            self.neo4j_healthy = bool(self._neo4j_probe()) if self._neo4j_probe is not None else True
+        except Exception:
+            logger.warning("Neo4j health check failed", exc_info=True)
+            self.neo4j_healthy = False
+        healthy = qdrant_healthy and llm_healthy and self.neo4j_healthy
         if healthy:
             self.ready.set()
         else:
@@ -60,6 +68,7 @@ class HealthMonitor:
                 logger.warning("Health monitor check failed", exc_info=True)
                 self.qdrant_healthy = False
                 self.llm_healthy = False
+                self.neo4j_healthy = False
                 self.ready.clear()
             self._stop.wait(self._interval)
 
