@@ -1099,16 +1099,16 @@ aiohttp = [
 
 [[package]]
 name = "google-genai-haystack"
-version = "4.8.0"
+version = "6.0.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "google-genai", extra = ["aiohttp"] },
     { name = "haystack-ai" },
     { name = "jsonref" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/89/0f/e130664a15e13175e106cf2a0faf0711cbba27d1599f5b95a4eaf52bf6cd/google_genai_haystack-4.8.0.tar.gz", hash = "sha256:e2b4768bd9e6d0906f3672b24b5da03d6659994ac0ae7cbe11235614c7ce78e8", size = 860712, upload-time = "2026-08-24T09:29:05.446Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/6d/e2/f3bb64e53e4c2c932857f633cdb7f5ad9334fbe2cd3b25ac9a5f014802e3/google_genai_haystack-6.0.1.tar.gz", hash = "sha256:bf9fc11ed8389ca0103517e0e58f5d5be495c41e17548b28b4934230afc07977", size = 866781, upload-time = "2026-09-25T09:23:18.529Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e5/22/587eb72893ff83090f8a9a9277388c8230ce645f0db8421e4506fef1595a/google_genai_haystack-4.8.0-py3-none-any.whl", hash = "sha256:f2ac557df832fc52d26630dc653fab490f1ea581f72c5caf13d8f48654d1cd5d", size = 35460, upload-time = "2026-08-24T09:29:04.075Z" },
+    { url = "https://files.pythonhosted.org/packages/5c/94/2b889eabea5242019bc170cbc6f35a724d70ad7687d9055f2e131d9c4fd1/google_genai_haystack-6.0.1-py3-none-any.whl", hash = "sha256:d3d6f2071764fc751b33cee362867cea3d6a5c58ac0728aa351fb9d4312e1ba5", size = 40112, upload-time = "2026-09-25T09:23:17.063Z" },
 ]
 
 [[package]]
@@ -3994,7 +3994,7 @@ requires-dist = [
     { name = "einops", specifier = "~=0.8.1" },
     { name = "fastembed-haystack", specifier = "~=2.7.0" },
     { name = "flake8", marker = "extra == 'dev'" },
-    { name = "google-genai-haystack", specifier = ">=4.5,<4.9" },
+    { name = "google-genai-haystack", specifier = ">=4.5,<6.1" },
     { name = "guppy3", specifier = "~=3.1.6" },
     { name = "haystack-ai", specifier = "~=3.3.0" },
     { name = "html5lib", specifier = "~=1.1" },
