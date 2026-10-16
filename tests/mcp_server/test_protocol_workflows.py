@@ -492,8 +492,23 @@ async def test_indexing_wait_progress_on_http_transports(
     updates = []
     finish = None
 
+    pending_observed = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    read_status = indexing_wait.read_indexing_status
+
+    def observe_pending(*args, **kwargs):
+        counts, unresolved = read_status(*args, **kwargs)
+        if any(stage["pending"] + stage["processing"] for stage in counts.values()):
+            # Status reads run in a worker thread. Preserve the pending snapshot before
+            # allowing indexing to finish, regardless of transport or runner speed.
+            loop.call_soon_threadsafe(pending_observed.set)
+        return counts, unresolved
+
+    monkeypatch.setattr(indexing_wait, "read_indexing_status", observe_pending)
+
     async def finish_indexing():
-        await asyncio.sleep(0.03)
+        async with asyncio.timeout(5):
+            await pending_observed.wait()
         queue.ack(queue.get())
 
     async def receive(value, total, message):
