@@ -31,6 +31,7 @@ import shyhurricane.mcp_server.tools.register_http_headers  # noqa: F401
 import shyhurricane.mcp_server.tools.status  # noqa: F401
 from shyhurricane.config import configure
 from shyhurricane.generator_config import GeneratorConfig, add_generator_args
+from shyhurricane.indexing_wait import indexing_timeout
 from shyhurricane.logging_config import (
     configure_file_logging,
     file_logging_enabled,
@@ -133,6 +134,11 @@ async def main():
                     help="If true, the server is allowed to reach out to hosts. If false, only tools using indexed content are advertised.")
     ap.add_argument("--low-power", type=str, default=low_power_default,
                     help="If true, disables compute intensive features and those requiring GPU.")
+    ap.add_argument(
+        "--indexing-wait-timeout-seconds", type=indexing_timeout,
+        default=os.environ.get("INDEXING_WAIT_TIMEOUT_SECONDS", "60"),
+        help="Maximum wait for query-relevant indexing; zero disables waiting (default: 60 seconds)",
+    )
     add_generator_args(ap)
 
     args = ap.parse_args()
@@ -154,6 +160,7 @@ async def main():
         ingest_pool_size=args.index_pool_size,
         open_world=_str_to_bool(args.open_world),
         low_power=_str_to_bool(args.low_power),
+        indexing_wait_timeout_seconds=args.indexing_wait_timeout_seconds,
     ))
     server_context = await get_server_context()
 

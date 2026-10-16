@@ -157,7 +157,7 @@ Binary responses return metadata only. `deobfuscate_javascript.output_length_lim
 Both preview overrides accept 1–4,194,304 characters. `fetch_web_resource_content` retains
 `output_start_position`, `output_length_limit`, and its offset-based partial-content fields, including `contents.has_more`.
 
-`index_http_url` treats a missing or empty `Content-Type` as unknown and includes the decoded body.
+`index_http_url` treats a missing or empty response `Content-Type` as unknown and includes the decoded body.
 It accepts HTTP and HTTPS URLs; invalid URLs and request inputs raise explicit tool errors, as does
 disabled open-world access. Connection failures, timeouts, protocol failures, and excessive redirects
 return null. HTTP 4xx/5xx responses are still indexed. Redirects are not followed by default; enable
@@ -180,7 +180,8 @@ rather than saved-page tokens. It reads indexed content without contacting the t
 Pending scans can return no resources while `scan_complete=false`; this does not establish that
 the target is unreachable. Avoid starting duplicate scans. `port_scan.retry` is deprecated and
 ignored; repeated calls with the same parameters retrieve cached or pending results, without a
-forced rescan. Indexing is asynchronous, so new discoveries may not be searchable immediately.
+forced rescan. Indexing is asynchronous; retrieval tools wait briefly for relevant queued work and report when
+results may still be incomplete.
 
 Findings returned by `query_findings` may be unverified or outdated. Review their evidence before
 treating them as confirmed vulnerabilities. New findings should include
@@ -201,6 +202,67 @@ runs while the server is idle. This store follows the server's single-process de
 
 For Docker Compose, set `TOOL_RESULT_TTL_SECONDS` in `.env` and restart the service. Both Compose
 configurations retain saved pages in the existing `tool_cache` volume.
+
+### Waiting for indexing
+
+Web-resource search, content fetch, domain/host/netloc/URL inventories, and application-graph tools
+wait up to 60 seconds for indexing relevant to their query before reading available data. Indexing
+and scan tools still return promptly after queueing work. Unrelated targets do not delay scoped
+queries; an unfiltered inventory considers all targets. Finding queries, direct MCP resource reads,
+and saved-page navigation do not wait.
+
+| Environment variable | Default | Description |
+|----------------------|---------|-------------|
+| `INDEXING_WAIT_TIMEOUT_SECONDS` | `60` | Finite, nonnegative seconds to wait for relevant indexing per retrieval call; `0` disables waiting |
+
+`--indexing-wait-timeout-seconds` overrides the environment. Both Compose configurations accept the
+variable from `.env`; restart the service after changing it. The timeout covers the indexing wait,
+including nested lookups, separately from the normal query's execution time.
+
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant MCP
+    participant Indexer
+    Agent->>MCP: index_http_url
+    MCP->>Indexer: Queue captured response
+    MCP-->>Agent: Response preview
+    Agent->>MCP: find_web_resources
+    loop Relevant indexing remains, within timeout
+        MCP-->>Agent: Indexing progress (opt-in clients)
+        Indexer->>Indexer: Ingest and publish downstream indexes
+    end
+    MCP-->>Agent: Available resources and indexing status
+```
+
+Progress notifications describe elapsed time and pending/processing counts immediately upon waiting,
+every five seconds during the wait, and when the wait ends. Clients must opt into MCP progress to
+receive them. Cancellation stops the wait without cancelling indexing.
+
+Covered results include `indexing.status`, `waited_seconds`, `potentially_incomplete`, per-stage
+`stages` counts (`pending`, `processing`, `failed`), and `skipped_stages`. Status is `complete`,
+`timed_out`, `paused`, `failed`, `unavailable`, or `disabled`. Only `complete` establishes that no
+relevant outstanding or failed indexing work was observed; it does not guarantee exhaustive analysis.
+A timeout returns currently available data and does not stop workers. Failed items do not prolong
+the wait. Unresolvable queue metadata or status-read errors report `unavailable`, rather than success.
+
+Content fetch retains its content fields and adds `indexing`. If no content is available while
+indexing is incomplete, it returns only `{ "indexing": { ... } }`; a confirmed miss remains `null`.
+With waiting disabled, missing content retains the previous `null` behavior. Graph evidence retrieval
+similarly returns a status-only object when evidence is missing and indexing is incomplete. Saved
+pages preserve the original indexing status and never wait again.
+
+Semantic search and explicit type filters such as `type:javascript` also wait for type-specific
+indexing. Low-power mode skips deliberately paused type-specific indexing and reports outstanding skipped work
+as `paused`; ingest and graph stages still wait normally. Graph waits include known script and
+source-map dependencies of scoped documents, including dependencies on other origins. Opaque content
+URIs use their indexed URL when available; if a missing URI cannot be related to outstanding ingest,
+status is `unavailable`. Scope metadata is backfilled for active and failed legacy queue records
+before workers start; queue payloads and records are preserved.
+
+New relevant indexing arriving during a wait is included, so continuous ingestion for the same scope
+may consume the full timeout. A completed wait does not wait for scans to discover future resources.
+Do not start duplicate scans because an indexing wait timed out.
 
 ### Search predicates
 

@@ -100,6 +100,8 @@ def test_get_persistent_queue_sanitizes_db_name_and_uses_user_state_dir(monkeypa
     original_exists = persistent_queue.os.path.exists
 
     class FakeSQLiteAckQueue:
+        initialize_scopes = Mock()
+
         def __init__(self, path, auto_commit, serializer, auto_resume):
             assert auto_resume is True
             self.tran_lock = threading.Lock()
@@ -112,7 +114,7 @@ def test_get_persistent_queue_sanitizes_db_name_and_uses_user_state_dir(monkeypa
     monkeypatch.setattr(persistent_queue.os.path, "exists",
                         lambda path: False if path == "/data" else original_exists(path))
     monkeypatch.setattr(persistent_queue.Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(persistent_queue.persistqueue, "SQLiteAckQueue", FakeSQLiteAckQueue)
+    monkeypatch.setattr(persistent_queue, "ScopedAckQueue", FakeSQLiteAckQueue)
 
     queue = persistent_queue.get_persistent_queue("prod/db:2026", "ingest_queue")
 
@@ -144,6 +146,8 @@ def test_get_persistent_queue_allows_existing_queue_directory(monkeypatch, tmp_p
     original_exists = persistent_queue.os.path.exists
 
     class FakeSQLiteAckQueue:
+        initialize_scopes = Mock()
+
         def __init__(self, path, auto_commit, serializer, auto_resume):
             assert auto_resume is True
             self.tran_lock = threading.Lock()
@@ -154,7 +158,7 @@ def test_get_persistent_queue_allows_existing_queue_directory(monkeypatch, tmp_p
     monkeypatch.setattr(persistent_queue.os.path, "exists",
                         lambda path: False if path == "/data" else original_exists(path))
     monkeypatch.setattr(persistent_queue.Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(persistent_queue.persistqueue, "SQLiteAckQueue", FakeSQLiteAckQueue)
+    monkeypatch.setattr(persistent_queue, "ScopedAckQueue", FakeSQLiteAckQueue)
 
     persistent_queue.get_persistent_queue("db", "doc_type_queue")
     persistent_queue.get_persistent_queue("db", "doc_type_queue")
@@ -673,7 +677,7 @@ def test_index_migration_preserves_existing_records_and_is_idempotent(tmp_path, 
 def test_index_migration_closes_queue_and_propagates_failure(monkeypatch):
     queue = Mock(tran_lock=threading.Lock(), _putter=MagicMock())
     queue._putter.__enter__.return_value.execute.side_effect = sqlite3.OperationalError("disk full")
-    monkeypatch.setattr(persistent_queue.persistqueue, "SQLiteAckQueue", lambda **kwargs: queue)
+    monkeypatch.setattr(persistent_queue, "ScopedAckQueue", lambda **kwargs: queue)
     with pytest.raises(sqlite3.OperationalError, match="disk full"):
         persistent_queue.open_persistent_queue("queue")
     queue.close.assert_called_once()

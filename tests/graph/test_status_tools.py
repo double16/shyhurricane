@@ -62,7 +62,9 @@ async def test_query_errors_are_explicit_and_no_fetch_occurs(monkeypatch):
         await tools.query(None, "test", "elements", "example.com")
     server.graph_store = object()
     monkeypatch.setattr(tools, "GraphQuery", lambda store: SimpleNamespace(elements=lambda scope: {"results": []}))
-    assert await tools.query(None, "test", "elements", "example.com") == {"results": []}
+    result = await tools.query(None, "test", "elements", "example.com")
+    assert result["results"] == []
+    assert result["indexing"]["status"] == "unavailable"
     for error in (ValueError("invalid scope"), RuntimeError("database error")):
 
         def fail(scope):
@@ -206,3 +208,28 @@ async def test_endpoint_tool_paginates_defaults_and_filters(tmp_path, monkeypatc
     query.assert_awaited_once()
     with pytest.raises(ToolError, match="limit must be"):
         await tools.find_application_endpoints(None, "example.com", limit=0)
+
+
+async def test_graph_query_waits_before_read_and_preserves_incomplete_evidence(monkeypatch):
+    from shyhurricane.indexing_wait import IndexingStatus
+
+    server = SimpleNamespace(graph_store=object())
+    order = []
+
+    async def wait(ctx, context, matches, **kwargs):
+        order.append("wait")
+        assert matches("https://sub.example.com/app")
+        assert kwargs == {"graph": True}
+        return IndexingStatus(status="timed_out", potentially_incomplete=True)
+
+    def evidence(scope):
+        order.append("query")
+        return None
+
+    monkeypatch.setattr(tools, "get_server_context", AsyncMock(return_value=server))
+    monkeypatch.setattr(tools, "log_tool_history", AsyncMock())
+    monkeypatch.setattr(tools, "wait_for_indexing", wait)
+    monkeypatch.setattr(tools, "GraphQuery", lambda store: SimpleNamespace(evidence=evidence))
+    result = await tools.query(None, "test", "evidence", "example.com")
+    assert order == ["wait", "query"]
+    assert result["indexing"]["status"] == "timed_out"

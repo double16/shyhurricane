@@ -92,3 +92,26 @@ async def test_internal_network_inventory_is_not_paginated(indexed_metadata, res
     assert result.network_locations == ["api.example.com:8443", "www.example.com:443"]
     assert result.pagination is None
     assert not list(result_store.snapshots.iterdir())
+
+
+@pytest.mark.asyncio
+async def test_inventory_waits_before_query_and_saves_indexing_status(indexed_metadata, monkeypatch, result_store):
+    from shyhurricane import indexing_wait
+
+    calls = []
+
+    async def wait(ctx, server, matches, **kwargs):
+        assert matches("https://api.example.com/admin")
+        assert not matches("https://other.test/admin")
+        calls.append("wait")
+        indexed_metadata.append(Record({"host": "new.example.com", "url": "https://new.example.com/admin"}))
+        return indexing_wait.IndexingStatus(status="timed_out", potentially_incomplete=True)
+
+    monkeypatch.setattr(indexing_wait, "wait_for_indexing", wait)
+    result = await metadata.find_urls(None, "example.com", path_query="admin", limit=1)
+    assert calls == ["wait"]
+    assert result.indexing.status == "timed_out"
+    assert result.pagination.total_items == 2
+    saved = result_store.read(result.pagination.next_page_token)["result"]
+    assert saved["indexing"] == result.indexing.model_dump()
+    assert saved["urls"] == ["https://new.example.com/admin"]

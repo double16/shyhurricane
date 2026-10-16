@@ -15,6 +15,7 @@ import persistqueue
 from persistqueue import Empty
 from persistqueue.serializers import pickle as pickle_serializer
 
+from shyhurricane.queue_scopes import ScopedAckQueue
 from shyhurricane.utils import log_gpu_memory_summary, log_heap_stats
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,7 @@ def persistent_queue_path(db: str, queue_name: str) -> Path:
 
 def open_persistent_queue(path: str, *, auto_resume: bool = True) -> persistqueue.SQLiteAckQueue:
     """Open a queue and ensure status queries have a covering index."""
-    queue = persistqueue.SQLiteAckQueue(
+    queue = ScopedAckQueue(
         path=path, auto_commit=True, auto_resume=auto_resume, serializer=Base64QueueSerializer)
     try:
         with queue.tran_lock, queue._putter as connection:
@@ -73,6 +74,7 @@ def open_persistent_queue(path: str, *, auto_resume: bool = True) -> persistqueu
                     f"CREATE INDEX IF NOT EXISTS ack_queue_status_id ON {queue._table_name} (status)"
                 )
                 logger.info("Created queue status index in %s in %.2f seconds", path, time.monotonic() - started)
+        queue.initialize_scopes()
         return queue
     except BaseException:
         queue.close()

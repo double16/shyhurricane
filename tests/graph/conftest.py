@@ -11,6 +11,7 @@ def graph_paths(monkeypatch, tmp_path):
     monkeypatch.setattr("shyhurricane.persistent_queue.persistent_queue_path", path)
     monkeypatch.setattr("shyhurricane.graph.artifacts.persistent_queue_path", path)
     monkeypatch.setattr("shyhurricane.graph.status.persistent_queue_path", path)
+    monkeypatch.setattr("shyhurricane.indexing_wait.persistent_queue_path", path)
     return tmp_path
 
 

@@ -326,3 +326,23 @@ async def test_unwritable_log_file_fails_before_services_start(service_runtime, 
     assert "Cannot open log file" in capsys.readouterr().err
     service.get_server_context.assert_not_awaited()
     service.set_generator_config.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_indexing_wait_environment_and_cli_override(service_runtime, monkeypatch):
+    monkeypatch.setenv("INDEXING_WAIT_TIMEOUT_SECONDS", "12.5")
+    await service.main()
+    assert service.set_server_config.call_args.args[0].indexing_wait_timeout_seconds == 12.5
+    monkeypatch.setattr(service.sys, "argv", ["mcp_service.py", "--indexing-wait-timeout-seconds", "0"])
+    await service.main()
+    assert service.set_server_config.call_args.args[0].indexing_wait_timeout_seconds == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["-1", "nan", "inf", "invalid"])
+async def test_invalid_indexing_wait_timeout_rejected_before_startup(service_runtime, monkeypatch, invalid):
+    monkeypatch.setenv("INDEXING_WAIT_TIMEOUT_SECONDS", invalid)
+    with pytest.raises(SystemExit) as error:
+        await service.main()
+    assert error.value.code == 2
+    service.get_server_context.assert_not_awaited()

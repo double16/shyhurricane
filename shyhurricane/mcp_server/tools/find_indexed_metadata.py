@@ -1,4 +1,5 @@
 import logging
+from inspect import unwrap
 from typing import Annotated, Any, List, Optional, TypeAlias
 
 from mcp.server.mcpserver import Context
@@ -10,6 +11,7 @@ from qdrant_client.http import models as qm
 
 from shyhurricane.db import scroll_qdrant_collection
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
+from shyhurricane.indexing_wait import IndexingStatus, indexed_inventory
 from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
 from shyhurricane.result_pages import Pagination, paged_results
 from shyhurricane.utils import query_to_netloc
@@ -37,6 +39,7 @@ def _finder_instructions(subject: str, results: Any) -> str:
 
 
 class FindDomainsResult(BaseModel):
+    indexing: IndexingStatus | None = None
     pagination: Pagination | None = None
     instructions: str = Field(description="Instructions for interpreting the results")
     query: Optional[str] = Field(description="The query used to these find domains")
@@ -53,6 +56,7 @@ DomainQueryField: TypeAlias = Annotated[str,
         open_world_hint=False),
 )
 @paged_results("domains")
+@indexed_inventory(domains=True)
 async def find_domains(
         ctx: Context,
         query: Annotated[
@@ -96,6 +100,7 @@ async def find_domains(
 
 
 class FindHostsResult(BaseModel):
+    indexing: IndexingStatus | None = None
     pagination: Pagination | None = None
     instructions: str = Field(description="Instructions for interpreting the results")
     domain_query: str = Field(description="The query used to these find hosts")
@@ -109,6 +114,7 @@ class FindHostsResult(BaseModel):
         open_world_hint=False),
 )
 @paged_results("hosts")
+@indexed_inventory(domains=False)
 async def find_hosts(
         ctx: Context,
         domain_query: DomainQueryField,
@@ -154,6 +160,7 @@ async def find_hosts(
 
 
 class FindNetworkLocationResult(BaseModel):
+    indexing: IndexingStatus | None = None
     pagination: Pagination | None = None
     instructions: str = Field(description="Instructions for interpreting the results")
     domain_query: str = Field(description="The query used to these find network locations (host:port)")
@@ -167,6 +174,7 @@ class FindNetworkLocationResult(BaseModel):
         open_world_hint=False),
 )
 @paged_results("network_locations")
+@indexed_inventory(domains=False)
 async def find_netloc(
         ctx: Context,
         domain_query: DomainQueryField,
@@ -208,6 +216,7 @@ async def find_netloc(
 
 
 class FindURLsResult(BaseModel):
+    indexing: IndexingStatus | None = None
     pagination: Pagination | None = None
     instructions: str = Field(description="Instructions for interpreting the results")
     host_query: str = Field(description="The query used to these find URLs by host")
@@ -224,6 +233,7 @@ class FindURLsResult(BaseModel):
         open_world_hint=False),
 )
 @paged_results("urls")
+@indexed_inventory(domains=False)
 async def find_urls(
         ctx: Context,
         host_query: Annotated[str, Field(description="Limit the results using the \"ends with\" operator")],
@@ -273,4 +283,4 @@ async def find_urls(
 
 async def find_netloc_all(ctx: Context, domain_query: str) -> FindNetworkLocationResult:
     """Load the complete inventory for internal target selection without creating pages."""
-    return await find_netloc.__wrapped__(ctx, domain_query)
+    return await unwrap(find_netloc)(ctx, domain_query)

@@ -1,5 +1,6 @@
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from haystack import Document
@@ -933,3 +934,97 @@ async def test_cached_spider_caps_retrieval_and_paginates(monkeypatch):
     assert second.resources[0].url == "https://example.com/50"
     assert get_matches.await_count == 1
     assert get_matches.call_args.args[2] == 1001
+
+
+@pytest.mark.asyncio
+async def test_search_waits_before_inventory_and_filters_site_intersection(predicate_context, monkeypatch):
+    server, _ = predicate_context
+    calls = []
+    original_inventory = resources.find_netloc
+    original_wait = resources.wait_for_indexing
+
+    async def wait(ctx, context, matches, **kwargs):
+        assert matches("https://sub.example.com/app.js")
+        assert not matches("https://example.com/app.js")
+        assert not matches("https://other.test/app.js")
+        calls.append("wait")
+        return await original_wait(ctx, context, matches, **kwargs)
+
+    async def inventory(*args):
+        assert calls
+        calls.append("inventory")
+        return await original_inventory(*args)
+
+    monkeypatch.setattr(resources, "wait_for_indexing", wait)
+    monkeypatch.setattr(resources, "find_netloc", inventory)
+    result = await resources.find_web_resources(ToolCtx(), "site:example.com site:sub.example.com")
+    assert calls[:2] == ["wait", "inventory"]
+    assert result.indexing.status == "unavailable"
+
+
+@pytest.mark.asyncio
+async def test_pending_indexing_prevents_duplicate_scan(predicate_context, monkeypatch):
+    from shyhurricane.indexing_wait import IndexingStatus
+
+    async def wait(*args, **kwargs):
+        return IndexingStatus(
+            status="timed_out", potentially_incomplete=True,
+            stages={"ingest": {"pending": 1, "processing": 0, "failed": 0}},
+        )
+
+    monkeypatch.setattr(resources, "wait_for_indexing", wait)
+    scan = AsyncMock()
+    monkeypatch.setattr(resources, "spider_website", scan)
+    ctx = ToolCtx()
+    result = await resources.find_web_resources(ctx, "site:missing.test")
+    scan.assert_not_awaited()
+    assert result.resources == []
+    search = resources.SearchPreparation("site:missing.test", 20, None, predicate_context[0])
+    search.indexing = await wait()
+    search.missing_targets = [resources.parse_target_info("missing.test")]
+    answer = await resources._request_scan(ctx, search)
+    assert answer.confirm is False
+
+
+@pytest.mark.asyncio
+async def test_search_waits_for_spider_indexing_before_query(predicate_context, monkeypatch):
+    from shyhurricane.indexing_wait import IndexingStatus
+
+    order = []
+
+    async def wait(ctx, server, matches, **kwargs):
+        order.append("wait")
+        return IndexingStatus(status="complete")
+
+    async def spider(ctx, url):
+        order.append("spider")
+
+    monkeypatch.setattr(resources, "wait_for_indexing", wait)
+    monkeypatch.setattr(resources, "spider_website", spider)
+    search = resources.SearchPreparation("missing.test", 20, None, predicate_context[0], targets=["missing.test"])
+    search.missing_targets = [resources.parse_target_info("missing.test").with_port(443)]
+    result = await resources._execute_search(
+        ToolCtx(), search, resources.AcceptedElicitation(data=resources.SpiderConfirmation(confirm=True)),
+    )
+    assert order == ["spider", "wait"]
+    assert result is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query,semantic", [
+    ("site:example.com type:javascript", True),
+    ("site:example.com type:content", False),
+    ("site:example.com type:network", False),
+    ("site:example.com -type:javascript", False),
+])
+async def test_explicit_type_filter_waits_for_required_index_stage(predicate_context, monkeypatch, query, semantic):
+    waits = []
+    original = resources.wait_for_indexing
+
+    async def wait(ctx, server, matches, **kwargs):
+        waits.append(kwargs["semantic"])
+        return await original(ctx, server, matches, **kwargs)
+
+    monkeypatch.setattr(resources, "wait_for_indexing", wait)
+    await resources.find_web_resources(ToolCtx(), query)
+    assert waits == [semantic]

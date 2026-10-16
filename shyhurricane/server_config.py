@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 
 
@@ -12,6 +13,13 @@ class ServerConfig:
     """
     Enables "low-power" mode that disables features that require GPU or other compute intenstive tasks.
     """
+    indexing_wait_timeout_seconds: float = 60.0
+
+    def __post_init__(self):
+        if not math.isfinite(self.indexing_wait_timeout_seconds) or self.indexing_wait_timeout_seconds < 0:
+            raise ValueError("Indexing wait timeout must be finite and nonnegative")
+
+
 _server_config: ServerConfig = ServerConfig()
 
 

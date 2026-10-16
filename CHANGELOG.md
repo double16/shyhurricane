@@ -4,6 +4,12 @@
 
 ### Features
 
+- Accept dictionary request bodies in `index_http_url`, using URL form encoding by default and JSON
+  serialization for JSON request Content-Types. Store the serialized request body during ingestion.
+- Wait up to a configurable 60 seconds for query-relevant indexing before web-resource and graph
+  retrieval. Send MCP progress and return explicit indexing status with available results.
+  Configure `INDEXING_WAIT_TIMEOUT_SECONDS` or `--indexing-wait-timeout-seconds`; zero disables waiting.
+  Persist transactional URL/document scope metadata and backfill outstanding legacy queue records.
 - Add persistent Neo4j application graph built incrementally from existing HTTP ingestion,
   with versioned evidence, out-of-order reference reconciliation, shared JavaScript/source-map preparation,
   browser/framework/Vite static analysis, and resumable offline backfill.
@@ -21,6 +27,9 @@
   Accept scoped targets and optional analysis/active modes; render workflows without executing tools.
 
 ### Fixes
+
+- Check pending indexing before treating search targets as absent or offering another scan.
+  Preserve an explicit incomplete status when pending content or graph evidence is unavailable.
 
 - Always show the primary Qdrant findings collection count first in dashboard database statistics,
   including when it is zero or outside the top five collections.

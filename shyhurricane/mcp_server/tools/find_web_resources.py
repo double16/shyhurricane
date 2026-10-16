@@ -21,6 +21,13 @@ from qdrant_client.http import models as qm
 
 from shyhurricane.db import scroll_qdrant_collection
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
+from shyhurricane.indexing_wait import (
+    IndexingStatus,
+    attach_indexing,
+    indexing_scope,
+    url_matcher,
+    wait_for_indexing,
+)
 from shyhurricane.mcp_server import (
     AdditionalHostsField,
     CookiesField,
@@ -219,6 +226,7 @@ async def _find_recommended_urls(ctx: Context) -> Optional[List[str]]:
 
 
 class FindWebResourcesResult(BaseModel):
+    indexing: IndexingStatus | None = None
     pagination: Pagination | None = None
     instructions: str = Field(description="Instructions for using the results")
     query: str = Field(description="Search query used to find web resources")
@@ -286,6 +294,7 @@ class SearchPreparation:
     predicates: list[Predicate] = field(default_factory=list)
     semantic_query: Optional[str] = None
     has_indexed_targets: bool = False
+    indexing: IndexingStatus | None = None
 
 
 async def _determine_targets(ctx: Context, search: SearchPreparation, target_query: str):
@@ -302,6 +311,7 @@ async def _determine_targets(ctx: Context, search: SearchPreparation, target_que
             pass
 
 
+@attach_indexing
 async def _prepare_search(
     ctx: Context,
     query: str,
@@ -344,6 +354,12 @@ async def _prepare_search(
             search.targets.extend(await _find_recommended_urls(ctx) or [])
         return search
 
+    direct_host, _ = query_to_netloc(query)
+    if direct_host and filter_hosts_and_addresses([direct_host]):
+        parsed_query = urlsplit(query if "://" in query else f"//{query}")
+        await wait_for_indexing(
+            ctx, server_ctx, url_matcher([query], exact=bool(parsed_query.query or parsed_query.fragment)),
+        )
     if resources_by_url := await _find_web_resources_by_url(ctx, query, limit):
         return find_web_resources_result(results=resources_by_url, query=query, http_methods=http_methods, limit=limit)
     if resources_by_netloc := await _find_web_resources_by_netloc(ctx, query, limit):
@@ -448,6 +464,11 @@ async def _prepare_targets(
         )
     targets = search.targets
     sites = [predicate for predicate in search.predicates if predicate.operator == "site" and not predicate.exclude]
+    if targets:
+        search.indexing = await wait_for_indexing(
+            ctx, search.server_ctx, _search_indexing_matcher(search),
+            semantic=_needs_type_indexing(search),
+        )
     if sites:
         # Resolve host scope independently of the legacy parent-domain fallback.
         known = (await find_netloc(ctx, "")).network_locations
@@ -515,18 +536,41 @@ async def _prepare_targets(
     return search
 
 
+def _indexing_outstanding(search):
+    return search.indexing is not None and any(
+        stage["pending"] + stage["processing"] for stage in search.indexing.stages.values()
+    )
+
+
+def _needs_type_indexing(search):
+    return bool(search.semantic_query or not search.predicates) or any(
+        predicate.operator == "type" and not predicate.exclude
+        and predicate.value not in {"content", "network", "forms"}
+        for predicate in search.predicates
+    )
+
+
+def _search_indexing_matcher(search):
+    sites = [predicate for predicate in search.predicates if predicate.operator == "site"]
+    if any(not predicate.exclude for predicate in sites):
+        return lambda url: all(predicate.matches({"url": url}) for predicate in sites)
+    matches = url_matcher(search.targets)
+    return lambda url: matches(url) and all(predicate.matches({"url": url}) for predicate in sites)
+
+
 async def _request_scan(
     ctx: Context,
     search: Annotated[Union[SearchPreparation, FindWebResourcesResult], Resolve(_prepare_targets)],
 ) -> Union[SpiderConfirmation, Elicit[SpiderConfirmation]]:
     if isinstance(search, FindWebResourcesResult) or not search.missing_targets or not search.server_ctx.open_world:
         return SpiderConfirmation(confirm=False)
-    if not _can_elicit(ctx, search.server_ctx):
+    if _indexing_outstanding(search) or not _can_elicit(ctx, search.server_ctx):
         return SpiderConfirmation(confirm=False)
     targets = ", ".join(map(str, search.missing_targets))
     return Elicit(f"There is no data for {targets}. Would you like to start a scan?", SpiderConfirmation)
 
 
+@attach_indexing
 async def _execute_search(
     ctx: Context,
     search: Union[SearchPreparation, FindWebResourcesResult],
@@ -548,6 +592,10 @@ async def _execute_search(
             for target in search.missing_targets:
                 await spider_website(ctx, target.to_url())
             # A completed scan may have queued documents that are not searchable yet.
+            search.indexing = await wait_for_indexing(
+                ctx, search.server_ctx, _search_indexing_matcher(search),
+                semantic=_needs_type_indexing(search),
+            )
             search.has_indexed_targets = True
             if search.predicates:
                 search.filter_netloc.clear()
@@ -667,6 +715,7 @@ async def _execute_predicate_search(ctx: Context, search: SearchPreparation) -> 
 
 
 @progress_scope()
+@indexing_scope()
 async def find_web_resources(
     ctx: Context,
     query: str,
@@ -686,7 +735,10 @@ async def find_web_resources(
             answer = DeclinedElicitation()
     search = await _prepare_targets(ctx, search, answer)
     scan_answer = DeclinedElicitation()
-    if isinstance(search, SearchPreparation) and search.missing_targets and search.server_ctx.open_world:
+    if (
+        isinstance(search, SearchPreparation) and search.missing_targets and search.server_ctx.open_world
+        and not _indexing_outstanding(search)
+    ):
         try:
             assert_elicitation(search.server_ctx)
             targets = ", ".join(map(str, search.missing_targets))

@@ -3,7 +3,8 @@ import logging
 import sqlite3
 import subprocess
 from datetime import datetime
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
+from urllib.parse import urlencode
 
 import httpx
 import requests
@@ -43,6 +44,24 @@ def _request_mapping(value, name: str, kv_sep=None, element_sep=None) -> dict[st
     ):
         raise ToolError(f"{name} must contain string names and string values")
     return mapping
+
+
+def _serialize_request_body(body: str | dict[str, Any] | None, headers: dict[str, str]) -> str | None:
+    if not isinstance(body, dict):
+        return body
+    content_type_header = next(
+        (name for name in reversed(headers) if name.lower() == "content-type"), "Content-Type",
+    )
+    media_type = headers.get(content_type_header, "").split(";", 1)[0].strip().lower()
+    try:
+        if media_type.endswith("/json") or ("/" in media_type and media_type.endswith("+json")):
+            return json.dumps(body, allow_nan=False)
+        encoded = urlencode(body, doseq=True)
+    except (TypeError, ValueError, UnicodeError) as error:
+        raise ToolError("request_body cannot be serialized for the request Content-Type") from error
+    if not media_type:
+        headers[content_type_header] = "application/x-www-form-urlencoded"
+    return encoded
 
 
 @mcp_instance.custom_route('/index', methods=['POST'])
@@ -116,7 +135,11 @@ async def index_http_url(
         request_headers: RequestHeadersField = None,
         cookies: CookiesField = None,
         params: RequestParamsField = None,
-        request_body: Optional[str] = None,
+        request_body: Annotated[
+            str | dict[str, Any] | None,
+            Field(description="Raw body text or a dictionary. Dictionaries use URL form encoding by default; "
+                  "JSON request Content-Types use JSON serialization. Form lists use repeated keys."),
+        ] = None,
         follow_redirects: Optional[bool] = None,
         content_length_limit: Annotated[
             int, Field(16384, description="Response preview characters per page", ge=1, le=4 * 1024 * 1024)
@@ -128,6 +151,10 @@ async def index_http_url(
 
     Invoke this tool when the user needs one URL. Text is indexed completely and returned as saved
     preview pages. Binary content returns metadata only. content_length_limit controls preview characters.
+
+    Dictionary request bodies use URL form encoding unless the request Content-Type is JSON
+    (such as application/json or application/problem+json). Missing or empty request Content-Type
+    defaults to application/x-www-form-urlencoded for dictionaries. String bodies are sent as given.
 
     This contacts the live target; use fetch_web_resource_content for already indexed content.
     Indexing is asynchronous; the returned response may not be searchable immediately.
@@ -176,6 +203,7 @@ async def index_http_url(
     the_headers = request_headers or {}
     if user_agent:
         the_headers['User-Agent'] = user_agent
+    request_body = _serialize_request_body(request_body, the_headers)
     try:
         if parsed_url.hostname in additional_hosts:
             the_headers['Host'] = parsed_url.hostname

@@ -8,7 +8,8 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, Field
 
-from shyhurricane.graph.query import GraphQuery
+from shyhurricane.graph.query import GraphQuery, scope_predicate
+from shyhurricane.indexing_wait import IndexingStatus, indexing_scope, wait_for_indexing
 from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
 from shyhurricane.result_pages import Pagination, paged_results
 
@@ -80,6 +81,7 @@ ExactUrl = Annotated[
 
 
 class GraphResult(BaseModel):
+    indexing: IndexingStatus | None = None
     results: list[dict]
     analysis_gaps: list[str] = Field(default_factory=list)
     instructions: str
@@ -93,14 +95,20 @@ class GraphResult(BaseModel):
     seed_ids_limited: bool = Field(False, description="True if resolved seed ID examples omit selected seeds")
 
 
+@indexing_scope()
 async def query(ctx, tool, operation, scope, **arguments):
     await log_tool_history(ctx, tool, scope=scope, **arguments)
     server = await get_server_context()
     if server.graph_store is None:
         raise ToolError("Application graph is unavailable")
     try:
+        matches = scope_predicate(scope)
+        indexing = await wait_for_indexing(ctx, server, matches, graph=True)
         service = GraphQuery(server.graph_store)
-        return await asyncio.to_thread(getattr(service, operation), scope, **arguments)
+        result = await asyncio.to_thread(getattr(service, operation), scope, **arguments)
+        if result is not None:
+            return {**result, "indexing": indexing.model_dump()}
+        return {"indexing": indexing.model_dump()} if indexing.potentially_incomplete else None
     except ValueError as error:
         raise ToolError(str(error)) from error
     except Exception as error:
