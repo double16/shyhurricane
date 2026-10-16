@@ -46,7 +46,7 @@ def memory_environment() -> list[str]:
 def graph_location() -> str:
     from shyhurricane.server_config import get_server_config
 
-    return get_server_config().graph_database or os.environ.get("NEO4J", "shyhurricane.graph.db")
+    return get_server_config().graph_database
 
 
 def resolve_uri(location: str) -> str:

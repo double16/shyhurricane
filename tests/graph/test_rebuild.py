@@ -83,7 +83,7 @@ def test_worker_uses_durable_policy_and_only_marks_successful_publications(event
     artifacts.close()
 
 
-def test_policy_recognition_and_cli(monkeypatch, capsys):
+def test_policy_recognition_and_cli(monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("GRAPH_LIBRARY_ANALYSIS", "full")
     assert policy.library_analysis() == "full"
     assert policy.library_analysis("summary") == "summary"
@@ -91,6 +91,6 @@ def test_policy_recognition_and_cli(monkeypatch, capsys):
     source = "verified standalone"
     monkeypatch.setitem(policy.LIBRARIES, hashlib.sha256(source.encode()).hexdigest(), "Fixture")
     assert policy.recognized_library(source) == "Fixture"
-    monkeypatch.setattr("sys.argv", ["rebuild", "--database", "db", "--target", "example.com", "--dry-run"])
+    monkeypatch.setattr("sys.argv", ["rebuild", "--data-dir", str(tmp_path), "--target", "example.com", "--dry-run"])
     rebuild.main()
     assert json.loads(capsys.readouterr().out)["dry_run"]

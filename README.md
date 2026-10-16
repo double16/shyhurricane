@@ -197,7 +197,7 @@ runs while the server is idle. This store follows the server's single-process de
 
 | Environment variable      | Default                        | Description                                                                                                                                   |
 |---------------------------|--------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
-| `TOOL_CACHE`              | `TMPDIR`, or `/tmp` when unset | Parent directory for the server's `tool_cache` directory and saved pages; use persistent storage to retain pages across container replacement |
+| `TOOL_CACHE`              | Unset; uses `<data-dir>/tool_cache` | Compose compatibility override: parent of `tool_cache`; Compose retains its `/tool_cache` volume |
 | `TOOL_RESULT_TTL_SECONDS` | `86400`                        | Positive integer retention in seconds for newly created snapshots; existing expiration times remain unchanged                                 |
 
 For Docker Compose, set `TOOL_RESULT_TTL_SECONDS` in `.env` and restart the service. Both Compose
@@ -543,7 +543,7 @@ incoming value propagation. Conditional tests do not create implicit data-flow e
 
 Fetch response readers and properties on recognized XMLHttpRequest instances are external sources.
 Request bodies remain separate from response values: a captured request never proves server reflection.
-For example, the stock-check pattern has two independent paths:
+For example, the form-submission pattern has two independent paths:
 
 ```mermaid
 flowchart LR
@@ -574,9 +574,9 @@ Rebuild retained captures explicitly after updating the analyzer image and resta
 
 ```shell
 uv run python -m shyhurricane.graph.rebuild \
-  --database shyhurricane.db --target example.com --dry-run
+  --data-dir assessment --target example.com --dry-run
 uv run python -m shyhurricane.graph.rebuild \
-  --database shyhurricane.db --target example.com --mode summary
+  --data-dir assessment --target example.com --mode summary
 ```
 
 Omit `--target` to rebuild all retained captures, or use `--mode full` for detailed library analysis.
@@ -591,7 +591,7 @@ Rebuilding also populates missing count summaries. Startup never rebuilds or cou
 
 Neo4j is required. Source runs create, start, or reuse a managed container, binding Bolt to an
 available loopback port and mounting the configured host directory at `/data`, with persistent logs.
-The default directory is `shyhurricane.graph.db`. Shutdown retains the container and data.
+The default directory is `<data-dir>/graph`. Shutdown retains the container and data.
 Both Compose configurations supply a private `graph` service with `neo4j-data` and `neo4j-logs`
 volumes. No graph ports are published by Compose. Managed private deployments use the same
 unauthenticated connection model as Qdrant; external servers can use credentials.
@@ -599,7 +599,7 @@ unauthenticated connection model as Qdrant; external servers can use credentials
 | Environment variable | Default | Description |
 |----------------------|---------|-------------|
 | `GRAPH_LIBRARY_ANALYSIS` | `summary` | `summary` retains bounded security paths for verified standalone library distributions; `full` retains ordinary detailed analysis. Unknown or modified scripts always use full analysis |
-| `NEO4J` | `shyhurricane.graph.db`; `bolt://graph:7687` in Compose | Managed storage directory or Bolt/Neo4j server URI; `--graph-database` overrides it |
+| `NEO4J` | Unset; `bolt://graph:7687` in Compose | External Bolt/Neo4j server URI; managed local storage uses `<data-dir>/graph` |
 | `NEO4J_USERNAME` | `neo4j` | Username when `NEO4J_PASSWORD` is supplied |
 | `NEO4J_PASSWORD` | Unset | Password for authenticated connections; also initializes authentication on a newly created managed container |
 | `NEO4J_HEAP_SIZE` | `1g` | Initial and maximum JVM heap for newly created managed containers and the Compose graph service |
@@ -646,7 +646,7 @@ expiration. Saved tool-result pages retain their existing expiration policy.
 Run the server normally, then queue an offline backfill:
 
 ```shell
-uv run python -m shyhurricane.graph.backfill --database shyhurricane.db
+uv run python -m shyhurricane.graph.backfill --data-dir assessment
 ```
 
 Use the same Qdrant database and persistent state location as the server. Backfill reads existing
@@ -763,6 +763,61 @@ $(command -v python3.14) -m venv .venv
 source .venv/bin/activate
 uv sync
 ```
+
+#### Application data directory
+
+Use `--data-dir` or `DATA_DIR` to select the application storage root. The command-line option
+wins over the environment variable. Absolute paths are used directly and `~` is expanded.
+Relative paths are placed beneath the detected default, regardless of the working directory.
+Paths that escape that default through `..` or symbolic links are rejected.
+
+When `/data` exists as a directory, it is automatically the default. Otherwise, defaults are:
+
+| Platform | Default data directory |
+|----------|------------------------|
+| Linux | `${XDG_STATE_HOME:-~/.local/state}/shyhurricane` |
+| macOS | `~/Library/Application Support/shyhurricane` |
+| Windows | `%LOCALAPPDATA%\shyhurricane`, falling back to `~/AppData/Local/shyhurricane` |
+
+```shell
+# Separate assessment beneath the detected default, shared by all three commands:
+uv run python mcp_service.py --data-dir assessment
+uv run python -m shyhurricane.graph.backfill --data-dir assessment
+uv run python -m shyhurricane.graph.rebuild --data-dir assessment --dry-run
+
+# Or choose an absolute directory:
+uv run python mcp_service.py --data-dir /srv/shyhurricane
+```
+
+```text
+<data-dir>/
+  qdrant/                  Managed Qdrant storage
+  graph/                   Managed Neo4j storage, including graph/logs/
+  queues/<queue-name>/     Persistent ingest, document, finding, and graph queues
+  graph_state/             Graph captures, artifacts, and maintenance checkpoints
+  logs/                    Indexing and finding logs
+  certs/                   Replay proxy CA and certificates
+  tool_cache/              Tool history, cached output, and result_pages/
+  sessions/                Container working directories mounted at /work
+```
+
+| Environment variable | Default | Description |
+|----------------------|---------|-------------|
+| `DATA_DIR` | Detected default above | Application storage root; overridden by `--data-dir`; inherited as an absolute path by workers |
+| `XDG_STATE_HOME` | `~/.local/state` | Linux state-directory base when `/data` is absent; relative values are ignored |
+| `LOCALAPPDATA` | `~/AppData/Local` | Windows state-directory base when `/data` is absent |
+| `QDRANT` | Unset; `db:6333` in Compose | External Qdrant `host:port`; managed local storage uses `<data-dir>/qdrant` |
+| `MCP_SESSION_VOLUME` | Unset; `mcp_session` in Compose | Compose compatibility override for the Docker session volume; local runs bind `<data-dir>/sessions` |
+
+`--database` and `--graph-database` have been removed from all commands. `QDRANT` and `NEO4J`
+accept remote endpoints, not local storage paths. Existing data is not moved, copied, or deleted;
+relocate it manually before starting against the new layout.
+
+Docker Compose retains its existing named volumes and storage mappings, including separate
+Qdrant, Neo4j, tool-cache, and session storage. Its remaining MCP state defaults to `/data`.
+Compose is an exception to physical storage consolidation. External database storage, explicitly
+selected diagnostic log files, model caches, and operating-system temporary files also retain
+their existing locations.
 
 #### File logging
 
@@ -1043,7 +1098,7 @@ The proxy supports HTTP and HTTPS with self-signed certs. Look for a log line li
 POST an empty body to `/status`. Either your tools can be configured to ignore certificate validation or trust this cert.
 
 ```
-replay proxy listening on ('127.0.0.1', 8010), CA cert is at /home/user/.local/state/shyhurricane/shyhurricane.db/certs/ca.pem (CONNECT→TLS ALPN: h2/http1.1)
+replay proxy listening on ('127.0.0.1', 8010), CA cert is at /home/user/.local/state/shyhurricane/certs/ca.pem (CONNECT→TLS ALPN: h2/http1.1)
 ```
 
 An example `curl` call:

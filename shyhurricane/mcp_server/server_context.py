@@ -4,7 +4,6 @@ import logging
 import multiprocessing
 import os
 import subprocess
-import sys
 import time
 from dataclasses import dataclass, field
 from multiprocessing import Queue
@@ -15,6 +14,7 @@ from haystack import Pipeline
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 from qdrant_client import AsyncQdrantClient
 
+from shyhurricane.data_paths import configure_data_dir, state_path
 from shyhurricane.db import create_qdrant_client, create_qdrant_document_store, qdrant_host_port
 from shyhurricane.doc_type_model_map import doc_type_to_model
 from shyhurricane.graph.database import GraphStore, graph_location
@@ -178,14 +178,17 @@ async def get_server_context() -> ServerContext:
     log_timestamp = get_log_timestamp()
     server_config = get_server_config()
 
-    cache_path: str = os.path.join(os.environ.get('TOOL_CACHE', os.environ.get('TMPDIR', '/tmp')), 'tool_cache')
+    configure_data_dir(server_config.data_dir)
+    cache_path = str(state_path("tool_cache"))
+    if os.environ.get("TOOL_CACHE"):
+        cache_path = os.path.join(os.environ["TOOL_CACHE"], "tool_cache")
     os.makedirs(cache_path, exist_ok=True)
     result_store = await asyncio.to_thread(
         ResultPageStore, cache_path, int(os.environ.get("TOOL_RESULT_TTL_SECONDS", "86400")),
     )
     await asyncio.to_thread(result_store.cleanup)
 
-    db = server_config.database or os.environ.get('QDRANT', 'shyhurricane.db')
+    db = server_config.database
     logger.info("Using Qdrant database at %s", db)
     # ensure collections are created
     for doc_type_model in doc_type_to_model().values():
@@ -207,23 +210,14 @@ async def get_server_context() -> ServerContext:
                                    neo4j_probe=graph_store.ready)
     health_monitor.start()
 
-    mcp_session_volume = "mcp_session"
-
-    for retry in reversed(range(3)):
-        try:
-            subprocess.check_call(["docker", "volume", "inspect", mcp_session_volume],
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except subprocess.CalledProcessError:
-            try:
-                subprocess.check_call(["docker", "volume", "create", mcp_session_volume],
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                break
-            except subprocess.CalledProcessError as e:
-                if retry == 0:
-                    logger.error(f"Failed to create {mcp_session_volume} volume", exc_info=e)
-                    sys.exit(1)
-                else:
-                    time.sleep(5)
+    mcp_session_volume = os.environ.get("MCP_SESSION_VOLUME")
+    if mcp_session_volume:
+        subprocess.check_call(["docker", "volume", "create", mcp_session_volume],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        sessions = state_path("sessions")
+        sessions.mkdir(parents=True, exist_ok=True)
+        mcp_session_volume = str(sessions)
 
     await asyncio.create_subprocess_exec(
         "docker", "run", "--rm",

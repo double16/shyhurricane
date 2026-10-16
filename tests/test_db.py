@@ -106,16 +106,14 @@ def test_get_published_port_errors_for_missing_binding_or_port():
 
 
 def test_qdrant_host_port_uses_cached_and_host_port(monkeypatch):
-    monkeypatch.setattr(db, "_QDRANT_HOST", None)
-    monkeypatch.setattr(db, "_QDRANT_HOST_PORT", None)
+    monkeypatch.setattr(db, "_QDRANT_ENDPOINTS", {})
 
     assert db.qdrant_host_port("qdrant.local:6333") == ("qdrant.local", 6333)
-    assert db.qdrant_host_port("ignored") == ("qdrant.local", 6333)
+    assert db.qdrant_host_port("qdrant.local:6333") == ("qdrant.local", 6333)
 
 
 def test_qdrant_host_port_starts_docker_for_path(monkeypatch, tmp_path):
-    monkeypatch.setattr(db, "_QDRANT_HOST", None)
-    monkeypatch.setattr(db, "_QDRANT_HOST_PORT", None)
+    monkeypatch.setattr(db, "_QDRANT_ENDPOINTS", {})
     monkeypatch.setattr(
         db,
         "_start_qdrant_docker",
@@ -124,6 +122,27 @@ def test_qdrant_host_port_starts_docker_for_path(monkeypatch, tmp_path):
     monkeypatch.setattr(db, "_wait_ready", lambda url: None)
 
     assert db.qdrant_host_port(str(tmp_path / "My DB!")) == ("127.0.0.1", 1234)
+
+
+def test_qdrant_connections_and_container_names_are_isolated_by_full_path(monkeypatch, tmp_path):
+    monkeypatch.setattr(db, "_QDRANT_ENDPOINTS", {})
+    calls = []
+
+    def start(name, storage_dir):
+        calls.append((name, storage_dir))
+        return db.QdrantDockerInfo(name, "abc", "127.0.0.1", 10000 + len(calls), "127.0.0.1", 6334)
+
+    monkeypatch.setattr(db, "_start_qdrant_docker", start)
+    monkeypatch.setattr(db, "_wait_ready", lambda url: None)
+    first, second = (str(tmp_path / name / "qdrant") for name in ("one", "two"))
+    assert db.qdrant_host_port(first) == ("127.0.0.1", 10001)
+    assert db.qdrant_host_port(second) == ("127.0.0.1", 10002)
+    assert db.qdrant_host_port(first) == ("127.0.0.1", 10001)
+    assert db.qdrant_host_port("remote:6333") == ("remote", 6333)
+    assert db.qdrant_host_port("other:6334") == ("other", 6334)
+    assert len(calls) == 2
+    assert calls[0][0] != calls[1][0]
+    assert [call[1] for call in calls] == [first, second]
 
 
 @pytest.mark.asyncio
@@ -206,7 +225,11 @@ def docker_inspect(container_id="abc", running=True):
 
 def test_start_qdrant_docker_creates_starts_reuses_and_errors(monkeypatch, tmp_path):
     commands = []
-    inspect_values = iter([None, docker_inspect(), docker_inspect(running=False), docker_inspect()])
+    created_info = docker_inspect()
+    created_info["Mounts"] = [{"Source": str(tmp_path / "create"), "Destination": "/qdrant/storage"}]
+    started_info = docker_inspect()
+    started_info["Mounts"] = [{"Source": str(tmp_path / "start"), "Destination": "/qdrant/storage"}]
+    inspect_values = iter([None, created_info, docker_inspect(running=False), started_info])
 
     def inspect(name):
         return next(inspect_values)
@@ -231,6 +254,18 @@ def test_start_qdrant_docker_creates_starts_reuses_and_errors(monkeypatch, tmp_p
     monkeypatch.setattr(db, "_inspect_container", lambda name: {"State": {"Running": True}})
     with pytest.raises(RuntimeError, match="container Id"):
         db._start_qdrant_docker(name="bad", storage_dir=str(tmp_path / "bad"))
+
+
+def test_qdrant_reused_container_requires_matching_mount(monkeypatch, tmp_path):
+    info = docker_inspect()
+    monkeypatch.setattr(db, "_inspect_container", lambda name: info)
+    with pytest.raises(RuntimeError, match="storage mount"):
+        db._start_qdrant_docker(storage_dir=str(tmp_path))
+    info["Mounts"] = [{"Destination": "/qdrant/storage", "Source": str(tmp_path / "elsewhere")}]
+    with pytest.raises(RuntimeError, match="storage mount"):
+        db._start_qdrant_docker(storage_dir=str(tmp_path))
+    info["Mounts"][0]["Source"] = str(tmp_path)
+    assert db._start_qdrant_docker(storage_dir=str(tmp_path)).http_port == 63330
 
 
 def test_create_qdrant_store_client_and_list_collections(monkeypatch):

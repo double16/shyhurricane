@@ -144,9 +144,12 @@ async def test_same_tool_stays_visible_until_all_calls_finish_or_cancel(monkeypa
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pipeline_error", [None, RuntimeError, asyncio.CancelledError])
-async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path, pipeline_error):
+@pytest.mark.parametrize("compose", [False, True])
+async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path, pipeline_error, compose):
     monkeypatch.setattr(server_context, "_server_context", None)
-    monkeypatch.setenv("TOOL_CACHE", str(tmp_path))
+    if compose:
+        monkeypatch.setenv("TOOL_CACHE", str(tmp_path))
+        monkeypatch.setenv("MCP_SESSION_VOLUME", "mcp_session")
     monkeypatch.setenv("DISABLE_ELICITATION", "")
     stores = {"content": object()}
     doc_stores = []
@@ -155,6 +158,7 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
 
     class Config:
         database = "db"
+        data_dir = str(tmp_path)
         low_power = True
         ingest_pool_size = 2
         task_pool_size = 3
@@ -288,6 +292,7 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
     assert ctx.open_world is False
     assert ctx.disable_elicitation is False
     assert ctx.cache_path == os.path.join(str(tmp_path), "tool_cache")
+    assert ctx.mcp_session_volume == ("mcp_session" if compose else str(tmp_path / "sessions"))
     assert page_cleanups == [ctx.result_store]
     assert doc_stores and all(store.initialized for store in doc_stores)
     ctx.close()

@@ -12,7 +12,7 @@ def application(event):
     graph = extract(
         event(
             url="https://example.com/blog",
-            body='<form action="/stock" method="post"><input name="product"></form>'
+            body='<form action="/submit" method="post"><input name="product"></form>'
             '<script src="/app.js"></script><a href="https://outside.test/">outside</a>',
         )
     )
@@ -80,12 +80,12 @@ def test_overview_resources_methods_contexts_and_scope(application):
     assert endpoint["sinks"]["examples"][0]["association"] == "script_context"
     assert endpoint["sources"]["follow_up"][0]["arguments"]["context_url"] == graph.url
     assert not service.endpoints("example.com", url=graph.url, method="post")["results"]
-    stock = service.endpoints("example.com", url="https://example.com/stock", method="POST")["results"][0]
-    assert stock["capture_status"] == "referenced"
-    assert stock["inputs"]["count"] == 1
-    graph.resource("https://example.com/stock", "GET")
+    endpoint = service.endpoints("example.com", url="https://example.com/submit", method="POST")["results"][0]
+    assert endpoint["capture_status"] == "referenced"
+    assert endpoint["inputs"]["count"] == 1
+    graph.resource("https://example.com/submit", "GET")
     resources = service.endpoints("example.com")["results"]
-    assert [item["method"] for item in resources if item["url"].endswith("/stock")] == ["GET", "POST"]
+    assert [item["method"] for item in resources if item["url"].endswith("/submit")] == ["GET", "POST"]
     assert resources == sorted(resources, key=lambda item: (item["url"], item["method"], item["id"]))
     assert not service.endpoints("unrelated.test")["results"]
     assert not service.endpoints("example.com", url="https://example.com/missing")["results"]

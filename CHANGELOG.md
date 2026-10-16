@@ -4,6 +4,11 @@
 
 ### Features
 
+- Replace `--database` and `--graph-database` with `--data-dir`/`DATA_DIR` across the server and
+  graph maintenance commands. Consolidate local application state, including database storage,
+  queues, certificates, logs, tool results, and session work. Preserve automatic `/data` detection,
+  otherwise use native OS state directories; resolve relative selections beneath that default.
+  Keep Compose volume mappings and remote database endpoints. Existing data is not migrated.
 - Accept dictionary request bodies in `index_http_url`, using URL form encoding by default and JSON
   serialization for JSON request Content-Types. Store the serialized request body during ingestion.
 - Wait up to a configurable 60 seconds for query-relevant indexing before web-resource and graph

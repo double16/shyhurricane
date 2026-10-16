@@ -257,7 +257,7 @@ def test_library_analysis_metadata_is_exposed_in_queries_and_evidence(event):
 def test_endpoint_overview_uses_captured_http_fields_and_resource_identity(event):
     graph = extract(
         event(
-            url="https://example.com/stock?product=1",
+            url="https://example.com/submit?product=1",
             method="POST",
             request_headers={"Content-Type": "application/json"},
             request_body='{"quantity": 2}',
@@ -276,9 +276,9 @@ def test_endpoint_overview_uses_captured_http_fields_and_resource_identity(event
     assert not service.paths("example.com", endpoint["id"], mode="flow")["results"]
 
 
-def test_stock_check_backward_trace_and_evidence(event, javascript_runner):
-    fixture = Path("src/docker/unix_command/graph-analysis/test/stockCheck.js").read_text()
-    url = "https://ginandjuice.shop/resources/js/stockCheck.js"
+def test_form_response_backward_trace_and_evidence(event, javascript_runner):
+    fixture = Path("src/docker/unix_command/graph-analysis/test/dataFlow.js").read_text()
+    url = "https://graph-test.invalid/resources/js/dataFlow.js"
     graph = extract(event(url=url, body=fixture, mime="text/javascript"), javascript_runner=javascript_runner)
     sink = next(node for node in graph.nodes.values() if node["kind"] == "sink" and node["name"] == ".innerHTML")
     service = GraphQuery(Store(graph))
@@ -297,7 +297,7 @@ def test_stock_check_backward_trace_and_evidence(event, javascript_runner):
 def test_forms_reach_request_but_not_response_and_named_reads_are_isolated(event, javascript_runner):
     from shyhurricane.graph.links import LinkPlanner
 
-    source = """<form id="one" action="/stock" method="POST">
+    source = """<form id="one" action="/submit" method="POST">
       <input name="name"><input name="secret"><input name="disabled" disabled>
       <fieldset disabled><input name="fieldset"></fieldset>
       <input><input name="wrong" form="two"></form>
@@ -333,7 +333,7 @@ def test_forms_reach_request_but_not_response_and_named_reads_are_isolated(event
     destination = next(
         node
         for node in graph.nodes.values()
-        if node.get("url") == "https://example.com/stock" and node.get("method") == "POST"
+        if node.get("url") == "https://example.com/submit" and node.get("method") == "POST"
     )
     assert any(
         edge["source"] == request["id"] and edge["target"] == destination["id"] and edge["kind"] == "REQUESTS"

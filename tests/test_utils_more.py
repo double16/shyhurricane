@@ -49,7 +49,7 @@ def test_soup_filter_path_and_encoding_helpers(monkeypatch, tmp_path):
     assert title == "OG title"
     assert description == "Twitter desc"
     assert utils.remove_unencodable("a\udcffb") == "ab"
-    assert str(state_path).endswith("db_name/state")
+    assert state_path == tmp_path / "application_data/state"
     assert utils.get_log_path("db:name", "log.txt").name == "log.txt"
     assert utils.b64(b"ok") == "b2s="
 

@@ -95,7 +95,7 @@ def test_active_queue_size_falls_back_for_non_ack_queue():
     assert persistent_queue.active_queue_size(Queue()) == 3
 
 
-def test_get_persistent_queue_sanitizes_db_name_and_uses_user_state_dir(monkeypatch, tmp_path):
+def test_get_persistent_queue_uses_data_dir_independent_of_db_name(monkeypatch, tmp_path):
     captured = {}
     original_exists = persistent_queue.os.path.exists
 
@@ -121,8 +121,8 @@ def test_get_persistent_queue_sanitizes_db_name_and_uses_user_state_dir(monkeypa
     assert isinstance(queue, FakeSQLiteAckQueue)
     assert captured["auto_commit"] is True
     assert captured["serializer"] is persistent_queue.Base64QueueSerializer
-    assert captured["path"] == str(tmp_path / ".local/state/shyhurricane/prod_db_2026/ingest_queue")
-    assert (tmp_path / ".local/state/shyhurricane/prod_db_2026/ingest_queue").is_dir()
+    assert captured["path"] == str(tmp_path / "application_data/queues/ingest_queue")
+    assert (tmp_path / "application_data/queues/ingest_queue").is_dir()
 
 
 def test_scan_finding_queue_survives_reopen(tmp_path):
@@ -140,7 +140,7 @@ def test_scan_finding_queue_survives_reopen(tmp_path):
 
 
 def test_get_persistent_queue_allows_existing_queue_directory(monkeypatch, tmp_path):
-    queue_path = tmp_path / ".local/state/shyhurricane/db/doc_type_queue"
+    queue_path = tmp_path / "application_data/queues/doc_type_queue"
     queue_path.mkdir(parents=True)
     calls = []
     original_exists = persistent_queue.os.path.exists
@@ -167,7 +167,7 @@ def test_get_persistent_queue_allows_existing_queue_directory(monkeypatch, tmp_p
 
 
 def test_get_persistent_queue_rejects_file_at_queue_path(monkeypatch, tmp_path):
-    queue_path = tmp_path / ".local/state/shyhurricane/db/doc_type_queue"
+    queue_path = tmp_path / "application_data/queues/doc_type_queue"
     queue_path.parent.mkdir(parents=True)
     queue_path.write_text("not a directory")
     original_exists = persistent_queue.os.path.exists

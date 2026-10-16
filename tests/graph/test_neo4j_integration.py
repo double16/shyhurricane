@@ -446,18 +446,18 @@ def test_production_container_parses_without_executing(monkeypatch):
     assert any(node["role"] == "sink" for node in result["nodes"])
 
 
-def test_stock_check_published_response_flow_and_form_request(neo4j, event, graph_paths, monkeypatch):
+def test_published_form_response_flow_and_request(neo4j, event, graph_paths, monkeypatch):
     from shyhurricane.graph.artifacts import ArtifactStore
 
     monkeypatch.setattr("shyhurricane.index.web_resources_pipeline._deobfuscate_javascript", lambda source: source)
-    source = Path("src/docker/unix_command/graph-analysis/test/stockCheck.js").read_text()
+    source = Path("src/docker/unix_command/graph-analysis/test/dataFlow.js").read_text()
     page = event(
-        url="https://graph-test.invalid/product",
-        body="""<form id="stockCheckForm" method="POST"
-      action="/stock"><input name="productId"><select name="storeId"></select></form>
-      <script src="/stockCheck.js"></script>""",
+        url="https://graph-test.invalid/form",
+        body="""<form id="dataForm" method="POST"
+      action="/submit"><input name="fieldOne"><select name="fieldTwo"></select></form>
+      <script src="/dataFlow.js"></script>""",
     )
-    script = event(url="https://graph-test.invalid/stockCheck.js", body=source, mime="text/javascript")
+    script = event(url="https://graph-test.invalid/dataFlow.js", body=source, mime="text/javascript")
     artifacts = ArtifactStore("db")
     try:
         artifacts.register(page)

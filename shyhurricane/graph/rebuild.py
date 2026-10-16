@@ -6,6 +6,7 @@ import os
 import sqlite3
 from contextlib import closing
 
+from shyhurricane.data_paths import add_data_dir_argument, qdrant_location, resolve_data_dir
 from shyhurricane.graph.artifacts import ArtifactStore
 from shyhurricane.graph.policy import ANALYZER_VERSION, library_analysis
 from shyhurricane.graph.query import scope_predicate
@@ -63,12 +64,18 @@ def rebuild(db, *, mode="summary", target=None, dry_run=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database", default=os.environ.get("QDRANT", "shyhurricane.db"))
+    add_data_dir_argument(parser)
     parser.add_argument("--target", help="Host, netloc, or HTTP(S) URL prefix")
     parser.add_argument("--mode", choices=("summary", "full"), default="summary")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
-    print(json.dumps(rebuild(args.database, mode=args.mode, target=args.target, dry_run=args.dry_run)))
+    try:
+        root = resolve_data_dir(args.data_dir)
+        os.environ["DATA_DIR"] = str(root)
+        db = qdrant_location(root)
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
+    print(json.dumps(rebuild(db, mode=args.mode, target=args.target, dry_run=args.dry_run)))
 
 
 if __name__ == "__main__":

@@ -6,7 +6,6 @@ import logging
 import os
 import signal
 import sys
-from pathlib import Path
 
 import torch
 import uvicorn
@@ -30,6 +29,7 @@ import shyhurricane.mcp_server.tools.register_hostname_address  # noqa: F401
 import shyhurricane.mcp_server.tools.register_http_headers  # noqa: F401
 import shyhurricane.mcp_server.tools.status  # noqa: F401
 from shyhurricane.config import configure
+from shyhurricane.data_paths import add_data_dir_argument, configure_data_dir
 from shyhurricane.generator_config import GeneratorConfig, add_generator_args
 from shyhurricane.indexing_wait import indexing_timeout
 from shyhurricane.logging_config import (
@@ -109,10 +109,6 @@ async def main():
     else:
         low_power_default = os.environ.get("LOW_POWER", "False")
 
-    default_database = os.environ.get("QDRANT", str(Path.home() / "Data" / "shyhurricane.db"))
-    if default_database:
-        Path(default_database).parent.mkdir(parents=True, exist_ok=True)
-
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--transport",
@@ -122,9 +118,7 @@ async def main():
     )
     ap.add_argument("--log-file", default=os.environ.get("LOG_FILE"),
                     help="Append all Python logger messages and tracebacks to this file (or set LOG_FILE)")
-    ap.add_argument("--database", default=default_database, help="Database location: path or host:port of qdrant server")
-    ap.add_argument("--graph-database", default=os.environ.get("NEO4J", "shyhurricane.graph.db"),
-                    help="Neo4j storage directory or Bolt URI")
+    add_data_dir_argument(ap)
     ap.add_argument("--host", default="127.0.0.1", help="Host to listen on")
     ap.add_argument("--port", type=int, default=8000, help="Port to listen on for MCP")
     ap.add_argument("--proxy-port", type=int, default=8010, help="Port to listen on for HTTP/HTTPS proxy")
@@ -145,6 +139,10 @@ async def main():
     if args.transport not in TRANSPORTS:
         ap.error(f"Invalid MCP_TRANSPORT: {args.transport}")
     try:
+        args.data_dir = str(configure_data_dir(args.data_dir))
+    except (OSError, ValueError) as error:
+        ap.error(f"Cannot use data directory: {error}")
+    try:
         configure_file_logging(args.log_file, console_enabled=not is_tty)
     except OSError as error:
         ap.error(f"Cannot open log file {args.log_file!r}: {error}")
@@ -154,8 +152,7 @@ async def main():
         logger.info("low_power: CPU is the default pytorch device, defaulting to low power mode")
     set_generator_config(GeneratorConfig.from_args(args).apply_summarizing_default().check())
     set_server_config(ServerConfig(
-        database=args.database,
-        graph_database=args.graph_database,
+        data_dir=args.data_dir,
         task_pool_size=args.task_pool_size,
         ingest_pool_size=args.index_pool_size,
         open_world=_str_to_bool(args.open_world),

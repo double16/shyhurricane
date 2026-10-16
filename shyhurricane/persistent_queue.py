@@ -2,7 +2,6 @@ import asyncio
 import base64
 import logging
 import os
-import re
 import sqlite3
 import threading
 import time
@@ -15,6 +14,7 @@ import persistqueue
 from persistqueue import Empty
 from persistqueue.serializers import pickle as pickle_serializer
 
+from shyhurricane.data_paths import state_path
 from shyhurricane.queue_scopes import ScopedAckQueue
 from shyhurricane.utils import log_gpu_memory_summary, log_heap_stats
 
@@ -52,10 +52,9 @@ class Base64QueueSerializer:
 
 def persistent_queue_path(db: str, queue_name: str) -> Path:
     """Resolve a queue directory without opening or changing its database."""
-    if os.path.exists("/data"):
-        return Path("/data", "queues", queue_name)
-    return Path(Path.home(), ".local", "state", "shyhurricane",
-                re.sub(r"[^A-Za-z0-9_.-]", "_", db), queue_name)
+    if queue_name == "graph_state":
+        return state_path("graph_state")
+    return state_path("queues") / queue_name
 
 
 def open_persistent_queue(path: str, *, auto_resume: bool = True) -> persistqueue.SQLiteAckQueue:

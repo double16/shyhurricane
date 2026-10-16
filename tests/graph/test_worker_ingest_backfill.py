@@ -165,12 +165,12 @@ def test_worker_reconciliation_map_and_health_races(graph_paths, event, monkeypa
     assert queue.ack.call_count == 2
 
 
-def test_start_worker_and_backfill_command(monkeypatch, capsys):
+def test_start_worker_and_backfill_command(monkeypatch, capsys, tmp_path):
     process = MagicMock()
     monkeypatch.setattr(worker.multiprocessing, "Process", lambda **kwargs: process)
     assert worker.start_graph_worker("db", "graph", object(), object(), False) is process
     process.start.assert_called_once()
-    monkeypatch.setattr("sys.argv", ["backfill", "--database", "db"])
+    monkeypatch.setattr("sys.argv", ["backfill", "--data-dir", str(tmp_path)])
     monkeypatch.setattr(backfill, "backfill", lambda db: 5)
     backfill.main()
     assert "Queued 5" in capsys.readouterr().out

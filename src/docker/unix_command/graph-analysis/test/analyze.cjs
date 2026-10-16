@@ -126,13 +126,13 @@ test("virtual framework source filenames retain typescript and DOM selector prov
   assert(!analyze("const items=[];items.push('/not-a-route')").references.some((item) => item.kind === "NAVIGATES_TO"));
 });
 
-test("captured stock-check response reaches HTML within eight edges without request reflection", () => {
+test("captured form-submission response reaches HTML within eight edges without request reflection", () => {
   const fs = require("node:fs");
-  const result = analyze(fs.readFileSync(`${__dirname}/stockCheck.js`, "utf8"), "stockCheck.js");
+  const result = analyze(fs.readFileSync(`${__dirname}/dataFlow.js`, "utf8"), "dataFlow.js");
   assert(reachable(result, n => n.name === "res.text" && n.role === "source", n => n.kind === "sink" && n.name === ".innerHTML"));
   assert(!reachable(result, n => n.name === "FormData", n => n.kind === "sink" && n.name === ".innerHTML"));
-  assert(result.nodes.some(n => n.form_request && n.selector === "#stockCheckForm"));
-  assert(result.nodes.some(n => n.form_data && n.selector === "#stockCheckForm"));
+  assert(result.nodes.some(n => n.form_request && n.selector === "#dataForm"));
+  assert(result.nodes.some(n => n.form_data && n.selector === "#dataForm"));
 });
 
 test("Promise handlers return values, including named callbacks and nested arrow expressions", () => {

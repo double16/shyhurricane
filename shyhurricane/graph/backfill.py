@@ -7,6 +7,7 @@ import os
 from haystack import Document
 from qdrant_client import QdrantClient
 
+from shyhurricane.data_paths import add_data_dir_argument, configure_data_dir, qdrant_location, resolve_data_dir
 from shyhurricane.db import qdrant_host_port
 from shyhurricane.graph.artifacts import ArtifactStore
 from shyhurricane.graph.model import capture_event
@@ -90,9 +91,15 @@ def backfill(db: str, *, stores=None) -> int:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--database", default=os.environ.get("QDRANT", "shyhurricane.db"))
+    add_data_dir_argument(parser)
     args = parser.parse_args()
-    print(f"Queued {backfill(args.database)} stored representations; unavailable original fields remain unknown.")
+    try:
+        root = resolve_data_dir(args.data_dir)
+        configure_data_dir(root)
+        db = qdrant_location(root)
+    except (OSError, ValueError) as error:
+        parser.error(str(error))
+    print(f"Queued {backfill(db)} stored representations; unavailable original fields remain unknown.")
 
 
 if __name__ == "__main__":
