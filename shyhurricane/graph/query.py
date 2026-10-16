@@ -351,6 +351,7 @@ class GraphQuery:
         pending = deque(([key], []) for key in starts)
         result = []
         expansions = 0
+        scope_boundary = False
         deadline = time.monotonic() + 10
         contains = scope_predicate(scope)
         while pending and len(result) < MAX_RESULTS and expansions < MAX_ENTITIES and time.monotonic() < deadline:
@@ -373,6 +374,7 @@ class GraphQuery:
                 contains(url) for url in nodes[current].get("context_urls", [])
             )
             if len(steps) >= max_depth or not inside:
+                scope_boundary |= not inside and bool(adjacent[current])
                 if adjacent[current] and len(steps) >= max_depth:
                     metadata["retrieval_truncated"] = True
                     metadata["truncation_reasons"].append("depth_limit")
@@ -405,13 +407,39 @@ class GraphQuery:
             metadata["analysis_gaps"].append(
                 "Selected seeds have no discovered path within the reported traversal limits"
             )
+            if mode == "flow":
+                destination_role = "source" if reverse else "sink"
+                if not any(node.get("role") == destination_role for node in nodes.values()):
+                    metadata["analysis_gaps"].append(
+                        f"No {destination_role} operations were identified in the selected captured graph"
+                    )
+                if not any(adjacent[seed] for seed in starts):
+                    metadata["analysis_gaps"].append(
+                        "Selected seeds have no incoming flow edges"
+                        if reverse
+                        else "Selected seeds have no outgoing flow edges"
+                    )
+                if scope_boundary:
+                    metadata["analysis_gaps"].append(
+                        "Traversal stopped at the requested scope boundary; "
+                        "related captured resources may require a broader scope"
+                    )
+                metadata["analysis_gaps"].append(
+                    "No source-to-sink path was discovered in the selected captured graph; "
+                    + (
+                        "traversal was truncated"
+                        if metadata["retrieval_truncated"]
+                        else "reported traversal limits were not reached; unresolved analysis may leave missing links"
+                    )
+                )
         return {**metadata, "results": result}
 
     def evidence(self, scope, evidence_id):
         contains = scope_predicate(scope)
         rows = self.store.read(
             "MATCH (e:GraphEvidence {id:$id}) "
-            "WHERE (e._publication_id IS NULL AND EXISTS { MATCH (c:GraphCapture {id:e.capture_id}) "
+            "WHERE (e._publication_id IS NULL AND EXISTS { "
+            "MATCH (c:GraphCapture {id:e.capture_id}) "
             "WHERE c.complete=true }) OR EXISTS { MATCH (p:GraphPublication {id:e._publication_id}) "
             "WHERE p.published_at IS NOT NULL } "
             "OPTIONAL MATCH (context:GraphCapture {id:e.context_owner_id}) "

@@ -534,6 +534,42 @@ retained-history counts; `current` and `retained_history` expose `entity_estimat
 `relationship_estimate`, capture/resource counts, and coverage. Status also includes refresh time
 and age. Empty graphs report zero; wholly uncovered graphs report unavailable estimates.
 
+### JavaScript data-flow coverage
+
+The analyzer separates call arguments from return values and models Promise fulfillment and rejection
+independently. Supported patterns include expression-bodied arrows, lexical callback aliases, nested
+`then` chains, `catch`, `finally`, `Promise.resolve`/`reject`, and `async`/`await`. Constant returns stop
+incoming value propagation. Conditional tests do not create implicit data-flow edges.
+
+Fetch response readers and properties on recognized XMLHttpRequest instances are external sources.
+Request bodies remain separate from response values: a captured request never proves server reflection.
+For example, the stock-check pattern has two independent paths:
+
+```mermaid
+flowchart LR
+    Control[Captured form controls] --> Data[FormData / URLSearchParams]
+    Data --> Request[Request body]
+    Response[Response text] --> Handler[Promise handler returns]
+    Handler --> HTML[innerHTML]
+```
+
+Literal form selectors bind `FormData(form)`, regular submit-handler `this`, and
+`event.currentTarget` to controls in the captured consuming document. Named `FormData.get`/`getAll`
+reads select the requested field. Disabled, unnamed, unchecked, and non-data controls are excluded.
+Form action and method can resolve a fetch destination when both trace to the same captured form.
+Use literal ID selectors or `form[name="..."]` for form ownership; computed selectors remain unresolved.
+
+Module argument/return interfaces support named/default imports, namespace member calls, lexical
+aliases, and explicit named re-exports. Re-export chains are bounded to 32 links and retain supporting
+evidence and capture-version constraints. Shared globals, computed dispatch, missing modules, and
+unknown calls remain conservative summaries or explicit analysis gaps. General heap analysis,
+call-site sensitivity, implicit control flows, and backend execution are not modeled.
+
+An empty trace distinguishes missing seeds, missing source/sink operations, disconnected edges,
+requested scope boundaries, and reached traversal limits through `analysis_gaps` and truncation
+metadata. No result establishes safety. Broaden scope only when authorized, and inspect step evidence.
+The analyzer policy version is now 3; existing captures require an explicit rebuild to gain these links.
+
 Rebuild retained captures explicitly after updating the analyzer image and restarting the service:
 
 ```shell

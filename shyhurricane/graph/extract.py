@@ -20,6 +20,21 @@ from shyhurricane.utils import unix_command_image
 logger = logging.getLogger(__name__)
 
 
+def _successful_control(tag):
+    """Controls included by FormData(form), without an explicit submitter."""
+    if tag.name not in {"input", "select", "textarea"} or not tag.get("name") or tag.has_attr("disabled"):
+        return False
+    for fieldset in tag.find_parents("fieldset", disabled=True):
+        legend = fieldset.find("legend", recursive=False)
+        if legend is None or not any(parent is legend for parent in tag.parents):
+            return False
+    kind = tag.get("type", "").lower()
+    return tag.name != "input" or (
+        kind not in {"submit", "button", "reset", "image"}
+        and (kind not in {"checkbox", "radio"} or tag.has_attr("checked"))
+    )
+
+
 def run_javascript(source: str, filename: str, mode=None) -> dict:
     result = subprocess.run(
         [
@@ -201,6 +216,17 @@ def extract(event: dict, artifacts=None, *, open_world=False, javascript_runner=
                 graph.gaps.append("HTML element budget reached")
                 break
             locator = f"html:{index}:{tag.name}"
+            owner = (
+                (soup.find("form", id=tag["form"]) if tag.get("form") else None)
+                if tag.has_attr("form")
+                else tag.find_parent("form")
+            )
+            form_selectors = []
+            if owner:
+                if owner.get("id"):
+                    form_selectors.append(f"#{owner['id']}")
+                if owner.get("name"):
+                    form_selectors.append(f'form[name="{owner["name"]}"]')
             element = graph.node(
                 "element",
                 identity(event["id"], locator),
@@ -208,6 +234,9 @@ def extract(event: dict, artifacts=None, *, open_world=False, javascript_runner=
                 html_id=tag.get("id"),
                 field_name=tag.get("name"),
                 html_tag=tag.name,
+                form_selectors=form_selectors,
+                disabled=tag.has_attr("disabled"),
+                form_successful=_successful_control(tag),
                 role="source" if tag.name in {"input", "select", "textarea"} else "",
                 capture_id=event["id"],
             )
@@ -231,6 +260,9 @@ def extract(event: dict, artifacts=None, *, open_world=False, javascript_runner=
                     if method != "DIALOG"
                     else None
                 )
+                if target:
+                    graph.nodes[element]["form_target_url"] = graph.nodes[target]["url"]
+                    graph.nodes[element]["form_target_method"] = method
                 controls = list(tag.find_all(["input", "textarea", "select", "button"]))
                 if tag.get("id"):
                     controls += soup.find_all(attrs={"form": tag["id"]})
@@ -248,7 +280,9 @@ def extract(event: dict, artifacts=None, *, open_world=False, javascript_runner=
                             method=override_method,
                             location=locator,
                         )
-                    if control.get("name") and not control.has_attr("disabled") and target:
+                    if control.has_attr("form") and control["form"] != tag.get("id"):
+                        continue
+                    if _successful_control(control) and target:
                         field = graph.node(
                             "field",
                             identity(event["id"], locator, control["name"]),
@@ -460,15 +494,24 @@ def _apply_javascript(graph, page, filename, result, reference, contexts):
             import_key=import_key,
             imported_name=item.get("imported_name"),
             export_name=item.get("export_name"),
-            export_names=item.get("export_names"),
+            export_names=item.get("export_names") or ([item["reexport_name"]] if item.get("reexport_name") else None),
             parameter_index=item.get("parameter_index"),
             return_value=item.get("return_value"),
             selector=item.get("selector"),
+            form_data=item.get("form_data"),
+            form_field=item.get("form_field"),
+            form_request=item.get("form_request"),
+            reexport_name=item.get("reexport_name"),
             context_urls=[context["url"] for context in contexts],
             capture_id=None if item.get("kind") == "storage" else graph.event["id"],
         )
         graph.fact(
-            page, symbols[item["id"]], "CONTAINS", "js.symbol", location=f"{filename}:{item.get('location', '')}"
+            page,
+            symbols[item["id"]],
+            "CONTAINS",
+            "js.symbol",
+            location=f"{filename}:{item.get('location', '')}",
+            snippet=item.get("snippet", ""),
         )
     for edge in result.get("edges", []):
         if edge["source"] in symbols and edge["target"] in symbols:

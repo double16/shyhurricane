@@ -3,7 +3,7 @@
 import hashlib
 import os
 
-ANALYZER_VERSION = 2
+ANALYZER_VERSION = 3
 
 
 def library_analysis(value=None):

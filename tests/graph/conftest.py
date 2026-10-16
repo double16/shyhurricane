@@ -1,3 +1,7 @@
+import json
+import subprocess
+from pathlib import Path
+
 import pytest
 
 from shyhurricane.graph.model import capture_event
@@ -33,3 +37,18 @@ def event():
         )
 
     return create
+
+
+@pytest.fixture
+def javascript_runner():
+    """Run the shipped AST analyzer without Docker or target network access."""
+    analyzer = Path("src/docker/unix_command/graph-analysis/analyze.cjs").resolve()
+
+    def run(source, filename):
+        result = subprocess.run(
+            ["node", str(analyzer)], input=json.dumps({"source": source, "filename": filename}),
+            text=True, capture_output=True, check=True, timeout=15,
+        )
+        return json.loads(result.stdout)
+
+    return run

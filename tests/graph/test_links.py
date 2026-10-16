@@ -142,3 +142,142 @@ def test_link_candidate_memory_budget_subdivides_reads_and_keeps_paging(event, m
     store.read.side_effect = Neo4jError._hydrate_neo4j(code="Neo.ClientError.Statement.SyntaxError", message="syntax")
     with pytest.raises(Neo4jError):
         planner.candidates("selector", "#test")
+
+
+@pytest.mark.parametrize("returns", [False, True])
+def test_reexport_interfaces_forward_local_and_external_proofs(event, returns):
+    graph = Projection(event())
+    capture = graph.event["id"]
+    page = graph.resource(graph.url)
+    importer = graph.node(
+        "parameter",
+        "caller",
+        capture_id=capture,
+        import_key="barrel",
+        imported_name="load",
+        parameter_index=None if returns else 0,
+        return_value=returns,
+    )
+    barrel = graph.node(
+        "symbol",
+        "barrel",
+        capture_id=capture,
+        module_key="barrel",
+        export_names=["load"],
+        imported_name="read",
+        reexport_name="load",
+        import_key="api",
+    )
+    actual = graph.node(
+        "parameter",
+        "actual",
+        capture_id=capture,
+        module_key="api",
+        export_names=["read"],
+        parameter_index=None if returns else 0,
+        return_value=returns,
+    )
+    for node in (importer, barrel, actual):
+        graph.fact(page, node, "CONTAINS", "test", location=node)
+    store = MagicMock()
+    store.read.return_value = []
+    planner = LinkPlanner(store, graph)
+    result = planner.plan()
+    proxies = [node for node in graph.nodes.values() if node["kind"] == "module_interface"]
+    assert len(proxies) == 1
+    proxy = proxies[0]["id"]
+    expected = [(actual, proxy), (proxy, importer)] if returns else [(importer, proxy), (proxy, actual)]
+    assert all(
+        any(edge["source"] == start and edge["target"] == end for edge in result.values()) for start, end in expected
+    )
+    assert all(edge["_proof_local"] for edge in result.values())
+    # A retained external barrel keeps its own proof, without rewriting it into this publication.
+    external = {**graph.nodes[barrel], "id": "external", "evidence_id": "external-proof"}
+    planner.module(graph.nodes[importer], external, True, False)
+    external_proxy = next(
+        node for node in graph.nodes.values() if node["kind"] == "module_interface" and node["id"] != proxy
+    )
+    proof_edge = next(
+        edge
+        for edge in result.values()
+        if external_proxy["id"] in {edge["source"], edge["target"]} and actual in {edge["source"], edge["target"]}
+    )
+    assert proof_edge["evidence_id"] == "external-proof" and not proof_edge["_proof_local"]
+
+
+def test_reexport_cycles_missing_targets_and_budgets_are_bounded(event, monkeypatch):
+    graph = Projection(event())
+    page = graph.resource(graph.url)
+    caller = graph.node("parameter", "caller", capture_id=graph.event["id"], imported_name="read", parameter_index=0)
+    barrel = graph.node(
+        "symbol",
+        "barrel",
+        capture_id=graph.event["id"],
+        module_key="api",
+        export_names=["read"],
+        import_key="api",
+        imported_name="read",
+        reexport_name="read",
+    )
+    for node in (caller, barrel):
+        graph.fact(page, node, "CONTAINS", "test")
+    store = MagicMock()
+    store.read.return_value = []
+    planner = LinkPlanner(store, graph)
+    planner.module(graph.nodes[caller], graph.nodes[barrel], True, True)
+    assert len(planner.links) == 1
+    planner.module(
+        graph.nodes[caller], graph.nodes[barrel], True, True, seen={(str(index), 0, False) for index in range(32)}
+    )
+    assert "Inferred link budget reached" in graph.gaps
+    graph.nodes[barrel]["import_key"] = "missing"
+    planner.module(graph.nodes[caller], graph.nodes[barrel], True, True)
+    assert any("Unresolved re-export" in gap for gap in graph.gaps)
+    planner.module({**graph.nodes[caller], "parameter_index": None}, graph.nodes[barrel], True, True)
+    graph.node_limit = len(graph.nodes)
+    alternate = {**graph.nodes[barrel], "id": "new-barrel"}
+    planner.module(graph.nodes[caller], alternate, True, True)
+    assert "Capture entity budget reached" in graph.gaps
+
+
+def test_form_links_require_ownership_field_and_context(event):
+    graph = Projection(event())
+    capture = graph.event["id"]
+    page = graph.resource(graph.url)
+    read = graph.node("result", "read", capture_id=capture, selector="#form", form_data=True, form_field="name")
+    request = graph.node("call", "request", capture_id=capture, selector="#form", form_request=True)
+    graph.fact(page, read, "CONTAINS", "test")
+    graph.fact(page, request, "CONTAINS", "test")
+    planner = LinkPlanner(MagicMock(), graph)
+    control = {
+        "id": "input",
+        "capture_id": "document",
+        "html_tag": "input",
+        "field_name": "name",
+        "form_selectors": ["#form"],
+    }
+    planner.dom(graph.nodes[read], control, True, False, ["document"])
+    assert len(planner.links) == 1
+    for changes in (
+        {"disabled": True},
+        {"field_name": "secret"},
+        {"field_name": None},
+        {"html_tag": "button"},
+        {"form_selectors": ["#other"]},
+        {"capture_id": "other"},
+    ):
+        planner.dom(graph.nodes[read], control | changes, True, False, ["document"])
+    assert len(planner.links) == 1
+    form = {
+        "id": "form",
+        "html_id": "form",
+        "html_tag": "form",
+        "capture_id": "document",
+        "form_target_url": "https://example.com/save",
+        "form_target_method": "POST",
+    }
+    planner.dom(graph.nodes[request], form, True, False, ["document"])
+    assert any(edge["kind"] == "REQUESTS" for edge in planner.links.values())
+    planner.dom(graph.nodes[request], form | {"form_target_url": None}, True, False, ["document"])
+    planner.dom(graph.nodes[request], form | {"html_tag": "div"}, True, False, ["document"])
+    assert len(planner.links) == 2

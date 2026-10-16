@@ -42,7 +42,10 @@ class LinkPlanner:
                     "WITH other, min(proof.evidence_id) AS evidence_id "
                     "OPTIONAL MATCH (c:GraphCapture {id:other.capture_id}) "
                     "RETURN other{.id,.kind,._logical_id,._publication_id,.capture_id,.imported_name,.export_names,"
-                    ".parameter_index,.return_value,.selector,.html_id,.field_name} AS node, evidence_id, "
+                    ".parameter_index,.return_value,.selector,.html_id,.field_name,.html_tag,.form_selectors,"
+                    ".disabled,.form_successful,.form_data,.form_field,.form_request,"
+                    ".form_target_url,.form_target_method,"
+                    ".import_key,.module_key,.reexport_name} AS node, evidence_id, "
                     "CASE WHEN $capture IN c.context_capture_ids THEN [$capture] ELSE [] END AS contexts "
                     "ORDER BY other.id",
                     value=value,
@@ -89,7 +92,11 @@ class LinkPlanner:
             "id": key,
             "source": logical_source,
             "target": logical_target,
-            "kind": "FLOWS_TO" if rule == "js.module-link" else "READS_FROM",
+            "kind": "FLOWS_TO"
+            if rule == "js.module-link"
+            else "REQUESTS"
+            if rule == "js.form-request"
+            else "READS_FROM",
             "capture_id": importer["capture_id"],
             "evidence_id": proof,
             "classification": "statically_inferred",
@@ -102,10 +109,83 @@ class LinkPlanner:
             **({"context_capture_id": context} if context else {}),
         }
 
-    def module(self, importer, exporter, importer_local, exporter_local):
+    def module(self, importer, exporter, importer_local, exporter_local, seen=None):
+        seen = set() if seen is None else seen
+        signature = (exporter["id"], importer.get("parameter_index"), importer.get("return_value", False))
+        if signature in seen:
+            return
+        if len(seen) >= 32 or len(self.links) >= LINK_LIMIT:
+            self.gap()
+            return
+        seen = seen | {signature}
         if importer.get("imported_name") not in (exporter.get("export_names") or []):
             return
+        if importer.get("reexport_name") and importer.get("module_key"):
+            upstream = [
+                (item, True)
+                for item in list(self.graph.nodes.values())
+                if item.get("import_key") == importer["module_key"]
+            ]
+            upstream.extend(
+                (row["node"] | {"evidence_id": row["evidence_id"]}, False)
+                for row in self.candidates("import_key", importer["module_key"])
+            )
+            for caller, local in upstream:
+                self.module(caller, importer, local, importer_local, seen)
+            return
         parameter = importer.get("parameter_index")
+        if exporter.get("reexport_name") and exporter.get("import_key"):
+            if parameter is None and not importer.get("return_value"):
+                return
+            key = identity(self.capture_id, "reexport", signature)
+            proxy_id = self.graph.node(
+                "module_interface",
+                key,
+                capture_id=self.capture_id,
+                name=exporter["reexport_name"],
+                parameter_index=parameter,
+                return_value=importer.get("return_value", False),
+            )
+            proxy = self.graph.nodes.get(proxy_id)
+            if proxy is None:
+                self.gap()
+                return
+            proof = self.proofs.get(exporter["id"]) if exporter_local else exporter.get("evidence_id")
+            proxy = {
+                **proxy,
+                "imported_name": exporter["imported_name"],
+                "evidence_id": proof,
+                "_proof_external": not exporter_local,
+            }
+            returns = importer.get("return_value") is True
+            self.add(
+                proxy if returns else importer,
+                importer if returns else proxy,
+                importer,
+                "js.module-link",
+                source_local=True if returns else importer_local,
+                target_local=importer_local if returns else True,
+                proof_local=importer_local and not importer.get("_proof_external", False),
+                context=exporter.get("capture_id"),
+            )
+            if exporter_local:
+                self.proofs[proxy_id] = proof
+            candidates = [
+                (item, True)
+                for item in list(self.graph.nodes.values())
+                if item.get("module_key") == exporter["import_key"] and item.get("export_names")
+            ]
+            candidates.extend(
+                (row["node"] | {"evidence_id": row["evidence_id"]}, False)
+                for row in self.candidates("module_key", exporter["import_key"])
+            )
+            if not candidates:
+                gap = f"Unresolved re-export: {exporter['import_key']} export {exporter['imported_name']}"
+                if gap not in self.graph.gaps:
+                    self.graph.gaps.append(gap)
+            for candidate, local in candidates:
+                self.module(proxy, candidate, True, local, seen)
+            return
         returns = importer.get("return_value") is True and exporter.get("return_value") is True
         if not returns and (parameter is None or parameter != exporter.get("parameter_index")):
             return
@@ -117,7 +197,7 @@ class LinkPlanner:
             "js.module-link",
             source_local=exporter_local if returns else importer_local,
             target_local=importer_local if returns else exporter_local,
-            proof_local=importer_local,
+            proof_local=importer_local and not importer.get("_proof_external", False),
         )
 
     def dom(self, selector, element, selector_local, element_local, contexts):
@@ -125,8 +205,32 @@ class LinkPlanner:
         if element.get("html_id"):
             candidates.append(f"#{element['html_id']}")
         if element.get("field_name"):
-            candidates.extend([f"[name=\"{element['field_name']}\"]", f"input[name=\"{element['field_name']}\"]"])
+            candidates.extend([f'[name="{element["field_name"]}"]', f'input[name="{element["field_name"]}"]'])
+        if selector.get("form_data"):
+            candidates = element.get("form_selectors") or []
+            if (
+                element.get("disabled")
+                or not element.get("form_successful", True)
+                or not element.get("field_name")
+                or element.get("html_tag") not in {"input", "select", "textarea"}
+                or (selector.get("form_field") is not None and selector["form_field"] != element.get("field_name"))
+            ):
+                return
         if element.get("capture_id") in contexts and selector.get("selector") in candidates:
+            if selector.get("form_request"):
+                if element.get("html_tag") == "form" and element.get("form_target_url"):
+                    target = self.graph.resource(element["form_target_url"], element["form_target_method"])
+                    self.add(
+                        selector,
+                        self.graph.nodes[target],
+                        selector,
+                        "js.form-request",
+                        source_local=selector_local,
+                        target_local=True,
+                        proof_local=selector_local,
+                        context=element["capture_id"],
+                    )
+                return
             self.add(
                 element,
                 selector,
@@ -145,12 +249,19 @@ class LinkPlanner:
                 modules[node.get("module_key")].append(node)
             if node.get("kind") == "element":
                 elements[node.get("capture_id")].append(node)
-        for node in self.graph.nodes.values():
+        for node in list(self.graph.nodes.values()):
             if node.get("import_key"):
+                found = False
                 for other in modules[node["import_key"]]:
+                    found |= node.get("imported_name") in (other.get("export_names") or [])
                     self.module(node, other, True, True)
                 for row in self.candidates("module_key", node["import_key"]):
-                    self.module(node, row["node"], True, False)
+                    found |= node.get("imported_name") in (row["node"].get("export_names") or [])
+                    self.module(node, row["node"] | {"evidence_id": row["evidence_id"]}, True, False)
+                if not found and (node.get("return_value") or node.get("parameter_index") is not None):
+                    gap = f"Unresolved module interface: {node['import_key']} export {node.get('imported_name')}"
+                    if gap not in self.graph.gaps:
+                        self.graph.gaps.append(gap)
             if node.get("export_names") and node.get("module_key"):
                 for row in self.candidates("import_key", node["module_key"]):
                     other = {**row["node"], "evidence_id": row["evidence_id"]}
@@ -167,9 +278,16 @@ class LinkPlanner:
                 if node.get("html_id"):
                     selectors.append(f"#{node['html_id']}")
                 if node.get("field_name"):
-                    selectors.extend([f"[name=\"{node['field_name']}\"]", f"input[name=\"{node['field_name']}\"]"])
-                for selector in selectors:
+                    selectors.extend([f'[name="{node["field_name"]}"]', f'input[name="{node["field_name"]}"]'])
+                selectors.extend(node.get("form_selectors") or [])
+                for selector in set(selectors):
                     for row in self.candidates("selector", selector):
                         other = {**row["node"], "evidence_id": row["evidence_id"]}
                         self.dom(other, node, False, True, row["contexts"] or [])
+        resolved_requests = {link["source"] for link in self.links.values() if link["kind"] == "REQUESTS"}
+        for node in self.graph.nodes.values():
+            if node.get("form_request") and node["id"] not in resolved_requests:
+                gap = f"Unresolved form-bound request: {node['selector']} requires captured form action and method"
+                if gap not in self.graph.gaps:
+                    self.graph.gaps.append(gap)
         return self.links

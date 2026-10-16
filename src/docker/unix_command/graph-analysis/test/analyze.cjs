@@ -125,3 +125,104 @@ test("virtual framework source filenames retain typescript and DOM selector prov
   assert(analyze("createServerReference('id')").gaps.some((gap) => gap.includes("backend")));
   assert(!analyze("const items=[];items.push('/not-a-route')").references.some((item) => item.kind === "NAVIGATES_TO"));
 });
+
+test("captured stock-check response reaches HTML within eight edges without request reflection", () => {
+  const fs = require("node:fs");
+  const result = analyze(fs.readFileSync(`${__dirname}/stockCheck.js`, "utf8"), "stockCheck.js");
+  assert(reachable(result, n => n.name === "res.text" && n.role === "source", n => n.kind === "sink" && n.name === ".innerHTML"));
+  assert(!reachable(result, n => n.name === "FormData", n => n.kind === "sink" && n.name === ".innerHTML"));
+  assert(result.nodes.some(n => n.form_request && n.selector === "#stockCheckForm"));
+  assert(result.nodes.some(n => n.form_data && n.selector === "#stockCheckForm"));
+});
+
+test("Promise handlers return values, including named callbacks and nested arrow expressions", () => {
+  for (const source of [
+    `Promise.resolve(location.hash).then(x => x).then(x => eval(x))`,
+    `const pass = x => x; const alias = pass; Promise.resolve(location.hash).then(alias).then(x => eval(x))`,
+    `Promise.resolve(location.hash).then(x => Promise.resolve(x).then(y => y)).then(x => eval(x))`,
+    `const p = Promise.resolve(location.hash); p.then(null).then(x => eval(x))`,
+    `async function pass(x) {return x;} async function use(){eval(await pass(location.hash));}`,
+    `const pass = async x => x; pass(location.hash).then(x => eval(x))`,
+    `async function use(){const response = await fetch('/api'); const alias = response; eval(await alias.text());}`,
+    `function consume(response){return response.json();} fetch('/api').then(consume).then(x=>eval(x));`,
+    `fetch('/api').then(undefined).catch(()=>null).then(response=>response.text()).then(x=>eval(x));`,
+    `Promise.reject('error').catch(()=>fetch('/api')).then(response=>response.text()).then(x=>eval(x));`,
+  ]) {
+    const result = analyze(source);
+    assert(reachable(result, n => n.name === "location.hash" || n.role === "source", n => n.name === "eval" && n.role === "sink"), source);
+  }
+});
+
+test("constant returns, ignored inputs, unrelated Promises, and custom methods stay disconnected", () => {
+  for (const source of [
+    `Promise.resolve(location.hash).then(x => 'safe').then(x => eval(x))`,
+    `Promise.resolve(location.hash).then(x => x).then(x => 'safe').then(x => eval(x))`,
+    `function safe(x){return 'safe'} eval(safe(location.hash));`,
+    `const safe=x=>'safe'; eval(safe(location.hash));`,
+    `Promise.resolve(location.hash); Promise.resolve('safe').then(x=>eval(x));`,
+    `const object={text(){return 'safe'},then(fn){return 'safe'}}; eval(object.text()); object.then(x=>eval(x));`,
+    `Promise.reject(location.hash).then(x=>eval(x));`,
+    `Promise.resolve('safe').finally(()=>location.hash).then(x=>eval(x));`,
+    `fetch('/api',{body:location.hash}).then(r=>r.text()).then(x=>eval(x));`,
+    `const xhr={responseText:'safe'}; eval(xhr.responseText);`,
+  ]) {
+    const result = analyze(source);
+    assert(!reachable(result, n => n.name === "location.hash", n => n.name === "eval" && n.role === "sink"), source);
+    if (source.includes("object=")) assert(!result.nodes.some(n=>n.role === "source"));
+  }
+});
+
+test("Promise rejection channels support recovery, forwarding and finally without fulfilled leaks", () => {
+  for (const source of [
+    `Promise.reject(location.hash).catch(x=>x).then(x=>eval(x));`,
+    `Promise.reject(location.hash).then().catch(x=>eval(x));`,
+    `Promise.reject(location.hash).then(null,x=>x).then(x=>eval(x));`,
+    `Promise.resolve(location.hash).finally(()=>{}).then(x=>eval(x));`,
+    `Promise.reject(location.hash).finally(()=>{}).catch(x=>eval(x));`,
+    `Promise.resolve('safe').finally(()=>Promise.reject(location.hash)).catch(x=>eval(x));`,
+    `Promise.resolve(location.hash).then(undefined, 1).then(x=>eval(x));`,
+    `async function fail(){await Promise.reject(location.hash);} fail().catch(x=>eval(x));`,
+    `async function fail(x){throw x;} fail(location.hash).catch(x=>eval(x));`,
+    `async function fail(x){return Promise.reject(x);} fail(location.hash).catch(x=>eval(x));`,
+    `Promise.resolve('safe').then(()=>{throw location.hash}).catch(x=>eval(x));`,
+  ]) {
+    const result = analyze(source);
+    assert(reachable(result, n=>n.name === "location.hash", n=>n.name === "eval" && n.role === "sink"),source);
+  }
+  const result = analyze(`Promise.reject(location.hash).catch(x=>'safe').then(x=>eval(x));`);
+  assert(!reachable(result,n=>n.name==='location.hash',n=>n.name==='eval'&&n.role==='sink'));
+});
+
+test("recognized XHR instances and aliases expose response sources and request destinations", () => {
+  const result=analyze(`const client = new XMLHttpRequest(); const alias = client;
+    alias.open('POST','/api'); alias.send(location.hash); eval(alias.responseText);`);
+  assert(result.references.some(r=>r.url==='/api'&&r.method==='POST'));
+  assert(reachable(result,n=>n.role==='source'&&n.name==='alias.responseText',n=>n.name==='eval'&&n.role==='sink'));
+  assert(!reachable(result,n=>n.name==='location.hash',n=>n.name==='alias.responseText'));
+});
+
+test("form selectors preserve regular this, currentTarget, aliases and named field reads", () => {
+  const result=analyze(`const form=document.getElementById('one');
+    form.addEventListener('submit',function(e){const f=this; const data=new FormData(f); eval(data.get('name'));});
+    form.addEventListener('submit',e=>{eval(new URLSearchParams(new FormData(e.currentTarget)))});
+    form.addEventListener('submit',()=>{new FormData(this)});
+    new FormData(unknown); new FormData(form).get(computed);`);
+  assert(result.nodes.some(n=>n.form_field==='name'&&n.selector==='#one'));
+  assert(result.nodes.filter(n=>n.form_data&&n.selector==='#one').length>=3);
+  assert(result.gaps.some(g=>g.includes('Unresolved FormData form')));
+  assert(result.gaps.some(g=>g.includes('Unresolved FormData field')));
+});
+
+test("module interfaces support namespace calls, lexical aliases, default functions and reexports", () => {
+  const result=analyze(`import * as api from './api.js'; const send=api.send; send(location.hash);
+    export {read as load} from './data.js';
+    export default async function(value){return value;}`);
+  assert(result.nodes.some(n=>n.imported_name==='send'&&n.parameter_index===0));
+  assert(result.nodes.some(n=>n.imported_name==='send'&&n.return_value));
+  assert(result.nodes.some(n=>n.reexport_name==='load'&&n.imported_name==='read'));
+  assert(result.nodes.some(n=>n.export_names?.includes('default')&&n.return_value));
+  const alias=analyze(`const identity=x=>x; export const pass=identity;`);
+  assert(alias.nodes.some(n=>n.export_names?.includes('pass')&&n.parameter_index===0));
+  const imported=analyze(`import {read} from './data.js'; export {read as load};`);
+  assert(imported.nodes.some(n=>n.reexport_name==='load'&&n.imported_name==='read'));
+});

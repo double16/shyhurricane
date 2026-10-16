@@ -13,12 +13,16 @@ def kinds(graph):
 
 
 def test_html_forms_links_base_and_overrides(event):
-    graph = extract(event(body="""<html><base href="/base/"><a href="next#route">next</a>
+    graph = extract(
+        event(
+            body="""<html><base href="/base/"><a href="next#route">next</a>
         <link rel="modulepreload" href="app.js"><img src="image.png"><iframe src="frame"></iframe>
         <meta http-equiv="refresh" content="0; url=/new">
         <form id="form" action="save" method="POST"><input name="name"><input disabled name="skip">
         <button formaction="/override" formmethod="PUT">go</button></form><input form="form" name="outside">
-        <script type="importmap">{"imports":{"app":"./app.js"}}</script></html>"""))
+        <script type="importmap">{"imports":{"app":"./app.js"}}</script></html>"""
+        )
+    )
     assert {"SUBMITS_TO", "LOADS", "NAVIGATES_TO", "IMPORTS"} <= kinds(graph)
     resources = [node for node in graph.nodes.values() if node["kind"] == "resource"]
     assert any(node["url"] == "https://example.com/base/save" and node["method"] == "POST" for node in resources)
@@ -294,3 +298,31 @@ def test_library_publication_budgets_do_not_leave_dangling_edges_or_leak_to_othe
     assert any("budget reached" in gap for gap in graph.gaps)
     resource = next(node for node in graph.nodes.values() if node["kind"] == "resource")
     assert json.loads(resource["analysis_details"])[0]["published_nodes"] == 500
+
+
+def test_form_successful_controls_respect_fieldsets_submitters_and_explicit_owners(event):
+    graph = extract(
+        event(
+            body="""<form id="one" name="first" action="/save">
+      <fieldset disabled><legend><input name="legend"></legend><input name="outsideLegend"></fieldset>
+      <fieldset disabled><input name="noLegend"></fieldset>
+      <input name="checked" type="checkbox" checked><input name="unchecked" type="checkbox">
+      <input name="radio" type="radio"><input name="submit" type="submit"><button name="button">Go</button>
+      <input name="wrong" form="other"><input name="none" form=""><textarea name="text"></textarea>
+      </form><input name="external" form="one"><form id="other"><input name="otherField"></form>"""
+        )
+    )
+    controls = {node["field_name"]: node for node in graph.nodes.values() if node.get("field_name")}
+    for name in ("legend", "checked", "text", "external", "otherField"):
+        assert controls[name]["form_successful"]
+    for name in ("outsideLegend", "noLegend", "unchecked", "radio", "submit", "button"):
+        assert not controls[name]["form_successful"]
+    assert controls["none"]["form_selectors"] == []
+    assert controls["wrong"]["form_selectors"] == ["#other"]
+    assert controls["external"]["form_selectors"] == ["#one", 'form[name="first"]']
+    submitted = {
+        graph.nodes[edge["source"]]["name"]
+        for edge in graph.edges.values()
+        if graph.evidence[edge["evidence_id"]]["rule"] == "html.form-field"
+    }
+    assert submitted == {"legend", "checked", "text", "external", "otherField", "wrong"}

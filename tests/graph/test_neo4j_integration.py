@@ -26,7 +26,7 @@ def neo4j():
         scope = "n.url STARTS WITH 'https://graph-test.invalid/' OR n.url STARTS WITH 'https://cdn.graph-test.invalid/'"
         with store.connect().session() as session:
             while session.run(
-                f"MATCH (n) WHERE {scope} MATCH (n)-[r]-() WITH DISTINCT r LIMIT 500 " "DELETE r RETURN count(r) AS n"
+                f"MATCH (n) WHERE {scope} MATCH (n)-[r]-() WITH DISTINCT r LIMIT 500 DELETE r RETURN count(r) AS n"
             ).single()["n"]:
                 pass
             while session.run(
@@ -299,7 +299,7 @@ def test_cross_module_flows_resolve_in_either_order(neo4j, event, reverse):
         ),
         javascript_runner=runner,
     )
-    for projection in ([exporter, importer] if reverse else [importer, exporter]):
+    for projection in [exporter, importer] if reverse else [importer, exporter]:
         neo4j.publish(projection)
     source = next(node["id"] for node in importer.nodes.values() if node.get("name") == "location.hash")
     service = GraphQuery(neo4j)
@@ -444,3 +444,75 @@ def test_production_container_parses_without_executing(monkeypatch):
     monkeypatch.setattr(extractor, "unix_command_image", lambda: os.environ["GRAPH_ANALYZER_TEST_IMAGE"])
     result = extractor.run_javascript("while(true){};const input=location.hash;eval(input);", "app.js")
     assert any(node["role"] == "sink" for node in result["nodes"])
+
+
+def test_stock_check_published_response_flow_and_form_request(neo4j, event, graph_paths, monkeypatch):
+    from shyhurricane.graph.artifacts import ArtifactStore
+
+    monkeypatch.setattr("shyhurricane.index.web_resources_pipeline._deobfuscate_javascript", lambda source: source)
+    source = Path("src/docker/unix_command/graph-analysis/test/stockCheck.js").read_text()
+    page = event(
+        url="https://graph-test.invalid/product",
+        body="""<form id="stockCheckForm" method="POST"
+      action="/stock"><input name="productId"><select name="storeId"></select></form>
+      <script src="/stockCheck.js"></script>""",
+    )
+    script = event(url="https://graph-test.invalid/stockCheck.js", body=source, mime="text/javascript")
+    artifacts = ArtifactStore("db")
+    try:
+        artifacts.register(page)
+        neo4j.publish(extract(page, artifacts, javascript_runner=runner))
+        projection = extract(script, artifacts, javascript_runner=runner)
+        neo4j.publish(projection)
+        sink = next(
+            node for node in projection.nodes.values() if node["kind"] == "sink" and node["name"] == ".innerHTML"
+        )
+        query = GraphQuery(neo4j)
+        result = query.paths(script["data"]["url"], sink["id"], direction="backward", mode="flow", max_depth=8)
+        assert any(path["nodes"][-1]["name"] == "res.text" for path in result["results"])
+        for path in result["results"]:
+            for step in path["steps"]:
+                assert query.evidence("graph-test.invalid", step["evidence_id"])["snippet"]
+        request = next(node for node in projection.nodes.values() if node.get("form_request"))
+        _, edges, _ = query.snapshot("graph-test.invalid")
+        assert any(edge["source"] == request["id"] and edge["kind"] == "REQUESTS" for edge in edges)
+        controls = query.elements("graph-test.invalid", kinds=["element"], detail="full")["results"]
+        for control in (node for node in controls if node.get("field_name")):
+            assert query.paths("graph-test.invalid", control["id"], end=request["id"], mode="flow")["results"]
+            assert not query.paths("graph-test.invalid", control["id"], end=sink["id"], mode="flow")["results"]
+    finally:
+        artifacts.close()
+
+
+@pytest.mark.parametrize("order", [(0, 1, 2), (2, 1, 0), (1, 0, 2)])
+def test_reexport_async_returns_publish_in_either_order_and_respect_versions(neo4j, event, order):
+    sources = [
+        ("app.js", "import {pass} from './barrel.js'; async function run(){eval(await pass(location.hash));}"),
+        ("barrel.js", "export {identity as pass} from './api.js';"),
+        ("api.js", "export async function identity(value){return value;}"),
+    ]
+    projections = [
+        extract(
+            event(url=f"https://graph-test.invalid/{name}", mime="text/javascript", body=body), javascript_runner=runner
+        )
+        for name, body in sources
+    ]
+    for index in order:
+        neo4j.publish(projections[index])
+    source = next(node for node in projections[0].nodes.values() if node["name"] == "location.hash")
+    query = GraphQuery(neo4j)
+    result = query.paths("graph-test.invalid", source["id"], mode="flow", max_depth=32, detail="full")
+    assert any(path["nodes"][-1]["name"] == "eval" for path in result["results"])
+    for path in result["results"]:
+        for step in path["steps"]:
+            assert query.evidence("graph-test.invalid", step["evidence_id"])["snippet"]
+    # Replacing the barrel must invalidate shortcuts owned by other captures too.
+    changed = event(
+        url="https://graph-test.invalid/barrel.js",
+        mime="text/javascript",
+        body="export function pass(value){return 'safe';}",
+        timestamp="2026-02-01T00:00:00Z",
+    )
+    neo4j.publish(extract(changed, javascript_runner=runner))
+    assert not query.paths("graph-test.invalid", source["id"], mode="flow", max_depth=32)["results"]
+    assert query.paths("graph-test.invalid", source["id"], mode="flow", max_depth=32, historical=True)["results"]
