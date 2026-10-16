@@ -1,3 +1,4 @@
-graph-analysis/node_modules/
-graph-analysis/coverage/
-graph-analysis/test/
+coverage/
+coverage.tmp/
+test/
+node_modules/
