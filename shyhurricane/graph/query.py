@@ -1,8 +1,9 @@
 """Bounded, deterministic semantic queries; no user-supplied Cypher."""
 
 import json
+import logging
 import time
-from collections import defaultdict, deque
+from collections import deque
 from itertools import batched
 from urllib.parse import urlsplit
 
@@ -11,6 +12,8 @@ from neo4j.exceptions import Neo4jError
 from shyhurricane.graph.discovery import INTERPRETATION, ResourceDiscovery, in_context, present
 from shyhurricane.graph.model import FLOW_KINDS, JOURNEY_KINDS, identity, web_url
 from shyhurricane.graph.visibility import public_properties, visible_node, visible_relationship
+
+logger = logging.getLogger(__name__)
 
 MAX_RESULTS = 1000
 MAX_ENTITIES = 10000
@@ -47,8 +50,23 @@ class GraphQuery:
     def __init__(self, store):
         self.store = store
 
-    def snapshot(self, scope: str, *, historical=False, as_of: float | None = None):
+    def snapshot(self, scope: str, *, historical=False, as_of: float | None = None, context_url=None, role=None):
         contains = scope_predicate(scope)
+        # Filter membership before the bounded working set is selected. Context archives have
+        # no digest; ordinary publications always have one, even after retirement.
+        element_filter = ""
+        if context_url is not None or role is not None:
+            element_filter = (
+                "AND any(n IN [a,b] WHERE ($role IS NULL OR n.role=$role) "
+                "AND ($context_url IS NULL OR n.url=$context_url OR "
+                "(n.context_owner_id IS NULL AND $context_url IN coalesce(n.context_urls,[])) OR EXISTS { "
+                "OPTIONAL MATCH (p:GraphPublication {id:n.context_owner_id}) "
+                "OPTIONAL MATCH (archive:GraphPublication {capture_id:n.context_owner_id}) "
+                "WHERE archive.digest IS NULL "
+                "OPTIONAL MATCH (owner:GraphCapture {id:n.context_owner_id}) "
+                "WITH coalesce(p.context_urls,archive.context_urls,owner.context_urls,[]) AS urls "
+                "WHERE $context_url IN urls RETURN 1 AS matched })) "
+            )
         # Fetch one bounded immutable working set and save result pages after traversal.
         references = self.store.read(
             "MATCH (c:GraphCapture) WHERE c.complete=true AND ($as_of IS NULL OR c.observed_at <= $as_of) "
@@ -78,10 +96,13 @@ class GraphQuery:
             "WHERE later.complete=true AND later.resource_key=owner.resource_key "
             "AND later.observed_at>owner.observed_at "
             "AND ($as_of IS NULL OR later.observed_at <= $as_of) }) }) "
+            f"{element_filter}"
             "RETURN r.id AS membership_id,c.id AS capture_id, "
             "CASE WHEN a._owner_capture_id=c.id THEN a._publication_id "
             "WHEN b._owner_capture_id=c.id THEN b._publication_id ELSE null END AS publication_id "
             "ORDER BY r.id LIMIT 20001",
+            context_url=context_url,
+            role=role,
             as_of=as_of,
             historical=historical,
             prefix=scope if "://" in scope else None,
@@ -130,121 +151,185 @@ class GraphQuery:
             },
         )
 
-    def hydrate(self, references):
-        """Load a fixed membership set within the retired-generation cleanup grace period."""
-        deadline = time.monotonic() + 120
-        edges, entities, metadata, contexts = {}, {}, {}, {}
-        timed_out = False
-        memory_blocked = False
+    def hydrate(self, references, *, state=None):
+        """Hydrate complete membership windows within the immutable-generation grace period."""
+        state = {} if state is None else state
+        started = state.setdefault("started", time.monotonic())
+        deadline = started + 120
+        entities, metadata, contexts = (state.setdefault(key, {}) for key in ("entities", "metadata", "contexts"))
+        attempted_nodes, attempted_owners, attempted_contexts = (
+            state.setdefault(key, set()) for key in ("attempted_nodes", "attempted_owners", "attempted_contexts")
+        )
+        timed_out, memory_blocked, unavailable = (
+            state.get(key, False) for key in ("timed_out", "memory_blocked", "unavailable")
+        )
+        subdivisions = state.get("subdivisions", 0)
+        result = []
 
-        def fetch(batch, statement, parameter):
-            nonlocal timed_out, memory_blocked
-            if time.monotonic() >= deadline:
+        def fetch(batch, statement, parameter, stage):
+            nonlocal timed_out, memory_blocked, unavailable, subdivisions
+            read_started = time.monotonic()
+            remaining = deadline - read_started
+            if remaining < 0.001:
                 timed_out = True
                 return []
             try:
-                return self.store.read(statement, **{parameter: list(batch)})
+                rows = self.store.read(statement, timeout=min(10, remaining), **{parameter: list(batch)})
+                if len(rows) < len(batch):
+                    unavailable = True
+                logger.debug(
+                    "Graph hydration stage=%s batch=%s returned=%s seconds=%.3f remaining_seconds=%.3f",
+                    stage,
+                    len(batch),
+                    len(rows),
+                    time.monotonic() - read_started,
+                    max(0, deadline - time.monotonic()),
+                )
+                return rows
             except Neo4jError as error:
-                if not (error.code or "").endswith("MemoryPoolOutOfMemoryError"):
+                code = error.code or ""
+                if "TransactionTimedOut" in code and time.monotonic() >= deadline:
+                    timed_out = True
+                    return []
+                if not code.endswith("MemoryPoolOutOfMemoryError"):
                     raise
+                logger.warning(
+                    "Graph hydration memory limit stage=%s batch=%s seconds=%.3f remaining_seconds=%.3f",
+                    stage,
+                    len(batch),
+                    time.monotonic() - read_started,
+                    max(0, deadline - time.monotonic()),
+                )
                 if len(batch) == 1:
                     memory_blocked = True
                     return []
+                subdivisions += 1
                 middle = len(batch) // 2
-                return fetch(batch[:middle], statement, parameter) + fetch(batch[middle:], statement, parameter)
+                return fetch(batch[:middle], statement, parameter, stage) + fetch(
+                    batch[middle:], statement, parameter, stage
+                )
 
-        def read_batches(values, statement, parameter):
-            nonlocal timed_out
+        def read_batches(values, statement, parameter, stage):
             for batch in batched(values, 500):
-                if time.monotonic() >= deadline:
-                    timed_out = True
+                yield from fetch(batch, statement, parameter, stage)
+                if timed_out:
                     break
-                yield from fetch(batch, statement, parameter)
 
-        owners = sorted(
-            {
-                (
-                    reference["capture_id"],
-                    reference["publication_id"] or identity("legacy-publication", reference["capture_id"]),
+        for window in batched(references, 500):
+            if time.monotonic() >= deadline:
+                timed_out = True
+                break
+            edges = {
+                row["relationship"]["id"]: row
+                for row in read_batches(
+                    [reference["membership_id"] for reference in window],
+                    "MATCH (a:GraphEntity)-[r:RELATES]->(b:GraphEntity) USING INDEX SEEK r:RELATES(id) "
+                    "WHERE r.id IN $ids RETURN a.id AS source_id,b.id AS target_id,properties(r) AS relationship",
+                    "ids",
+                    "relationships",
                 )
-                for reference in references
             }
-        )
-        for row in read_batches(
-            [{"capture": capture, "publication": publication} for capture, publication in owners],
-            "UNWIND $owners AS owner OPTIONAL MATCH (p:GraphPublication {id:owner.publication}) "
-            "OPTIONAL MATCH (c:GraphCapture {id:owner.capture}) "
-            "RETURN owner.capture AS capture_id,owner.publication AS publication_id, "
-            "coalesce(p.gaps,c.gaps,[]) AS gaps,coalesce(p.observed_at,c.observed_at) AS observed_at, "
-            "coalesce(p.analysis_details,c.analysis_details) AS analysis_details",
-            "owners",
-        ):
-            metadata[(row["capture_id"], row["publication_id"])] = row
-        for row in read_batches(
-            [reference["membership_id"] for reference in references],
-            "UNWIND $ids AS id MATCH (a:GraphEntity)-[r:RELATES {id:id}]->(b:GraphEntity) "
-            "RETURN a.id AS source_id,b.id AS target_id,properties(r) AS relationship",
-            "ids",
-        ):
-            edges[row["relationship"]["id"]] = row
-        node_ids = sorted({row[key] for row in edges.values() for key in ("source_id", "target_id")})
-        for row in read_batches(
-            node_ids, "UNWIND $ids AS id MATCH (n:GraphEntity {id:id}) RETURN properties(n) AS node", "ids"
-        ):
-            entities[row["node"]["id"]] = row["node"]
-        context_ids = sorted({node["context_owner_id"] for node in entities.values() if node.get("context_owner_id")})
-        for row in read_batches(
-            [{"id": value, "legacy": identity("legacy-publication", value)} for value in context_ids],
-            "UNWIND $contexts AS owner OPTIONAL MATCH (p:GraphPublication {id:owner.id}) "
-            "OPTIONAL MATCH (archive:GraphPublication {id:owner.legacy}) "
-            "OPTIONAL MATCH (c:GraphCapture {id:owner.id}) RETURN owner.id AS id, "
-            "coalesce(p.context_urls,archive.context_urls,c.context_urls,[]) AS context_urls",
-            "contexts",
-        ):
-            contexts[row["id"]] = row["context_urls"]
-        result = []
-        for reference in references:
-            row = edges.get(reference["membership_id"])
-            owner = metadata.get(
+            owners = {
                 (
                     reference["capture_id"],
                     reference["publication_id"] or identity("legacy-publication", reference["capture_id"]),
                 )
-            )
-            if row is None or owner is None or row["source_id"] not in entities or row["target_id"] not in entities:
-                continue
-            source, target = entities[row["source_id"]], entities[row["target_id"]]
-            if any(
-                node.get("context_owner_id") and node["context_owner_id"] not in contexts for node in (source, target)
+                for reference in window
+            } - attempted_owners
+            for row in read_batches(
+                [{"capture": capture, "publication": publication} for capture, publication in sorted(owners)],
+                "UNWIND $owners AS owner OPTIONAL MATCH (p:GraphPublication {id:owner.publication}) "
+                "OPTIONAL MATCH (c:GraphCapture {id:owner.capture}) "
+                "WITH owner,p,c WHERE p IS NOT NULL OR c IS NOT NULL "
+                "RETURN owner.capture AS capture_id,owner.publication AS publication_id, "
+                "coalesce(p.gaps,c.gaps,[]) AS gaps,coalesce(p.observed_at,c.observed_at) AS observed_at, "
+                "coalesce(p.analysis_details,c.analysis_details) AS analysis_details",
+                "owners",
+                "metadata",
             ):
-                continue
-            result.append(
-                {
-                    **row,
-                    "source": source,
-                    "target": target,
-                    "gaps": owner["gaps"],
-                    "analysis_details": owner.get("analysis_details"),
-                    "observed_at": owner["observed_at"],
-                    "source_context_urls": contexts.get(source.get("context_owner_id")),
-                    "target_context_urls": contexts.get(target.get("context_owner_id")),
-                }
-            )
-        if len(result) < len(references):
-            if memory_blocked:
-                return result, ["Snapshot record exceeds the Neo4j transaction memory budget"], ["memory_limit"]
-            return (
-                result,
-                [
+                metadata[(row["capture_id"], row["publication_id"])] = row
+            attempted_owners.update(owners)
+            node_ids = {row[key] for row in edges.values() for key in ("source_id", "target_id")} - attempted_nodes
+            for row in read_batches(
+                sorted(node_ids),
+                "MATCH (n:GraphEntity) USING INDEX SEEK n:GraphEntity(id) "
+                "WHERE n.id IN $ids RETURN properties(n) AS node",
+                "ids",
+                "entities",
+            ):
+                entities[row["node"]["id"]] = row["node"]
+            attempted_nodes.update(node_ids)
+            context_ids = {
+                entities[key]["context_owner_id"] for key in entities if entities[key].get("context_owner_id")
+            } - attempted_contexts
+            for row in read_batches(
+                [{"id": value, "legacy": identity("legacy-publication", value)} for value in sorted(context_ids)],
+                "UNWIND $contexts AS owner OPTIONAL MATCH (p:GraphPublication {id:owner.id}) "
+                "OPTIONAL MATCH (archive:GraphPublication {id:owner.legacy}) "
+                "OPTIONAL MATCH (c:GraphCapture {id:owner.id}) "
+                "WITH owner,p,archive,c WHERE p IS NOT NULL OR archive IS NOT NULL OR c IS NOT NULL "
+                "RETURN owner.id AS id, "
+                "coalesce(p.context_urls,archive.context_urls,c.context_urls,[]) AS context_urls",
+                "contexts",
+                "contexts",
+            ):
+                contexts[row["id"]] = row["context_urls"]
+            attempted_contexts.update(context_ids)
+            for reference in window:
+                row = edges.get(reference["membership_id"])
+                owner = metadata.get(
                     (
-                        "Snapshot hydration budget reached"
-                        if timed_out
-                        else "Selected generation became unavailable; repeat the graph query"
+                        reference["capture_id"],
+                        reference["publication_id"] or identity("legacy-publication", reference["capture_id"]),
                     )
-                ],
-                ["time_limit" if timed_out else "generation_unavailable"],
-            )
-        return result, [], []
+                )
+                if row is None or owner is None or row["source_id"] not in entities or row["target_id"] not in entities:
+                    continue
+                source, target = entities[row["source_id"]], entities[row["target_id"]]
+                if any(
+                    node.get("context_owner_id") and node["context_owner_id"] not in contexts
+                    for node in (source, target)
+                ):
+                    continue
+                result.append(
+                    {
+                        **row,
+                        "source": source,
+                        "target": target,
+                        "gaps": owner["gaps"],
+                        "analysis_details": owner.get("analysis_details"),
+                        "observed_at": owner["observed_at"],
+                        "source_context_urls": contexts.get(source.get("context_owner_id")),
+                        "target_context_urls": contexts.get(target.get("context_owner_id")),
+                    }
+                )
+        gaps, reasons = [], []
+        if len(result) < len(references):
+            for condition, reason, message in (
+                (timed_out, "time_limit", "Snapshot hydration budget reached"),
+                (memory_blocked, "memory_limit", "Snapshot record exceeds the Neo4j transaction memory budget"),
+                (
+                    unavailable,
+                    "generation_unavailable",
+                    "Selected generation became unavailable; repeat the graph query",
+                ),
+            ):
+                if condition:
+                    reasons.append(reason)
+                    gaps.append(message)
+        log = logger.warning if reasons else logger.info
+        log(
+            "Graph hydration complete selected=%s completed=%s seconds=%.3f subdivisions=%s reasons=%s",
+            len(references),
+            len(result),
+            time.monotonic() - started,
+            subdivisions,
+            reasons,
+        )
+        state.update(
+            timed_out=timed_out, memory_blocked=memory_blocked, unavailable=unavailable, subdivisions=subdivisions
+        )
+        return result, gaps, reasons
 
     def endpoints(self, scope, *, url=None, method=None, historical=False, as_of=None):
         nodes, relationships, metadata = self.snapshot(scope, historical=historical, as_of=as_of)
@@ -280,14 +365,17 @@ class GraphQuery:
         as_of=None,
     ):
         present({}, detail)
-        nodes, _, metadata = self.snapshot(scope, historical=historical, as_of=as_of)
+        normalized_context = web_url(context_url, fragment=True) if context_url is not None else None
+        nodes, _, metadata = self.snapshot(
+            scope, historical=historical, as_of=as_of, context_url=normalized_context, role=role
+        )
         matches = [
             node
             for node in nodes.values()
             if (not kinds or node["kind"] in kinds)
             and (not role or node.get("role") == role)
             and (not url or node["url"] == web_url(url, fragment=True))
-            and (context_url is None or in_context(node, web_url(context_url, fragment=True)))
+            and (context_url is None or in_context(node, normalized_context))
         ]
         matches.sort(
             key=lambda item: (
@@ -320,13 +408,14 @@ class GraphQuery:
             raise ValueError("direction must be forward or backward")
         if type(max_depth) is not int or not 1 <= max_depth <= 32:
             raise ValueError("max_depth must be between 1 and 32")
-        nodes, relationships, metadata = self.snapshot(scope, historical=historical, as_of=as_of)
+        from shyhurricane.graph.traversal import TraversalSnapshot
 
-        discovery = ResourceDiscovery(nodes, relationships)
+        reader = TraversalSnapshot(self, scope, historical=historical, as_of=as_of)
+        nodes, metadata = reader.nodes, reader.metadata
         start_role = ("sink" if direction == "backward" else "source") if mode == "flow" else None
         end_role = ("source" if direction == "backward" else "sink") if mode == "flow" else None
-        starts = discovery.select(start, start_role)
-        targets = set(discovery.select(end, end_role)) if end else set()
+        starts = reader.select(start, start_role)
+        targets = set(reader.select(end, end_role, boundary=True)) if end else set()
         if mode == "flow":
             metadata.update(
                 resolved_start_ids=starts[:20],
@@ -343,18 +432,30 @@ class GraphQuery:
         allowed = FLOW_KINDS if mode == "flow" else JOURNEY_KINDS if mode == "journey" else None
         if kinds:
             allowed = set(kinds) & allowed if allowed is not None else set(kinds)
-        adjacent = defaultdict(list)
         reverse = direction == "backward"
-        for item in relationships:
-            if allowed is None or item["kind"] in allowed:
-                adjacent[item["target"] if reverse else item["source"]].append(item)
+        adjacent = reader.adjacent
         pending = deque(([key], []) for key in starts)
         result = []
         expansions = 0
         scope_boundary = False
-        deadline = time.monotonic() + 10
+        cpu_started = time.thread_time()
         contains = scope_predicate(scope)
-        while pending and len(result) < MAX_RESULTS and expansions < MAX_ENTITIES and time.monotonic() < deadline:
+        while (
+            pending
+            and len(result) < MAX_RESULTS
+            and expansions < MAX_ENTITIES
+            and time.thread_time() - cpu_started < 10
+        ):
+            # Prefetch only this breadth-first layer; repeated path states share adjacency.
+            depth = len(pending[0][1])
+            frontier = list(
+                dict.fromkeys(
+                    path[-1]
+                    for path, steps in pending
+                    if len(steps) == depth and not (end and steps and path[-1] in targets)
+                )
+            )[:500]
+            reader.expand(frontier, direction, allowed, probe=depth >= max_depth, depth=depth)
             visited, steps = pending.popleft()
             current = visited[-1]
             if steps and (
@@ -374,12 +475,12 @@ class GraphQuery:
                 contains(url) for url in nodes[current].get("context_urls", [])
             )
             if len(steps) >= max_depth or not inside:
-                scope_boundary |= not inside and bool(adjacent[current])
-                if adjacent[current] and len(steps) >= max_depth:
+                scope_boundary |= not inside and bool(adjacent.get(current) or reader.probes.get(current))
+                if (adjacent.get(current) or reader.probes.get(current)) and len(steps) >= max_depth:
                     metadata["retrieval_truncated"] = True
                     metadata["truncation_reasons"].append("depth_limit")
                 continue
-            for item in adjacent[current]:
+            for item in adjacent.get(current, []):
                 expansions += 1
                 target = item["source"] if reverse else item["target"]
                 if target not in visited:
@@ -392,7 +493,7 @@ class GraphQuery:
                 metadata["truncation_reasons"].append("result_limit")
             if expansions >= MAX_ENTITIES:
                 metadata["truncation_reasons"].append("expansion_limit")
-            if time.monotonic() >= deadline:
+            if time.thread_time() - cpu_started >= 10:
                 metadata["truncation_reasons"].append("time_limit")
         metadata["truncation_reasons"] = sorted(set(metadata["truncation_reasons"]))
         if not starts:
@@ -411,9 +512,9 @@ class GraphQuery:
                 destination_role = "source" if reverse else "sink"
                 if not any(node.get("role") == destination_role for node in nodes.values()):
                     metadata["analysis_gaps"].append(
-                        f"No {destination_role} operations were identified in the selected captured graph"
+                        f"No {destination_role} operations were reached in the explored captured graph"
                     )
-                if not any(adjacent[seed] for seed in starts):
+                if not metadata["retrieval_truncated"] and not any(adjacent.get(seed) for seed in starts):
                     metadata["analysis_gaps"].append(
                         "Selected seeds have no incoming flow edges"
                         if reverse
@@ -432,6 +533,12 @@ class GraphQuery:
                         else "reported traversal limits were not reached; unresolved analysis may leave missing links"
                     )
                 )
+        if metadata["retrieval_truncated"]:
+            metadata["analysis_gaps"] = [
+                gap.replace("is absent or has no associated", "could not be fully resolved or has no selected")
+                for gap in metadata["analysis_gaps"]
+            ]
+        reader.finish(len(result))
         return {**metadata, "results": result}
 
     def evidence(self, scope, evidence_id):
@@ -446,7 +553,8 @@ class GraphQuery:
             "OPTIONAL MATCH (publication:GraphPublication {id:e.context_owner_id}) "
             "OPTIONAL MATCH (analysis:GraphPublication {id:e._publication_id}) "
             "OPTIONAL MATCH (capture:GraphCapture {id:e.capture_id}) "
-            "RETURN properties(e) AS evidence, coalesce(publication.context_urls,context.context_urls) AS context_urls, "
+            "RETURN properties(e) AS evidence, "
+            "coalesce(publication.context_urls,context.context_urls) AS context_urls, "
             "coalesce(analysis.analysis_details,capture.analysis_details) AS analysis_details",
             id=evidence_id,
         )

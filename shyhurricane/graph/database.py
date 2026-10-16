@@ -2,6 +2,7 @@
 
 import hashlib
 import logging
+import math
 import os
 import re
 import threading
@@ -141,8 +142,16 @@ class GraphStore:
                 self.driver = None
                 self.schema_ready = False
 
-    def read(self, statement: str, **parameters) -> list[dict]:
-        with self.connect().session(database="neo4j") as session:
+    def read(self, statement: str, *, timeout: float | None = None, **parameters) -> list[dict]:
+        """Read with managed retries normally, or one deadline-bounded transaction."""
+        if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
+            raise ValueError("Graph read timeout must be finite and positive")
+        with self.connect().session(database="neo4j", default_access_mode="READ") as session:
+            if timeout is not None:
+                # Explicit transactions do not perform driver-managed retries, which could
+                # otherwise outlive the caller's remaining hydration budget.
+                with session.begin_transaction(timeout=min(10, timeout)) as transaction:
+                    return [dict(row) for row in transaction.run(statement, **parameters)]
 
             @unit_of_work(timeout=10)
             def read(tx):
@@ -172,10 +181,18 @@ class GraphStore:
             "GraphPublication",
         ):
             session.run(
-                f"CREATE CONSTRAINT {label.lower()}_id IF NOT EXISTS " f"FOR (n:{label}) REQUIRE n.id IS UNIQUE"
+                f"CREATE CONSTRAINT {label.lower()}_id IF NOT EXISTS FOR (n:{label}) REQUIRE n.id IS UNIQUE"
             ).consume()
         session.run("CREATE INDEX graph_entity_url IF NOT EXISTS FOR (n:GraphEntity) ON (n.url)").consume()
-        for field in ("module_key", "import_key", "capture_id", "selector", "_publication_id", "context_owner_id"):
+        for field in (
+            "module_key",
+            "import_key",
+            "capture_id",
+            "selector",
+            "_publication_id",
+            "context_owner_id",
+            "_logical_id",
+        ):
             session.run(f"CREATE INDEX graph_entity_{field} IF NOT EXISTS FOR (n:GraphEntity) ON (n.{field})").consume()
         session.run("CREATE INDEX graph_capture_host IF NOT EXISTS FOR (n:GraphCapture) ON (n.host)").consume()
         session.run(
@@ -190,12 +207,18 @@ class GraphStore:
         session.run("CREATE INDEX graph_rel_id IF NOT EXISTS FOR ()-[r:RELATES]-() ON (r.id)").consume()
         session.run("CREATE INDEX graph_rel_capture IF NOT EXISTS FOR ()-[r:RELATES]-() ON (r.capture_id)").consume()
         session.run(
+            "CREATE INDEX graph_publication_capture IF NOT EXISTS FOR (n:GraphPublication) ON (n.capture_id)"
+        ).consume()
+        session.run(
             "CREATE INDEX graph_publication_retired IF NOT EXISTS FOR (n:GraphPublication) ON (n.state,n.retired_at)"
         ).consume()
         session.run(
-            "CREATE INDEX graph_capture_resource IF NOT EXISTS "
-            "FOR (n:GraphCapture) ON (n.resource_key, n.observed_at)"
+            "CREATE INDEX graph_capture_resource IF NOT EXISTS FOR (n:GraphCapture) ON (n.resource_key, n.observed_at)"
         ).consume()
+
+        session.run("MERGE (n:GraphState {id:'publication_revision'}) ON CREATE SET n.value=0").consume()
+        # Hydration uses explicit seek hints, so newly created indexes must be online.
+        session.run("CALL db.awaitIndexes(30)").consume()
 
     def publish(self, projection):
         from shyhurricane.graph.publication import GraphPublisher

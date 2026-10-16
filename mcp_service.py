@@ -117,7 +117,7 @@ async def main():
         help="Transport: streamable-http (default), sse, or streamable-http-modern (stateless)"
     )
     ap.add_argument("--log-file", default=os.environ.get("LOG_FILE"),
-                    help="Append all Python logger messages and tracebacks to this file (or set LOG_FILE)")
+                    help="Append Python logs here (or set LOG_FILE; default: <data-dir>/logs/shyhurricane.log)")
     add_data_dir_argument(ap)
     ap.add_argument("--host", default="127.0.0.1", help="Host to listen on")
     ap.add_argument("--port", type=int, default=8000, help="Port to listen on for MCP")
@@ -142,6 +142,8 @@ async def main():
         args.data_dir = str(configure_data_dir(args.data_dir))
     except (OSError, ValueError) as error:
         ap.error(f"Cannot use data directory: {error}")
+    if not args.log_file:
+        args.log_file = os.path.join(args.data_dir, "logs", "shyhurricane.log")
     try:
         configure_file_logging(args.log_file, console_enabled=not is_tty)
     except OSError as error:

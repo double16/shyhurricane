@@ -46,7 +46,9 @@ def application(event):
     other = graph.resource("https://example.com/unrelated")
     separate = graph.node("source", "separate", url="https://example.com/other.js", role="source")
     graph.fact(other, separate, "CONTAINS", "test.other")
-    service = GraphQuery(None)
+    from test_query import Store
+
+    service = GraphQuery(Store(graph))
     calls = []
 
     def snapshot(scope, **kwargs):

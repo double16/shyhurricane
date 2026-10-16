@@ -1,23 +1,35 @@
 """Closed-world relationship and data-flow tools over captured application artifacts."""
 
 import asyncio
+import logging
 from typing import Annotated, Literal
 
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
 
 from shyhurricane.graph.query import GraphQuery, scope_predicate
 from shyhurricane.indexing_wait import IndexingStatus, indexing_scope, wait_for_indexing
 from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
 from shyhurricane.result_pages import Pagination, paged_results
 
+logger = logging.getLogger(__name__)
+
+
+def trim_input(value):
+    """Remove incidental boundary whitespace without coercing invalid input types."""
+    return value.strip() if isinstance(value, str) else value
+
+
+TrimmedString = Annotated[str, BeforeValidator(trim_input)]
+
 Scope = Annotated[
-    str,
+    TrimmedString,
     Field(
         description="Application scope: hostname, host:port, or HTTP(S) URL prefix. "
-        "Hostname scopes include subdomains; URL scopes restrict scheme, host, and path prefix."
+        "Hostname scopes include subdomains; URL scopes restrict scheme, host, and path prefix. "
+        "Surrounding whitespace is trimmed from all graph string arguments and kinds entries."
     ),
 ]
 Historical = Annotated[
@@ -44,6 +56,7 @@ Depth = Annotated[
 ]
 Direction = Annotated[
     Literal["forward", "backward"],
+    BeforeValidator(trim_input),
     Field(
         description="Traversal direction: forward follows outgoing relationships; backward follows incoming "
         "relationships. For flow traces, forward seeks sinks and backward seeks sources "
@@ -51,7 +64,7 @@ Direction = Annotated[
     ),
 ]
 ElementId = Annotated[
-    str,
+    TrimmedString,
     Field(
         description="Element ID from find_application_elements results[].id, resource ID from "
         "find_application_endpoints results[].id, or exact captured resource URL; "
@@ -59,7 +72,7 @@ ElementId = Annotated[
     ),
 ]
 JourneyEndpoint = Annotated[
-    str,
+    TrimmedString,
     Field(
         description="Exact captured resource URL or opaque resource ID from find_application_elements "
         "results[].id filtered to resource kinds, or find_application_endpoints results[].id. "
@@ -70,13 +83,15 @@ JourneyEndpoint = Annotated[
 
 Detail = Annotated[
     Literal["compact", "full"],
+    BeforeValidator(trim_input),
     Field(
         description="Result detail: compact (default) keeps IDs, roles, URLs, locations and evidence references; "
         "full includes all public graph properties. Selection and traversal are unchanged."
     ),
 ]
 ExactUrl = Annotated[
-    str | None, Field(description="Exact resource URL filter, not a prefix or text search. Null applies no URL filter.")
+    TrimmedString | None,
+    Field(description="Exact resource URL filter, not a prefix or text search. Null applies no URL filter."),
 ]
 
 
@@ -97,6 +112,11 @@ class GraphResult(BaseModel):
 
 @indexing_scope()
 async def query(ctx, tool, operation, scope, **arguments):
+    scope = trim_input(scope)
+    arguments = {
+        key: [trim_input(item) for item in value] if isinstance(value, list) else trim_input(value)
+        for key, value in arguments.items()
+    }
     await log_tool_history(ctx, tool, scope=scope, **arguments)
     server = await get_server_context()
     if server.graph_store is None:
@@ -112,6 +132,7 @@ async def query(ctx, tool, operation, scope, **arguments):
     except ValueError as error:
         raise ToolError(str(error)) from error
     except Exception as error:
+        logger.exception("Application graph query failed: tool=%s operation=%s scope=%s", tool, operation, scope)
         raise ToolError("Application graph query failed; inspect Neo4j health and ingest backlog") from error
 
 
@@ -122,7 +143,7 @@ async def find_application_endpoints(
     scope: Scope,
     url: ExactUrl = None,
     method: Annotated[
-        str | None,
+        TrimmedString | None,
         Field(description="Exact HTTP method filter, ignoring case, such as GET or POST. Null includes all methods."),
     ] = None,
     historical: Historical = False,
@@ -164,7 +185,7 @@ async def find_application_elements(
     ctx: Context,
     scope: Scope,
     kinds: Annotated[
-        list[str] | None,
+        list[TrimmedString] | None,
         Field(
             description="Filter by case-sensitive element kind strings, matching any listed kind; "
             "examples: resource, element, field, cookie, origin. Omitted, null, or [] means "
@@ -173,20 +194,21 @@ async def find_application_elements(
     ] = None,
     role: Annotated[
         Literal["source", "sink"] | None,
+        BeforeValidator(trim_input),
         Field(
             description="Filter by static data-flow role: source reads input, sink consumes data. "
             "Omitted or null includes all roles; classifications are investigation candidates."
         ),
     ] = None,
     url: Annotated[
-        str | None,
+        TrimmedString | None,
         Field(
             description="Exact element resource URL filter, not a prefix or text search. "
             "Omitted or null applies no URL filter."
         ),
     ] = None,
     context_url: Annotated[
-        str | None,
+        TrimmedString | None,
         Field(
             description="Exact page URL: match elements at that URL or with that consuming-document context. "
             "Includes associated external scripts; null applies no context filter."
@@ -230,7 +252,7 @@ async def find_application_relationships(
     element_id: ElementId,
     direction: Direction = "forward",
     kinds: Annotated[
-        list[str] | None,
+        list[TrimmedString] | None,
         Field(
             description="Filter by case-sensitive relationship kind strings, matching any listed kind; "
             "examples: CONTAINS, LOADS, NAVIGATES_TO, SUBMITS_TO, FLOWS_TO. Omitted, null, "
@@ -274,7 +296,7 @@ async def trace_application_data_flow(
     scope: Scope,
     start: ElementId,
     end: Annotated[
-        str | None,
+        TrimmedString | None,
         Field(
             description="Optional destination element ID from find_application_elements results[].id, "
             "resource ID from find_application_endpoints results[].id, or exact resource URL in the same scope. "
@@ -356,7 +378,7 @@ async def fetch_application_graph_evidence(
     ctx: Context,
     scope: Scope,
     evidence_id: Annotated[
-        str,
+        TrimmedString,
         Field(
             description="Opaque evidence ID from results[].steps[].evidence_id returned by "
             "find_application_relationships, trace_application_data_flow, or "

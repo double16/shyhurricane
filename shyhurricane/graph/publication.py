@@ -158,12 +158,15 @@ class GraphPublisher:
                 "WITH c MATCH (p:GraphPublication {id:$generation}) "
                 "WHERE p.state='staging' AND c.staging_publication_id=p.id "
                 "AND coalesce(c.active_publication_id,'')=p.expected_active "
-                "WITH c,p, coalesce(c.active_publication_id,$legacy) AS previous "
+                "MERGE (revision:GraphState {id:'publication_revision'}) "
+                "SET revision.value=coalesce(revision.value,0)+1 "
+                "WITH c,p,revision.value AS revision, coalesce(c.active_publication_id,$legacy) AS previous "
                 "SET c += $capture, c.complete=true, c.active_publication_id=p.id, "
                 "c.staging_publication_id=null, c.published_at=timestamp()/1000.0, "
-                "p.state='published', p.published_at=c.published_at "
-                "WITH previous,p OPTIONAL MATCH (old:GraphPublication {id:previous}) "
-                "SET old.state='retired', old.retired_at=timestamp()/1000.0 RETURN p.id AS id",
+                "p.state='published', p.published_at=c.published_at, p.published_revision=revision "
+                "WITH previous,p,revision OPTIONAL MATCH (old:GraphPublication {id:previous}) "
+                "SET old.state='retired', old.retired_at=timestamp()/1000.0, old.retired_revision=revision "
+                "RETURN p.id AS id",
                 capture=capture,
                 generation=generation,
                 legacy=identity("legacy-publication", capture["id"]),
@@ -254,7 +257,7 @@ class GraphPublisher:
         )
         for batch in batched(ids, WRITE_BATCH_SIZE):
             rows = self.store.read(
-                "UNWIND $ids AS id MATCH (n:GraphEntity {id:id}) " f"WHERE {visible_node('n')} RETURN n.id AS id",
+                f"UNWIND $ids AS id MATCH (n:GraphEntity {{id:id}}) WHERE {visible_node('n')} RETURN n.id AS id",
                 ids=list(batch),
             )
             if {row["id"] for row in rows} != set(batch):

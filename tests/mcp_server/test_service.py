@@ -317,6 +317,35 @@ async def test_log_file_option_and_environment_precedence(service_runtime, monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["default", "environment", "cli"])
+async def test_default_log_file_uses_resolved_data_directory(service_runtime, monkeypatch, tmp_path, source):
+    selected = tmp_path / source
+    monkeypatch.setenv("DATA_DIR", str(selected))
+    if source == "default":
+        monkeypatch.delenv("DATA_DIR")
+        monkeypatch.setattr("shyhurricane.data_paths.default_data_dir", lambda: selected)
+    elif source == "cli":
+        monkeypatch.setenv("DATA_DIR", str(tmp_path / "other"))
+        monkeypatch.setattr(service.sys, "argv", ["mcp_service.py", "--data-dir", str(selected)])
+    await service.main()
+    service.configure_file_logging.assert_called_once_with(
+        str(selected / "logs" / "shyhurricane.log"), console_enabled=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_unwritable_default_log_file_fails_before_services_start(service_runtime, monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    service.configure_file_logging.side_effect = PermissionError("permission denied")
+    with pytest.raises(SystemExit) as error:
+        await service.main()
+    assert error.value.code == 2
+    assert str(tmp_path / "logs" / "shyhurricane.log") in capsys.readouterr().err
+    service.get_server_context.assert_not_awaited()
+    service.set_generator_config.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_unwritable_log_file_fails_before_services_start(service_runtime, monkeypatch, capsys):
     monkeypatch.setenv("LOG_FILE", "/unwritable/server.log")
     service.configure_file_logging.side_effect = PermissionError("permission denied")

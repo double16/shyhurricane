@@ -30,3 +30,15 @@ def test_relationship_with_capture_selects_generation_and_falls_back_to_active_p
         "WHEN edge._build_capture_id=capture.id THEN edge._publication_id=selected_generation "
         f"ELSE {visible_relationship('edge')} END)"
     )
+
+
+@pytest.mark.parametrize("helper", ["node", "relationship"])
+def test_frozen_visibility_uses_revision_intervals_and_legacy_archives(helper):
+    from shyhurricane.graph.visibility import visible_node
+
+    condition = (visible_node if helper == "node" else visible_relationship)("record", revision="$watermark")
+    assert "published_revision,0)<=$watermark" in condition
+    assert "retired_revision>$watermark" in condition
+    assert "['retired','abandoned','staging']" in condition
+    assert "archive.digest IS NULL" in condition
+    assert "selected_generation" not in condition

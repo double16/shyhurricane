@@ -516,3 +516,338 @@ def test_reexport_async_returns_publish_in_either_order_and_respect_versions(neo
     neo4j.publish(extract(changed, javascript_runner=runner))
     assert not query.paths("graph-test.invalid", source["id"], mode="flow", max_depth=32)["results"]
     assert query.paths("graph-test.invalid", source["id"], mode="flow", max_depth=32, historical=True)["results"]
+
+
+@pytest.mark.parametrize("storage", ["inline", "publication", "capture", "archive"])
+def test_element_filters_preserve_effective_contexts_and_require_same_endpoint(neo4j, storage):
+    from shyhurricane.graph.model import identity
+
+    page = "https://graph-test.invalid/filter-page"
+    other = "https://graph-test.invalid/other-page"
+    script = "https://cdn.graph-test.invalid/filters.js"
+    owner = "filter-context-owner"
+    capture = "filter-capture"
+    nodes = [
+        {
+            "id": "context-source",
+            "url": script,
+            "kind": "result",
+            "role": "source",
+            "name": "context source",
+            "capture_id": capture,
+            "context_urls": [page],
+        },
+        {
+            "id": "direct-sink",
+            "url": page,
+            "kind": "call",
+            "role": "sink",
+            "name": "direct sink",
+            "capture_id": capture,
+        },
+        {
+            "id": "wrong-source",
+            "url": script,
+            "kind": "result",
+            "role": "source",
+            "name": "wrong context",
+            "capture_id": capture,
+            "context_urls": [other],
+        },
+    ]
+    if storage != "inline":
+        nodes[0].update(context_owner_id=owner, context_urls=[other])
+    with neo4j.connect().session() as session:
+        session.run(
+            "CREATE (:GraphCapture {id:$capture,url:$script,host:'cdn.graph-test.invalid',complete:true, "
+            "resource_key:$script,observed_at:1.0})",
+            capture=capture,
+            script=script,
+        ).consume()
+        session.run("UNWIND $nodes AS row CREATE (n:GraphEntity) SET n += row", nodes=nodes).consume()
+        session.run(
+            "MATCH (a:GraphEntity {id:'context-source'}), (b:GraphEntity {id:'direct-sink'}), "
+            "(wrong:GraphEntity {id:'wrong-source'}) "
+            "CREATE (a)-[:RELATES {id:'matching-edge',capture_id:$capture}]->(b), "
+            "(wrong)-[:RELATES {id:'split-predicate-edge',capture_id:$capture}]->(b)",
+            capture=capture,
+        ).consume()
+        if storage in {"capture", "archive"}:
+            session.run(
+                "CREATE (:GraphCapture {id:$owner,url:$script,host:'cdn.graph-test.invalid', context_urls:$contexts})",
+                owner=owner,
+                script=script,
+                contexts=[page] if storage == "capture" else [other],
+            ).consume()
+        if storage in {"publication", "archive"}:
+            session.run(
+                "CREATE (:GraphPublication {id:$id,capture_id:$owner,url:$script,context_urls:[$page]})",
+                id=owner if storage == "publication" else identity("legacy-publication", owner),
+                owner=owner,
+                script=script,
+                page=page,
+            ).consume()
+    service = GraphQuery(neo4j)
+    baseline = service.elements("graph-test.invalid", detail="full")["results"]
+    for role in (None, "source", "sink"):
+        for context in (None, page, other):
+            expected = [
+                node
+                for node in baseline
+                if (role is None or node.get("role") == role)
+                and (context is None or node["url"] == context or context in node.get("context_urls", []))
+            ]
+            result = service.elements("graph-test.invalid", role=role, context_url=context, detail="full")
+            assert result["results"] == expected
+    result = service.elements("graph-test.invalid", role="source", context_url=page)
+    assert [node["id"] for node in result["results"]] == ["context-source"]
+    # Checking membership, rather than just final Python filtering, catches split-endpoint matches.
+    memberships = []
+    read = neo4j.read
+
+    def record(statement, **parameters):
+        rows = read(statement, **parameters)
+        if "AS membership_id" in statement:
+            memberships.extend(row["membership_id"] for row in rows)
+        return rows
+
+    neo4j.read = record
+    service.elements("graph-test.invalid", role="source", context_url=page)
+    assert memberships == ["matching-edge"]
+    assert [node["id"] for node in service.elements(page, role="source", context_url=page)["results"]] == [
+        "context-source"
+    ]
+    if storage != "inline":
+        # An explicit empty normalized context suppresses stale inline/capture context values.
+        label = "GraphCapture" if storage == "capture" else "GraphPublication"
+        context_id = identity("legacy-publication", owner) if storage == "archive" else owner
+        with neo4j.connect().session() as session:
+            session.run(f"MATCH (n:{label} {{id:$id}}) SET n.context_urls=[]", id=context_id).consume()
+        assert not service.elements("graph-test.invalid", role="source", context_url=page)["results"]
+
+
+def test_focused_elements_are_not_displaced_by_unrelated_relationship_limit(neo4j):
+    with neo4j.connect().session() as session:
+        session.run(
+            "CREATE (:GraphCapture {id:'filter-budget',url:'https://graph-test.invalid/budget', "
+            "host:'graph-test.invalid',resource_key:'filter-budget',complete:true,observed_at:1.0}), "
+            "(a:GraphEntity {id:'budget-a',kind:'result',url:'https://graph-test.invalid/budget',name:'noise'}), "
+            "(b:GraphEntity {id:'budget-b',kind:'result',url:'https://graph-test.invalid/budget',name:'target', "
+            "role:'source'}), "
+            "(c:GraphEntity {id:'budget-c',kind:'result',url:'https://graph-test.invalid/budget',name:'noise'}) "
+            "WITH a,b,c UNWIND range(1,20001) AS i "
+            "CREATE (a)-[:RELATES {id:'a'+toString(i),capture_id:'filter-budget'}]->(c) "
+            "WITH DISTINCT b,c CREATE (b)-[:RELATES {id:'z-focused',capture_id:'filter-budget'}]->(c)"
+        ).consume()
+    service = GraphQuery(neo4j)
+    result = service.elements("graph-test.invalid", role="source", context_url="https://graph-test.invalid/budget")
+    assert [node["id"] for node in result["results"]] == ["budget-b"]
+    assert not result["retrieval_truncated"]
+
+
+def test_filtered_elements_keep_temporal_and_staged_publication_visibility(neo4j, event, monkeypatch):
+    from shyhurricane.graph import publication
+    from shyhurricane.graph.model import Projection
+
+    url = "https://graph-test.invalid/filter-versions"
+
+    def projection(timestamp, role):
+        graph = Projection(event(url=url, timestamp=timestamp))
+        resource = graph.resource(url)
+        node = graph.node("result", f"candidate-{role}", role=role, capture_id=graph.event["id"])
+        graph.fact(resource, node, "CONTAINS", "test-filter")
+        return graph
+
+    old = projection("2026-01-01T00:00:00Z", "source")
+    recent = projection("2026-02-01T00:00:00Z", "sink")
+    neo4j.publish(old)
+    neo4j.publish(recent)
+    service = GraphQuery(neo4j)
+    for options in ({}, {"historical": True}, {"as_of": old.event["observed_at"]}):
+        baseline = service.elements("graph-test.invalid", detail="full", **options)["results"]
+        for role in ("source", "sink"):
+            result = service.elements("graph-test.invalid", role=role, context_url=url, detail="full", **options)
+            assert result["results"] == [node for node in baseline if node.get("role") == role]
+    before = service.elements("graph-test.invalid", role="sink", context_url=url)
+    original_write = publication.write_batches
+
+    def check_staged(*args):
+        original_write(*args)
+        assert service.elements("graph-test.invalid", role="sink", context_url=url) == before
+
+    monkeypatch.setattr(publication, "write_batches", check_staged)
+    next(node for node in recent.nodes.values() if node.get("role") == "sink")["name"] = "replacement"
+    neo4j.publish(recent)
+    assert service.elements("graph-test.invalid", role="sink", context_url=url)["results"][0]["name"] == "replacement"
+
+
+def test_hydration_queries_seek_existing_id_indexes(neo4j, event, monkeypatch):
+    graph = extract(event(url="https://graph-test.invalid/hydration-plan", body='<a href="/next">next</a>'))
+    neo4j.publish(graph)
+    read = neo4j.read
+    plans = {}
+
+    def operators(plan):
+        return [plan["operatorType"]] + [
+            operator for child in plan.get("children", []) for operator in operators(child)
+        ]
+
+    def inspect(statement, **parameters):
+        if "USING INDEX SEEK" in statement:
+            with neo4j.connect().session(database="neo4j") as session:
+                summary = session.run("EXPLAIN " + statement, **parameters).consume()
+                plans["relationships" if "AS source_id" in statement else "entities"] = operators(summary.plan)
+        return read(statement, **parameters)
+
+    monkeypatch.setattr(neo4j, "read", inspect)
+    assert GraphQuery(neo4j).elements("graph-test.invalid")["results"]
+    assert any("DirectedRelationshipIndexSeek" in operator for operator in plans["relationships"])
+    assert any("NodeUniqueIndexSeek" in operator for operator in plans["entities"])
+    assert all("Unwind" not in operator and "Apply" not in operator for plan in plans.values() for operator in plan)
+
+
+def frontier_projection(event, *, timestamp="2026-01-01T00:00:00Z"):
+    from shyhurricane.graph.model import Projection
+
+    graph = Projection(event(url="https://graph-test.invalid/frontier", timestamp=timestamp))
+    source = graph.node("source", "frontier-source", role="source", capture_id=graph.event["id"])
+    middle = graph.node("symbol", "frontier-middle", capture_id=graph.event["id"])
+    sink = graph.node("sink", "frontier-sink", role="sink", capture_id=graph.event["id"])
+    graph.fact(source, middle, "FLOWS_TO", "test.frontier")
+    graph.fact(middle, sink, "CALL_ARGUMENT", "test.frontier")
+    return graph, source, middle, sink
+
+
+def test_frontier_ignores_disconnected_relationships_and_uses_indexed_anchors(neo4j, event, monkeypatch):
+    import time
+
+    graph, source, _, sink = frontier_projection(event)
+    neo4j.publish(graph)
+    with neo4j.connect().session() as session:
+        session.run(
+            "CREATE (:GraphCapture {id:'frontier-noise',url:'https://graph-test.invalid/noise', "
+            "host:'graph-test.invalid',resource_key:'frontier-noise',complete:true,observed_at:1.0}), "
+            "(a:GraphEntity {id:'frontier-noise-a',kind:'symbol',url:'https://graph-test.invalid/noise'}), "
+            "(b:GraphEntity {id:'frontier-noise-b',kind:'symbol',url:'https://graph-test.invalid/noise'}) "
+            "WITH a,b UNWIND range(1,22001) AS i "
+            "CREATE (a)-[:RELATES {id:'!'+toString(i),kind:'FLOWS_TO',capture_id:'frontier-noise'}]->(b)"
+        ).consume()
+    read = neo4j.read
+    hydrated = set()
+    profiles = {}
+
+    def inspect(statement, **parameters):
+        if "AS source_id" in statement:
+            hydrated.update(parameters["ids"])
+            assert len(parameters["ids"]) <= 500
+        if "traversal:frontier" in statement and "frontier" not in profiles:
+            with neo4j.connect().session() as session:
+                rows = session.run("PROFILE " + statement, **parameters)
+                list(rows)
+                profiles["frontier"] = rows.consume().profile
+        if "traversal:seeds" in statement and "seeds" not in profiles:
+            with neo4j.connect().session() as session:
+                profiles["seeds"] = session.run("EXPLAIN " + statement, **parameters).consume().plan
+        return read(statement, **parameters)
+
+    monkeypatch.setattr(neo4j, "read", inspect)
+    service = GraphQuery(neo4j)
+    monkeypatch.setattr(service, "snapshot", lambda *a, **kw: pytest.fail("No whole-scope snapshot"))
+    for trial in range(3):
+        started = time.monotonic()
+        result = service.paths("graph-test.invalid", source, end=sink, mode="flow")
+        print(f"frontier trial={trial + 1} seconds={time.monotonic() - started:.3f} hydrated={len(hydrated)}")
+        assert result["results"] and not result["retrieval_truncated"]
+    assert len(hydrated) == 2
+
+    def walk(plan):
+        return [plan] + [node for child in plan.get("children", []) for node in walk(child)]
+
+    assert any(
+        "IndexSeek" in node["operatorType"] and "anchor" in node["args"].get("Details", "")
+        for node in walk(profiles["frontier"])
+    )
+    assert not any("AllNodesScan" in node["operatorType"] for node in walk(profiles["seeds"]))
+    print(f"frontier profile DB hits={sum(node.get('dbHits', 0) for node in walk(profiles['frontier']))}")
+
+
+@pytest.mark.parametrize("new_capture", [False, True])
+def test_frontier_revision_survives_reanalysis_and_new_observations(neo4j, event, monkeypatch, new_capture):
+    graph, source, _, sink = frontier_projection(event)
+    neo4j.publish(graph)
+    revised, _, _, _ = frontier_projection(
+        event, timestamp="2026-02-01T00:00:00Z" if new_capture else "2026-01-01T00:00:00Z"
+    )
+    revised.nodes[sink]["name"] = "replacement"
+    revised.edges = {key: edge for key, edge in revised.edges.items() if edge["kind"] != "CALL_ARGUMENT"}
+    read = neo4j.read
+    replaced = False
+
+    def replace_between_frontiers(statement, **parameters):
+        nonlocal replaced
+        if "traversal:frontier" in statement and not replaced:
+            replaced = True
+            neo4j.publish(revised)
+        return read(statement, **parameters)
+
+    monkeypatch.setattr(neo4j, "read", replace_between_frontiers)
+    service = GraphQuery(neo4j)
+    original = service.paths("graph-test.invalid", source, end=sink, mode="flow")
+    assert replaced and original["results"]
+    assert original["results"][0]["nodes"][-1]["name"] != "replacement"
+    assert not service.paths("graph-test.invalid", source, end=sink, mode="flow")["results"]
+    if new_capture:
+        assert service.paths("graph-test.invalid", source, end=sink, mode="flow", as_of=graph.event["observed_at"])[
+            "results"
+        ]
+        assert service.paths("graph-test.invalid", source, end=sink, mode="flow", historical=True)["results"]
+
+
+def test_frontier_revision_zero_compatibility_excludes_previously_retired_generations(neo4j, event):
+    graph, source, _, sink = frontier_projection(event)
+    neo4j.publish(graph)
+    graph.edges = {key: edge for key, edge in graph.edges.items() if edge["kind"] != "CALL_ARGUMENT"}
+    neo4j.publish(graph)
+    with neo4j.connect().session() as session:
+        session.run("MATCH (p:GraphPublication) REMOVE p.published_revision,p.retired_revision").consume()
+    assert not GraphQuery(neo4j).paths("graph-test.invalid", source, end=sink, mode="flow")["results"]
+
+
+def test_legacy_frontier_is_frozen_while_first_generation_is_published(neo4j, event, monkeypatch):
+    graph, source, _, sink = frontier_projection(event)
+    capture = {
+        "id": graph.event["id"],
+        "url": graph.url,
+        "host": "graph-test.invalid",
+        "complete": True,
+        "resource_key": "GET " + graph.url,
+        "observed_at": graph.event["observed_at"],
+        "gaps": [],
+    }
+    with neo4j.connect().session() as session:
+        session.run("CREATE (c:GraphCapture) SET c += $capture", capture=capture).consume()
+        session.run(
+            "UNWIND $nodes AS row CREATE (n:GraphEntity) SET n += row", nodes=list(graph.nodes.values())
+        ).consume()
+        session.run(
+            "UNWIND $edges AS row MATCH (a:GraphEntity {id:row.source}), (b:GraphEntity {id:row.target}) "
+            "CREATE (a)-[r:RELATES]->(b) SET r += row",
+            edges=list(graph.edges.values()),
+        ).consume()
+    revised, _, _, _ = frontier_projection(event)
+    revised.edges = {key: edge for key, edge in revised.edges.items() if edge["kind"] != "CALL_ARGUMENT"}
+    read = neo4j.read
+    activated = False
+
+    def activate_between_reads(statement, **parameters):
+        nonlocal activated
+        if "traversal:frontier" in statement and not activated:
+            activated = True
+            neo4j.publish(revised)
+        return read(statement, **parameters)
+
+    monkeypatch.setattr(neo4j, "read", activate_between_reads)
+    service = GraphQuery(neo4j)
+    assert service.paths("graph-test.invalid", source, end=sink, mode="flow")["results"]
+    assert activated
+    assert not service.paths("graph-test.invalid", source, end=sink, mode="flow")["results"]

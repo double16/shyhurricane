@@ -13,6 +13,38 @@ class Store:
         self.graph = graph
 
     def read(self, statement, **parameters):
+        if "traversal:revision" in statement:
+            return [{"revision": 0}]
+        if "traversal:contexts" in statement:
+            return [{"id": row["id"], "context_urls": []} for row in parameters["ids"]]
+        if "traversal:seeds" in statement or "traversal:contextual" in statement:
+            contextual = "traversal:contextual" in statement
+            nodes = [
+                node
+                for node in self.graph.nodes.values()
+                if node["id"] > parameters["after"]
+                and (
+                    parameters.get("url") in node.get("context_urls", [])
+                    if contextual
+                    else (node["id"] in parameters["ids"] or node.get("_logical_id") in parameters["ids"])
+                    or (node["kind"] == "resource" and node["url"] == parameters.get("url"))
+                )
+            ]
+            return [{"seed": node} for node in sorted(nodes, key=lambda node: node["id"])[: parameters["limit"]]]
+        if "traversal:frontier" in statement:
+            backward = "(other:GraphEntity)-[r:RELATES]->(anchor)" in statement
+            both = "(anchor)-[r:RELATES]-(other:GraphEntity)" in statement
+            return [
+                {"membership_id": edge["id"], "capture_id": self.graph.event["id"], "publication_id": None}
+                for edge in sorted(self.graph.edges.values(), key=lambda edge: edge["id"])
+                if edge["id"] > parameters["after"]
+                and (
+                    edge["target" if backward else "source"] in parameters["ids"]
+                    or both
+                    and edge["target"] in parameters["ids"]
+                )
+                and (parameters["kinds"] is None or edge["kind"] in parameters["kinds"])
+            ][: parameters["limit"]]
         if "GraphEvidence" in statement:
             evidence = self.graph.evidence.get(parameters["id"])
             return [{"evidence": evidence}] if evidence else []
@@ -398,16 +430,12 @@ def test_flow_diagnostics_preserve_scope_and_report_depth_limits(monkeypatch):
         {"id": "first", "source": "source", "target": "boundary", "kind": "FLOWS_TO"},
         {"id": "second", "source": "boundary", "target": "sink", "kind": "FLOWS_TO"},
     ]
-    service = GraphQuery(None)
+    from types import SimpleNamespace
 
-    def snapshot(*args, **kwargs):
-        return (
-            nodes,
-            edges,
-            {"analysis_gaps": [], "instructions": "", "retrieval_truncated": False, "truncation_reasons": []},
-        )
-
-    monkeypatch.setattr(service, "snapshot", snapshot)
+    graph = SimpleNamespace(
+        nodes=nodes, edges={edge["id"]: edge for edge in edges}, event={"id": "capture", "observed_at": 0}, gaps=[]
+    )
+    service = GraphQuery(Store(graph))
     scoped = service.paths("example.com", "source", mode="flow")
     assert not scoped["results"]
     assert any("scope boundary" in gap for gap in scoped["analysis_gaps"])
@@ -417,3 +445,178 @@ def test_flow_diagnostics_preserve_scope_and_report_depth_limits(monkeypatch):
     assert limited["truncation_reasons"] == ["depth_limit"]
     assert any("traversal was truncated" in gap for gap in limited["analysis_gaps"])
     assert service.paths("example.com", "source", mode="flow", max_depth=2)["results"]
+
+
+@pytest.mark.parametrize(
+    "role,context",
+    [(None, None), ("source", None), (None, "https://EXAMPLE.com/form"), ("sink", "https://example.com/form")],
+)
+def test_elements_push_filters_into_membership_selection(event, role, context):
+    graph = extract(event(body='<input name="value">'))
+    store = Store(graph)
+    read = store.read
+    calls = []
+
+    def record(statement, **parameters):
+        calls.append((statement, parameters))
+        return read(statement, **parameters)
+
+    store.read = record
+    GraphQuery(store).elements("example.com", role=role, context_url=context)
+    statement, parameters = calls[0]
+    assert parameters["role"] == role
+    assert parameters["context_url"] == ("https://example.com/form" if context else None)
+    if role is not None or context is not None:
+        assert statement.index("any(n IN [a,b]") < statement.index("ORDER BY r.id LIMIT")
+        assert "($role IS NULL OR n.role=$role)" in statement
+        assert "n.url=$context_url" in statement
+        assert "coalesce(p.context_urls,archive.context_urls,owner.context_urls,[])" in statement
+    else:
+        assert "any(n IN [a,b]" not in statement
+
+
+@pytest.fixture
+def hydration_graph(event):
+    from shyhurricane.graph.model import Projection
+
+    graph = Projection(event())
+    source = graph.node("symbol", "source", capture_id=graph.event["id"], context_owner_id="context")
+    target = graph.node("symbol", "target", capture_id=graph.event["id"], context_owner_id="context")
+    for index in range(501):
+        graph.fact(source, target, "FLOWS_TO", "test", location=str(index))
+    return graph
+
+
+def test_hydration_completes_windows_in_order_and_reuses_dependencies(hydration_graph, caplog):
+    graph = hydration_graph
+    store = Store(graph)
+    references = store.read("AS membership_id")
+    original = store.read
+    calls = []
+
+    def record(statement, **parameters):
+        calls.append((statement, parameters))
+        return list(reversed(original(statement, **parameters)))
+
+    store.read = record
+    with caplog.at_level("DEBUG", logger="shyhurricane.graph.query"):
+        rows, gaps, reasons = GraphQuery(store).hydrate(references)
+    assert [row["relationship"]["id"] for row in rows] == [ref["membership_id"] for ref in references]
+    assert not gaps and not reasons
+    assert sum("AS source_id" in query for query, _ in calls) == 2
+    for marker in ("AS node", "AS publication_id", "AS context_urls"):
+        assert sum(marker in query for query, _ in calls) == 1
+    assert all(0 < values["timeout"] <= 10 for _, values in calls)
+    assert "stage=relationships batch=500 returned=500" in caplog.text
+    assert "selected=501 completed=501" in caplog.text
+    assert "USING INDEX SEEK r:RELATES(id)" in calls[0][0]
+    assert "WHERE r.id IN $ids" in calls[0][0]
+
+
+def test_hydration_retains_completed_window_when_budget_expires(hydration_graph, monkeypatch, caplog):
+    from shyhurricane.graph import query
+
+    store = Store(hydration_graph)
+    references = store.read("AS membership_id")
+    original = store.read
+    now = 0
+
+    def read(statement, **parameters):
+        nonlocal now
+        rows = original(statement, **parameters)
+        if "AS context_urls" in statement:
+            now = 121
+        return rows
+
+    monkeypatch.setattr(query.time, "monotonic", lambda: now)
+    store.read = read
+    with caplog.at_level("WARNING", logger=query.__name__):
+        rows, gaps, reasons = GraphQuery(store).hydrate(references)
+    assert len(rows) == 500
+    assert reasons == ["time_limit"] and gaps == ["Snapshot hydration budget reached"]
+    assert "selected=501 completed=500" in caplog.text
+
+
+@pytest.mark.parametrize("stage", ["AS node", "AS publication_id", "AS context_urls", "AS source_id"])
+def test_hydration_reports_missing_dependencies_without_dangling_records(hydration_graph, stage):
+    store = Store(hydration_graph)
+    references = store.read("AS membership_id")
+    read = store.read
+
+    def missing(statement, **parameters):
+        return [] if stage in statement else read(statement, **parameters)
+
+    store.read = missing
+    rows, gaps, reasons = GraphQuery(store).hydrate(references)
+    assert not rows and gaps and reasons == ["generation_unavailable"]
+
+
+def test_hydration_passes_remaining_timeout_and_stops_after_transaction_expiry(hydration_graph, monkeypatch):
+    from neo4j.exceptions import Neo4jError
+
+    from shyhurricane.graph import query
+
+    store = Store(hydration_graph)
+    references = store.read("AS membership_id")
+    now = 0
+    calls = []
+
+    def clock():
+        nonlocal now
+        if now == 0:
+            now = 115
+            return 0
+        return now
+
+    def expire(statement, **parameters):
+        nonlocal now
+        calls.append(parameters)
+        assert parameters["timeout"] == 5
+        now = 121
+        raise Neo4jError._hydrate_neo4j(
+            code="Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration", message="deadline"
+        )
+
+    monkeypatch.setattr(query.time, "monotonic", clock)
+    store.read = expire
+    rows, gaps, reasons = GraphQuery(store).hydrate(references)
+    assert not rows and gaps and reasons == ["time_limit"]
+    assert len(calls) == 1
+
+
+def test_hydration_reports_memory_and_missing_generation_together(hydration_graph):
+    from neo4j.exceptions import Neo4jError
+
+    store = Store(hydration_graph)
+    references = store.read("AS membership_id")
+    read = store.read
+    blocked = references[0]["membership_id"]
+    absent = references[1]["membership_id"]
+
+    def limited(statement, **parameters):
+        if "AS source_id" in statement and blocked in parameters["ids"]:
+            raise Neo4jError._hydrate_neo4j(
+                code="Neo.TransientError.General.MemoryPoolOutOfMemoryError", message="oversized record"
+            )
+        rows = read(statement, **parameters)
+        if "AS source_id" in statement:
+            rows = [row for row in rows if row["relationship"]["id"] != absent]
+        return rows
+
+    store.read = limited
+    rows, gaps, reasons = GraphQuery(store).hydrate(references)
+    assert len(rows) == 499
+    assert reasons == ["memory_limit", "generation_unavailable"] and len(gaps) == 2
+
+
+def test_hydration_does_not_start_a_read_below_server_timeout_resolution(hydration_graph, monkeypatch):
+    from shyhurricane.graph import query
+
+    store = Store(hydration_graph)
+    references = store.read("AS membership_id")
+    ticks = iter([0, 119.9995, 119.9995])
+    monkeypatch.setattr(query.time, "monotonic", lambda: next(ticks, 120))
+    store.read = MagicMock(side_effect=AssertionError("No read should start with less than a millisecond"))
+    rows, _, reasons = GraphQuery(store).hydrate(references)
+    assert not rows and reasons == ["time_limit"]
+    store.read.assert_not_called()

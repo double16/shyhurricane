@@ -233,3 +233,114 @@ async def test_graph_query_waits_before_read_and_preserves_incomplete_evidence(m
     result = await tools.query(None, "test", "evidence", "example.com")
     assert order == ["wait", "query"]
     assert result["indexing"]["status"] == "timed_out"
+
+
+@pytest.mark.parametrize(
+    "name,arguments",
+    [
+        ("find_application_endpoints", {"url": "https://example.com/a%20b", "method": "post"}),
+        (
+            "find_application_elements",
+            {
+                "role": "source",
+                "context_url": "https://example.com/page",
+                "url": "https://example.com/a%20b",
+                "kinds": ["field", "custom kind"],
+            },
+        ),
+        ("find_application_relationships", {"element_id": "opaque id", "direction": "backward", "kinds": ["LOADS"]}),
+        ("trace_application_data_flow", {"start": "opaque id", "end": "other id", "direction": "forward"}),
+        ("find_user_journey_paths", {"start": "https://example.com/a%20b", "end": "other id"}),
+        ("fetch_application_graph_evidence", {"evidence_id": "evidence id"}),
+    ],
+)
+async def test_graph_input_validation_trims_before_literals_and_preserves_content(name, arguments, monkeypatch):
+    from mcp.server.mcpserver.utilities.func_metadata import func_metadata
+
+    function = getattr(tools, name)
+    fields = {"scope": "example.com", **arguments}
+    if name not in {"fetch_application_graph_evidence", "find_application_endpoints"}:
+        fields["detail"] = "full"
+    padded = {
+        key: [f" \t{item}\n" for item in value] if isinstance(value, list) else f" \t{value}\n"
+        for key, value in fields.items()
+    }
+    # The SDK builds this same model when registering MCP tools.
+    model = func_metadata(function, skip_names=["ctx"]).arg_model
+    validated = model.model_validate(padded).model_dump()
+    for key, value in fields.items():
+        assert validated[key] == value
+
+    history = AsyncMock()
+    monkeypatch.setattr(tools, "log_tool_history", history)
+    server = SimpleNamespace(graph_store=object())
+    monkeypatch.setattr(tools, "get_server_context", AsyncMock(return_value=server))
+    calls = []
+
+    class Service:
+        def __getattr__(self, operation):
+            def run(scope, **kwargs):
+                calls.append((scope, kwargs))
+                return {"results": [], "instructions": "partial"}
+
+            return run
+
+    monkeypatch.setattr(tools, "GraphQuery", lambda store: Service())
+    # Also exercise Python calls which bypass Pydantic validation.
+    target = function.__wrapped__ if hasattr(function, "__wrapped__") else function
+    await target(None, **padded)
+    assert calls[0][0] == "example.com"
+    assert history.await_args.kwargs["scope"] == "example.com"
+    for key, value in fields.items():
+        mapped = "start" if key == "element_id" else key
+        if key != "scope":
+            assert calls[0][1][mapped] == value
+
+
+@pytest.mark.parametrize("value", [None, [], [""], ["  "], 3, "a  b", "a%20b"])
+def test_graph_trim_preserves_nonboundary_content_and_types(value):
+    assert tools.trim_input(value) == value
+
+
+def test_graph_validation_rejects_invalid_literals_and_preserves_blank_filters():
+    from mcp.server.mcpserver.utilities.func_metadata import func_metadata
+    from pydantic import ValidationError
+
+    model = func_metadata(tools.find_application_elements, skip_names=["ctx"]).arg_model
+    result = model.model_validate({"scope": " example.com ", "kinds": [" \t"], "url": "  ", "role": None})
+    assert result.kinds == [""] and result.url == "" and result.role is None
+    assert model.model_validate({"scope": "example.com", "kinds": []}).kinds == []
+    for role in (" SOURCE ", "  ", 3):
+        with pytest.raises(ValidationError):
+            model.model_validate({"scope": "example.com", "role": role})
+    with pytest.raises(ValidationError):
+        model.model_validate({"scope": 3})
+
+
+async def test_unexpected_graph_failure_logs_original_traceback(monkeypatch, caplog):
+    monkeypatch.setattr(tools, "log_tool_history", AsyncMock())
+    monkeypatch.setattr(tools, "get_server_context", AsyncMock(return_value=SimpleNamespace(graph_store=object())))
+    failure = RuntimeError("original database failure")
+
+    def fail(scope):
+        raise failure
+
+    monkeypatch.setattr(tools, "GraphQuery", lambda store: SimpleNamespace(elements=fail))
+    with caplog.at_level("ERROR", logger=tools.__name__):
+        with pytest.raises(ToolError, match="Application graph query failed") as caught:
+            await tools.query(None, "find_application_elements", "elements", " example.com ")
+    assert caught.value.__cause__ is failure
+    record = next(record for record in caplog.records if record.name == tools.__name__)
+    assert record.exc_info[1] is failure and record.exc_info[2] is not None
+    assert "tool=find_application_elements operation=elements scope=example.com" in record.message
+    assert "RuntimeError: original database failure" in caplog.text
+    assert "Traceback" in caplog.text
+    assert "original database failure" not in str(caught.value)
+
+    caplog.clear()
+    with pytest.raises(ToolError, match="scope"):
+        await tools.query(None, "find_application_elements", "elements", "   ")
+    monkeypatch.setattr(tools, "get_server_context", AsyncMock(return_value=SimpleNamespace(graph_store=None)))
+    with pytest.raises(ToolError, match="unavailable"):
+        await tools.query(None, "find_application_elements", "elements", "example.com")
+    assert not [record for record in caplog.records if record.name == tools.__name__]

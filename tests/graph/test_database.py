@@ -98,6 +98,9 @@ def test_driver_read_schema_and_publication_handoff(monkeypatch, event):
     store = GraphStore("bolt://localhost:7687")
     monkeypatch.setattr(store, "cleanup", lambda: None)
     assert store.ready()
+    session.run.assert_any_call(
+        "CREATE INDEX graph_publication_capture IF NOT EXISTS FOR (n:GraphPublication) ON (n.capture_id)"
+    )
     schema_calls = session.run.call_count
     assert store.ready()
     assert session.run.call_count == schema_calls + 1
@@ -120,3 +123,28 @@ def test_driver_read_schema_and_publication_handoff(monkeypatch, event):
         "shyhurricane.server_config.get_server_config", lambda: SimpleNamespace(graph_database="custom")
     )
     assert database.graph_location() == "custom"
+
+
+@pytest.mark.parametrize("timeout,expected", [(0.25, 0.25), (5, 5), (30, 10)])
+def test_deadline_reads_use_one_explicit_transaction_without_retries(monkeypatch, timeout, expected):
+    driver = MagicMock()
+    session = driver.session.return_value.__enter__.return_value
+    transaction = session.begin_transaction.return_value.__enter__.return_value
+    transaction.run.return_value = [{"value": 2}]
+    store = GraphStore("bolt://localhost:7687")
+    monkeypatch.setattr(store, "connect", lambda: driver)
+    assert store.read("RETURN $value AS value", timeout=timeout, value=2) == [{"value": 2}]
+    driver.session.assert_called_once_with(database="neo4j", default_access_mode="READ")
+    session.begin_transaction.assert_called_once_with(timeout=expected)
+    transaction.run.assert_called_once_with("RETURN $value AS value", value=2)
+    session.execute_read.assert_not_called()
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("inf"), float("nan")])
+def test_deadline_read_rejects_invalid_timeout_before_connecting(monkeypatch, timeout):
+    store = GraphStore("bolt://localhost:7687")
+    connect = MagicMock()
+    monkeypatch.setattr(store, "connect", connect)
+    with pytest.raises(ValueError, match="finite and positive"):
+        store.read("RETURN 1", timeout=timeout)
+    connect.assert_not_called()

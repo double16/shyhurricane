@@ -377,6 +377,9 @@ subdomains on hostname boundaries; URL scopes restrict scheme, host, and path pr
 
 Types below are JSON types. Optional arguments accept their documented defaults; nullable filters
 also accept `null`. IDs are opaque strings: copy them unchanged from the indicated response field.
+All graph string arguments, including each `kinds` entry, ignore leading and trailing whitespace.
+Case, internal whitespace, and URL escaping remain unchanged. Blank strings are not converted to `null`;
+use `null` to omit a nullable filter.
 Use the same application scope when passing IDs between tools.
 Begin with `find_application_endpoints`, optionally narrowing to an exact `url` and HTTP `method`.
 Each entry identifies one resource ID, URL, and method, including assets. `capture_status` is
@@ -386,6 +389,12 @@ not mean the resource has never been captured. Inputs/forms, scripts, sources, a
 Counts describe graph elements in the bounded snapshot, not unique business inputs or a complete
 application inventory. `association` distinguishes directly related nodes from script-context
 candidates; a related script does not prove that an endpoint input reaches its sinks.
+
+Element discovery applies `context_url` and `role` filters in Neo4j before selecting and hydrating
+its bounded snapshot. Context matching includes direct URL matches and consuming-document contexts
+for external scripts. Unexpected graph query failures log the original exception and traceback;
+clients receive the existing generic error. Startup automatically adds an index on publication
+capture IDs for legacy context lookups.
 
 Element discovery prioritizes resources, then fields/HTML elements, then code artifacts when
 `kinds` is omitted. All four existing graph list tools now default to `detail="compact"`: nodes
@@ -470,9 +479,36 @@ database query/traversal. `retrieval_truncated` and `truncation_reasons` report 
 artifacts or incomplete analysis. Cross-origin request/navigation destinations are boundaries;
 supplied scripts used by scoped documents remain available for dependency and flow analysis.
 Queries first select a bounded set of relationship IDs, then hydrate immutable relationships,
-entities, capture metadata, and shared context with reads of at most 500 records. Hydration has a
-120-second total budget, within the five-minute cleanup grace period. Missing generations or reached
-hydration budgets are reported as incomplete results; repeat the query when a generation is unavailable.
+entities, capture metadata, and shared context in windows of at most 500 relationships. Each window
+loads its dependencies before the next window; shared entities and metadata are cached across windows.
+Indexed ID-list lookups avoid per-ID query expansion. Every database request contains at most 500
+input records. Startup waits for schema indexes to become available before serving hinted reads.
+Hydration keeps its 120-second total budget, within the five-minute cleanup grace period. Each read
+uses at most ten seconds or the remaining budget, without automatic transaction retries. If a budget
+is reached, completed records remain available and results report applicable time, memory, and missing
+generation limits. Repeat the query when a generation is unavailable.
+DEBUG logs report stage, batch size, returned records, elapsed time, and remaining budget. A completion
+summary reports selected/completed relationships, memory subdivisions, and incompleteness reasons;
+incomplete hydration is logged at WARNING. See [hydration measurements](docs/graph_hydration.md).
+
+Relationship, flow, and journey tools resolve indexed seeds and load bounded frontiers rather than
+hydrating the entire application scope. Flow seed association includes direct inputs and contextual
+scripts; association edges do not become flow evidence, and unlabelled intermediates remain traversable.
+External destinations can be returned as boundary nodes but are not expanded beyond scope.
+The 20,000-membership budget counts distinct relationships loaded for seed associations and traversal;
+unrelated graph regions no longer displace focused paths. Shared dependencies and adjacency are cached
+per request, with a shared 120-second database-work deadline, ten-second read caps, and a separate
+ten-second traversal CPU budget. No-path diagnostics describe the explored graph rather than claiming
+application-wide absence of sources or sinks.
+
+Each traversal reads a publication revision once. Activation atomically stamps publication and
+retirement revisions, so reanalysis between frontier reads cannot mix generations. Existing active
+publications are revision zero; older retired publications remain excluded, and legacy archives remain
+readable. Startup initializes the revision counter and logical-ID index without a bulk data backfill.
+**Upgrade with all older server processes stopped:** mixed-version writers do not maintain the revision
+protocol. Keep the existing single-server deployment model. MCP arguments and saved-page schemas are
+unchanged. DEBUG logs report frontier depth, batch/read counts, and cache sizes; completion logs report
+path count, loaded memberships, elapsed time, and limiting reasons.
 
 ### Inference coverage and limits
 
@@ -795,7 +831,7 @@ uv run python mcp_service.py --data-dir /srv/shyhurricane
   graph/                   Managed Neo4j storage, including graph/logs/
   queues/<queue-name>/     Persistent ingest, document, finding, and graph queues
   graph_state/             Graph captures, artifacts, and maintenance checkpoints
-  logs/                    Indexing and finding logs
+  logs/                    Diagnostic, indexing, and finding logs
   certs/                   Replay proxy CA and certificates
   tool_cache/              Tool history, cached output, and result_pages/
   sessions/                Container working directories mounted at /work
@@ -821,8 +857,9 @@ their existing locations.
 
 #### File logging
 
-Set `LOG_FILE` or pass `--log-file` to append Python logger messages at DEBUG and higher to a UTF-8
-file. The command-line option overrides the environment variable. Parent directories are created;
+Python logger messages at DEBUG and higher are appended to the UTF-8 file
+`<data-dir>/logs/shyhurricane.log` by default. Set `LOG_FILE` or pass `--log-file` to override the
+destination. The command-line option overrides the environment variable. Parent directories are created;
 an unwritable destination stops startup with an error. Each record includes its timestamp, severity,
 logger name, process name, and PID. Exceptions logged with exception details include their tracebacks.
 The file remains active while the interactive dashboard suppresses console output, and worker
@@ -834,7 +871,7 @@ repeated notifications are suppressed. Other Neo4j warnings and errors remain vi
 
 | Environment variable | Default                      | Description                                                              |
 |----------------------|------------------------------|--------------------------------------------------------------------------|
-| `LOG_FILE`           | Unset; file logging disabled | Diagnostic log path, relative to the working directory or absolute. |
+| `LOG_FILE`           | `<data-dir>/logs/shyhurricane.log` | Diagnostic log path, relative to the working directory or absolute. |
 
 ```shell
 uv run python mcp_service.py --log-file ./logs/server.log
