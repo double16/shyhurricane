@@ -6,7 +6,6 @@ import logging
 import os
 import signal
 import sys
-from pathlib import Path
 
 import torch
 import uvicorn
@@ -14,6 +13,8 @@ from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.cors import CORSMiddleware
 from uvicorn import Config, Server
 
+import shyhurricane.mcp_server.prompts  # noqa: F401
+import shyhurricane.mcp_server.tools.application_graph  # noqa: F401
 import shyhurricane.mcp_server.tools.deobfuscate_javascript  # noqa: F401
 import shyhurricane.mcp_server.tools.directory_buster  # noqa: F401
 import shyhurricane.mcp_server.tools.fetch_web_resource_content  # noqa: F401
@@ -28,7 +29,9 @@ import shyhurricane.mcp_server.tools.register_hostname_address  # noqa: F401
 import shyhurricane.mcp_server.tools.register_http_headers  # noqa: F401
 import shyhurricane.mcp_server.tools.status  # noqa: F401
 from shyhurricane.config import configure
+from shyhurricane.data_paths import add_data_dir_argument, configure_data_dir
 from shyhurricane.generator_config import GeneratorConfig, add_generator_args
+from shyhurricane.indexing_wait import indexing_timeout
 from shyhurricane.logging_config import (
     configure_file_logging,
     file_logging_enabled,
@@ -106,10 +109,6 @@ async def main():
     else:
         low_power_default = os.environ.get("LOW_POWER", "False")
 
-    default_database = os.environ.get("QDRANT", str(Path.home() / "Data" / "shyhurricane.db"))
-    if default_database:
-        Path(default_database).parent.mkdir(parents=True, exist_ok=True)
-
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--transport",
@@ -118,8 +117,8 @@ async def main():
         help="Transport: streamable-http (default), sse, or streamable-http-modern (stateless)"
     )
     ap.add_argument("--log-file", default=os.environ.get("LOG_FILE"),
-                    help="Append all Python logger messages and tracebacks to this file (or set LOG_FILE)")
-    ap.add_argument("--database", default=default_database, help="Database location: path or host:port of qdrant server")
+                    help="Append Python logs here (or set LOG_FILE; default: <data-dir>/logs/shyhurricane.log)")
+    add_data_dir_argument(ap)
     ap.add_argument("--host", default="127.0.0.1", help="Host to listen on")
     ap.add_argument("--port", type=int, default=8000, help="Port to listen on for MCP")
     ap.add_argument("--proxy-port", type=int, default=8010, help="Port to listen on for HTTP/HTTPS proxy")
@@ -129,11 +128,22 @@ async def main():
                     help="If true, the server is allowed to reach out to hosts. If false, only tools using indexed content are advertised.")
     ap.add_argument("--low-power", type=str, default=low_power_default,
                     help="If true, disables compute intensive features and those requiring GPU.")
+    ap.add_argument(
+        "--indexing-wait-timeout-seconds", type=indexing_timeout,
+        default=os.environ.get("INDEXING_WAIT_TIMEOUT_SECONDS", "60"),
+        help="Maximum wait for query-relevant indexing; zero disables waiting (default: 60 seconds)",
+    )
     add_generator_args(ap)
 
     args = ap.parse_args()
     if args.transport not in TRANSPORTS:
         ap.error(f"Invalid MCP_TRANSPORT: {args.transport}")
+    try:
+        args.data_dir = str(configure_data_dir(args.data_dir))
+    except (OSError, ValueError) as error:
+        ap.error(f"Cannot use data directory: {error}")
+    if not args.log_file:
+        args.log_file = os.path.join(args.data_dir, "logs", "shyhurricane.log")
     try:
         configure_file_logging(args.log_file, console_enabled=not is_tty)
     except OSError as error:
@@ -144,11 +154,12 @@ async def main():
         logger.info("low_power: CPU is the default pytorch device, defaulting to low power mode")
     set_generator_config(GeneratorConfig.from_args(args).apply_summarizing_default().check())
     set_server_config(ServerConfig(
-        database=args.database,
+        data_dir=args.data_dir,
         task_pool_size=args.task_pool_size,
         ingest_pool_size=args.index_pool_size,
         open_world=_str_to_bool(args.open_world),
         low_power=_str_to_bool(args.low_power),
+        indexing_wait_timeout_seconds=args.indexing_wait_timeout_seconds,
     ))
     server_context = await get_server_context()
 

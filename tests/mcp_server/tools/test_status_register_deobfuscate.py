@@ -45,7 +45,7 @@ async def get_status_server_context():
 @pytest.mark.asyncio
 async def test_status_aggregates_counts_and_metadata(monkeypatch):
     monkeypatch.setattr(status_tool, "get_server_context", get_status_server_context)
-    monkeypatch.setattr(status_tool, "persistent_queue_sizes", AsyncMock(return_value=(4, 5)))
+    monkeypatch.setattr(status_tool, "persistent_queue_counts", AsyncMock(return_value=queue_counts(4, 5)))
 
     async def domain_and_host_counts(*args, **kwargs):
         return {"example.com": 2}, {"www.example.com": 1, "api.example.com": 2}
@@ -59,8 +59,9 @@ async def test_status_aggregates_counts_and_metadata(monkeypatch):
     assert body["document_counts"] == {"content": 2, "network": 3}
     assert body["domain_counts"] == {"example.com": 2}
     assert body["host_counts"] == {"www.example.com": 1, "api.example.com": 2}
-    assert body["index_active"] == 4
-    assert body["type_specific_index_active"] == 5
+    assert body["queues"] == queue_counts(4, 5)
+    assert "index_active" not in body
+    assert "type_specific_index_active" not in body
 
 
 @pytest.mark.asyncio
@@ -75,7 +76,7 @@ async def test_status_includes_proxy_ca_certificate(monkeypatch, tmp_path):
         return CertServerContext()
 
     monkeypatch.setattr(status_tool, "get_server_context", get_cert_context)
-    monkeypatch.setattr(status_tool, "persistent_queue_sizes", AsyncMock(return_value=(4, 0)))
+    monkeypatch.setattr(status_tool, "persistent_queue_counts", AsyncMock(return_value=queue_counts(4, 0)))
 
     async def empty_domain_and_host_counts(*args):
         return {}, {}
@@ -157,3 +158,32 @@ async def test_deobfuscate_javascript_handles_empty_failure_and_success(monkeypa
 
     monkeypatch.setattr(deobf, "_run_unix_command", AsyncMock(return_value=CommandResult(0, "same")))
     assert (await deobf.deobfuscate_javascript(None, "same")).transformation_status == "succeeded"
+
+
+def queue_counts(ingest, doc_type):
+    return {name: {"pending": pending, "processing": 0, "failed": 0}
+            for name, pending in (("ingest", ingest), ("type_specific_index", doc_type),
+                                  ("scan_findings", 0), ("graph", 0))}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [0, 3])
+async def test_status_always_includes_queue_states(monkeypatch, failed):
+    counts = queue_counts(0, 0)
+    counts["scan_findings"]["failed"] = failed
+    counts["graph"]["processing"] = 2
+    monkeypatch.setattr(status_tool, "get_server_context", get_status_server_context)
+    monkeypatch.setattr(status_tool, "persistent_queue_counts", AsyncMock(return_value=counts))
+    monkeypatch.setattr(status_tool, "get_domain_and_host_counts", AsyncMock(return_value=({}, {})))
+    response = await status_tool.status(None)
+    assert json.loads(response.body)["queues"] == counts
+
+
+@pytest.mark.asyncio
+async def test_status_propagates_queue_read_error(monkeypatch):
+    import sqlite3
+
+    monkeypatch.setattr(status_tool, "get_server_context", get_status_server_context)
+    monkeypatch.setattr(status_tool, "persistent_queue_counts", AsyncMock(side_effect=sqlite3.OperationalError("locked")))
+    with pytest.raises(sqlite3.OperationalError, match="locked"):
+        await status_tool.status(None)

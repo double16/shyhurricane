@@ -4,6 +4,45 @@
 
 ### Features
 
+- Replace `--database` and `--graph-database` with `--data-dir`/`DATA_DIR` across the server and
+  graph maintenance commands. Consolidate local application state, including database storage,
+  queues, certificates, logs, tool results, and session work. Preserve automatic `/data` detection,
+  otherwise use native OS state directories; resolve relative selections beneath that default.
+  Keep Compose volume mappings and remote database endpoints. Existing data is not migrated.
+- Accept dictionary request bodies in `index_http_url`, using URL form encoding by default and JSON
+  serialization for JSON request Content-Types. Store the serialized request body during ingestion.
+- Wait up to a configurable 60 seconds for query-relevant indexing before web-resource and graph
+  retrieval. Send MCP progress and return explicit indexing status with available results.
+  Configure `INDEXING_WAIT_TIMEOUT_SECONDS` or `--indexing-wait-timeout-seconds`; zero disables waiting.
+  Persist transactional URL/document scope metadata and backfill outstanding legacy queue records.
+- Add persistent Neo4j application graph built incrementally from existing HTTP ingestion,
+  with versioned evidence, out-of-order reference reconciliation, shared JavaScript/source-map preparation,
+  browser/framework/Vite static analysis, and resumable offline backfill.
+- Add read-only graph tools for element discovery, relationships, data-flow traces, possible user journeys,
+  and evidence retrieval.
+- Rename the monitor tool panel to MCP tools and append the last five completed calls, with
+  yellow, green, and red dots for running, complete, and failed calls.
+- Add monitor `f` command to mark failed persistent queue items pending, with per-queue results.
+  Show scan-finding queue counts and append positive failed counts to persistent queue rows.
+- Replace `/status` fields `index_active` and `type_specific_index_active` with `queues`, containing
+  pending, processing, and failed counts for ingest, type-specific indexing, scan findings, and graph.
+  All queue count fields are present even when zero.
+- Add ten MCP assessment prompts for attack-surface mapping, focused vulnerability hunting,
+  authentication/configuration reviews, graph data-flow tracing, and vulnerability-chain analysis.
+  Accept scoped targets and optional analysis/active modes; render workflows without executing tools.
+
+### Fixes
+
+- Check pending indexing before treating search targets as absent or offering another scan.
+  Preserve an explicit incomplete status when pending content or graph evidence is unavailable.
+
+- Always show the primary Qdrant findings collection count first in dashboard database statistics,
+  including when it is zero or outside the top five collections.
+
+## 0.2.0
+
+### Features
+
 - Add `--log-file` and `LOG_FILE` for append-only diagnostic logs at all Python logger levels,
   including logged tracebacks, server access messages, and worker-process logs during dashboard use.
 - Add filesystem-backed tool result pagination with opaque next/previous page tokens and `get_result_page`.

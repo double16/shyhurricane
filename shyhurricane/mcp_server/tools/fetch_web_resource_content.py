@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Annotated, Optional
 
@@ -7,10 +8,21 @@ from mcp.types import TextResourceContents, ToolAnnotations
 from pydantic import Field
 
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
+from shyhurricane.indexing_wait import (
+    IndexingOnlyResult,
+    IndexingStatus,
+    indexing_scope,
+    url_matcher,
+    wait_for_indexing,
+)
 from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
 from shyhurricane.utils import HttpResourceOffset, TextResourcePartialContents
 
 logger = logging.getLogger(__name__)
+
+
+class IndexedResourceContent(HttpResourceOffset):
+    indexing: IndexingStatus | None = None
 
 
 async def _find_document_by_type_and_id(doc_type: str, doc_id: str) -> Optional[Document]:
@@ -35,6 +47,7 @@ async def _find_document_by_type_and_id(doc_type: str, doc_id: str) -> Optional[
         read_only_hint=True,
         open_world_hint=False),
 )
+@indexing_scope()
 async def fetch_web_resource_content(
         ctx: Context,
         url: Annotated[str, Field(description="""The URL may be a http:// or https:// URL of a website that has been indexed, spidered or scanned.
@@ -48,7 +61,7 @@ async def fetch_web_resource_content(
         output_length_limit: Annotated[
             int, Field(4096, description="Output length limit, truncates output if over this length.", ge=1,
                        le=4 * 1024 * 1024)] = 4096,
-) -> Optional[HttpResourceOffset]:
+) -> IndexedResourceContent | IndexingOnlyResult | None:
     """Fetch the content of a web resource that has already been indexed.
 
     Invoke this tool when:
@@ -57,7 +70,9 @@ async def fetch_web_resource_content(
 
     Indexed JavaScript has undergone automatic transformation, which may fail or be partial.
     Avoid repeating transformation unless the content warrants it.
-    This reads the index and does not fetch the live URL. Null means no content was found.
+    This waits briefly for relevant indexing, then reads the index without fetching the live URL.
+    Null is a confirmed miss; a status-only indexing result means content may still be pending.
+    Inspect indexing.potentially_incomplete before interpreting missing or partial results.
     When contents.has_more is true, request the next chunk with
     output_start_position=contents.offset + len(contents.text). Offsets count Unicode characters.
     This tool uses offsets rather than saved-page tokens.
@@ -80,6 +95,14 @@ async def fetch_web_resource_content(
     else:
         try_http_url = True
 
+    wait_url = doc.meta.get("url") if doc is not None else url
+    opaque_id = doc_id if not try_http_url and doc is None else None
+    indexing = await wait_for_indexing(
+        ctx, server_ctx, url_matcher([wait_url], exact=True), doc_id=opaque_id,
+        semantic=doc_type not in {None, "content", "network", "forms"},
+    )
+    if not try_http_url:
+        doc = await _find_document_by_type_and_id(doc_type, doc_id)
     if try_http_url:
         filters = {"operator": "AND",
                    "conditions": [
@@ -87,13 +110,15 @@ async def fetch_web_resource_content(
                        {"field": "meta.url", "operator": "==", "value": url},
                    ]}
         store = server_ctx.stores["content"]
-        docs = store.filter_documents(filters=filters)
+        docs = await asyncio.to_thread(store.filter_documents, filters=filters)
         if docs:
             logger.info("Found indexed web resource %s", url)
             doc = docs[0]
             doc_type = "content"
             doc_id = doc.id
     if not doc or not doc.content:
+        if indexing.potentially_incomplete and indexing.status != "disabled":
+            return IndexingOnlyResult(indexing=indexing)
         return None
 
     if output_start_position >= len(doc.content):
@@ -112,7 +137,9 @@ async def fetch_web_resource_content(
         offset=output_start_position,
         has_more=(output_start_position + output_length_limit < len(doc.content)),
     )
-    return HttpResourceOffset.from_doc(doc, contents=contents)
+    result = IndexedResourceContent.from_doc(doc, contents=contents)
+    result.indexing = indexing
+    return result
 
 
 @mcp_instance.resource("web://{doc_type}/{doc_id}", title="Web Resource")

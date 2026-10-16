@@ -540,11 +540,9 @@ def unix_command_image() -> str:
 
 
 def get_state_path(db: str, state_name: str) -> Path:
-    if os.path.exists("/data"):
-        # Running inside a container
-        path = Path("/data", state_name)
-    else:
-        path = Path(Path.home(), ".local", "state", "shyhurricane", re.sub(r'[^A-Za-z0-9_.-]', '_', db), state_name)
+    from shyhurricane.data_paths import state_path
+
+    path = state_path(state_name)
     os.makedirs(path, mode=0o755, exist_ok=True)
     return path
 

@@ -40,3 +40,10 @@ def pytest_runtest_setup(item):
                 pytest.skip(f"Skipping tests: Ollama is not available at http://{ollama_host}", allow_module_level=True)
         else:
             pytest.skip("Test requires --ollama option to run.")
+
+
+@pytest.fixture(autouse=True)
+def isolated_application_data(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "application_data"))
+    for name in ("TOOL_CACHE", "MCP_SESSION_VOLUME", "QDRANT", "NEO4J"):
+        monkeypatch.delenv(name, raising=False)

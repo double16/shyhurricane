@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, RootModel, ValidationError
 
 from shyhurricane import result_pages
 from shyhurricane.mcp_server import mcp_instance
+from shyhurricane.mcp_server.tools.application_graph import GraphResult
 from shyhurricane.mcp_server.tools.deobfuscate_javascript import DeobfuscationResult
 from shyhurricane.mcp_server.tools.directory_buster import DirBusterResults
 from shyhurricane.mcp_server.tools.find_indexed_metadata import (
@@ -91,6 +92,17 @@ class PortScanXmlPage(BaseModel):
     result: SavedTextResult
 
 
+class ApplicationGraphPage(BaseModel):
+    source_tool: Literal[
+        "find_application_endpoints",
+        "find_application_elements",
+        "find_application_relationships",
+        "trace_application_data_flow",
+        "find_user_journey_paths",
+    ]
+    result: GraphResult
+
+
 ResultPageValue = Annotated[
     Union[
         FindDomainsPage,
@@ -106,6 +118,7 @@ ResultPageValue = Annotated[
         IndexHttpUrlPage,
         DeobfuscateJavascriptPage,
         PortScanXmlPage,
+        ApplicationGraphPage,
     ],
     Field(discriminator="source_tool"),
 ]

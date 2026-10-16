@@ -172,3 +172,7 @@ qdrant_store*
 db/
 /coverage.json
 :memory:.ses
+# Graph analyzer dependencies and generated coverage
+src/docker/unix_command/graph-analysis/node_modules/
+src/docker/unix_command/graph-analysis/coverage/
+shyhurricane.graph.db/

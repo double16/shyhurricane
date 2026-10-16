@@ -54,6 +54,42 @@ docker:
 
 ## Quality checks
 
+Install and test the JavaScript graph analyzer before running Python tests that exercise its real AST output:
+
+```shell
+npm --prefix src/docker/unix_command/graph-analysis ci --ignore-scripts
+npm --prefix src/docker/unix_command/graph-analysis test
+```
+
+The Node tests enforce 80% line and branch coverage per analyzer file. Python graph unit tests use
+mocked database clients; optional Neo4j integration tests exercise real transactions and temporal queries.
+
+| Environment variable | Default | Description |
+|----------------------|---------|-------------|
+| `NEO4J_TEST_URI` | Unset; Neo4j integration tests skipped | Bolt URI for an isolated test Neo4j; tests clean only resources under `https://graph-test.invalid/` |
+| `GRAPH_ANALYZER_TEST_IMAGE` | Unset; analyzer container test skipped | Built command image containing `/opt/graph-analysis/analyze.cjs`; tests run it with networking disabled |
+
+```shell
+NEO4J_TEST_URI=bolt://127.0.0.1:17687 KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" \
+  uv run pytest tests/graph/test_neo4j_integration.py -q
+```
+
+Graph publication integration tests include a 9,905-entity, 20,000-relationship, 15,140-evidence
+regression case, generation activation/replay, legacy compatibility, and retained evidence.
+For the memory regression, run against a dedicated Neo4j instance with a 512 MiB initial/maximum
+heap, 128 MiB page cache, and a 128 MiB transaction budget. Allow at least 2 GiB of container memory
+for JVM native overhead; the transaction budget is separate from the container limit. For example:
+
+```shell
+docker run -d --name graph-publication-tests --memory=2g -p 127.0.0.1:17687:7687 \
+  -e NEO4J_AUTH=none -e NEO4J_server_memory_heap_initial__size=512m \
+  -e NEO4J_server_memory_heap_max__size=512m -e NEO4J_server_memory_pagecache_size=128m \
+  -e NEO4J_dbms_memory_transaction_total_max=128m neo4j:2026.09.0-community
+```
+
+Wait for the container's startup log to report `Started`, run the integration tests above, then
+remove only this temporary test container with `docker rm -f graph-publication-tests`.
+
 Run the test suite with the project-local UV cache:
 
 ```shell

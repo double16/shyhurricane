@@ -5,6 +5,7 @@ import logging
 import multiprocessing
 import os
 import signal
+import time
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import persistqueue
@@ -13,6 +14,7 @@ from haystack import Pipeline
 
 from shyhurricane.doc_type_model_map import map_mime_to_type
 from shyhurricane.generator_config import GeneratorConfig
+from shyhurricane.graph.ingest import GraphCaptureError
 from shyhurricane.haystack_lifecycle import close_haystack_resources
 from shyhurricane.index.javascript_analysis import analyze_document, javascript_url_from_map, source_map_url
 from shyhurricane.index.web_resources_pipeline import build_doc_type_pipeline, build_ingest_pipeline, build_stores
@@ -48,7 +50,7 @@ def _wait_for_health(health_state, stop_event=None) -> bool:
 
 
 def _ingest_worker(db: str, generator_config: GeneratorConfig, health_state=None,
-                   log_timestamp: str | None = None, stop_event=None):
+                   log_timestamp: str | None = None, stop_event=None, open_world: bool | None = None):
     prepare_worker_process(create_process_group=False)
     try:
         faulthandler.register(signal.SIGUSR1)
@@ -74,6 +76,9 @@ def _ingest_worker(db: str, generator_config: GeneratorConfig, health_state=None
                 item = next(queue_items)
             except StopIteration:
                 break
+            if health_state is not None and not health_state.is_set():
+                queue.nack(item)
+                continue
             logger.info(f"Processing {item[0:128]} in PID {os.getpid()}")
 
             if index_log_path is not None:
@@ -100,14 +105,30 @@ def _ingest_worker(db: str, generator_config: GeneratorConfig, health_state=None
                                 atexit.register(scan_finding_queue.close)
                                 content_store = build_stores(db, {"content"})["content"]
                             try:
-                                analyze_document(doc, get_server_config().open_world,
-                                                 content_store, scan_finding_queue)
+                                from shyhurricane.graph.artifacts import ArtifactStore
+
+                                artifacts = ArtifactStore(db)
+                                try:
+                                    analyze_document(doc, get_server_config().open_world if open_world is None else open_world,
+                                                     content_store, scan_finding_queue, artifacts=artifacts)
+                                finally:
+                                    artifacts.close()
                             except Exception as exc:
                                 logger.warning("JavaScript analysis failed for %s: %s", doc.meta.get("url"), exc)
 
                 queue.ack(item)
             except Exception as e:
-                queue.ack_failed(item)
+                cause = e
+                while cause is not None and not isinstance(cause, GraphCaptureError):
+                    cause = cause.__cause__
+                if cause is not None:
+                    queue.nack(item)
+                    if stop_event is not None:
+                        stop_event.wait(1)
+                    else:
+                        time.sleep(1)
+                else:
+                    queue.ack_failed(item)
                 url = None
                 try:
                     url = json.loads(item).get("request", {}).get("endpoint", None)
@@ -123,16 +144,19 @@ def _ingest_worker(db: str, generator_config: GeneratorConfig, health_state=None
 
 
 def _ingest_watcher(db: str, generator_config: GeneratorConfig, health_state=None,
-                    log_timestamp: str | None = None, stop_event=None):
+                    log_timestamp: str | None = None, stop_event=None, open_world: bool | None = None):
     log_timestamp = log_timestamp or get_log_timestamp()
     prepare_worker_process()
     process = None
     try:
         while stop_event is None or not stop_event.is_set():
+            worker_options = {"stop_event": stop_event}
+            if open_world is not None:
+                worker_options["open_world"] = open_world
             process = multiprocessing.Process(
                 target=_ingest_worker,
                 args=(db, generator_config, health_state, log_timestamp),
-                kwargs={"stop_event": stop_event},
+                kwargs=worker_options,
             )
             process.start()
             process.join()
@@ -207,6 +231,9 @@ def _doc_type_worker(db: str, generator_config: GeneratorConfig, health_state=No
                 item = next(queue_items)
             except StopIteration:
                 break
+            if health_state is not None and not health_state.is_set():
+                doc_type_queue.nack(item)
+                continue
             logger.info(f"Processing document {item.id} in PID {os.getpid()}")
             try:
                 pipeline.run({"input": {"documents": [item]}})
@@ -273,7 +300,8 @@ def _doc_type_watcher(db: str, generator_config: GeneratorConfig, health_state=N
 
 
 def start_ingest_worker(db: str, generator_config: GeneratorConfig, pool_size: int = 1, health_state=None,
-                        indexing_enabled=None, log_timestamp: str | None = None, stop_event=None) -> Tuple[
+                        indexing_enabled=None, log_timestamp: str | None = None, stop_event=None,
+                        open_world: bool | None = None) -> Tuple[
     persistqueue.SQLiteAckQueue, "TaskPool"]:
     from shyhurricane.task_queue.types import TaskPool
 
@@ -298,7 +326,7 @@ def start_ingest_worker(db: str, generator_config: GeneratorConfig, pool_size: i
     # this is a light-weight process, we only need one
     ingest_process = multiprocessing.Process(
         target=_ingest_watcher, args=(db, generator_config, health_state, log_timestamp),
-        kwargs={"stop_event": stop_event},
+        kwargs={"stop_event": stop_event, "open_world": open_world},
     )
     ingest_process._shyhurricane_monitor_process_group = hasattr(os, "setsid")
     ingest_process.start()

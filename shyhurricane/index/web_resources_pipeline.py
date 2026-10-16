@@ -349,9 +349,10 @@ class NormalizeDocuments:
     Normalize document content for better results from embedding and make it easier for LLMs to analyze the content.
     """
 
-    def __init__(self, doc_cleaner: DocumentCleaner, stores: Dict[str, QdrantDocumentStore]) -> None:
+    def __init__(self, doc_cleaner: DocumentCleaner, stores: Dict[str, QdrantDocumentStore], graph_db=None) -> None:
         self.doc_cleaner = doc_cleaner
         self.store = stores.get("content")
+        self.graph_db = graph_db
 
     def _query_normalized_content(self, doc: Document) -> Optional[str]:
         content_sha256 = doc.meta.get("content_sha256", "")
@@ -395,7 +396,16 @@ class NormalizeDocuments:
                     if existing_normalized_content := self._query_normalized_content(doc):
                         normalized_content = existing_normalized_content
                     else:
-                        normalized_content = _deobfuscate_javascript(normalized_content)
+                        if self.graph_db is None:
+                            normalized_content = _deobfuscate_javascript(normalized_content)
+                        else:
+                            from shyhurricane.graph.artifacts import ArtifactStore
+
+                            artifacts = ArtifactStore(self.graph_db)
+                            try:
+                                normalized_content = artifacts.deobfuscate(normalized_content, _deobfuscate_javascript)
+                            finally:
+                                artifacts.close()
                 elif doc_type == "html":
                     normalized_content = normalize_html(normalized_content)
                 elif doc_type == "xml":
@@ -696,6 +706,8 @@ def build_embedders(
 
 
 def build_ingest_pipeline(db: str, generator_config: GeneratorConfig) -> Pipeline:
+    from shyhurricane.graph.ingest import CaptureGraphEvents
+
     stores = build_stores(db)
     embedders = build_embedders(embedder_cache=EmbedderCache(generator_config))
     sparse_embedder = generator_config.create_sparse_document_embedder(SPARSE_EMBEDDING_MODEL)
@@ -742,9 +754,10 @@ def build_ingest_pipeline(db: str, generator_config: GeneratorConfig) -> Pipelin
     pipe.add_component("har_document", HarDocument())
 
     pipe.add_component("rr_joiner", ListJoiner(List[IngestableRequestResponse]))
+    pipe.add_component("capture_graph", CaptureGraphEvents(db))
     pipe.add_component("request_response_to_document",
                        RequestResponseToDocument(embedders=embedders, sparse_embedder=sparse_embedder))
-    pipe.add_component("normalize_document", NormalizeDocuments(doc_cleaner=doc_cleaner, stores=stores))
+    pipe.add_component("normalize_document", NormalizeDocuments(doc_cleaner=doc_cleaner, stores=stores, graph_db=db))
     pipe.add_component("filter_doc_by_id", FilterExistingDocumentsById(stores=stores))
 
     pipe.add_component("output", IngestMultiStore(stores))
@@ -757,7 +770,8 @@ def build_ingest_pipeline(db: str, generator_config: GeneratorConfig) -> Pipelin
     pipe.connect("raw_document", "rr_joiner")
     pipe.connect("har_document", "rr_joiner")
 
-    pipe.connect("rr_joiner", "request_response_to_document")
+    pipe.connect("rr_joiner", "capture_graph")
+    pipe.connect("capture_graph", "request_response_to_document")
     pipe.connect("request_response_to_document", "filter_doc_by_id")
     pipe.connect("filter_doc_by_id", "normalize_document")
     pipe.connect("normalize_document", "output")

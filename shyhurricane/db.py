@@ -1,6 +1,6 @@
+import hashlib
 import json
 import logging
-import os
 import re
 import socket
 import subprocess
@@ -144,6 +144,10 @@ def _start_qdrant_docker(
     if not container_id:
         raise RuntimeError("docker inspect did not return container Id")
 
+    if not any(mount.get("Destination") == "/qdrant/storage" and mount.get("Source") == str(storage)
+               for mount in inspect.get("Mounts", [])):
+        raise RuntimeError("Managed Qdrant storage mount does not match configured directory")
+
     http_ip, http_port = _get_published_port(inspect, f"{http_container_port}/tcp")
     grpc_ip, grpc_port = _get_published_port(inspect, f"{grpc_container_port}/tcp")
 
@@ -170,30 +174,25 @@ def _wait_ready(url: str = "http://127.0.0.1:6333", timeout_s: int = 30) -> None
     raise TimeoutError(f"Qdrant not ready after {timeout_s}s")
 
 
-_QDRANT_HOST: Optional[str] = None
-_QDRANT_HOST_PORT: Optional[int] = None
-_QDRANT_GRPC_PORT: Optional[int] = None
+_QDRANT_ENDPOINTS: dict[str, Tuple[str, int]] = {}
 
 
 def qdrant_host_port(db: str) -> Tuple[str, int]:
-    global _QDRANT_HOST, _QDRANT_HOST_PORT, _QDRANT_GRPC_PORT
-
-    if _QDRANT_HOST and _QDRANT_HOST_PORT:
-        return _QDRANT_HOST, _QDRANT_HOST_PORT
-
-    if re.match(r'\S+:\d+$', db):
-        host, _, port = db.rpartition(':')
-        _QDRANT_HOST = host
-        _QDRANT_HOST_PORT = int(port)
-        return _QDRANT_HOST, _QDRANT_HOST_PORT
-
-    container_name = "qdrant-" + re.sub(r'[^A-Za-z0-9]+', '-', os.path.basename(db)).lower()
-    container_info = _start_qdrant_docker(name=container_name, storage_dir=os.path.abspath(db))
-    logger.info(f"Qdrant database at {container_info.http_url}")
-    _wait_ready(container_info.http_url)
-    _QDRANT_HOST = container_info.http_host
-    _QDRANT_HOST_PORT = container_info.http_port
-    return _QDRANT_HOST, _QDRANT_HOST_PORT
+    remote = re.fullmatch(r"([^/\\\s]+):(\d+)", db)
+    location = db if remote else str(Path(db).expanduser().resolve())
+    if location in _QDRANT_ENDPOINTS:
+        return _QDRANT_ENDPOINTS[location]
+    if remote:
+        host, port = remote.groups()
+        endpoint = (host, int(port))
+    else:
+        container_name = "qdrant-shyhurricane-" + hashlib.sha256(location.encode()).hexdigest()[:12]
+        container_info = _start_qdrant_docker(name=container_name, storage_dir=location)
+        logger.info("Qdrant database at %s", container_info.http_url)
+        _wait_ready(container_info.http_url)
+        endpoint = (container_info.http_host, container_info.http_port)
+    _QDRANT_ENDPOINTS[location] = endpoint
+    return endpoint
 
 
 async def create_qdrant_client(db: str) -> AsyncQdrantClient:

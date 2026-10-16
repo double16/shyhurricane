@@ -36,6 +36,10 @@ RUN ARCH=$(uname -m) && \
 COPY --chown=0:0 --chmod=755 jsdeobf.sh /usr/local/bin/
 RUN npm -g install webcrack shuji
 
+COPY --chown=0:0 graph-analysis/package*.json /opt/graph-analysis/
+RUN cd /opt/graph-analysis && npm ci --omit=dev --ignore-scripts
+COPY --chown=0:0 graph-analysis/*.cjs /opt/graph-analysis/
+
 # Seed the rule cache so JavaScript scans work when the registry is unavailable.
 RUN git clone --depth=1 https://github.com/amplify-security/opengrep-rules.git /opt/opengrep-rules && \
     chown -R 2000:2000 /opt/opengrep-rules

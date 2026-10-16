@@ -14,7 +14,7 @@ SHUTDOWN_MESSAGE = "Shutting down: waiting up to 5 minutes (300 seconds) for cur
 async def test_registered_tools_publish_first_line_summaries(monkeypatch):
     monkeypatch.setattr(service.mcp_instance, "open_world", True)
     tools = await service.mcp_instance.list_tools()
-    assert len(tools) == 17
+    assert len(tools) == 23
     for tool in tools:
         assert tool.description, tool.name
         summary = tool.description.splitlines()[0]
@@ -82,7 +82,7 @@ def test_shutdown_logging_reenables_info_without_duplicate_output(monkeypatch, c
 @pytest.fixture
 async def service_runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(service, "logger", logging.Logger("service-test"))
-    monkeypatch.setenv("QDRANT", str(tmp_path / "db"))
+    monkeypatch.setenv("QDRANT", "db:6333")
     monkeypatch.delenv("MCP_TRANSPORT", raising=False)
     monkeypatch.delenv("LOW_POWER", raising=False)
     monkeypatch.delenv("LOG_FILE", raising=False)
@@ -164,7 +164,7 @@ async def test_main_uses_environment_transport_and_closes_servers(service_runtim
 @pytest.mark.asyncio
 async def test_cli_transport_overrides_environment_and_gpu_default(service_runtime, monkeypatch):
     monkeypatch.setenv("MCP_TRANSPORT", "invalid")
-    monkeypatch.setenv("QDRANT", "")
+    monkeypatch.delenv("QDRANT")
     monkeypatch.setattr(service.sys, "argv", ["mcp_service.py", "--transport", "sse"])
     monkeypatch.setattr(service.torch.accelerator, "device_count", lambda: 1)
     await service.main()
@@ -317,6 +317,35 @@ async def test_log_file_option_and_environment_precedence(service_runtime, monke
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("source", ["default", "environment", "cli"])
+async def test_default_log_file_uses_resolved_data_directory(service_runtime, monkeypatch, tmp_path, source):
+    selected = tmp_path / source
+    monkeypatch.setenv("DATA_DIR", str(selected))
+    if source == "default":
+        monkeypatch.delenv("DATA_DIR")
+        monkeypatch.setattr("shyhurricane.data_paths.default_data_dir", lambda: selected)
+    elif source == "cli":
+        monkeypatch.setenv("DATA_DIR", str(tmp_path / "other"))
+        monkeypatch.setattr(service.sys, "argv", ["mcp_service.py", "--data-dir", str(selected)])
+    await service.main()
+    service.configure_file_logging.assert_called_once_with(
+        str(selected / "logs" / "shyhurricane.log"), console_enabled=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_unwritable_default_log_file_fails_before_services_start(service_runtime, monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    service.configure_file_logging.side_effect = PermissionError("permission denied")
+    with pytest.raises(SystemExit) as error:
+        await service.main()
+    assert error.value.code == 2
+    assert str(tmp_path / "logs" / "shyhurricane.log") in capsys.readouterr().err
+    service.get_server_context.assert_not_awaited()
+    service.set_generator_config.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_unwritable_log_file_fails_before_services_start(service_runtime, monkeypatch, capsys):
     monkeypatch.setenv("LOG_FILE", "/unwritable/server.log")
     service.configure_file_logging.side_effect = PermissionError("permission denied")
@@ -326,3 +355,64 @@ async def test_unwritable_log_file_fails_before_services_start(service_runtime, 
     assert "Cannot open log file" in capsys.readouterr().err
     service.get_server_context.assert_not_awaited()
     service.set_generator_config.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_indexing_wait_environment_and_cli_override(service_runtime, monkeypatch):
+    monkeypatch.setenv("INDEXING_WAIT_TIMEOUT_SECONDS", "12.5")
+    await service.main()
+    assert service.set_server_config.call_args.args[0].indexing_wait_timeout_seconds == 12.5
+    monkeypatch.setattr(service.sys, "argv", ["mcp_service.py", "--indexing-wait-timeout-seconds", "0"])
+    await service.main()
+    assert service.set_server_config.call_args.args[0].indexing_wait_timeout_seconds == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", ["-1", "nan", "inf", "invalid"])
+async def test_invalid_indexing_wait_timeout_rejected_before_startup(service_runtime, monkeypatch, invalid):
+    monkeypatch.setenv("INDEXING_WAIT_TIMEOUT_SECONDS", invalid)
+    with pytest.raises(SystemExit) as error:
+        await service.main()
+    assert error.value.code == 2
+    service.get_server_context.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_data_dir_cli_overrides_environment(service_runtime, monkeypatch, tmp_path):
+    selected = tmp_path / "selected"
+    monkeypatch.setattr(service.sys, "argv", ["mcp_service.py", "--data-dir", str(selected)])
+    await service.main()
+    assert selected.is_dir()
+    assert service.set_server_config.call_args.args[0].data_dir == str(selected)
+    assert service.os.environ["DATA_DIR"] == str(selected)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["", "../escape"])
+async def test_invalid_data_dir_fails_before_startup(service_runtime, monkeypatch, value):
+    monkeypatch.setattr(service.sys, "argv", ["mcp_service.py", "--data-dir", value])
+    with pytest.raises(SystemExit) as error:
+        await service.main()
+    assert error.value.code == 2
+    service.get_server_context.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unwritable_data_dir_fails_before_startup(service_runtime, monkeypatch, tmp_path):
+    blocked = tmp_path / "file"
+    blocked.touch()
+    monkeypatch.setattr(service.sys, "argv", ["mcp_service.py", "--data-dir", str(blocked)])
+    with pytest.raises(SystemExit) as error:
+        await service.main()
+    assert error.value.code == 2
+    service.get_server_context.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", ["--database", "--graph-database"])
+async def test_removed_storage_flags_fail_before_startup(service_runtime, monkeypatch, flag):
+    monkeypatch.setattr(service.sys, "argv", ["mcp_service.py", flag, "old"])
+    with pytest.raises(SystemExit) as error:
+        await service.main()
+    assert error.value.code == 2
+    service.get_server_context.assert_not_awaited()

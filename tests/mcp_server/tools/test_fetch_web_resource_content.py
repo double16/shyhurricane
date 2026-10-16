@@ -1,3 +1,6 @@
+from dataclasses import replace
+from unittest.mock import AsyncMock
+
 import pytest
 from haystack import Document
 
@@ -50,6 +53,7 @@ def patch_server_context(monkeypatch, server_context):
         return server_context
 
     monkeypatch.setattr(fetch, "get_server_context", get_fake_server_context)
+    monkeypatch.setattr(fetch, "wait_for_indexing", AsyncMock(return_value=fetch.IndexingStatus(status="complete")))
 
 
 @pytest.mark.asyncio
@@ -127,3 +131,34 @@ async def test_web_resource_returns_full_text_resource(monkeypatch):
     assert str(result.uri) == "web://content/doc-1"
     assert result.mime_type == "application/javascript"
     assert result.text == "full"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", ["https://example.com/missing", "web://content/missing"])
+async def test_missing_pending_content_returns_status_only(monkeypatch, url):
+    patch_server_context(monkeypatch, ServerContext({"content": AsyncStore([])}))
+    monkeypatch.setattr(fetch, "log_tool_history", noop)
+    status = fetch.IndexingStatus(status="timed_out", potentially_incomplete=True)
+    monkeypatch.setattr(fetch, "wait_for_indexing", AsyncMock(return_value=status))
+    result = await fetch.fetch_web_resource_content(None, url)
+    assert isinstance(result, fetch.IndexingOnlyResult)
+    assert result.indexing is status
+
+
+@pytest.mark.asyncio
+async def test_opaque_uri_resolves_url_and_refreshes_after_wait(monkeypatch):
+    doc = make_doc()
+    store = AsyncStore([doc])
+    patch_server_context(monkeypatch, ServerContext({"content": store}))
+    monkeypatch.setattr(fetch, "log_tool_history", noop)
+
+    async def wait(ctx, server, matches, **kwargs):
+        assert matches(doc.meta["url"])
+        assert not matches("https://other.test/")
+        store.docs = [replace(doc, content="new content")]
+        return fetch.IndexingStatus(status="complete")
+
+    monkeypatch.setattr(fetch, "wait_for_indexing", wait)
+    result = await fetch.fetch_web_resource_content(None, "web://content/doc-1")
+    assert result.contents.text == "new content"
+    assert result.indexing.status == "complete"

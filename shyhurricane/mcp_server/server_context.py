@@ -4,7 +4,6 @@ import logging
 import multiprocessing
 import os
 import subprocess
-import sys
 import time
 from dataclasses import dataclass, field
 from multiprocessing import Queue
@@ -15,8 +14,10 @@ from haystack import Pipeline
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 from qdrant_client import AsyncQdrantClient
 
+from shyhurricane.data_paths import configure_data_dir, state_path
 from shyhurricane.db import create_qdrant_client, create_qdrant_document_store, qdrant_host_port
 from shyhurricane.doc_type_model_map import doc_type_to_model
+from shyhurricane.graph.database import GraphStore, graph_location
 from shyhurricane.haystack_lifecycle import close_haystack_resources
 from shyhurricane.health import HealthMonitor, qdrant_probe
 from shyhurricane.mcp_server.generator_config import get_generator_config
@@ -68,6 +69,7 @@ class ServerContext:
     worker_manager: Optional[object] = None
     stop_event: Optional[object] = None
     result_store: ResultPageStore | None = None
+    graph_store: GraphStore | None = None
     _closed: bool = field(default=False, init=False)
     _ingest_writer: AsyncIngestWriter | None = field(default=None, init=False)
 
@@ -153,6 +155,8 @@ class ServerContext:
             pass
         if self.result_store is not None:
             self.result_store.cleanup()
+        if self.graph_store is not None:
+            self.graph_store.close()
         logger.info("ServerContext closed")
 
 
@@ -174,14 +178,17 @@ async def get_server_context() -> ServerContext:
     log_timestamp = get_log_timestamp()
     server_config = get_server_config()
 
-    cache_path: str = os.path.join(os.environ.get('TOOL_CACHE', os.environ.get('TMPDIR', '/tmp')), 'tool_cache')
+    configure_data_dir(server_config.data_dir)
+    cache_path = str(state_path("tool_cache"))
+    if os.environ.get("TOOL_CACHE"):
+        cache_path = os.path.join(os.environ["TOOL_CACHE"], "tool_cache")
     os.makedirs(cache_path, exist_ok=True)
     result_store = await asyncio.to_thread(
         ResultPageStore, cache_path, int(os.environ.get("TOOL_RESULT_TTL_SECONDS", "86400")),
     )
     await asyncio.to_thread(result_store.cleanup)
 
-    db = server_config.database or os.environ.get('QDRANT', 'shyhurricane.db')
+    db = server_config.database
     logger.info("Using Qdrant database at %s", db)
     # ensure collections are created
     for doc_type_model in doc_type_to_model().values():
@@ -198,26 +205,19 @@ async def get_server_context() -> ServerContext:
     disable_elicitation = _elicitation_disabled()
     qdrant_client = await create_qdrant_client(db=db)
     qdrant_host, qdrant_port = qdrant_host_port(db)
-    health_monitor = HealthMonitor(lambda: qdrant_probe(qdrant_host, qdrant_port), lambda: True)
+    graph_store = GraphStore(graph_location())
+    health_monitor = HealthMonitor(lambda: qdrant_probe(qdrant_host, qdrant_port), lambda: True,
+                                   neo4j_probe=graph_store.ready)
     health_monitor.start()
 
-    mcp_session_volume = "mcp_session"
-
-    for retry in reversed(range(3)):
-        try:
-            subprocess.check_call(["docker", "volume", "inspect", mcp_session_volume],
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except subprocess.CalledProcessError:
-            try:
-                subprocess.check_call(["docker", "volume", "create", mcp_session_volume],
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                break
-            except subprocess.CalledProcessError as e:
-                if retry == 0:
-                    logger.error(f"Failed to create {mcp_session_volume} volume", exc_info=e)
-                    sys.exit(1)
-                else:
-                    time.sleep(5)
+    mcp_session_volume = os.environ.get("MCP_SESSION_VOLUME")
+    if mcp_session_volume:
+        subprocess.check_call(["docker", "volume", "create", mcp_session_volume],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    else:
+        sessions = state_path("sessions")
+        sessions.mkdir(parents=True, exist_ok=True)
+        mcp_session_volume = str(sessions)
 
     await asyncio.create_subprocess_exec(
         "docker", "run", "--rm",
@@ -246,7 +246,12 @@ async def get_server_context() -> ServerContext:
         indexing_enabled=indexing_enabled,
         log_timestamp=log_timestamp,
         stop_event=stop_event,
+        open_world=server_config.open_world,
     )
+    from shyhurricane.graph.worker import start_graph_worker
+
+    ingest_pool.processes.append(start_graph_worker(db, graph_store.location, health_monitor.ready,
+                                                   stop_event, server_config.open_world))
     task_worker_ipc = start_task_worker(db, ingest_queue.path, server_config.task_pool_size, log_timestamp,
                                        stop_event=stop_event)
 
@@ -254,6 +259,7 @@ async def get_server_context() -> ServerContext:
         db=db,
         cache_path=cache_path,
         result_store=result_store,
+        graph_store=graph_store,
         document_pipeline=None,
         website_context_pipeline=None,
         ingest_queue=ingest_queue,
