@@ -2,6 +2,7 @@
 import argparse
 import json
 import sys
+from typing import Optional
 
 import requests
 
@@ -9,9 +10,12 @@ from shyhurricane.http_burp_xml import http_burp_xml_generator
 from shyhurricane.http_csv import http_csv_generator
 
 
-def _post(index_url: str, payload: str, url: str) -> None:
+def _post(index_url: str, payload: str, url: str, content_type: Optional[str] = None) -> None:
     try:
-        requests.post(index_url, data=payload).raise_for_status()
+        headers = dict()
+        if content_type:
+            headers["Content-Type"] = content_type
+        requests.post(index_url, data=payload, headers=headers).raise_for_status()
         print(f"[✔] Queued for indexing: {url}", file=sys.stderr)
     except Exception as error:
         print(f"[✘] Error: {url}, {error}", file=sys.stderr)
@@ -33,6 +37,7 @@ def main(argv=None) -> int:
     if args.burp_xml and (args.katana or args.csv):
         parser.error("--burp-xml cannot be combined with --katana or --csv")
     index_url = args.mcp_url.rstrip("/") + "/index"
+    findings_url = args.mcp_url.rstrip("/") + "/findings"
     try:
         requests.post(index_url, data="{}").raise_for_status()
         print(f"[✔] {index_url} verified", file=sys.stderr)
@@ -43,10 +48,14 @@ def main(argv=None) -> int:
     if args.katana:
         for line in sys.stdin:
             try:
-                url = str(json.loads(line).get("request", {}).get("endpoint"))
+                payload = json.loads(line)
+                if "request" in payload:
+                    url = str(payload.get("request", {}).get("endpoint"))
+                    _post(index_url, line.strip(), url)
+                elif "target" in payload and "title" in payload and "markdown" in payload:
+                    _post(findings_url, line.strip(), payload["target"], "application/json")
             except Exception:
                 continue
-            _post(index_url, line.strip(), url)
     else:
         try:
             records = (
