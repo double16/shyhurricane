@@ -119,7 +119,6 @@ def test_qdrant_host_port_starts_docker_for_path(monkeypatch, tmp_path):
         "_start_qdrant_docker",
         lambda name, storage_dir: db.QdrantDockerInfo(name, "abc", "127.0.0.1", 1234, "127.0.0.1", 5678),
     )
-    monkeypatch.setattr(db, "_wait_ready", lambda url: None)
 
     assert db.qdrant_host_port(str(tmp_path / "My DB!")) == ("127.0.0.1", 1234)
 
@@ -133,7 +132,6 @@ def test_qdrant_connections_and_container_names_are_isolated_by_full_path(monkey
         return db.QdrantDockerInfo(name, "abc", "127.0.0.1", 10000 + len(calls), "127.0.0.1", 6334)
 
     monkeypatch.setattr(db, "_start_qdrant_docker", start)
-    monkeypatch.setattr(db, "_wait_ready", lambda url: None)
     first, second = (str(tmp_path / name / "qdrant") for name in ("one", "two"))
     assert db.qdrant_host_port(first) == ("127.0.0.1", 10001)
     assert db.qdrant_host_port(second) == ("127.0.0.1", 10002)
@@ -162,22 +160,6 @@ async def test_scroll_qdrant_collection_stops_on_none_and_empty_point_id():
             return ["record-2"], None
 
     assert [record async for record in db.scroll_qdrant_collection(Client(), "network")] == ["record-1"]
-
-
-def test_wait_ready_returns_on_200_and_times_out(monkeypatch):
-    class Response:
-        status_code = 200
-
-    monkeypatch.setattr(db.requests, "get", lambda url, timeout: Response())
-    db._wait_ready("http://127.0.0.1:6333", timeout_s=1)
-
-    times = iter([0.0, 1.0])
-    monkeypatch.setattr(db.time, "time", lambda: next(times))
-    monkeypatch.setattr(db.time, "sleep", lambda seconds: None)
-    monkeypatch.setattr(db.requests, "get", lambda url, timeout: (_ for _ in ()).throw(db.requests.RequestException()))
-
-    with pytest.raises(TimeoutError):
-        db._wait_ready("http://127.0.0.1:6333", timeout_s=1)
 
 
 def test_find_available_port_uses_requested_host_and_closes_socket(monkeypatch):

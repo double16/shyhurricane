@@ -191,7 +191,7 @@ class MatchingStore:
         self.contexts = set()
 
     def read(self, statement, **parameters):
-        assert parameters.pop("timeout") == 5
+        assert 0 < parameters.pop("timeout") <= 30
         if "contexts" in parameters:
             self.selection += 1
             self.contexts.update(parameters["contexts"])
@@ -232,7 +232,7 @@ def test_checkpoint_resumes_selected_page_without_repeating_selection(event):
     assert not planner.plan_slice(reads=1)
     state = json.loads(json.dumps(planner.checkpoint()))
     assert state["cursor"]["selected"] and store.selection == 1 and store.hydration == 0
-    assert state["operation"]["parameters"]["timeout"] == 5
+    assert 0 < state["operation"]["parameters"]["timeout"] <= 30
     restored = LinkPlanner(store, graph)
     restored.restore(state)
     assert restored.plan_slice()

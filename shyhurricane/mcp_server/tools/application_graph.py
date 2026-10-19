@@ -376,19 +376,31 @@ async def find_user_journey_paths(
 @mcp_instance.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
 async def fetch_application_graph_evidence(
     ctx: Context,
-    scope: Scope,
     evidence_id: Annotated[
         TrimmedString,
         Field(
             description="Opaque evidence ID from results[].steps[].evidence_id returned by "
             "find_application_relationships, trace_application_data_flow, or "
-            "find_user_journey_paths. Use the same scope and pass the ID unchanged."
+            "find_user_journey_paths. Pass the ID unchanged."
         ),
     ],
 ) -> dict | None:
     """Read evidence and source locations for a relationship; never contacts the application.
 
     Supply results[].steps[].evidence_id from find_application_relationships,
-    trace_application_data_flow, or find_user_journey_paths and the same application scope.
+    trace_application_data_flow, or find_user_journey_paths. Reads published evidence directly
+    without waiting for indexing; possession of its ID permits retrieval.
     """
-    return await query(ctx, "fetch_application_graph_evidence", "evidence", scope, evidence_id=evidence_id)
+    evidence_id = trim_input(evidence_id)
+    await log_tool_history(ctx, "fetch_application_graph_evidence", evidence_id=evidence_id)
+    server = await get_server_context()
+    if server.graph_store is None:
+        raise ToolError("Application graph is unavailable")
+    try:
+        return await asyncio.to_thread(GraphQuery(server.graph_store).evidence, evidence_id)
+    except Exception as error:
+        logger.exception(
+            "Application graph query failed: tool=fetch_application_graph_evidence operation=evidence evidence_id=%s",
+            evidence_id,
+        )
+        raise ToolError("Application graph query failed; inspect Neo4j health and ingest backlog") from error

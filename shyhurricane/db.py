@@ -4,12 +4,10 @@ import logging
 import re
 import socket
 import subprocess
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncGenerator, List, Optional, Sequence, Tuple
 
-import requests
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.conversions import common_types as types
@@ -161,19 +159,6 @@ def _start_qdrant_docker(
     )
 
 
-def _wait_ready(url: str = "http://127.0.0.1:6333", timeout_s: int = 30) -> None:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        try:
-            r = requests.get(f"{url}/readyz", timeout=1)
-            if r.status_code == 200:
-                return
-        except requests.RequestException:
-            pass
-        time.sleep(0.2)
-    raise TimeoutError(f"Qdrant not ready after {timeout_s}s")
-
-
 _QDRANT_ENDPOINTS: dict[str, Tuple[str, int]] = {}
 
 
@@ -189,7 +174,6 @@ def qdrant_host_port(db: str) -> Tuple[str, int]:
         container_name = "qdrant-shyhurricane-" + hashlib.sha256(location.encode()).hexdigest()[:12]
         container_info = _start_qdrant_docker(name=container_name, storage_dir=location)
         logger.info("Qdrant database at %s", container_info.http_url)
-        _wait_ready(container_info.http_url)
         endpoint = (container_info.http_host, container_info.http_port)
     _QDRANT_ENDPOINTS[location] = endpoint
     return endpoint

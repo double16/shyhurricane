@@ -68,6 +68,7 @@ async def test_each_workflow_renders_without_running_tools(name, mode, monkeypat
     assert "contents.offset + len(contents.text)" in text
     assert "get_result_page" in text
     assert "fetch_application_graph_evidence" in text
+    assert "no scope is required and this lookup does not wait for indexing" in text
     assert text.index("find_application_endpoints(scope=target)") < text.index("context_url=<selected exact page URL>")
     assert "Avoid scope-wide symbol enumeration" in text
     assert 'detail="full"' in text

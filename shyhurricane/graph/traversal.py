@@ -8,6 +8,7 @@ from itertools import batched
 
 from neo4j.exceptions import Neo4jError
 
+from shyhurricane.graph.config import graph_timeouts
 from shyhurricane.graph.discovery import INTERPRETATION, ResourceDiscovery
 from shyhurricane.graph.model import web_url
 from shyhurricane.graph.visibility import (
@@ -72,7 +73,7 @@ class TraversalSnapshot:
             return []
         before = time.monotonic()
         try:
-            rows = self.store.read(statement, timeout=min(10, remaining), **self.parameters, **parameters)
+            rows = self.store.read(statement, timeout=min(graph_timeouts().read, remaining), **self.parameters, **parameters)
             logger.debug(
                 "Graph frontier read stage=%s batch=%s rows=%s seconds=%.3f remaining_seconds=%.3f",
                 statement.split("*/", 1)[0].removeprefix("/* traversal:"),

@@ -6,9 +6,10 @@ import time
 from itertools import batched
 from urllib.parse import urlsplit
 
-from neo4j import unit_of_work
+from neo4j import Query, unit_of_work
 from neo4j.exceptions import Neo4jError
 
+from shyhurricane.graph.config import graph_timeouts
 from shyhurricane.graph.links import LinkPlanner
 from shyhurricane.graph.model import identity, projection_snapshot
 from shyhurricane.graph.policy import ANALYZER_VERSION, library_analysis
@@ -48,13 +49,17 @@ def payload_batches(records):
         yield batch
 
 
-def write_batches(session, capture_id, stage, statement, parameter, records):
+def write_batches(session, capture_id, stage, statement, parameter, records, *, deadline=None):
     """Commit each payload independently and subdivide transaction-memory failures."""
 
     def commit(batch):
         started = time.monotonic()
 
-        @unit_of_work(timeout=60)
+        remaining = deadline - time.monotonic() if deadline is not None else float("inf")
+        if remaining <= 0:
+            raise TimeoutError("Graph maintenance budget reached")
+
+        @unit_of_work(timeout=min(graph_timeouts().write, remaining))
         def write(tx):
             try:
                 tx.run(statement, **{parameter: batch}).consume()
@@ -97,7 +102,7 @@ class GraphPublisher:
         self.store = store
 
     def begin(self, session, capture, digest):
-        @unit_of_work(timeout=10)
+        @unit_of_work(timeout=graph_timeouts().control)
         def begin(tx):
             row = tx.run(
                 "MERGE (c:GraphCapture {id:$id}) ON CREATE SET c.url=$url,c.host=$host "
@@ -117,13 +122,13 @@ class GraphPublisher:
             if previous_stage and previous_stage != generation:
                 tx.run(
                     "MATCH (p:GraphPublication {id:$id}) WHERE p.published_at IS NULL "
-                    "SET p.state='abandoned', p.retired_at=timestamp()/1000.0",
+                    "SET p:GraphCleanupPending, p.state='abandoned', p.retired_at=timestamp()/1000.0",
                     id=previous_stage,
                 ).consume()
             tx.run(
                 "MERGE (p:GraphPublication {id:$publication.id}) "
                 "ON CREATE SET p += $publication, p.created_at=timestamp()/1000.0 "
-                "SET p.state='staging', p.retired_at=null, p.cleaned=false "
+                "REMOVE p:GraphCleanupPending SET p.state='staging', p.retired_at=null, p.cleaned=false "
                 "WITH p MATCH (c:GraphCapture {id:p.capture_id}) SET c.staging_publication_id=p.id",
                 publication={
                     **capture,
@@ -150,7 +155,7 @@ class GraphPublisher:
         return session.execute_write(begin)
 
     def activate(self, session, capture, generation):
-        @unit_of_work(timeout=10)
+        @unit_of_work(timeout=graph_timeouts().control)
         def activate(tx):
             row = tx.run(
                 "MATCH (c:GraphCapture {id:$capture.id}) "
@@ -165,7 +170,9 @@ class GraphPublisher:
                 "c.staging_publication_id=null, c.published_at=timestamp()/1000.0, "
                 "p.state='published', p.published_at=c.published_at, p.published_revision=revision "
                 "WITH previous,p,revision OPTIONAL MATCH (old:GraphPublication {id:previous}) "
-                "SET old.state='retired', old.retired_at=timestamp()/1000.0, old.retired_revision=revision "
+                "FOREACH (retired IN CASE WHEN old IS NULL THEN [] ELSE [old] END | "
+                "SET retired:GraphCleanupPending, retired.state='retired', retired.retired_at=timestamp()/1000.0, "
+                "retired.retired_revision=revision) "
                 "RETURN p.id AS id",
                 capture=capture,
                 generation=generation,
@@ -178,9 +185,13 @@ class GraphPublisher:
 
     def abandon(self, session, generation):
         session.run(
-            "MATCH (p:GraphPublication {id:$id}), (c:GraphCapture {id:p.capture_id}) "
-            "WHERE p.published_at IS NULL SET p.state='abandoned', p.retired_at=timestamp()/1000.0 "
-            "WITH p,c WHERE c.staging_publication_id=p.id SET c.staging_publication_id=null",
+            Query(
+                "MATCH (p:GraphPublication {id:$id}), (c:GraphCapture {id:p.capture_id}) "
+                "WHERE p.published_at IS NULL SET p:GraphCleanupPending, p.state='abandoned', "
+                "p.retired_at=timestamp()/1000.0 "
+                "WITH p,c WHERE c.staging_publication_id=p.id SET c.staging_publication_id=null",
+                timeout=graph_timeouts().control,
+            ),
             id=generation,
         ).consume()
 
@@ -248,7 +259,6 @@ class GraphPublisher:
                         )
                     raise
         logger.info("Graph capture %s publication activated seconds=%.3f", capture["id"], time.monotonic() - started)
-        self.cleanup()
 
     def validate_dependencies(self, links):
         ids = sorted(
@@ -377,59 +387,71 @@ class GraphPublisher:
             )
             after = rows[-1]["id"]
 
-    def cleanup(self):
-        """Incremental maintenance; its failure never invalidates an activated capture."""
-        try:
-            publications = self.store.read(
-                "MATCH (p:GraphPublication) WHERE p.state IN ['retired','abandoned'] "
-                "AND p.retired_at<$cutoff AND coalesce(p.cleaned,false)=false "
-                "RETURN p.id AS id, p.capture_id AS capture, p.published_at IS NULL AS abandoned "
-                "ORDER BY p.retired_at,p.id LIMIT 5",
-                cutoff=time.time() - CLEANUP_GRACE_SECONDS,
-            )
-            remaining = CLEANUP_BATCHES
-            with self.store.connect().session(database="neo4j") as session:
-                for publication in publications:
-                    for select, delete in self.cleanup_stages(publication):
-                        while remaining:
-                            rows = self.store.read(
-                                select,
-                                id=publication["id"],
-                                capture=publication["capture"],
-                                limit=WRITE_BATCH_SIZE,
-                                cutoff=time.time() - CLEANUP_GRACE_SECONDS,
-                            )
-                            if not rows:
-                                break
-                            write_batches(
-                                session,
-                                publication["capture"],
-                                "cleanup",
-                                delete,
-                                "rows",
-                                (
-                                    {
-                                        **row,
-                                        "publication": publication["id"],
-                                        "cutoff": time.time() - CLEANUP_GRACE_SECONDS,
-                                    }
-                                    for row in rows
-                                ),
-                            )
-                            remaining -= 1
-                        if not remaining:
-                            return
-                    session.run(
-                        "MATCH (p:GraphPublication {id:$id}) "
-                        "SET p.cleanup_lock=coalesce(p.cleanup_lock,0)+1 WITH p "
-                        "MATCH (c:GraphCapture {id:p.capture_id}) "
-                        "WHERE p.state IN ['retired','abandoned'] "
-                        "AND coalesce(c.active_publication_id,'')<>p.id "
-                        "AND coalesce(c.staging_publication_id,'')<>p.id SET p.cleaned=true",
-                        id=publication["id"],
-                    ).consume()
-        except Exception:
-            logger.warning("Graph publication cleanup deferred; activated captures remain available", exc_info=True)
+    def cleanup(self, *, deadline=None, stop_event=None):
+        """Reclaim only pending generations within a cooperative maintenance budget."""
+        started = time.monotonic()
+        deadline = started + 60 if deadline is None else deadline
+        summary = {"selected": 0, "completed": 0, "deleted": 0}
+
+        def available():
+            return time.monotonic() < deadline and not (stop_event and stop_event.is_set())
+
+        def read(statement, **parameters):
+            return self.store.read(statement, timeout=deadline - time.monotonic(), **parameters)
+
+        if not available():
+            return summary
+        publications = read(
+            "MATCH (p:GraphPublication:GraphCleanupPending) "
+            "USING INDEX p:GraphCleanupPending(retired_at,id) "
+            "WHERE p.retired_at<$cutoff AND p.id IS NOT NULL "
+            "AND p.state IN ['retired','abandoned'] AND coalesce(p.cleaned,false)=false "
+            "RETURN p.id AS id, p.capture_id AS capture, p.published_at IS NULL AS abandoned "
+            "ORDER BY p.retired_at,p.id LIMIT 5",
+            cutoff=time.time() - CLEANUP_GRACE_SECONDS,
+        )
+        summary["selected"] = len(publications)
+        remaining = CLEANUP_BATCHES
+        with self.store.connect().session(database="neo4j") as session:
+            for publication in publications:
+                for select, delete in self.cleanup_stages(publication):
+                    while remaining and available():
+                        rows = read(
+                            select, id=publication["id"], capture=publication["capture"],
+                            limit=WRITE_BATCH_SIZE, cutoff=time.time() - CLEANUP_GRACE_SECONDS,
+                        )
+                        if not rows:
+                            break
+                        if not available():
+                            return summary
+                        write_batches(
+                            session, publication["capture"], "cleanup", delete, "rows",
+                            ({**row, "publication": publication["id"],
+                              "cutoff": time.time() - CLEANUP_GRACE_SECONDS} for row in rows),
+                            deadline=min(deadline, time.monotonic() + graph_timeouts().read),
+                        )
+                        summary["deleted"] += len(rows)
+                        remaining -= 1
+                    if not remaining or not available():
+                        return summary
+                if not available():
+                    return summary
+                statement = (
+                    "UNWIND $rows AS row MATCH (p:GraphPublication {id:row.publication}) "
+                    "SET p.cleanup_lock=coalesce(p.cleanup_lock,0)+1 WITH p "
+                    "MATCH (c:GraphCapture {id:p.capture_id}) "
+                    "WHERE p.state IN ['retired','abandoned'] "
+                    "AND coalesce(c.active_publication_id,'')<>p.id "
+                    "AND coalesce(c.staging_publication_id,'')<>p.id "
+                    "SET p.cleaned=true REMOVE p:GraphCleanupPending"
+                )
+                write_batches(
+                    session, publication["capture"], "cleanup-complete", statement, "rows",
+                    [{"publication": publication["id"]}],
+                    deadline=min(deadline, time.monotonic() + graph_timeouts().read),
+                )
+                summary["completed"] += 1
+        return summary
 
     @staticmethod
     def cleanup_stages(publication):

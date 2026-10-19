@@ -539,3 +539,36 @@ def test_bad_state_accepts_missing_mps_backend(monkeypatch):
     monkeypatch.setattr(web_resources.torch, "backends", Backends())
 
     assert web_resources.is_current_process_in_bad_state() is False
+
+
+@pytest.mark.parametrize("doc_type", [False, True])
+@pytest.mark.parametrize("shutdown", [False, True])
+def test_index_workers_wait_before_database_pipeline_setup(monkeypatch, doc_type, shutdown):
+    health = HealthState()
+    stop = Event()
+    queue = Queue()
+    built = []
+    closed = []
+
+    if shutdown:
+        health.wait = lambda timeout: stop.set()
+
+    def build(**kwargs):
+        assert health.is_set()
+        built.append(True)
+        return Pipeline()
+
+    monkeypatch.setattr(web_resources.faulthandler, "register", Mock())
+    monkeypatch.setattr(web_resources, "get_ingest_queue", lambda db: queue)
+    monkeypatch.setattr(web_resources, "get_doc_type_queue", lambda db: queue)
+    monkeypatch.setattr(web_resources, "get_log_path", lambda *args: None)
+    monkeypatch.setattr(web_resources, "build_ingest_pipeline", build)
+    monkeypatch.setattr(web_resources, "build_doc_type_pipeline", build)
+    monkeypatch.setattr(web_resources, "persistent_queue_get", lambda *args, **kwargs: iter(()))
+    monkeypatch.setattr(web_resources, "close_haystack_resources", lambda: closed.append(True))
+    target = web_resources._doc_type_worker if doc_type else web_resources._ingest_worker
+    result = target("db", object(), health_state=health, stop_event=stop)
+    assert built == ([] if shutdown else [True])
+    assert closed == [True]
+    if doc_type and shutdown:
+        assert result == 0

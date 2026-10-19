@@ -138,9 +138,10 @@ This server assists penetration testers, red team operators and security auditor
   Query indexed resources for later discoveries.
 - Registration persists only within a legacy session. Modern clients must supply request_headers
   and additional_hosts on every operation that needs them. Per-call headers override registered keys.
-- Indexed web-resource and graph tools wait briefly for relevant queued indexing, then return
+- Indexed web-resource and graph discovery/traversal tools wait briefly for relevant queued indexing, then return
   available data. Inspect indexing.status and indexing.potentially_incomplete before treating
   missing results as complete. A timeout does not stop indexing or justify a duplicate scan.
+- Graph evidence retrieval accepts only evidence_id and reads published evidence without an indexing wait.
 - Finding persistence remains asynchronous; queued findings may not be searchable immediately.
 """
 

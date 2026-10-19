@@ -6,6 +6,7 @@ from collections import defaultdict
 
 from neo4j.exceptions import Neo4jError
 
+from shyhurricane.graph.config import graph_timeouts
 from shyhurricane.graph.model import identity
 from shyhurricane.graph.visibility import visible_node
 
@@ -52,8 +53,11 @@ class LinkPlanner:
     def read(self, statement, **parameters):
         self.guard()
         self.reads_left -= 1
-        self.operation = {"statement": statement, "parameters": {"timeout": 5, **parameters}}
-        return self.store.read(statement, timeout=5, **parameters)
+        timeout = min(graph_timeouts().read, self.deadline - time.monotonic())
+        if timeout <= 0:
+            raise PlanningYield
+        self.operation = {"statement": statement, "parameters": {"timeout": timeout, **parameters}}
+        return self.store.read(statement, timeout=timeout, **parameters)
 
     def hydrate(self, ids):
         missing = [key for key in ids if key not in self.hydrated] if self.checkpointing else ids

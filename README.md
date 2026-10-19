@@ -214,11 +214,11 @@ configurations retain saved pages in the existing `tool_cache` volume.
 
 ### Waiting for indexing
 
-Web-resource search, content fetch, domain/host/netloc/URL inventories, and application-graph tools
-wait up to 60 seconds for indexing relevant to their query before reading available data. Indexing
-and scan tools still return promptly after queueing work. Unrelated targets do not delay scoped
-queries; an unfiltered inventory considers all targets. Finding queries, direct MCP resource reads,
-and saved-page navigation do not wait.
+Web-resource search, content fetch, domain/host/netloc/URL inventories, and application-graph
+discovery/traversal tools wait up to 60 seconds for indexing relevant to their query before reading
+available data. Indexing and scan tools still return promptly after queueing work. Unrelated targets do not delay scoped
+queries; an unfiltered inventory considers all targets. Finding queries, graph evidence retrieval,
+direct MCP resource reads, and saved-page navigation do not wait.
 
 | Environment variable | Default | Description |
 |----------------------|---------|-------------|
@@ -258,8 +258,8 @@ the wait. Unresolvable queue metadata or status-read errors report `unavailable`
 Content fetch retains its content fields and adds `indexing`. If no content is available while
 indexing is incomplete, it returns only `{ "indexing": { ... } }`; a confirmed miss remains `null`.
 With waiting disabled, missing content retains the previous `null` behavior. Graph evidence retrieval
-similarly returns a status-only object when evidence is missing and indexing is incomplete. Saved
-pages preserve the original indexing status and never wait again.
+does not wait or return indexing status; missing evidence returns `null`. Saved pages preserve the
+original indexing status and never wait again.
 
 Semantic search and explicit type filters such as `type:javascript` also wait for type-specific
 indexing. Low-power mode skips deliberately paused type-specific indexing and reports outstanding skipped work
@@ -353,8 +353,11 @@ avoiding repeated large properties on each JavaScript node and evidence record. 
 records remain readable and adopt publication generations when reprocessed.
 Committed staging batches can be replayed after a crash; acknowledgement loss after activation does
 not republish the same generation. Superseded entities and relationships become eligible for bounded
-cleanup after five minutes. Cleanup runs during health checks and after publication, resumes after
-restart, and cannot invalidate an active graph. Published evidence and its context metadata are
+cleanup after five minutes. A separate maintenance thread runs cleanup immediately after schema
+readiness and every 60 seconds,
+including when ingestion is idle. Health probes are read-only after schema initialization and never
+run cleanup; publication completion does not run cleanup either. Maintenance cannot invalidate an
+active graph. Published evidence and its context metadata are
 retained, including evidence referenced by earlier saved result pages. Abandoned staging evidence
 is reclaimed with its staged graph.
 
@@ -369,8 +372,9 @@ automatically to the existing artifact SQLite database; no backfill rerun is req
 
 ### Graph tools
 
-All graph tools are read-only, require an explicit scope, work in low-power mode, and never make
-target requests. Scope accepts a hostname, `host:port`, or HTTP(S) URL prefix. Hostname scopes include
+All graph tools are read-only, work in low-power mode, and never make target requests.
+Discovery and traversal tools require an explicit scope; evidence retrieval requires only an evidence ID.
+Scope accepts a hostname, `host:port`, or HTTP(S) URL prefix. Hostname scopes include
 subdomains on hostname boundaries; URL scopes restrict scheme, host, and path prefix.
 
 | Tool | Purpose |
@@ -389,7 +393,10 @@ also accept `null`. IDs are opaque strings: copy them unchanged from the indicat
 All graph string arguments, including each `kinds` entry, ignore leading and trailing whitespace.
 Case, internal whitespace, and URL escaping remain unchanged. Blank strings are not converted to `null`;
 use `null` to omit a nullable filter.
-Use the same application scope when passing IDs between tools.
+Use the same application scope when passing element/resource IDs between discovery and traversal tools.
+Evidence retrieval accepts only `evidence_id` and reads published evidence without waiting for indexing.
+Possession of an evidence ID permits retrieval regardless of its URL or consuming-document context.
+It returns the evidence object or `null` for missing or unpublished evidence, without an `indexing` field.
 Begin with `find_application_endpoints`, optionally narrowing to an exact `url` and HTTP `method`.
 Each entry identifies one resource ID, URL, and method, including assets. `capture_status` is
 `captured` when an observed capture is in the selected snapshot, otherwise `referenced`; this does
@@ -417,7 +424,7 @@ IDs on saved pages have the same meaning as IDs on the first page (`get_result_p
 | `method` | `find_application_endpoints` | string or null; default null | Exact HTTP method filter, ignoring case; e.g. `GET` or `POST` |
 | `detail` | Elements, relationships, data flow, journeys | string; default `compact` | `compact` keeps essential identity and evidence fields; `full` returns all public properties |
 | `context_url` | `find_application_elements` | string or null; default null | Exact page URL matched against an element’s own URL or its consuming-document contexts, including external scripts |
-| `scope` | All graph tools | string, required | Hostname, `host:port`, or HTTP(S) URL prefix; restricts the application evidence queried |
+| `scope` | All except evidence retrieval | string, required | Hostname, `host:port`, or HTTP(S) URL prefix; restricts the application evidence queried |
 | `kinds` | `find_application_elements` | array of strings or null; default null | Match any case-sensitive element kind, e.g. `resource`, `element`, `field`, `cookie`, `origin`; discover other values in `results[].kind`. Omitted, null, or `[]` applies no kind filter |
 | `kinds` | `find_application_relationships` | array of strings or null; default null | Match any case-sensitive relationship kind, e.g. `CONTAINS`, `LOADS`, `NAVIGATES_TO`, `SUBMITS_TO`, `FLOWS_TO`; discover values in `results[].steps[].kind`. Omitted, null, or `[]` applies no kind filter |
 | `role` | `find_application_elements` | string or null; default null | `source` reads input; `sink` consumes data. Null includes all roles. These static classifications are investigation candidates |
@@ -462,7 +469,7 @@ Missing seeds and selected seeds with no discovered path are reported separately
 Pass a returned `results[].steps[].evidence_id` to `fetch_application_graph_evidence`:
 
 ```json
-{"scope":"example.com","evidence_id":"<evidence ID from a trace step>"}
+{"evidence_id":"<evidence ID from a trace step>"}
 ```
 
 Source/sink labels describe static operations, including ordinary input handling and network
@@ -483,8 +490,8 @@ relationships with evidence IDs. List tools use saved-result pagination, default
 summaries or 20 other items per page. Follow `pagination.next_page_token` using `get_result_page`.
 
 Traversal defaults to eight steps, with a maximum of 32; relationship inspection allows up to three.
-Queries cap exploration at 10,000 entities, 20,000 relationships, 1,000 results, and ten seconds per
-database query/traversal. `retrieval_truncated` and `truncation_reasons` report reached limits; `analysis_gaps` reports missing
+Queries cap exploration at 10,000 entities, 20,000 relationships, 1,000 results, and ten seconds of
+traversal CPU time. Database reads default to 30 seconds per transaction. `retrieval_truncated` and `truncation_reasons` report reached limits; `analysis_gaps` reports missing
 artifacts or incomplete analysis. Cross-origin request/navigation destinations are boundaries;
 supplied scripts used by scoped documents remain available for dependency and flow analysis.
 Queries first select a bounded set of relationship IDs, then hydrate immutable relationships,
@@ -493,7 +500,8 @@ loads its dependencies before the next window; shared entities and metadata are 
 Indexed ID-list lookups avoid per-ID query expansion. Every database request contains at most 500
 input records. Startup waits for schema indexes to become available before serving hinted reads.
 Hydration keeps its 120-second total budget, within the five-minute cleanup grace period. Each read
-uses at most ten seconds or the remaining budget, without automatic transaction retries. If a budget
+uses the configured read timeout (default 30 seconds) or the remaining budget, whichever is shorter,
+without automatic transaction retries. If a budget
 is reached, completed records remain available and results report applicable time, memory, and missing
 generation limits. Repeat the query when a generation is unavailable.
 DEBUG logs report stage, batch size, returned records, elapsed time, and remaining budget. A completion
@@ -506,7 +514,7 @@ scripts; association edges do not become flow evidence, and unlabelled intermedi
 External destinations can be returned as boundary nodes but are not expanded beyond scope.
 The 20,000-membership budget counts distinct relationships loaded for seed associations and traversal;
 unrelated graph regions no longer displace focused paths. Shared dependencies and adjacency are cached
-per request, with a shared 120-second database-work deadline, ten-second read caps, and a separate
+per request, with a shared 120-second database-work deadline, configurable read caps, and a separate
 ten-second traversal CPU budget. No-path diagnostics describe the explored graph rather than claiming
 application-wide absence of sources or sinks.
 
@@ -749,8 +757,40 @@ unauthenticated connection model as Qdrant; external servers can use credentials
 | `NEO4J_USERNAME` | `neo4j` | Username when `NEO4J_PASSWORD` is supplied |
 | `NEO4J_PASSWORD` | Unset | Password for authenticated connections; also initializes authentication on a newly created managed container |
 | `NEO4J_HEAP_SIZE` | `1g` | Initial and maximum JVM heap for newly created managed containers and the Compose graph service |
-| `NEO4J_PAGECACHE_SIZE` | `256m` | Neo4j page-cache allocation for managed containers and the Compose graph service |
+| `NEO4J_PAGECACHE_SIZE` | `1g` | Neo4j page-cache allocation for managed containers and the Compose graph service |
 | `NEO4J_TRANSACTION_MEMORY_LIMIT` | Unset; Neo4j defaults to 70% of maximum heap | Optional combined transaction-memory budget for managed containers and the Compose graph service; must not exceed heap size |
+| `NEO4J_READ_TIMEOUT_SECONDS` | `30` | Ordinary graph reads, including evidence, traversal, hydration, and dependency queries |
+| `NEO4J_CONTROL_TIMEOUT_SECONDS` | `30` | Publication begin, activation, and abandonment transactions |
+| `NEO4J_WRITE_TIMEOUT_SECONDS` | `180` | Publication payload batch transactions |
+| `NEO4J_HEALTH_TIMEOUT_SECONDS` | `15` | Read-only application health probes after schema initialization |
+| `NEO4J_SCHEMA_TIMEOUT_SECONDS` | `120` | Schema transactions and waiting for indexes to become available |
+
+Timeout overrides accept finite positive seconds and apply to managed and external servers through
+client transaction settings. Invalid values fail before graph services start. Explicit shorter caller
+budgets take precedence. Activity/statistics probes keep their shorter budgets; link-planning reads
+are capped by the remaining planning slice. Traversal/hydration retain a 120-second total database
+budget and the five-minute generation-retention grace period. Indexing waits remain separately configured.
+Transaction timeouts are not strict wall-clock limits on commits, retries, or filesystem operations.
+
+Cleanup eligibility uses a `GraphCleanupPending` label indexed by retirement time and publication ID.
+Successful cleanup removes the label while retaining published evidence. On upgrade, background
+maintenance scans existing publication IDs once in ordered batches of up to 500, atomically saving its
+cursor after each batch. It labels only uncleaned retired/abandoned publications and resumes after
+interruption. Completed migrations do not rescan history. Stop older server processes before upgrading;
+older writers do not maintain the pending label. No capture rebuild or backfill is required.
+Cleanup runs before migration, with separate cooperative 30-second budgets and independent retry
+schedules. Slow or failed migration cannot consume cleanup's budget or put cleanup into backoff;
+cleanup failures likewise do not prevent migration. Each operation normally runs 60 seconds after
+completion. Failures do not affect readiness and independently back off for 60, 120, 240, 480, then
+at most 900 seconds; success resets only that operation's retry schedule.
+Migration scans at most ten batches per attempt, initially 500 records per batch. It halves its next
+batch after a transaction timeout, transaction-memory failure, or successful attempt taking more
+than 15 seconds, down to one record. The learned size lasts for the server process; restarting starts
+at 500 again while resuming the durable cursor. Failed transactions never advance that cursor.
+Cleanup selects at most five candidates and deletes at most ten batches of 500 records. Shutdown
+is checked between transactions and operations; slow commits can exceed cooperative budgets.
+Logs report migration progress, selected/completed publications, deleted records, elapsed time,
+failed operation, and next-attempt delay.
 
 Memory overrides accept positive integer sizes with `k`, `m`, or `g` suffixes, ignoring case.
 They do not configure externally supplied Neo4j servers. A transaction-memory-limit error can occur
@@ -982,7 +1022,7 @@ repeated notifications are suppressed. Other Neo4j warnings and errors remain vi
 | Environment variable | Default                      | Description                                                              |
 |----------------------|------------------------------|--------------------------------------------------------------------------|
 | `LOG_FILE`           | `<data-dir>/logs/shyhurricane.log` | Diagnostic log path, relative to the working directory or absolute. |
-| `ENABLE_HEAP_PROFILING` | `false` | Enable expensive Python heap summaries at existing worker/maintenance checkpoints. Accepts `1`, `true`, `yes`, or `on`, ignoring case and surrounding whitespace; also requires DEBUG logging. |
+| `ENABLE_HEAP_PROFILING` | `false` | Enable Python heap summaries and MPS memory stats at existing worker/maintenance checkpoints. Accepts `1`, `true`, `yes`, or `on`, ignoring case and surrounding whitespace. Python heap summaries also require DEBUG logging; MPS stats log at INFO. |
 
 ```shell
 uv run python mcp_service.py --log-file ./logs/server.log
@@ -1004,8 +1044,8 @@ The cache's `history.jsonl` remains a separate record of tool calls.
 Heap profiling is disabled by default even when diagnostic DEBUG logging is enabled. Set
 `ENABLE_HEAP_PROFILING=true` before starting the server to enable it; workers inherit the setting.
 Compose accepts the same variable from `.env`. Profiling traverses the Python heap and can slow
-large ingests, especially at the type-specific worker's per-document checkpoints. GPU diagnostics
-are independent of this setting.
+large ingests, especially at the type-specific worker's per-document checkpoints. MPS memory stats
+also require this setting; other GPU diagnostics are independent of it.
 
 
 #### Ollama
@@ -1120,6 +1160,8 @@ with `query_findings`. The command image includes a snapshot of the
 [Opengrep rules repository](https://github.com/amplify-security/opengrep-rules); it checks for updates at runtime and
 uses the cached snapshot if an update fails.
 
+The server starts even when Qdrant is unavailable or still starting. Background health checks retry
+Qdrant connectivity and collection initialization before enabling indexing workers.
 Indexing workers monitor Qdrant, Neo4j, and LLM readiness. If a dependency is unhealthy, `/index`
 requests continue to be accepted into the persistent queue, but ingest, graph, and type-specific indexing
 pause. Workers resume automatically after dependency health recovers; MCP tools report their own query errors.
@@ -1254,6 +1296,10 @@ Only unambiguous forms/content matches are combined. Ambiguous representations r
 and are counted in the report. Exact exchanges are deduplicated, and output order is deterministic.
 
 Graph metadata is read through a consistent SQLite backup, including committed WAL contents.
+The backup deadline defaults to 300 seconds. For large databases or slow storage, increase it
+with `--graph-backup-timeout-seconds 1800`. The value must be finite and greater than zero.
+Timeout errors show page-copy progress and the retry option; no partial export is published.
+Pausing ingestion can also help a busy database complete its consistent backup.
 Qdrant collection reads are live and are not an atomic database snapshot. Pause ingestion for a
 stable dataset during export. The exporter reads only base content, network, forms, and finding
 collections; derived chunks and port scans are not exported.

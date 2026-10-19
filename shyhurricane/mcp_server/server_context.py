@@ -19,6 +19,7 @@ from shyhurricane.db import create_qdrant_client, create_qdrant_document_store, 
 from shyhurricane.disk_space import DiskSpaceGuard
 from shyhurricane.doc_type_model_map import doc_type_to_model
 from shyhurricane.graph.database import GraphStore, graph_location
+from shyhurricane.graph.maintenance import GraphMaintenance
 from shyhurricane.haystack_lifecycle import close_haystack_resources
 from shyhurricane.health import HealthMonitor, qdrant_probe
 from shyhurricane.mcp_server.generator_config import get_generator_config
@@ -71,6 +72,7 @@ class ServerContext:
     stop_event: Optional[object] = None
     result_store: ResultPageStore | None = None
     graph_store: GraphStore | None = None
+    graph_maintenance: GraphMaintenance | None = None
     _closed: bool = field(default=False, init=False)
     _ingest_writer: AsyncIngestWriter | None = field(default=None, init=False)
 
@@ -113,6 +115,11 @@ class ServerContext:
         deadline = time.monotonic() + 300
         if self.stop_event is not None:
             self.stop_event.set()
+        if self.graph_maintenance is not None:
+            try:
+                self.graph_maintenance.close(deadline)
+            except Exception:
+                logger.exception("Failed to close graph maintenance")
         if self._ingest_writer is not None:
             try:
                 self._ingest_writer.close(timeout=max(0, deadline - time.monotonic()))
@@ -169,6 +176,31 @@ def _elicitation_disabled() -> bool:
     return value not in {"", "false", "0", "no", "off"}
 
 
+def _qdrant_readiness_probe(db: str, host: str, port: int):
+    """Retry collection setup in the health thread before releasing indexing workers."""
+    initialized = False
+
+    def check() -> bool:
+        nonlocal initialized
+        if not qdrant_probe(host, port):
+            return False
+        if not initialized:
+            for doc_type_model in doc_type_to_model().values():
+                for collection in doc_type_model.get_qdrant_collections():
+                    store = create_qdrant_document_store(db=db, index=collection)
+                    try:
+                        if hasattr(store, "_ensure_initialized"):
+                            store._ensure_initialized()
+                        else:
+                            store.count_documents()
+                    finally:
+                        store.close()
+            initialized = True
+        return True
+
+    return check
+
+
 async def get_server_context() -> ServerContext:
     global _server_context
     if _server_context is not None:
@@ -191,23 +223,11 @@ async def get_server_context() -> ServerContext:
 
     db = server_config.database
     logger.info("Using Qdrant database at %s", db)
-    # ensure collections are created
-    for doc_type_model in doc_type_to_model().values():
-        for col in doc_type_model.get_qdrant_collections():
-            document_store = create_qdrant_document_store(
-                db=db,
-                index=col,
-            )
-            if hasattr(document_store, "_ensure_initialized"):
-                document_store._ensure_initialized()
-            else:
-                document_store.count_documents()
-
     disable_elicitation = _elicitation_disabled()
     qdrant_client = await create_qdrant_client(db=db)
     qdrant_host, qdrant_port = qdrant_host_port(db)
     graph_store = GraphStore(graph_location())
-    health_monitor = HealthMonitor(lambda: qdrant_probe(qdrant_host, qdrant_port), lambda: True,
+    health_monitor = HealthMonitor(_qdrant_readiness_probe(db, qdrant_host, qdrant_port), lambda: True,
                                    neo4j_probe=graph_store.ready,
                                    disk_guard=DiskSpaceGuard(state_path("."), server_config))
     health_monitor.start()
@@ -285,6 +305,10 @@ async def get_server_context() -> ServerContext:
         stop_event=stop_event,
     )
     try:
+        _server_context.graph_maintenance = GraphMaintenance(
+            graph_store.location, lambda: graph_store.schema_ready and health_monitor.neo4j_healthy is True,
+        )
+        _server_context.graph_maintenance.start()
         document_pipeline, _, stores = await build_document_pipeline(
             db=db,
             generator_config=generator_config,

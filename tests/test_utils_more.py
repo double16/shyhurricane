@@ -1,11 +1,42 @@
 import asyncio
 import datetime
 import logging
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from haystack import Document
 
 import shyhurricane.utils as utils
+
+
+@pytest.mark.parametrize("value", [None, "false", "0", "off", "no", "invalid", "", "1", "true", "TRUE", "yes", "on", " On "])
+def test_mps_memory_logging_requires_heap_profiling(monkeypatch, caplog, value):
+    if value is None:
+        monkeypatch.delenv("ENABLE_HEAP_PROFILING", raising=False)
+    else:
+        monkeypatch.setenv("ENABLE_HEAP_PROFILING", value)
+    memory = Mock(return_value=1024**2)
+    monkeypatch.setattr(utils, "torch", SimpleNamespace(
+        cuda=SimpleNamespace(is_available=lambda: False),
+        backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: True)),
+        mps=SimpleNamespace(
+            current_allocated_memory=memory,
+            driver_allocated_memory=memory,
+            recommended_max_memory=memory,
+        ),
+    ))
+    with caplog.at_level(logging.INFO, logger=utils.logger.name):
+        utils.log_gpu_memory_summary()
+    enabled = value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
+    assert memory.call_count == (3 if enabled else 0)
+    assert ("--- MPS Device ---" in caplog.text) == enabled
+    if enabled:
+        assert "Allocated:        1.00 MB" in caplog.text
+        assert "Driver Allocated: 1.00 MB" in caplog.text
+        assert "Recommended Max:  1.00 MB" in caplog.text
+    else:
+        assert caplog.text == ""
 
 
 def test_url_domain_http_and_sort_helpers():

@@ -68,6 +68,9 @@ def _ingest_worker(db: str, generator_config: GeneratorConfig, health_state=None
 
         index_log_path = get_log_path(db, f"index-{log_timestamp or get_log_timestamp()}.jsonl")
 
+        if not _wait_for_health(health_state, stop_event):
+            return
+
         pipeline: Pipeline = build_ingest_pipeline(db=db, generator_config=generator_config)
         logger.info(f"Index worker ready in PID {os.getpid()}, logging to {index_log_path}")
         queue_items = iter(persistent_queue_get(queue, shrink_count=1000, stop_event=stop_event))
@@ -217,6 +220,9 @@ def _doc_type_worker(db: str, generator_config: GeneratorConfig, health_state=No
         doc_type_queue = get_doc_type_queue(db)
         atexit.register(doc_type_queue.close)
         doc_type_queue.resume_unack_tasks()
+
+        if not _wait_for_health(health_state, stop_event):
+            return 0
 
         pipeline: Pipeline = build_doc_type_pipeline(db=db, generator_config=generator_config)
 

@@ -78,6 +78,77 @@ def test_latest_history_idempotency_and_reopen(neo4j, event):
     )["results"]
 
 
+def test_pending_cleanup_migration_resumes_and_excludes_cleaned_history(neo4j):
+    import time
+
+    from shyhurricane.graph.maintenance import MIGRATION_ID, migrate_cleanup
+
+    url = "https://graph-test.invalid/cleanup"
+    with neo4j.connect().session(database="neo4j") as session:
+        session.run("MATCH (m:GraphState {id:$id}) DELETE m", id=MIGRATION_ID).consume()
+        session.run(
+            "UNWIND range(0,4999) AS i CREATE (p:GraphPublication "
+            "{id:'cleanup-history-'+toString(i),url:$url,state:'retired',retired_at:0,cleaned:true})",
+            url=url,
+        ).consume()
+        session.run(
+            "CREATE (c:GraphCapture {id:'cleanup-owner',url:$url}), "
+            "(p:GraphPublication {id:'cleanup-pending',capture_id:'cleanup-owner',url:$url,"
+            "state:'abandoned',retired_at:0}), "
+            "(e:GraphEvidence {id:'cleanup-abandoned-proof',_publication_id:'cleanup-pending',url:$url}), "
+            "(active:GraphPublication:GraphCleanupPending "
+            "{id:'cleanup-active',capture_id:'cleanup-owner',url:$url,state:'published',retired_at:0}), "
+            "(staging:GraphPublication:GraphCleanupPending "
+            "{id:'cleanup-staging',capture_id:'cleanup-owner',url:$url,state:'staging',retired_at:0}) "
+            "SET c.active_publication_id=active.id,c.staging_publication_id=staging.id",
+            url=url,
+        ).consume()
+
+    class Interrupted:
+        calls = 0
+
+        def is_set(self):
+            self.calls += 1
+            return self.calls > 1
+
+    assert migrate_cleanup(neo4j, time.monotonic() + 60, Interrupted()) == 500
+    marker = neo4j.read("MATCH (m:GraphState {id:$id}) RETURN properties(m) AS m", id=MIGRATION_ID)[0]["m"]
+    assert marker["cursor"] and marker["complete"] is False
+    neo4j.close()
+    neo4j.ready()
+    migrate_cleanup(neo4j, time.monotonic() + 60, threading.Event())
+    assert neo4j.read(
+        "MATCH (m:GraphState {id:$id}) RETURN m.complete AS done", id=MIGRATION_ID,
+    )[0]["done"]
+    with neo4j.connect().session(database="neo4j", default_access_mode="READ") as session:
+        with session.begin_transaction(timeout=10) as tx:
+            result = tx.run(
+                "PROFILE MATCH (p:GraphPublication:GraphCleanupPending) "
+                "USING INDEX p:GraphCleanupPending(retired_at,id) "
+                "WHERE p.retired_at<1 AND p.id IS NOT NULL "
+                "AND p.state IN ['retired','abandoned'] AND coalesce(p.cleaned,false)=false "
+                "RETURN p.id AS id ORDER BY p.retired_at,p.id LIMIT 5"
+            )
+            assert [row["id"] for row in result] == ["cleanup-pending"]
+            profile = result.consume().profile
+
+    def operators(plan):
+        yield plan
+        for child in plan.get("children", []):
+            yield from operators(child)
+
+    seeks = [plan for plan in operators(profile) if "NodeIndexSeek" in plan["operatorType"]]
+    assert seeks and sum(plan["rows"] for plan in seeks) <= 3
+    assert neo4j.cleanup() == {"selected": 1, "completed": 1, "deleted": 1}
+    assert neo4j.cleanup() == {"selected": 0, "completed": 0, "deleted": 0}
+    assert not neo4j.read("MATCH (e:GraphEvidence {id:'cleanup-abandoned-proof'}) RETURN e.id")
+    assert len(neo4j.read(
+        "MATCH (p:GraphPublication) WHERE p.id IN ['cleanup-active','cleanup-staging'] RETURN p.id"
+    )) == 2
+    # A completed migration never scans historical publications again.
+    assert migrate_cleanup(neo4j, time.monotonic() + 60, threading.Event()) == 0
+
+
 def test_staged_publication_preserves_previous_graph_and_replays(neo4j, event, monkeypatch):
     from shyhurricane.graph import publication
 
@@ -98,7 +169,7 @@ def test_staged_publication_preserves_previous_graph_and_replays(neo4j, event, m
     staged_evidence = neo4j.read(
         "MATCH (e:GraphEvidence {capture_id:$id}) RETURN e.id AS id LIMIT 1", id=projection.event["id"]
     )[0]["id"]
-    assert service.evidence("graph-test.invalid", staged_evidence) is None
+    assert service.evidence(staged_evidence) is None
     monkeypatch.setattr(publication, "write_batches", original)
     neo4j.publish(projection)
 
@@ -127,7 +198,7 @@ def test_staged_publication_preserves_previous_graph_and_replays(neo4j, event, m
         neo4j.publish(projection)
     assert service.elements("graph-test.invalid")["results"] == old
     assert visible_relationship_count() == len(projection.edges)
-    assert service.evidence("graph-test.invalid", old_evidence)
+    assert service.evidence(old_evidence)
     monkeypatch.setattr(publication, "write_batches", original)
     neo4j.close()
     assert neo4j.ready()
@@ -139,7 +210,7 @@ def test_staged_publication_preserves_previous_graph_and_replays(neo4j, event, m
         session.run("MATCH (p:GraphPublication) WHERE p.state='retired' SET p.retired_at=0").consume()
     for _ in range(4):
         neo4j.cleanup()
-    assert service.evidence("graph-test.invalid", old_evidence)
+    assert service.evidence(old_evidence)
     assert not neo4j.read("MATCH (n:GraphEntity {_publication_id:$id}) RETURN n.id", id=active)
 
 
@@ -204,7 +275,7 @@ def test_legacy_capture_migrates_without_exposing_staging_or_losing_evidence(neo
     service = GraphQuery(neo4j)
     original = service.elements("graph-test.invalid")["results"]
     evidence_id = next(iter(graph.evidence))
-    assert service.evidence("graph-test.invalid", evidence_id)["context_urls"] == capture["context_urls"]
+    assert service.evidence(evidence_id)["context_urls"] == capture["context_urls"]
     original_write = publication.write_batches
 
     def observe_staging(*args):
@@ -215,7 +286,7 @@ def test_legacy_capture_migrates_without_exposing_staging_or_losing_evidence(neo
     next(iter(graph.nodes.values()))["name"] = "new legacy name"
     neo4j.publish(graph)
     assert any(item["name"] == "new legacy name" for item in service.elements("graph-test.invalid")["results"])
-    assert service.evidence("graph-test.invalid", evidence_id)["context_urls"] == capture["context_urls"]
+    assert service.evidence(evidence_id)["context_urls"] == capture["context_urls"]
 
 
 def test_crash_after_activation_replays_without_rewriting_active_generation(neo4j, event, monkeypatch):
@@ -308,7 +379,7 @@ def test_cross_module_flows_resolve_in_either_order(neo4j, event, reverse):
     module_step = next(
         step for path in result["results"] for step in path["steps"] if step.get("rule") == "js.module-link"
     )
-    assert service.evidence("graph-test.invalid", module_step["evidence_id"])
+    assert service.evidence(module_step["evidence_id"])
 
 
 def test_cdn_script_requests_resolve_against_consuming_page(neo4j, event, graph_paths, monkeypatch):
@@ -342,7 +413,7 @@ def test_cdn_script_requests_resolve_against_consuming_page(neo4j, event, graph_
         mode="journey",
     )
     assert journeys["results"]
-    assert service.evidence("graph-test.invalid", journeys["results"][0]["steps"][0]["evidence_id"])
+    assert service.evidence(journeys["results"][0]["steps"][0]["evidence_id"])
     assert service.paths("https://graph-test.invalid/account/", script["data"]["url"], kinds=["IMPORTS"], max_depth=1)[
         "results"
     ]
@@ -472,7 +543,7 @@ def test_published_form_response_flow_and_request(neo4j, event, graph_paths, mon
         assert any(path["nodes"][-1]["name"] == "res.text" for path in result["results"])
         for path in result["results"]:
             for step in path["steps"]:
-                assert query.evidence("graph-test.invalid", step["evidence_id"])["snippet"]
+                assert query.evidence(step["evidence_id"])["snippet"]
         request = next(node for node in projection.nodes.values() if node.get("form_request"))
         _, edges, _ = query.snapshot("graph-test.invalid")
         assert any(edge["source"] == request["id"] and edge["kind"] == "REQUESTS" for edge in edges)
@@ -505,7 +576,7 @@ def test_reexport_async_returns_publish_in_either_order_and_respect_versions(neo
     assert any(path["nodes"][-1]["name"] == "eval" for path in result["results"])
     for path in result["results"]:
         for step in path["steps"]:
-            assert query.evidence("graph-test.invalid", step["evidence_id"])["snippet"]
+            assert query.evidence(step["evidence_id"])["snippet"]
     # Replacing the barrel must invalidate shortcuts owned by other captures too.
     changed = event(
         url="https://graph-test.invalid/barrel.js",

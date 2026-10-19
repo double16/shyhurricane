@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from neo4j import GraphDatabase, Query, unit_of_work
 
 from shyhurricane.db import _find_available_port, _get_published_port, _inspect_container, _is_running, _run
+from shyhurricane.graph.config import graph_timeouts
 from shyhurricane.graph.statistics import summarize_captures
 
 logger = logging.getLogger(__name__)
@@ -21,7 +22,7 @@ IMAGE = "neo4j:2026.09.0-community"
 def memory_environment() -> list[str]:
     """Validate deployment memory sizes before launching a managed container."""
     heap = os.environ.get("NEO4J_HEAP_SIZE", "1g")
-    pagecache = os.environ.get("NEO4J_PAGECACHE_SIZE", "256m")
+    pagecache = os.environ.get("NEO4J_PAGECACHE_SIZE", "1g")
     transaction = os.environ.get("NEO4J_TRANSACTION_MEMORY_LIMIT", "")
 
     def size(value):
@@ -116,6 +117,7 @@ class GraphStore:
     """One driver per process; never share driver objects across fork boundaries."""
 
     def __init__(self, location: str | None = None):
+        self.timeouts = graph_timeouts()
         self.location = location or graph_location()
         if "://" in self.location:
             resolve_uri(self.location)
@@ -150,10 +152,10 @@ class GraphStore:
             if timeout is not None:
                 # Explicit transactions do not perform driver-managed retries, which could
                 # otherwise outlive the caller's remaining hydration budget.
-                with session.begin_transaction(timeout=min(10, timeout)) as transaction:
+                with session.begin_transaction(timeout=min(self.timeouts.read, timeout)) as transaction:
                     return [dict(row) for row in transaction.run(statement, **parameters)]
 
-            @unit_of_work(timeout=10)
+            @unit_of_work(timeout=self.timeouts.read)
             def read(tx):
                 return [dict(row) for row in tx.run(statement, **parameters)]
 
@@ -161,17 +163,18 @@ class GraphStore:
 
     def ready(self) -> bool:
         self.connect().verify_connectivity()
-        with self.driver.session(database="neo4j") as session:
-            if not self.schema_ready:
+        if not self.schema_ready:
+            with self.driver.session(database="neo4j") as session:
                 self.initialize_schema(session)
-            session.run(
-                Query("MERGE (n:GraphState {id:'health'}) SET n.checked_at=timestamp() RETURN n.id", timeout=5)
-            ).consume()
+        with self.driver.session(database="neo4j", default_access_mode="READ") as session:
+            session.run(Query("RETURN 1", timeout=self.timeouts.health)).consume()
             self.schema_ready = True
-        self.cleanup()
         return True
 
     def initialize_schema(self, session):
+        def run(statement):
+            return session.run(Query(statement, timeout=self.timeouts.schema))
+
         for label in (
             "GraphEntity",
             "GraphEvidence",
@@ -180,10 +183,10 @@ class GraphStore:
             "GraphState",
             "GraphPublication",
         ):
-            session.run(
+            run(
                 f"CREATE CONSTRAINT {label.lower()}_id IF NOT EXISTS FOR (n:{label}) REQUIRE n.id IS UNIQUE"
             ).consume()
-        session.run("CREATE INDEX graph_entity_url IF NOT EXISTS FOR (n:GraphEntity) ON (n.url)").consume()
+        run("CREATE INDEX graph_entity_url IF NOT EXISTS FOR (n:GraphEntity) ON (n.url)").consume()
         for field in (
             "module_key",
             "import_key",
@@ -193,42 +196,46 @@ class GraphStore:
             "context_owner_id",
             "_logical_id",
         ):
-            session.run(f"CREATE INDEX graph_entity_{field} IF NOT EXISTS FOR (n:GraphEntity) ON (n.{field})").consume()
-        session.run("CREATE INDEX graph_capture_host IF NOT EXISTS FOR (n:GraphCapture) ON (n.host)").consume()
-        session.run(
+            run(f"CREATE INDEX graph_entity_{field} IF NOT EXISTS FOR (n:GraphEntity) ON (n.{field})").consume()
+        run("CREATE INDEX graph_capture_host IF NOT EXISTS FOR (n:GraphCapture) ON (n.host)").consume()
+        run(
             "CREATE INDEX graph_evidence_capture IF NOT EXISTS FOR (n:GraphEvidence) ON (n.capture_id)"
         ).consume()
-        session.run(
+        run(
             "CREATE INDEX graph_evidence_publication IF NOT EXISTS FOR (n:GraphEvidence) ON (n._publication_id)"
         ).consume()
-        session.run(
+        run(
             "CREATE INDEX graph_rel_publication IF NOT EXISTS FOR ()-[r:RELATES]-() ON (r._publication_id)"
         ).consume()
-        session.run("CREATE INDEX graph_rel_id IF NOT EXISTS FOR ()-[r:RELATES]-() ON (r.id)").consume()
-        session.run("CREATE INDEX graph_rel_capture IF NOT EXISTS FOR ()-[r:RELATES]-() ON (r.capture_id)").consume()
-        session.run(
+        run("CREATE INDEX graph_rel_id IF NOT EXISTS FOR ()-[r:RELATES]-() ON (r.id)").consume()
+        run("CREATE INDEX graph_rel_capture IF NOT EXISTS FOR ()-[r:RELATES]-() ON (r.capture_id)").consume()
+        run(
             "CREATE INDEX graph_publication_capture IF NOT EXISTS FOR (n:GraphPublication) ON (n.capture_id)"
         ).consume()
-        session.run(
+        run(
             "CREATE INDEX graph_publication_retired IF NOT EXISTS FOR (n:GraphPublication) ON (n.state,n.retired_at)"
         ).consume()
-        session.run(
+        run(
+            "CREATE INDEX graph_cleanup_pending IF NOT EXISTS "
+            "FOR (n:GraphCleanupPending) ON (n.retired_at,n.id)"
+        ).consume()
+        run(
             "CREATE INDEX graph_capture_resource IF NOT EXISTS FOR (n:GraphCapture) ON (n.resource_key, n.observed_at)"
         ).consume()
 
-        session.run("MERGE (n:GraphState {id:'publication_revision'}) ON CREATE SET n.value=0").consume()
+        run("MERGE (n:GraphState {id:'publication_revision'}) ON CREATE SET n.value=0").consume()
         # Hydration uses explicit seek hints, so newly created indexes must be online.
-        session.run("CALL db.awaitIndexes(30)").consume()
+        run(f"CALL db.awaitIndexes({math.ceil(self.timeouts.schema)})").consume()
 
     def publish(self, projection):
         from shyhurricane.graph.publication import GraphPublisher
 
         GraphPublisher(self).publish(projection)
 
-    def cleanup(self):
+    def cleanup(self, **kwargs):
         from shyhurricane.graph.publication import GraphPublisher
 
-        GraphPublisher(self).cleanup()
+        return GraphPublisher(self).cleanup(**kwargs)
 
     def activity(self) -> dict:
         """Read the indexed counter advanced atomically by publication activation."""

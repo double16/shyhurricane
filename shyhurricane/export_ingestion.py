@@ -18,6 +18,34 @@ from urllib.parse import urlsplit
 from shyhurricane.data_paths import add_data_dir_argument, qdrant_location, resolve_data_dir
 
 
+class GraphBackupTimeout(TimeoutError):
+    """The consistent graph metadata snapshot exceeded its configured deadline."""
+
+
+def positive_seconds(value):
+    seconds = float(value)
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("Graph backup timeout must be finite and greater than zero")
+    return seconds
+
+
+def snapshot_graph_metadata(path, destination, timeout_seconds):
+    """Copy committed graph metadata, including WAL, without changing the live database."""
+    deadline = time.monotonic() + timeout_seconds
+
+    def progress(_status, remaining, total):
+        if time.monotonic() > deadline:
+            raise GraphBackupTimeout(
+                f"Graph metadata backup exceeded {timeout_seconds:g} seconds "
+                f"({total - remaining}/{total} pages copied). "
+                "Increase --graph-backup-timeout-seconds or pause ingestion and retry."
+            )
+
+    with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1)) as source:
+        with closing(sqlite3.connect(destination)) as snapshot:
+            source.backup(snapshot, pages=256, progress=progress, sleep=0.05)
+
+
 def open_qdrant(**kwargs):
     # Keep optional inference-library imports out of --help and graph-only recovery.
     from qdrant_client import QdrantClient
@@ -158,40 +186,34 @@ class Exporter:
         counts = self.report["source_records"]
         counts[kind] = counts.get(kind, 0) + 1
 
-    def graph(self, root):
+    def graph(self, root, *, backup_timeout_seconds=300):
         graph_root = root / "graph_state"
         path = graph_root / "artifacts.sqlite"
         if not path.exists():
             self.report["warnings"].append("graph_state/artifacts.sqlite is missing")
             return
-        deadline = time.monotonic() + 30
-
-        def progress(_status, _remaining, _total):
-            if time.monotonic() > deadline:
-                raise TimeoutError("Graph metadata backup exceeded 30 seconds")
-
-        with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1)) as source:
-            with closing(sqlite3.connect(self.workspace / "captures.sqlite")) as snapshot:
-                source.backup(snapshot, pages=256, progress=progress, sleep=0.05)
-                for identifier, stored_path in snapshot.execute("SELECT id,path FROM captures ORDER BY id"):
-                    try:
-                        stored = Path(stored_path)
-                        # Artifacts may have been copied from a different container mount.
-                        candidate = graph_root / stored.name
-                        if not candidate.is_file():
-                            raise ValueError("Missing artifact")
-                        if not candidate.resolve().is_relative_to(graph_root.resolve()):
-                            raise ValueError("Artifact escapes graph_state")
-                        event = json.loads(candidate.read_text())
-                        if event["id"] != identifier:
-                            raise ValueError("Capture identity mismatch")
-                        kind = "backfill" if event.get("backfill", False) else "graph"
-                        if kind == "backfill" and event["data"].get("response_body") == "":
-                            # Backfill uses an empty string for network/forms bodies it never retained.
-                            event["data"]["response_body"] = None
-                        self.add(kind, katana(event["data"]), identifier)
-                    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-                        self.issue("graph", identifier, "Missing or invalid capture artifact")
+        destination = self.workspace / "captures.sqlite"
+        snapshot_graph_metadata(path, destination, backup_timeout_seconds)
+        with closing(sqlite3.connect(f"{destination.as_uri()}?mode=ro", uri=True)) as snapshot:
+            for identifier, stored_path in snapshot.execute("SELECT id,path FROM captures ORDER BY id"):
+                try:
+                    stored = Path(stored_path)
+                    # Artifacts may have been copied from a different container mount.
+                    candidate = graph_root / stored.name
+                    if not candidate.is_file():
+                        raise ValueError("Missing artifact")
+                    if not candidate.resolve().is_relative_to(graph_root.resolve()):
+                        raise ValueError("Artifact escapes graph_state")
+                    event = json.loads(candidate.read_text())
+                    if event["id"] != identifier:
+                        raise ValueError("Capture identity mismatch")
+                    kind = "backfill" if event.get("backfill", False) else "graph"
+                    if kind == "backfill" and event["data"].get("response_body") == "":
+                        # Backfill uses an empty string for network/forms bodies it never retained.
+                        event["data"]["response_body"] = None
+                    self.add(kind, katana(event["data"]), identifier)
+                except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                    self.issue("graph", identifier, "Missing or invalid capture artifact")
 
     def qdrant(self, client):
         for kind in ("content", "network", "forms", "finding"):
@@ -376,7 +398,8 @@ def private_open(path, flags):
     return os.open(path, flags, 0o600)
 
 
-def export(root, output, *, qdrant_url=None, graph_only=False):
+def export(root, output, *, qdrant_url=None, graph_only=False, graph_backup_timeout_seconds=300):
+    graph_backup_timeout_seconds = positive_seconds(graph_backup_timeout_seconds)
     root, output = Path(root).resolve(), Path(output).absolute()
     if output.exists():
         raise FileExistsError("Output directory already exists")
@@ -388,6 +411,7 @@ def export(root, output, *, qdrant_url=None, graph_only=False):
         "duplicates": 0,
         "ambiguous_groups": 0,
         "missing_collections": [],
+        "graph_backup_timeout_seconds": graph_backup_timeout_seconds,
         "warnings": [],
         "limitations": [
             "Recovery export, not an exact database backup",
@@ -402,7 +426,7 @@ def export(root, output, *, qdrant_url=None, graph_only=False):
         published.mkdir(mode=0o700)
         exporter = Exporter(workspace, report)
         try:
-            exporter.graph(root)
+            exporter.graph(root, backup_timeout_seconds=graph_backup_timeout_seconds)
             if not graph_only:
                 url = endpoint(root, qdrant_url)
                 # Store no URL credentials/query strings in the report.
@@ -434,17 +458,37 @@ def main(argv=None):
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--qdrant-url", help="Existing Qdrant HTTP(S) endpoint")
     parser.add_argument("--graph-only", action="store_true", help="Recover graph artifacts without Qdrant")
+    parser.add_argument(
+        "--graph-backup-timeout-seconds",
+        type=positive_seconds,
+        default=300,
+        help="Positive finite graph metadata backup deadline in seconds (default: 300)",
+    )
     args = parser.parse_args(argv)
     try:
         return export(
-            resolve_data_dir(args.data_dir), args.output_dir, qdrant_url=args.qdrant_url, graph_only=args.graph_only
+            resolve_data_dir(args.data_dir),
+            args.output_dir,
+            qdrant_url=args.qdrant_url,
+            graph_only=args.graph_only,
+            graph_backup_timeout_seconds=args.graph_backup_timeout_seconds,
         )
-    except (OSError, ValueError, sqlite3.Error, TimeoutError, subprocess.SubprocessError):
-        print("Export failed; check source availability and output path. No export was published.", file=sys.stderr)
+    except GraphBackupTimeout as error:
+        # This message is generated locally from numeric progress, never captured content.
+        print(f"Export failed: {error} No export was published.", file=sys.stderr)
         return 1
-    except Exception:
+    except (OSError, ValueError, sqlite3.Error, TimeoutError, subprocess.SubprocessError) as error:
+        print(
+            f"Export failed ({type(error).__name__}); check source availability and output path. "
+            "No export was published.",
+            file=sys.stderr,
+        )
+        return 1
+    except Exception as error:
         # Qdrant transport exceptions can expose URLs or payloads; keep stderr bounded and redacted.
-        print("Export failed while reading sources. No export was published.", file=sys.stderr)
+        print(
+            f"Export failed while reading sources ({type(error).__name__}). No export was published.", file=sys.stderr
+        )
         return 1
 
 

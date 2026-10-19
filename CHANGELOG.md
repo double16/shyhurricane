@@ -41,9 +41,10 @@
 
 ### Fixes
 
+- Start the server while Qdrant is unavailable and retry collection initialization in background
+  health checks. Keep indexing workers paused until database readiness recovers.
 - Close the ingestion exporter's Qdrant client explicitly; installed client versions do not
   support the context manager protocol and previously caused exports to fail before collection reads.
-
 - Reduce monitoring load with five-minute background graph/reference statistics caches, distinct-URL
   reference lookups, five-second Neo4j statistics transactions without retries, and domain/host-only
   Qdrant payload reads. Preserve cached counts and expose reference freshness and refresh errors.

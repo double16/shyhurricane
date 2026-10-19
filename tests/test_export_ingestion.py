@@ -347,7 +347,7 @@ def test_endpoint_resolution(tmp_path, monkeypatch):
 
 def test_graph_backup_deadline(tmp_path, monkeypatch):
     graph(tmp_path, [{"data": capture()}])
-    times = iter([0, 31])
+    times = iter([0, 301])
     monkeypatch.setattr(ex.time, "monotonic", lambda: next(times))
     with pytest.raises(TimeoutError):
         ex.export(tmp_path, tmp_path / "out", graph_only=True)
@@ -495,4 +495,62 @@ def test_client_closed_when_collection_read_fails(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="read failed"):
         ex.export(tmp_path, tmp_path / "out", qdrant_url="http://localhost:6333")
     client.close.assert_called_once_with()
+    assert not (tmp_path / "out").exists()
+
+
+def test_graph_backup_accepts_work_longer_than_old_deadline(tmp_path, monkeypatch):
+    graph(tmp_path, [{"data": capture()}])
+    times = iter([0, 31])
+    monkeypatch.setattr(ex.time, "monotonic", lambda: next(times))
+    assert ex.export(tmp_path, tmp_path / "out", graph_only=True) == 0
+    assert len(lines(tmp_path / "out/index.jsonl")) == 1
+    report = json.loads((tmp_path / "out/export-report.json").read_text())
+    assert report["graph_backup_timeout_seconds"] == 300
+
+
+def test_custom_graph_backup_deadline(tmp_path, monkeypatch):
+    graph(tmp_path, [{"data": capture()}])
+    times = iter([0, 301])
+    monkeypatch.setattr(ex.time, "monotonic", lambda: next(times))
+    assert ex.export(tmp_path, tmp_path / "out", graph_only=True, graph_backup_timeout_seconds=600) == 0
+
+
+def test_backup_timeout_cli_reports_actionable_progress(tmp_path, monkeypatch, capsys):
+    graph(tmp_path, [{"data": capture()}])
+    times = iter([0, 2])
+    monkeypatch.setattr(ex.time, "monotonic", lambda: next(times))
+    assert (
+        ex.main(
+            [
+                "--data-dir",
+                str(tmp_path),
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--graph-only",
+                "--graph-backup-timeout-seconds",
+                "1",
+            ]
+        )
+        == 1
+    )
+    error = capsys.readouterr().err
+    assert "exceeded 1 seconds" in error
+    assert "pages copied" in error
+    assert "--graph-backup-timeout-seconds" in error
+    assert not (tmp_path / "out").exists()
+    assert not list(tmp_path.glob(".ingestion-export-*"))
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf", "bad"])
+def test_backup_timeout_cli_rejects_invalid_values(tmp_path, value):
+    with pytest.raises(SystemExit) as error:
+        ex.main(["--output-dir", str(tmp_path / "out"), f"--graph-backup-timeout-seconds={value}"])
+    assert error.value.code == 2
+    assert not (tmp_path / "out").exists()
+
+
+@pytest.mark.parametrize("value", [0, -1, float("nan"), float("inf")])
+def test_backup_timeout_library_validation(tmp_path, value):
+    with pytest.raises(ValueError, match="finite and greater than zero"):
+        ex.export(tmp_path, tmp_path / "out", graph_only=True, graph_backup_timeout_seconds=value)
     assert not (tmp_path / "out").exists()

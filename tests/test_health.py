@@ -94,3 +94,25 @@ def test_disk_gate_combines_dependencies_without_resetting_hysteresis(monkeypatc
     assert not monitor.check()
     assert not monitor.ready.is_set()
     assert guard.snapshot()["state"] == "healthy"
+
+
+@pytest.mark.parametrize("other_dependency", ["neo4j", "llm"])
+def test_qdrant_recovery_respects_other_dependency_gates(other_dependency):
+    available = {"qdrant": False, "neo4j": True, "llm": True}
+    monitor = health.HealthMonitor(
+        lambda: available["qdrant"], lambda: available["llm"],
+        neo4j_probe=lambda: available["neo4j"],
+    )
+    assert not monitor.check()
+    available[other_dependency] = False
+    available["qdrant"] = True
+    assert not monitor.check()
+    assert monitor.qdrant_healthy is True
+    assert not monitor.ready.is_set()
+    available[other_dependency] = True
+    assert monitor.check()
+    available["qdrant"] = False
+    assert not monitor.check()
+    assert not monitor.ready.is_set()
+    available["qdrant"] = True
+    assert monitor.check()

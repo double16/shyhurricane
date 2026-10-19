@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from shyhurricane.data_paths import neo4j_location, qdrant_location, resolve_data_dir
 from shyhurricane.disk_space import validate_disk_config
+from shyhurricane.graph.config import graph_timeouts
 
 
 @dataclass
@@ -32,6 +33,7 @@ class ServerConfig:
         return neo4j_location(self.data_dir)
 
     def __post_init__(self):
+        graph_timeouts()
         validate_disk_config(self)
         if self.data_dir is not None:
             self.data_dir = str(resolve_data_dir(self.data_dir))

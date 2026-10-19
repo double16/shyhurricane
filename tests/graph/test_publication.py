@@ -47,6 +47,18 @@ def test_byte_budget_includes_unicode_encoding_and_rejects_oversized_records(mon
         list(publication.payload_batches([{"text": "🙂" * 100}]))
 
 
+def test_write_budgets_use_configured_timeout_and_remaining_maintenance_budget(monkeypatch):
+    monkeypatch.setenv("NEO4J_WRITE_TIMEOUT_SECONDS", "90")
+    monkeypatch.setattr(publication.time, "monotonic", lambda: 10)
+    session, _ = session_with_transactions()
+    publication.write_batches(session, "capture", "entities", "QUERY", "rows", [{"id": "one"}])
+    assert session.execute_write.call_args.args[0].timeout == 90
+    publication.write_batches(session, "capture", "cleanup", "QUERY", "rows", [{"id": "one"}], deadline=12)
+    assert session.execute_write.call_args.args[0].timeout == 2
+    with pytest.raises(TimeoutError, match="maintenance budget"):
+        publication.write_batches(session, "capture", "cleanup", "QUERY", "rows", [{"id": "one"}], deadline=9)
+
+
 def memory_error():
     return Neo4jError._hydrate_neo4j(code="Neo.TransientError.General.MemoryPoolOutOfMemoryError", message="budget")
 
@@ -130,7 +142,7 @@ def test_activation_rejects_stale_publisher_and_abandon_preserves_active():
     tx.run.return_value.single.return_value = {"id": "staging"}
     publisher.activate(session, {"id": "capture"}, "staging")
     publisher.abandon(session, "staging")
-    assert "p.published_at IS NULL" in session.run.call_args.args[0]
+    assert "p.published_at IS NULL" in str(session.run.call_args.args[0])
 
 
 @pytest.mark.parametrize(
@@ -158,7 +170,7 @@ def test_publish_completion_failures_and_replay(event, monkeypatch, failure):
         publisher.publish(graph)
         stage.assert_called_once()
         activate.assert_called_once()
-        cleanup.assert_called_once()
+        cleanup.assert_not_called()
         monkeypatch.setattr(publisher, "begin", lambda *args: ("generation", True))
         publisher.publish(graph)
         assert stage.call_count == activate.call_count == 1
@@ -213,9 +225,9 @@ def test_cleanup_is_bounded_preserves_published_evidence_and_defers_failure(monk
     session, transactions = session_with_transactions()
     store.connect.return_value.session.return_value.__enter__.return_value = session
     publisher.cleanup()
-    assert len(transactions) == 1
+    assert len(transactions) == 2
     assert "DELETE r" in transactions[0].run.call_args.args[0]
-    assert "cleaned=true" in session.run.call_args.args[0]
+    assert "cleaned=true REMOVE p:GraphCleanupPending" in transactions[-1].run.call_args.args[0]
     assert not any("GraphEvidence" in stage[0] for stage in publisher.cleanup_stages(publication_record))
     assert any(
         "GraphEvidence" in stage[0] for stage in publisher.cleanup_stages({**publication_record, "abandoned": True})
@@ -228,8 +240,8 @@ def test_cleanup_is_bounded_preserves_published_evidence_and_defers_failure(monk
     publisher.cleanup()
     session.run.assert_not_called()
     store.read.side_effect = RuntimeError("database unavailable")
-    publisher.cleanup()
-    assert "cleanup deferred" in caplog.text
+    with pytest.raises(RuntimeError, match="database unavailable"):
+        publisher.cleanup()
 
 
 def test_metadata_and_activation_memory_errors_are_terminal_and_retirement_failure_is_logged(

@@ -48,8 +48,9 @@ resolved_start_count/resolved_end_count and seed_ids_limited; seed examples are 
 Distinguish missing seeds from seeds with no discovered path. Start with max_depth=8 for flows.
 Only existing flow edges form paths; containment, script loading, and shared page context do not.
 Use find_user_journey_paths with exact discovered URLs or resource IDs for navigation hypotheses.
-Fetch relevant step evidence with fetch_application_graph_evidence using returned evidence IDs
-and the same scope. Never invent IDs, edges, or evidence. Correlate capture versions and timestamps;
+Fetch relevant step evidence with fetch_application_graph_evidence using only returned evidence IDs;
+no scope is required and this lookup does not wait for indexing. Never invent IDs, edges, or evidence.
+Correlate capture versions and timestamps;
 historical paths may combine observations that never coexisted.
 Static reachability is not runtime proof; recognized transformations do not prove sanitization.
 Source/sink labels include ordinary input handling and network boundaries, not proven attacker control.

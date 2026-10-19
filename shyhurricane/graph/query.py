@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 from neo4j.exceptions import Neo4jError
 
+from shyhurricane.graph.config import graph_timeouts
 from shyhurricane.graph.discovery import INTERPRETATION, ResourceDiscovery, in_context, present
 from shyhurricane.graph.model import FLOW_KINDS, JOURNEY_KINDS, identity, web_url
 from shyhurricane.graph.visibility import public_properties, visible_node, visible_relationship
@@ -174,7 +175,7 @@ class GraphQuery:
                 timed_out = True
                 return []
             try:
-                rows = self.store.read(statement, timeout=min(10, remaining), **{parameter: list(batch)})
+                rows = self.store.read(statement, timeout=min(graph_timeouts().read, remaining), **{parameter: list(batch)})
                 if len(rows) < len(batch):
                     unavailable = True
                 logger.debug(
@@ -541,8 +542,7 @@ class GraphQuery:
         reader.finish(len(result))
         return {**metadata, "results": result}
 
-    def evidence(self, scope, evidence_id):
-        contains = scope_predicate(scope)
+    def evidence(self, evidence_id):
         rows = self.store.read(
             "MATCH (e:GraphEvidence {id:$id}) "
             "WHERE (e._publication_id IS NULL AND EXISTS { "
@@ -567,6 +567,4 @@ class GraphQuery:
         }
         evidence = {**evidence, "context_urls": rows[0].get("context_urls") or evidence.get("context_urls", [])}
         evidence["analysis_summaries"] = json.loads(rows[0].get("analysis_details") or "[]")
-        if contains(evidence["url"]) or any(contains(url) for url in evidence.get("context_urls", [])):
-            return evidence
-        return None
+        return evidence

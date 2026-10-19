@@ -651,6 +651,8 @@ def log_gpu_memory_summary():
 
     # MPS (Apple Silicon)
     elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        if os.environ.get("ENABLE_HEAP_PROFILING", "false").strip().lower() not in {"1", "true", "yes", "on"}:
+            return
         msg.append("--- MPS Device ---")
         try:
             stats = torch.mps.current_allocated_memory()

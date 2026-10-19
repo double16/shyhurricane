@@ -19,7 +19,9 @@ publishes 9,905 entities, 20,000 relationships, and 15,140 evidence records.
 
 Timings measure hydration, excluding fixture publication and initial membership selection. Each trial
 also passed the existing snapshot assertions for all 9,905 entities and 20,000 relationships.
-The 120-second hydration budget and ten-second per-read cap were unchanged.
+These trials used the 120-second hydration budget and the then-default ten-second per-read cap.
+Current reads default to 30 seconds, configurable with `NEO4J_READ_TIMEOUT_SECONDS`; the overall
+120-second hydration budget remains unchanged.
 
 ## Sampled query profiles
 

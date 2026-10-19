@@ -103,8 +103,7 @@ def test_normalized_capture_context_preserves_cdn_scope_and_evidence(event):
     assert result["results"]
     assert all(node["context_urls"] == ["https://example.com/form"] for node in result["results"])
     evidence_id = next(iter(graph.evidence))
-    assert service.evidence("example.com", evidence_id)["context_urls"] == ["https://example.com/form"]
-    assert service.evidence("unrelated.com", evidence_id) is None
+    assert service.evidence(evidence_id)["context_urls"] == ["https://example.com/form"]
 
 
 @pytest.mark.parametrize(
@@ -130,16 +129,37 @@ def test_invalid_scopes(scope):
         scope_predicate(scope)
 
 
+def test_evidence_by_id_preserves_public_metadata_without_scope():
+    evidence = {
+        "id": "proof",
+        "url": "https://cdn.other.test/script.js",
+        "context_urls": ["https://unrelated.test/page"],
+        "context_owner_id": "owner",
+        "_publication_id": "publication",
+        "snippet": "input -> sink",
+    }
+    store = MagicMock()
+    store.read.return_value = [{"evidence": evidence, "analysis_details": '[{"status":"complete"}]'}]
+    result = GraphQuery(store).evidence("proof")
+    assert result == {
+        "id": "proof",
+        "url": evidence["url"],
+        "context_urls": evidence["context_urls"],
+        "snippet": "input -> sink",
+        "analysis_summaries": [{"status": "complete"}],
+    }
+    assert store.read.call_args.kwargs == {"id": "proof"}
+
+
 def test_journeys_exclude_assets_and_return_evidence(event):
     graph = extract(event(body='<a href="/next">next</a><script src="/asset.js"></script>'))
     service = GraphQuery(Store(graph))
     result = service.paths("example.com", graph.url, end="https://example.com/next", mode="journey")
     assert len(result["results"]) == 1
     step = result["results"][0]["steps"][0]
-    assert service.evidence("example.com", step["evidence_id"])["rule"] == "html.link"
+    assert service.evidence(step["evidence_id"])["rule"] == "html.link"
     assert not service.paths("example.com", graph.url, end="https://example.com/asset.js", mode="journey")["results"]
-    assert service.evidence("other.test", step["evidence_id"]) is None
-    assert service.evidence("example.com", "missing") is None
+    assert service.evidence("missing") is None
     assert service.paths("example.com", "missing")["analysis_gaps"]
     assert service.paths("example.com", graph.url, end="missing")["analysis_gaps"]
 
@@ -283,7 +303,7 @@ def test_library_analysis_metadata_is_exposed_in_queries_and_evidence(event):
     service = GraphQuery(AnalysisStore(graph))
     assert service.snapshot("example.com")[2]["analysis_summaries"] == analysis
     proof = next(iter(graph.evidence))
-    assert service.evidence("example.com", proof)["analysis_summaries"] == analysis
+    assert service.evidence(proof)["analysis_summaries"] == analysis
 
 
 def test_endpoint_overview_uses_captured_http_fields_and_resource_identity(event):
@@ -321,7 +341,7 @@ def test_form_response_backward_trace_and_evidence(event, javascript_runner):
     for path in result["results"]:
         assert len(path["steps"]) <= 8
         for step in path["steps"]:
-            assert service.evidence(url, step["evidence_id"])["snippet"]
+            assert service.evidence(step["evidence_id"])["snippet"]
     form_data = next(node for node in graph.nodes.values() if node["kind"] == "result" and node["name"] == "FormData")
     assert not service.paths(url, form_data["id"], end=sink["id"], mode="flow")["results"]
 
@@ -506,7 +526,7 @@ def test_hydration_completes_windows_in_order_and_reuses_dependencies(hydration_
     assert sum("AS source_id" in query for query, _ in calls) == 2
     for marker in ("AS node", "AS publication_id", "AS context_urls"):
         assert sum(marker in query for query, _ in calls) == 1
-    assert all(0 < values["timeout"] <= 10 for _, values in calls)
+    assert all(0 < values["timeout"] <= 30 for _, values in calls)
     assert "stage=relationships batch=500 returned=500" in caplog.text
     assert "selected=501 completed=501" in caplog.text
     assert "USING INDEX SEEK r:RELATES(id)" in calls[0][0]
@@ -640,7 +660,7 @@ def test_compressed_edges_are_visible_in_flow_traces_and_evidence_but_not_journe
     assert "witness" not in step
     full = service.paths("example.com", source, end=sink, mode="flow", detail="full")["results"]
     assert full[0]["steps"][0]["witness"] == ["input -> output"]
-    proof = service.evidence("example.com", graph.edges[edge]["evidence_id"])
+    proof = service.evidence(graph.edges[edge]["evidence_id"])
     assert proof["original_hops"] == 25
     assert proof["classification"] == "statically_inferred"
     assert not service.paths("example.com", source, end=sink, mode="journey")["results"]

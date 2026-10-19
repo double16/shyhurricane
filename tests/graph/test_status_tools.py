@@ -54,21 +54,74 @@ async def test_all_tools_dispatch_read_only_queries(monkeypatch):
 
     async def query(ctx, name, operation, scope, **kwargs):
         calls.append((name, operation, scope, kwargs))
-        return {"results": [], "instructions": "partial"} if operation != "evidence" else {"id": "evidence"}
+        return {"results": [], "instructions": "partial"}
 
     monkeypatch.setattr(tools, "query", query)
     assert not (await tools.find_application_elements.__wrapped__(None, "example.com")).results
     await tools.find_application_relationships.__wrapped__(None, "example.com", "id")
     await tools.trace_application_data_flow.__wrapped__(None, "example.com", "id")
     await tools.find_user_journey_paths.__wrapped__(None, "example.com", "/start", "/end")
-    assert await tools.fetch_application_graph_evidence(None, "example.com", "evidence") == {"id": "evidence"}
     await tools.find_application_endpoints.__wrapped__(
         None, "example.com", url="https://example.com/blog", method="POST"
     )
     assert calls[-1][1] == "endpoints"
     assert calls[-1][3]["method"] == "POST"
-    assert len(calls) == 6
+    assert len(calls) == 5
     assert calls[2][3]["mode"] == "flow" and calls[3][3]["mode"] == "journey"
+
+
+@pytest.mark.parametrize("result", [{"id": "evidence", "url": "https://cdn.other.test/script.js"}, None])
+@pytest.mark.parametrize("indexing_status", ["pending", "paused"])
+async def test_evidence_reads_directly_without_scope_or_indexing(monkeypatch, result, indexing_status):
+    from unittest.mock import Mock
+
+    server = SimpleNamespace(graph_store=object(), indexing_status=indexing_status)
+    history = AsyncMock()
+    wait = AsyncMock(side_effect=AssertionError("Evidence must not wait"))
+    scoped_query = AsyncMock(side_effect=AssertionError("Evidence must not use scoped queries"))
+    lookup = Mock(return_value=result)
+    monkeypatch.setattr(tools, "get_server_context", AsyncMock(return_value=server))
+    monkeypatch.setattr(tools, "log_tool_history", history)
+    monkeypatch.setattr(tools, "wait_for_indexing", wait)
+    monkeypatch.setattr(tools, "query", scoped_query)
+    monkeypatch.setattr(tools, "GraphQuery", lambda store: SimpleNamespace(evidence=lookup))
+    assert await tools.fetch_application_graph_evidence(None, " \tevidence\n") == result
+    lookup.assert_called_once_with("evidence")
+    history.assert_awaited_once_with(None, "fetch_application_graph_evidence", evidence_id="evidence")
+    wait.assert_not_awaited()
+    scoped_query.assert_not_awaited()
+
+
+async def test_evidence_errors_preserve_logging_and_hide_database_details(monkeypatch, caplog):
+    from unittest.mock import Mock
+
+    server = SimpleNamespace(graph_store=None)
+    monkeypatch.setattr(tools, "get_server_context", AsyncMock(return_value=server))
+    monkeypatch.setattr(tools, "log_tool_history", AsyncMock())
+    with pytest.raises(ToolError, match="Application graph is unavailable"):
+        await tools.fetch_application_graph_evidence(None, "evidence")
+    server.graph_store = object()
+    failure = RuntimeError("private database failure")
+    monkeypatch.setattr(
+        tools, "GraphQuery", lambda store: SimpleNamespace(evidence=Mock(side_effect=failure))
+    )
+    with pytest.raises(ToolError, match="Application graph query failed") as caught:
+        await tools.fetch_application_graph_evidence(None, "evidence")
+    assert "private database failure" not in str(caught.value)
+    record = next(record for record in caplog.records if record.name == tools.__name__)
+    assert record.exc_info[1] is failure and record.exc_info[2] is not None
+    assert "tool=fetch_application_graph_evidence operation=evidence evidence_id=evidence" in record.message
+
+
+def test_evidence_schema_trims_id_without_coercing_invalid_types():
+    from mcp.server.mcpserver.utilities.func_metadata import func_metadata
+    from pydantic import ValidationError
+
+    model = func_metadata(tools.fetch_application_graph_evidence, skip_names=["ctx"]).arg_model
+    assert model.model_validate({"evidence_id": " \tevidence id\n"}).evidence_id == "evidence id"
+    for value in (None, 3, []):
+        with pytest.raises(ValidationError):
+            model.model_validate({"evidence_id": value})
 
 
 async def test_query_errors_are_explicit_and_no_fetch_occurs(monkeypatch):
@@ -109,15 +162,18 @@ async def test_graph_tools_publish_complete_argument_schemas():
         "find_application_relationships": {"scope", "element_id"},
         "trace_application_data_flow": {"scope", "start"},
         "find_user_journey_paths": {"scope", "start", "end"},
-        "fetch_application_graph_evidence": {"scope", "evidence_id"},
+        "fetch_application_graph_evidence": {"evidence_id"},
     }
     for tool in registered.values():
         assert set(tool.input_schema["required"]) == required[tool.name]
         properties = tool.input_schema["properties"]
         assert "ctx" not in properties
         assert all(field.get("description", "").strip() for field in properties.values())
-        assert properties["scope"]["type"] == "string"
-        assert "scope" in tool.input_schema["required"]
+        if tool.name == "fetch_application_graph_evidence":
+            assert set(properties) == {"evidence_id"}
+        else:
+            assert properties["scope"]["type"] == "string"
+            assert "scope" in tool.input_schema["required"]
         if "limit" in properties:
             assert properties["limit"]["default"] == (5 if tool.name == "find_application_endpoints" else 20)
             assert properties["limit"]["minimum"] == 1
@@ -227,7 +283,7 @@ async def test_endpoint_tool_paginates_defaults_and_filters(tmp_path, monkeypatc
         await tools.find_application_endpoints(None, "example.com", limit=0)
 
 
-async def test_graph_query_waits_before_read_and_preserves_incomplete_evidence(monkeypatch):
+async def test_graph_query_waits_before_read_and_preserves_incomplete_results(monkeypatch):
     from shyhurricane.indexing_wait import IndexingStatus
 
     server = SimpleNamespace(graph_store=object())
@@ -239,15 +295,15 @@ async def test_graph_query_waits_before_read_and_preserves_incomplete_evidence(m
         assert kwargs == {"graph": True}
         return IndexingStatus(status="timed_out", potentially_incomplete=True)
 
-    def evidence(scope):
+    def elements(scope):
         order.append("query")
         return None
 
     monkeypatch.setattr(tools, "get_server_context", AsyncMock(return_value=server))
     monkeypatch.setattr(tools, "log_tool_history", AsyncMock())
     monkeypatch.setattr(tools, "wait_for_indexing", wait)
-    monkeypatch.setattr(tools, "GraphQuery", lambda store: SimpleNamespace(evidence=evidence))
-    result = await tools.query(None, "test", "evidence", "example.com")
+    monkeypatch.setattr(tools, "GraphQuery", lambda store: SimpleNamespace(elements=elements))
+    result = await tools.query(None, "test", "elements", "example.com")
     assert order == ["wait", "query"]
     assert result["indexing"]["status"] == "timed_out"
 
@@ -268,7 +324,6 @@ async def test_graph_query_waits_before_read_and_preserves_incomplete_evidence(m
         ("find_application_relationships", {"element_id": "opaque id", "direction": "backward", "kinds": ["LOADS"]}),
         ("trace_application_data_flow", {"start": "opaque id", "end": "other id", "direction": "forward"}),
         ("find_user_journey_paths", {"start": "https://example.com/a%20b", "end": "other id"}),
-        ("fetch_application_graph_evidence", {"evidence_id": "evidence id"}),
     ],
 )
 async def test_graph_input_validation_trims_before_literals_and_preserves_content(name, arguments, monkeypatch):
@@ -276,7 +331,7 @@ async def test_graph_input_validation_trims_before_literals_and_preserves_conten
 
     function = getattr(tools, name)
     fields = {"scope": "example.com", **arguments}
-    if name not in {"fetch_application_graph_evidence", "find_application_endpoints"}:
+    if name != "find_application_endpoints":
         fields["detail"] = "full"
     padded = {
         key: [f" \t{item}\n" for item in value] if isinstance(value, list) else f" \t{value}\n"

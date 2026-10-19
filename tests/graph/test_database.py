@@ -18,7 +18,7 @@ def test_memory_defaults_overrides_and_container_reuse_warning(monkeypatch, tmp_
     assert database.memory_environment() == [
         "NEO4J_server_memory_heap_initial__size=1g",
         "NEO4J_server_memory_heap_max__size=1g",
-        "NEO4J_server_memory_pagecache_size=256m",
+        "NEO4J_server_memory_pagecache_size=1g",
     ]
     monkeypatch.setenv("NEO4J_HEAP_SIZE", "2G")
     monkeypatch.setenv("NEO4J_PAGECACHE_SIZE", "512m")
@@ -96,11 +96,14 @@ def test_driver_read_schema_and_publication_handoff(monkeypatch, event):
     monkeypatch.setattr(database.GraphDatabase, "driver", lambda *args, **kwargs: driver)
     monkeypatch.setenv("NEO4J_PASSWORD", "password")
     store = GraphStore("bolt://localhost:7687")
-    monkeypatch.setattr(store, "cleanup", lambda: None)
+    cleanup = MagicMock()
+    monkeypatch.setattr(store, "cleanup", cleanup)
     assert store.ready()
-    session.run.assert_any_call(
-        "CREATE INDEX graph_publication_capture IF NOT EXISTS FOR (n:GraphPublication) ON (n.capture_id)"
-    )
+    assert any("CREATE INDEX graph_publication_capture" in str(call.args[0]) for call in session.run.call_args_list)
+    assert all(call.args[0].timeout == 120 for call in session.run.call_args_list[:-1])
+    assert str(session.run.call_args.args[0]) == "RETURN 1"
+    assert session.run.call_args.args[0].timeout == 15
+    cleanup.assert_not_called()
     schema_calls = session.run.call_count
     assert store.ready()
     assert session.run.call_count == schema_calls + 1
@@ -127,7 +130,7 @@ def test_driver_read_schema_and_publication_handoff(monkeypatch, event):
     assert database.graph_location() == "custom"
 
 
-@pytest.mark.parametrize("timeout,expected", [(0.25, 0.25), (5, 5), (30, 10)])
+@pytest.mark.parametrize("timeout,expected", [(0.25, 0.25), (5, 5), (30, 30), (60, 30)])
 def test_deadline_reads_use_one_explicit_transaction_without_retries(monkeypatch, timeout, expected):
     driver = MagicMock()
     session = driver.session.return_value.__enter__.return_value
