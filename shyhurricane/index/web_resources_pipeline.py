@@ -4,6 +4,7 @@ import json
 import logging
 import subprocess
 import sys
+from collections import defaultdict
 from dataclasses import replace
 from math import floor
 from typing import Dict, List, Optional, Set
@@ -444,28 +445,28 @@ class FilterExistingDocumentsById:
 
     @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]):
+        by_collection = defaultdict(list)
+        for doc in documents:
+            collection = doc.meta.get("type")
+            if doc.id and self.stores.get(collection) is not None:
+                by_collection[collection].append(doc.id)
+
+        existing = {}
+        for collection, ids in by_collection.items():
+            store = self.stores[collection]
+            found = set()
+            unique_ids = list(dict.fromkeys(ids))
+            for offset in range(0, len(unique_ids), 100):
+                found.update(doc.id for doc in store.get_documents_by_id(unique_ids[offset:offset + 100]))
+            existing[collection] = found
+
         new_documents = []
         for doc in documents:
-            if not doc.id:
-                new_documents.append(doc)
-                continue
-            collection_name: Optional[str] = doc.meta.get("type", None)
-            if not collection_name:
-                logger.warning(f"No collection found for {doc}")
-                new_documents.append(doc)
-                continue
-            store = self.stores.get(collection_name)
-            if store is None:
-                # This can happen if the only collection has the token length as a suffix
-                logger.debug(f"No collection '{collection_name}' found for {doc}")
-                new_documents.append(doc)
-                continue
-
-            if store.filter_documents({"field": "id", "operator": "==", "value": doc.id}):
-                logger.info(f"Skipping existing document {collection_name} {doc.id}")
+            collection = doc.meta.get("type")
+            if doc.id in existing.get(collection, set()):
+                logger.info("Skipping existing document %s %s", collection, doc.id)
             else:
                 new_documents.append(doc)
-
         return {"documents": new_documents}
 
 

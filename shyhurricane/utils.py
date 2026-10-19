@@ -624,7 +624,8 @@ def validate_container_file_path(path: str, message: Optional[str] = None):
 
 
 def log_heap_stats():
-    if logger.isEnabledFor(logging.DEBUG):
+    enabled = os.environ.get("ENABLE_HEAP_PROFILING", "false").strip().lower() in {"1", "true", "yes", "on"}
+    if enabled and logger.isEnabledFor(logging.DEBUG):
         try:
             from guppy import hpy
             h = hpy()

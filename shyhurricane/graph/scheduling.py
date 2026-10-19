@@ -29,15 +29,20 @@ class ReanalysisScheduler:
             "running_generation INTEGER, pending TEXT, running TEXT, delivered INTEGER)"
         )
         self.connection.execute("CREATE INDEX IF NOT EXISTS reanalysis_delivery ON reanalysis(state,delivered)")
+        self.connection.execute("CREATE TABLE IF NOT EXISTS reanalysis_obligations (id TEXT PRIMARY KEY)")
         self.connection.commit()
 
-    def request(self, capture_id, visited, remaining):
+    def request(self, capture_id, visited, remaining, *, obligation_id=None):
         """Commit a routing obligation; the worker flushes the outbox after its scheduling pass."""
         route = {"visited": sorted(set(visited)), "remaining": remaining}
         if capture_id in visited or not 0 <= remaining <= MAX_RECONCILE_CAPTURES - 2:
             raise ValueError("Invalid reconciliation route")
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
+            if obligation_id is not None and not self.connection.execute(
+                "INSERT OR IGNORE INTO reanalysis_obligations VALUES (?)", (obligation_id,)
+            ).rowcount:
+                return
             row = self.connection.execute(
                 "SELECT state,pending FROM reanalysis WHERE capture_id=?", (capture_id,)
             ).fetchone()
@@ -70,10 +75,26 @@ class ReanalysisScheduler:
                     )
 
     def recover(self):
+        has_jobs = self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='graph_continuations'"
+        ).fetchone()
+        if has_jobs:
+            for capture_id, ticket in self.connection.execute(
+                "SELECT capture_id,ticket FROM graph_continuations WHERE state='failed' AND ticket IS NOT NULL"
+            ).fetchall():
+                self.finish({"id": capture_id, "reanalysis_ticket": ticket})
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
+            has_continuations = self.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='graph_continuations'"
+            ).fetchone()
+            continuation_filter = (
+                " AND NOT EXISTS (SELECT 1 FROM graph_continuations j "
+                "WHERE j.capture_id=reanalysis.capture_id AND j.state IN ('pending','running','failed'))"
+                if has_continuations else ""
+            )
             rows = self.connection.execute(
-                "SELECT capture_id,pending,running FROM reanalysis WHERE state='running'"
+                "SELECT capture_id,pending,running FROM reanalysis WHERE state='running'" + continuation_filter
             ).fetchall()
             for capture_id, pending, running in rows:
                 route = merge_routes(json.loads(pending) if pending else None, json.loads(running))

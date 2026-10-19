@@ -354,3 +354,50 @@ async def test_exhausted_budget_does_not_wait_again(environment):
         assert result.waited_seconds < 0.01
     finally:
         waiting._budget.reset(token)
+
+
+@pytest.mark.parametrize("state,field", [("pending", "pending"), ("running", "processing"), ("failed", "failed")])
+def test_continuations_remain_in_indexing_status_after_queue_handoff(environment, tmp_path, state, field):
+    server, _, _ = environment
+    artifacts = make_artifacts(tmp_path / "graph_state")
+    artifacts.execute("CREATE TABLE graph_continuations(capture_id TEXT,state TEXT)")
+    artifacts.execute("INSERT INTO captures VALUES ('script','https://example.com/app.js')")
+    artifacts.execute("INSERT INTO graph_continuations VALUES ('script',?)", (state,))
+    artifacts.commit()
+    counts, unresolved = waiting.read_indexing_status(
+        server, waiting.url_matcher(["example.com"]), ["graph"], time.monotonic() + 1
+    )
+    assert counts["graph"][field] == 1 and not unresolved
+    artifacts.close()
+
+
+def test_continuation_handoff_is_read_after_upstream_queue(environment, tmp_path, monkeypatch):
+    server, _, _ = environment
+    artifacts = make_artifacts(tmp_path / "graph_state")
+    artifacts.execute("CREATE TABLE graph_continuations(capture_id TEXT,state TEXT)")
+    artifacts.execute("INSERT INTO captures VALUES ('script','https://example.com/app.js')")
+    artifacts.commit()
+
+    def handoff(*args):
+        artifacts.execute("INSERT INTO graph_continuations VALUES ('script','pending')")
+        artifacts.commit()
+        return iter([])
+
+    monkeypatch.setattr(waiting, "scoped_queue_rows", handoff)
+    counts, unresolved = waiting.read_indexing_status(
+        server, waiting.url_matcher(["example.com"]), ["graph"], time.monotonic() + 1
+    )
+    assert counts["graph"]["pending"] == 1 and not unresolved
+    artifacts.close()
+
+
+@pytest.mark.parametrize("state", ["paused", "checking", "healthy", "disabled"])
+async def test_disk_pause_only_affects_relevant_outstanding_work(environment, monkeypatch, state):
+    server, ctx, queue = environment
+    enqueue(queue("ingest_queue"))
+    monkeypatch.setattr(waiting, "disk_status", lambda server: {"state": state})
+    result = await waiting.wait_for_indexing(ctx, server, waiting.url_matcher(["example.com"]))
+    assert result.status == ("paused" if state in {"paused", "checking"} else "timed_out")
+    assert result.potentially_incomplete
+    unrelated = await waiting.wait_for_indexing(ctx, server, waiting.url_matcher(["other.test"]))
+    assert unrelated.status == "complete"

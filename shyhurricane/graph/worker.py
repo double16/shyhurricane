@@ -8,6 +8,7 @@ import time
 from neo4j.exceptions import Neo4jError, ServiceUnavailable, SessionExpired
 
 from shyhurricane.graph.artifacts import ArtifactStore
+from shyhurricane.graph.continuations import Continuations
 from shyhurricane.graph.database import GraphStore
 from shyhurricane.graph.extract import extract
 from shyhurricane.graph.policy import ANALYZER_VERSION
@@ -20,6 +21,44 @@ from shyhurricane.task_queue.types import prepare_worker_process
 logger = logging.getLogger(__name__)
 
 
+def complete_capture(artifacts, scheduler, event, mode, item):
+    logger.info("Graph capture %s stage=reconcile starting", event["id"])
+    # A newly arrived target can resolve references regardless of ingest order.
+    chain = set(event.get("reconcile_chain", [])) | {event["id"]}
+    remaining = event.get("reconcile_remaining", max(0, MAX_RECONCILE_CAPTURES - len(chain)))
+    seen = set(chain)
+    if not event.get("reconcile") and remaining > 0:
+        urls = [event["data"]["url"]]
+        bundle = javascript_url_from_map(urls[0])
+        if bundle:
+            urls.append(bundle)
+        for url in urls:
+            for dependent in artifacts.dependents(url):
+                if dependent["id"] != event["id"] and dependent["id"] not in seen:
+                    scheduler.request(dependent["id"], chain, remaining - 1)
+                    seen.add(dependent["id"])
+    headers = {key.lower(): value for key, value in event["data"].get("response_headers", {}).items()}
+    mime = headers.get("content-type", "")
+    if remaining > 0 and ("html" in mime or "javascript" in mime):
+        for target in artifacts.targets(event["id"]):
+            if target["id"] not in seen:
+                scheduler.request(target["id"], chain, remaining - 1)
+                seen.add(target["id"])
+    scheduler.flush()
+    record_completion(artifacts, scheduler, event, mode, item)
+
+
+def record_completion(artifacts, scheduler, event, mode, item):
+    with artifacts.connection:
+        artifacts.connection.execute(
+            "UPDATE analysis_policies SET completed_version=?,completed_mode=? WHERE capture_id=?",
+            (ANALYZER_VERSION, mode, event["id"]),
+        )
+    artifacts.status(event["id"], "complete")
+    if "reanalysis_ticket" in item:
+        scheduler.finish(item)
+
+
 def graph_worker(db, location, health_state, stop_event, open_world):
     prepare_worker_process()
     queue = get_persistent_queue(db, "graph_queue", auto_resume=False)
@@ -29,15 +68,54 @@ def graph_worker(db, location, health_state, stop_event, open_world):
     from shyhurricane.index.web_resources import _wait_for_health
 
     try:
+        continuations = Continuations(artifacts)
+        continuations.recover()
         scheduler = ReanalysisScheduler(artifacts, queue)
         scheduler.recover()
-        items = iter(persistent_queue_get(queue, stop_event=stop_event))
+
+        def continuation_item():
+            key = continuations.ready()
+            return {"graph_continuation": key} if key else None
+
+        items = iter(persistent_queue_get(queue, stop_event=stop_event, idle_callback=continuation_item))
+        continuation_turn = False
         while _wait_for_health(health_state, stop_event):
             scheduler.flush()
-            try:
-                item = next(items)
-            except StopIteration:
-                break
+            item = continuation_item() if continuation_turn else None
+            if item is None:
+                try:
+                    item = next(items)
+                except StopIteration:
+                    item = continuation_item()
+                    if item is None:
+                        break
+            if "graph_continuation" in item:
+                if not health_state.is_set():
+                    continue
+                continuation_turn = False
+                key = item["graph_continuation"]
+                completed = continuations.step(key, store, extractor=extract)
+                if completed is not None:
+                    try:
+                        if continuations.reconcile(key, completed, scheduler):
+                            record_completion(artifacts, scheduler, completed["event"],
+                                              completed["projection"]["library_analysis"], completed["item"])
+                            continuations.finish(key, completed)
+                        else:
+                            continuations.save(key, completed)
+                    except Exception as error:
+                        continuations.save(key, completed, error=str(error), delay=5)
+                        logger.warning("Graph continuation reconciliation retained %s", key, exc_info=True)
+                elif continuations.connection.execute(
+                    "SELECT state FROM graph_continuations WHERE id=?", (key,)
+                ).fetchone()[0] == "failed":
+                    capture_id, ticket = continuations.connection.execute(
+                        "SELECT capture_id,ticket FROM graph_continuations WHERE id=?", (key,)
+                    ).fetchone()
+                    if ticket:
+                        scheduler.finish({"id": capture_id, "reanalysis_ticket": ticket})
+                continue
+            continuation_turn = True
             if not health_state.is_set():
                 queue.nack(item)
                 continue
@@ -51,6 +129,14 @@ def graph_worker(db, location, health_state, stop_event, open_world):
                 ).fetchone()
                 if policy:
                     event = {**event, "library_analysis": policy[0]}
+                if continuations.eligible(event):
+                    key = continuations.enqueue(event, item, open_world and not policy)
+                    state = artifacts.connection.execute(
+                        "SELECT state FROM graph_continuations WHERE id=?", (key,)
+                    ).fetchone()[0]
+                    artifacts.status(event["id"], {"done": "complete", "failed": "failed"}.get(state, "processing"))
+                    queue.ack(item)
+                    continue
                 started = time.monotonic()
                 logger.info("Graph capture %s stage=extract starting", event["id"])
                 artifacts.status(event["id"], "processing")
@@ -64,37 +150,7 @@ def graph_worker(db, location, health_state, stop_event, open_world):
                     time.monotonic() - started,
                 )
                 store.publish(projection)
-                with artifacts.connection:
-                    artifacts.connection.execute(
-                        "UPDATE analysis_policies SET completed_version=?,completed_mode=? WHERE capture_id=?",
-                        (ANALYZER_VERSION, projection.library_analysis, event["id"]),
-                    )
-                logger.info("Graph capture %s stage=reconcile starting", event["id"])
-                # A newly arrived target can resolve references regardless of ingest order.
-                chain = set(event.get("reconcile_chain", [])) | {event["id"]}
-                remaining = event.get("reconcile_remaining", max(0, MAX_RECONCILE_CAPTURES - len(chain)))
-                seen = set(chain)
-                if not event.get("reconcile") and remaining > 0:
-                    urls = [event["data"]["url"]]
-                    bundle = javascript_url_from_map(urls[0])
-                    if bundle:
-                        urls.append(bundle)
-                    for url in urls:
-                        for dependent in artifacts.dependents(url):
-                            if dependent["id"] != event["id"] and dependent["id"] not in seen:
-                                scheduler.request(dependent["id"], chain, remaining - 1)
-                                seen.add(dependent["id"])
-                headers = {key.lower(): value for key, value in event["data"].get("response_headers", {}).items()}
-                mime = headers.get("content-type", "")
-                if remaining > 0 and ("html" in mime or "javascript" in mime):
-                    for target in artifacts.targets(event["id"]):
-                        if target["id"] not in seen:
-                            scheduler.request(target["id"], chain, remaining - 1)
-                            seen.add(target["id"])
-                scheduler.flush()
-                artifacts.status(event["id"], "complete")
-                if "reanalysis_ticket" in item:
-                    scheduler.finish(item)
+                complete_capture(artifacts, scheduler, event, projection.library_analysis, item)
                 queue.ack(item)
                 logger.info("Graph capture %s acknowledged seconds=%.3f", event["id"], time.monotonic() - started)
             except (ServiceUnavailable, SessionExpired, OSError, sqlite3.OperationalError) as error:

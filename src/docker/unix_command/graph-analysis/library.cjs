@@ -1,74 +1,96 @@
-/* Only exact, inspected standalone distributions qualify. Names and banners are insufficient. */
-const { createHash } = require("node:crypto");
-const DISTRIBUTIONS = new Map([
-  ["f76dd498a673f19070ba71cb25c10f886b12ae3fb0fe2da7ee2ad97bb2b7c655", "AngularJS 1.7.7"],
-  ["3691c923ea593c1f7b941443ee06a35ca0c3fdff54c9eaeb276fa4c42289ded5", "React development"],
-  ["2e10ae11b803fd7adf1ba2fa497d97797b803efdcd54de28967555ea1916cb54", "React DOM development"],
+/* Bounded compression of generated graphs; source names and versions are irrelevant. */
+const NODE_THRESHOLD = 2000;
+const EDGE_THRESHOLD = 4000;
+const FLOW_KINDS = new Set([
+  "FLOWS_TO", "CALL_ARGUMENT", "RETURNS_TO", "READS_FROM", "WRITES_TO", "SUBMITS_TO", "REQUESTS",
 ]);
-function recognize(source, distributions = DISTRIBUTIONS) {
-  return distributions.get(createHash("sha256").update(source).digest("hex")) || null;
-}
-function summarize(result, library) {
-  const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
-  const nodes = [...result.nodes].sort((a, b) => compare(a.id, b.id));
-  const seeds = nodes.filter((n) => n.role || n.import_url || n.export_name || n.selector);
-  const selected = new Set(seeds.slice(0, 500).map((n) => n.id));
+const SUMMARY_NOTICE = "Intermediate operations omitted; static reachability does not prove runtime execution or sanitization";
+const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+const category = (node, origins) => {
+  if (node.role) return "security";
+  if (node.import_url || node.export_name || node.callback_boundary) return "boundary";
+  if (node.selector) return "dom";
+  if (origins.has(node.id)) return "reference";
+  return "internal";
+};
+const priority = { security: 0, boundary: 1, dom: 2, reference: 3, internal: 4 };
+
+function summarize(result) {
+  const origins = new Set(result.references.map((reference) => reference.source));
+  const nodes = [...result.nodes].sort((a, b) =>
+    priority[category(a, origins)] - priority[category(b, origins)] || compare(a.id, b.id));
+  const seeds = nodes.filter((node) => category(node, origins) !== "internal");
+  const selected = new Set(seeds.slice(0, 500).map((node) => node.id));
+  const byId = new Map(nodes.map((node) => [node.id, node]));
+  const edges = result.edges.filter((edge) => byId.has(edge.source) && byId.has(edge.target))
+    .sort((a, b) => compare(JSON.stringify(a), JSON.stringify(b)));
   const adjacency = new Map();
-  const valid = new Set(nodes.map((n) => n.id));
-  const edges = result.edges.filter((e) => valid.has(e.source) && valid.has(e.target))
-    .sort((a, b) => compare(`${a.source}:${a.target}:${a.kind}`, `${b.source}:${b.target}:${b.kind}`));
   for (const edge of edges) {
+    if (!FLOW_KINDS.has(edge.kind)) continue;
     if (!adjacency.has(edge.source)) adjacency.set(edge.source, []);
     adjacency.get(edge.source).push(edge);
   }
-  const retained = new Set();
+  // Direct endpoint edges retain their original kinds, rules, and evidence.
+  const direct = edges.filter((edge) => selected.has(edge.source) && selected.has(edge.target));
+  const keptEdges = direct.slice(0, 500);
+  let relationshipLimited = direct.length > 500;
+  let traversalLimited = false;
   let work = 0;
-  let limited = seeds.length > 500;
-  // Breadth-first traversal retains shortest directed paths; intermediates are never contracted.
   for (const seed of seeds.slice(0, 500)) {
-    const queue = [{ id: seed.id, path: [] }];
+    const queue = [{ id: seed.id, hops: 0, witness: [] }];
     const seen = new Set([seed.id]);
-    for (let cursor = 0; cursor < queue.length; cursor += 1) {
+    for (let cursor = 0; cursor < queue.length && !traversalLimited; cursor += 1) {
       const item = queue[cursor];
-      if (item.path.length >= 16) { limited = true; continue; }
       for (const edge of adjacency.get(item.id) || []) {
+        if (work >= 100000) { traversalLimited = true; break; }
         work += 1;
-        if (work > 100000) { limited = true; break; }
         if (seen.has(edge.target)) continue;
         seen.add(edge.target);
-        const path = [...item.path, edge];
+        const hops = item.hops + 1;
+        const sample = `${edge.source} -> ${edge.target} (${edge.kind}) @ ${edge.location || ""}`.slice(0, 300);
+        // Keep the first four and last four edges without copying full paths.
+        const witness = [...item.witness, sample];
+        if (witness.length > 8) witness.splice(4, 1);
         if (selected.has(edge.target)) {
-          const additions = new Set(path.flatMap((e) => [e.source, e.target]).filter((id) => !selected.has(id)));
-          const newEdges = path.filter((e) => !retained.has(e));
-          if (selected.size + additions.size <= 500 && retained.size + newEdges.length <= 500) {
-            for (const id of additions) selected.add(id);
-            for (const e of path) retained.add(e);
-          } else limited = true;
+          if (hops > 1) {
+            if (keptEdges.length < 500) keptEdges.push({
+              source: seed.id, target: edge.target, kind: "SUMMARIZED_FLOW", rule: "js.size-summary",
+              location: seed.location || "", snippet: SUMMARY_NOTICE, original_hops: hops,
+              endpoint_locations: [seed.location || "", byId.get(edge.target).location || ""],
+              witness, summary_notice: SUMMARY_NOTICE,
+            });
+            else relationshipLimited = true;
+          }
+          continue;
         }
-        queue.push({ id: edge.target, path });
+        queue.push({ id: edge.target, hops, witness });
       }
-      if (work > 100000) break;
     }
-    if (work > 100000) break;
+    if (traversalLimited) break;
   }
-  const references = result.references.slice(0, 50).map((reference) => {
-    if (!reference.source || selected.has(reference.source)) return reference;
-    if (selected.size < 500 && valid.has(reference.source)) {
-      selected.add(reference.source);
-      return reference;
-    }
-    limited = true;
-    return null;
-  }).filter(Boolean);
-  const keptNodes = nodes.filter((n) => selected.has(n.id));
-  const keptEdges = edges.filter((e) => retained.has(e));
-  return { ...result, nodes: keptNodes, edges: keptEdges, references,
-    analysis: { mode: "summary", library, retained_nodes: keptNodes.length,
-      retained_edges: keptEdges.length, omitted_nodes: nodes.length - keptNodes.length,
-      omitted_edges: result.edges.length - keptEdges.length,
-      omitted_references: result.references.length - references.length,
-      budget_limited: limited || result.references.length > 50 || result.gaps.some((gap) => /budget reached/.test(gap)) },
-    gaps: [...result.gaps, `Library security summary: ${library}; unrelated internals omitted; absence is not proof`,
-      ...(limited || result.references.length > 50 ? ["Library security summary budget reached"] : [])] };
+  const references = result.references.filter((reference) => !reference.source || selected.has(reference.source))
+    .sort((a, b) => compare(JSON.stringify(a), JSON.stringify(b))).slice(0, 50);
+  const omittedEndpoints = { security: 0, boundary: 0, dom: 0, reference: 0 };
+  for (const node of seeds.slice(500)) omittedEndpoints[category(node, origins)] += 1;
+  const analysisLimited = result.gaps.some((gap) => /budget reached/.test(gap));
+  const endpointLimited = seeds.length > 500;
+  const referenceLimited = references.length < result.references.length;
+  const limited = analysisLimited || endpointLimited || relationshipLimited || traversalLimited || referenceLimited;
+  const directRetained = keptEdges.filter((edge) => edge.kind !== "SUMMARIZED_FLOW").length;
+  return { ...result, nodes: nodes.filter((node) => selected.has(node.id)), edges: keptEdges, references,
+    analysis: { mode: "summary", trigger: "graph_size", node_threshold: NODE_THRESHOLD, edge_threshold: EDGE_THRESHOLD,
+      input_nodes: nodes.length, input_edges: result.edges.length, input_references: result.references.length,
+      retained_nodes: selected.size, retained_edges: keptEdges.length, retained_references: references.length,
+      summarized_edges: keptEdges.length - directRetained, omitted_nodes: nodes.length - selected.size,
+      omitted_edges: result.edges.length - directRetained, omitted_references: result.references.length - references.length,
+      omitted_endpoints: omittedEndpoints, analysis_limited: analysisLimited, endpoint_limited: endpointLimited,
+      relationship_limited: relationshipLimited, traversal_limited: traversalLimited, reference_limited: referenceLimited,
+      publication_limited: false, traversal_steps: work, budget_limited: limited },
+    gaps: [...result.gaps, `Large-script graph summary: ${SUMMARY_NOTICE}; absence is not proof`,
+      ...(limited ? ["Large-script graph summary budget reached"] : [])] };
 }
-module.exports = { recognize, summarize, DISTRIBUTIONS };
+function compress(result, mode) {
+  return mode === "summary" && (result.nodes.length > NODE_THRESHOLD || result.edges.length > EDGE_THRESHOLD)
+    ? summarize(result) : result;
+}
+module.exports = { compress, summarize, NODE_THRESHOLD, EDGE_THRESHOLD };

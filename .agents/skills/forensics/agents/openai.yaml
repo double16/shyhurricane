@@ -1,0 +1,4 @@
+interface:
+  display_name: "ShyHurricane Forensics"
+  short_description: "Investigate runtime failures, correctness, and cost"
+  default_prompt: "Use $forensics to investigate ShyHurricane runtime artifacts and report evidence-backed findings."

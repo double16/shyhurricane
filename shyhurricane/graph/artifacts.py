@@ -4,15 +4,19 @@ import base64
 import fcntl
 import hashlib
 import json
+import logging
 import os
 import re
 import sqlite3
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import unquote
 
 from shyhurricane.graph.model import MAX_BYTES, identity
 from shyhurricane.persistent_queue import persistent_queue_path
+
+logger = logging.getLogger(__name__)
 
 
 class ArtifactStore:
@@ -30,6 +34,15 @@ class ArtifactStore:
             "CREATE TABLE IF NOT EXISTS work (id TEXT PRIMARY KEY, status TEXT, error TEXT);"
             "CREATE TABLE IF NOT EXISTS bodies (url TEXT, digest TEXT, path TEXT, PRIMARY KEY(url,digest));"
         )
+
+        if not self.connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' AND name='refs_capture_id'"
+        ).fetchone():
+            started = time.monotonic()
+            logger.info("Creating graph reference index in %s", self.root)
+            with self.connection:
+                self.connection.execute("CREATE INDEX IF NOT EXISTS refs_capture_id ON refs(capture_id,url)")
+            logger.info("Created graph reference index in %.3f seconds", time.monotonic() - started)
 
     def close(self):
         self.connection.close()

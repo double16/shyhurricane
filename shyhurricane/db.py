@@ -241,7 +241,7 @@ async def get_domain_and_host_counts(
     domain_counts: dict[str, int] = {}
     host_counts: dict[str, int] = {}
     async for record in scroll_qdrant_collection(
-        qdrant_client=qdrant_client, index="network", fields=["meta"], scroll_filter=filters
+        qdrant_client=qdrant_client, index="network", fields=["meta.domain", "meta.host"], scroll_filter=filters
     ):
         metadata = record.payload.get("meta", {})
         if domain := metadata.get("domain"):

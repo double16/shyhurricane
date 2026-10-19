@@ -152,7 +152,8 @@ def test_worker_reconciliation_map_and_health_races(graph_paths, event, monkeypa
     capture = event(url="https://example.com/a.js.map", body="{}", mime="application/json")
     queue = MagicMock()
     health = MagicMock()
-    health.is_set.side_effect = [False, True, True]
+    health_checks = iter([False])
+    health.is_set.side_effect = lambda: next(health_checks, True)
     monkeypatch.setattr(worker, "prepare_worker_process", lambda: None)
     monkeypatch.setattr(worker, "get_persistent_queue", lambda *args, **kwargs: queue)
     monkeypatch.setattr(

@@ -187,3 +187,20 @@ async def test_status_propagates_queue_read_error(monkeypatch):
     monkeypatch.setattr(status_tool, "persistent_queue_counts", AsyncMock(side_effect=sqlite3.OperationalError("locked")))
     with pytest.raises(sqlite3.OperationalError, match="locked"):
         await status_tool.status(None)
+
+
+async def test_status_includes_cached_disk_snapshot(monkeypatch):
+    from types import SimpleNamespace
+
+    from shyhurricane.disk_space import DiskSpaceGuard
+    from shyhurricane.server_config import ServerConfig
+
+    guard = DiskSpaceGuard("/data", ServerConfig())
+    context = StatusServerContext()
+    context.health_monitor = SimpleNamespace(disk_guard=guard)
+    monkeypatch.setattr(status_tool, "get_server_context", AsyncMock(return_value=context))
+    monkeypatch.setattr(status_tool, "persistent_queue_counts", AsyncMock(return_value=queue_counts(4, 0)))
+    monkeypatch.setattr(status_tool, "get_domain_and_host_counts", AsyncMock(return_value=({}, {})))
+    monkeypatch.setattr("shyhurricane.disk_space.shutil.disk_usage", lambda path: pytest.fail("status probed disk"))
+    response = await status_tool.status(None)
+    assert json.loads(response.body)["disk"] == guard.snapshot()

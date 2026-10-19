@@ -416,3 +416,22 @@ async def test_removed_storage_flags_fail_before_startup(service_runtime, monkey
         await service.main()
     assert error.value.code == 2
     service.get_server_context.assert_not_awaited()
+
+
+async def test_main_disk_configuration_reaches_server_context(service_runtime, monkeypatch):
+    monkeypatch.setenv("DISK_MIN_FREE_BYTES", "4096")
+    monkeypatch.setattr(service.sys, "argv", ["mcp_service.py", "--disk-min-free-percent", "5"])
+    await service.main()
+    config = service.set_server_config.call_args.args[0]
+    assert config.disk_min_free_percent == 5
+    assert config.disk_min_free_bytes == 4096
+    assert config.disk_resume_margin_percent == 1
+    assert config.disk_resume_margin_bytes == 536870912
+
+
+async def test_main_rejects_invalid_disk_config(service_runtime, monkeypatch):
+    monkeypatch.setattr(service.sys, "argv", ["mcp_service.py", "--disk-min-free-percent", "nan"])
+    with pytest.raises(SystemExit) as error:
+        await service.main()
+    assert error.value.code == 2
+    service.get_server_context.assert_not_awaited()

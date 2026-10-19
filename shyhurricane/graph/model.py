@@ -9,7 +9,9 @@ ANALYSIS_VERSION = 2
 MAX_BYTES = 40 * 1024 * 1024
 MAX_GRAPH_NODES = 10000
 MAX_GRAPH_EDGES = 20000
-FLOW_KINDS = {"FLOWS_TO", "CALL_ARGUMENT", "RETURNS_TO", "READS_FROM", "WRITES_TO", "SUBMITS_TO", "REQUESTS"}
+FLOW_KINDS = {
+    "FLOWS_TO", "CALL_ARGUMENT", "RETURNS_TO", "READS_FROM", "WRITES_TO", "SUBMITS_TO", "REQUESTS", "SUMMARIZED_FLOW"
+}
 JOURNEY_KINDS = {"NAVIGATES_TO", "SUBMITS_TO", "REDIRECTS_TO"}
 
 
@@ -70,6 +72,7 @@ class Projection:
         self.gaps: list[str] = []
         self.contexts: list[dict] = []
         self.analysis: list[dict] = []
+        self.planned_links = None
         self.node_limit = MAX_GRAPH_NODES
         self.edge_limit = MAX_GRAPH_EDGES
 
@@ -107,6 +110,8 @@ class Projection:
                 self.gaps.append("Capture relationship budget reached")
             return ""
         evidence_id = identity(self.event["id"], rule, location, snippet, ANALYSIS_VERSION)
+        if kind == "SUMMARIZED_FLOW":
+            evidence_id = identity(evidence_id, source, target, properties)
         self.evidence[evidence_id] = {
             "id": evidence_id,
             "capture_id": self.event["id"],
@@ -119,6 +124,10 @@ class Projection:
             "context_urls": [context["url"] for context in self.contexts],
             "confidence": "observed" if classification == "observed" else "supported",
         }
+        if kind == "SUMMARIZED_FLOW":
+            self.evidence[evidence_id].update(
+                {key: properties[key] for key in ("original_hops", "endpoint_locations", "witness", "summary_notice")}
+            )
         edge_id = identity(source, target, kind, evidence_id)
         self.edges[edge_id] = {
             "id": edge_id,
@@ -131,3 +140,43 @@ class Projection:
             **properties,
         }
         return edge_id
+
+
+def projection_snapshot(projection):
+    """Intern repeated context arrays in JSON checkpoints and publication digests."""
+    state = dict(projection.__dict__)
+    arrays = sorted({
+        tuple(record["context_urls"])
+        for name in ("nodes", "evidence") for record in state[name].values()
+        if isinstance(record.get("context_urls"), list)
+    })
+    lookup = {urls: index for index, urls in enumerate(arrays)}
+    arrays = [list(urls) for urls in arrays]
+    for collection in ("nodes", "evidence"):
+        records = {}
+        for key, record in state[collection].items():
+            record = dict(record)
+            if isinstance(record.get("context_urls"), list):
+                urls = tuple(record["context_urls"])
+                record["context_urls"] = {"_context_list": lookup[urls]}
+            records[key] = record
+        state[collection] = records
+    state["_context_lists"] = arrays
+    return state
+
+
+def restore_projection(snapshot):
+    state = dict(snapshot)
+    arrays = state.pop("_context_lists", [])
+    for collection in ("nodes", "evidence"):
+        records = {}
+        for key, record in state[collection].items():
+            record = dict(record)
+            context = record.get("context_urls")
+            if isinstance(context, dict) and "_context_list" in context:
+                record["context_urls"] = arrays[context["_context_list"]]
+            records[key] = record
+        state[collection] = records
+    projection = Projection(state["event"])
+    projection.__dict__.update(state)
+    return projection

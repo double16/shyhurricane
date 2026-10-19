@@ -12,7 +12,8 @@ class HealthMonitor:
     """Periodically checks indexing dependencies and exposes shared readiness."""
 
     def __init__(self, qdrant_probe: Callable[[], object], llm_probe: Callable[[], object], interval: float = 10,
-                 neo4j_probe: Callable[[], object] | None = None):
+                 neo4j_probe: Callable[[], object] | None = None, disk_guard=None):
+        self.disk_guard = disk_guard
         self.ready = multiprocessing.Event()
         self._qdrant_probe = qdrant_probe
         self._llm_probe = llm_probe
@@ -50,13 +51,14 @@ class HealthMonitor:
         except Exception:
             logger.warning("Neo4j health check failed", exc_info=True)
             self.neo4j_healthy = False
-        healthy = qdrant_healthy and llm_healthy and self.neo4j_healthy
+        disk_healthy = self.disk_guard.check() if self.disk_guard is not None else True
+        healthy = qdrant_healthy and llm_healthy and self.neo4j_healthy and disk_healthy
         if healthy:
             self.ready.set()
         else:
             self.ready.clear()
         if healthy != self._last_state:
-            logger.info("Indexing dependencies are %s", "healthy" if healthy else "unhealthy")
+            logger.info("Indexing readiness is %s", "healthy" if healthy else "unhealthy")
             self._last_state = healthy
         return healthy
 

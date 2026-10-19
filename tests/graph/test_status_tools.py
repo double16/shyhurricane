@@ -32,6 +32,23 @@ async def test_graph_status_handles_outage_and_reports_backlog(graph_paths, even
     assert (await graph_status(context))["statistics_stale"]
 
 
+async def test_graph_status_reports_live_uri_without_successful_statistics(graph_paths):
+    def fail():
+        raise RuntimeError("statistics failure")
+
+    context = SimpleNamespace(
+        db="db", graph_store=SimpleNamespace(uri="bolt://localhost:7687", statistics=fail),
+        health_monitor=SimpleNamespace(neo4j_healthy=True),
+    )
+    initial = await graph_status(context)
+    assert initial["uri"] == "bolt://localhost:7687" and initial["healthy"]
+    await context._graph_statistics_cache.task
+    failed = await graph_status(context)
+    assert failed["uri"] == initial["uri"] and failed["statistics_error"] == "RuntimeError"
+    context._graph_statistics_cache.values["uri"] = "bolt://old:7687"
+    assert (await graph_status(context))["uri"] == initial["uri"]
+
+
 async def test_all_tools_dispatch_read_only_queries(monkeypatch):
     calls = []
 
@@ -344,3 +361,67 @@ async def test_unexpected_graph_failure_logs_original_traceback(monkeypatch, cap
     with pytest.raises(ToolError, match="unavailable"):
         await tools.query(None, "find_application_elements", "elements", "example.com")
     assert not [record for record in caplog.records if record.name == tools.__name__]
+
+
+async def test_reference_cache_shared_by_status_calls_while_work_counts_stay_fresh(graph_paths, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "shyhurricane.graph.status.ReferenceStatistics.statistics",
+        lambda self: calls.append(1) or {"unresolved_references": 4},
+    )
+    context = SimpleNamespace(
+        db="db", graph_store=SimpleNamespace(uri="bolt://localhost:7687"),
+        health_monitor=SimpleNamespace(neo4j_healthy=False),
+    )
+    initial = await graph_status(context)
+    assert initial["reference_statistics_stale"]
+    await context._graph_reference_cache.task
+    task = context._graph_reference_cache.task
+    artifacts = ArtifactStore("db")
+    artifacts.status("new-work", "failed", "test")
+    artifacts.close()
+    refreshed = await graph_status(context)
+    assert refreshed["unresolved_references"] == 4 and not refreshed["reference_statistics_stale"]
+    assert refreshed["analyses"] == {"failed": 1}
+    assert calls == [1] and context._graph_reference_cache.task is task
+
+
+async def test_monitor_status_uses_activity_without_estimates_or_reference_scans(graph_paths):
+    from unittest.mock import Mock
+
+    store = SimpleNamespace(
+        uri="bolt://localhost:7687", activity=Mock(return_value={"publication_revision": 19}),
+        statistics=Mock(side_effect=AssertionError("Expensive statistics must not run")),
+    )
+    context = SimpleNamespace(db="db", graph_store=store, health_monitor=SimpleNamespace(neo4j_healthy=True))
+    first = await graph_status(context, include_estimates=False)
+    assert first["activity_stale"]
+    await context._graph_activity_cache.task
+    result = await graph_status(context, include_estimates=False)
+    assert result["publication_revision"] == 19 and not result["activity_stale"]
+    assert result["analyses"] == {} and result["uri"] == store.uri
+    assert not hasattr(context, "_graph_statistics_cache") and not hasattr(context, "_graph_reference_cache")
+    assert "current" not in result and "unresolved_references" not in result
+    store.statistics.assert_not_called()
+    store.activity.assert_called_once()
+
+
+async def test_status_exposes_continuation_progress_and_failures(graph_paths, event):
+    from shyhurricane.graph.continuations import Continuations
+
+    artifacts = ArtifactStore("db")
+    jobs = Continuations(artifacts)
+    capture = event()
+    key = jobs.enqueue(capture, capture, False)
+    state = jobs.load(key)
+    state["stage"] = "planning"
+    state["contexts"] = {"one": {"id": "one"}}
+    state["planner"] = {"cursor": {"context": 1}}
+    jobs.save(key, state, status="failed", error="deadline")
+    context = SimpleNamespace(db="db", graph_store=object(), health_monitor=SimpleNamespace(neo4j_healthy=False))
+    result = await graph_status(context, include_estimates=False)
+    progress = result["continuations"]
+    assert progress["failed"] == 1 and progress["pending"] == progress["running"] == 0
+    assert progress["stage"] == "planning" and progress["contexts_completed"] == progress["contexts_discovered"] == 1
+    assert progress["checkpoint_age_seconds"] >= 0
+    artifacts.close()

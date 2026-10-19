@@ -16,13 +16,18 @@ def test_indexed_candidate_paging_cache_and_limits(event, monkeypatch):
         [{"node": {"id": str(index)}} for index in range(2)],
         [{"node": {"id": str(index)}} for index in range(2, 4)],
     ]
-    store.read.side_effect = pages
+    def read(statement, **parameters):
+        if "ids" in parameters:
+            return [{"node": {"id": key}} for key in parameters["ids"]]
+        return [{"id": row["node"]["id"]} for row in pages.pop(0)]
+
+    store.read.side_effect = read
     graph = Projection(event())
     planner = LinkPlanner(store, graph)
     assert len(planner.candidates("module_key", "module")) == 4
-    assert planner.candidates("module_key", "module") == pages[0] + pages[1]
-    assert store.read.call_count == 2
-    assert store.read.call_args.kwargs["after"] == "1"
+    assert [row["node"]["id"] for row in planner.candidates("module_key", "module")] == ["0", "1", "2", "3"]
+    assert store.read.call_count == 4
+    assert store.read.call_args_list[2].kwargs["after"] == "1"
     assert "Inferred link budget reached" in graph.gaps
     planner.gap()
     assert len(graph.gaps) == 1
@@ -125,11 +130,13 @@ def test_link_candidate_memory_budget_subdivides_reads_and_keeps_paging(event, m
     store = MagicMock()
 
     def read(statement, **parameters):
+        if "ids" in parameters:
+            return [{"node": {"id": key}} for key in parameters["ids"]]
         if parameters["limit"] > 1:
             raise Neo4jError._hydrate_neo4j(
                 code="Neo.TransientError.General.MemoryPoolOutOfMemoryError", message="budget"
             )
-        return [{"node": {"id": key}} for key in ("a", "b", "c") if key > parameters["after"]][:1]
+        return [{"id": key} for key in ("a", "b", "c") if key > parameters["after"]][:1]
 
     store.read.side_effect = read
     planner = LinkPlanner(store, Projection(event()))
@@ -281,3 +288,48 @@ def test_form_links_require_ownership_field_and_context(event):
     planner.dom(graph.nodes[request], form | {"form_target_url": None}, True, False, ["document"])
     planner.dom(graph.nodes[request], form | {"html_tag": "div"}, True, False, ["document"])
     assert len(planner.links) == 2
+
+
+
+def test_candidate_selection_filters_elements_before_hydration(event):
+    store = MagicMock()
+    store.read.side_effect = [[{"id": "element"}], [
+        {"node": {"id": "element", "kind": "element"}, "evidence_id": "proof", "contexts": []}
+    ]]
+    planner = LinkPlanner(store, Projection(event()))
+    assert planner.candidates("capture_id", "page")[0]["evidence_id"] == "proof"
+    selection = store.read.call_args_list[0].args[0]
+    assert "USING INDEX other:GraphEntity(capture_id)" in selection
+    assert "other.kind='element'" in selection
+    assert "OPTIONAL MATCH" not in selection
+    assert store.read.call_args.kwargs["ids"] == ["element"]
+    with pytest.raises(ValueError, match="Unsupported"):
+        planner.candidates("untrusted", "page")
+
+
+def test_hydration_subdivides_memory_failures_and_preserves_results(event):
+    from shyhurricane.graph.publication import PublicationConflict, PublicationMemoryError
+
+    store = MagicMock()
+    def read(statement, **parameters):
+        ids = parameters["ids"]
+        if len(ids) > 1:
+            raise Neo4jError._hydrate_neo4j(
+                code="Neo.TransientError.General.MemoryPoolOutOfMemoryError", message="budget"
+            )
+        return [{"node": {"id": ids[0]}, "evidence_id": "proof", "contexts": []}]
+
+    store.read.side_effect = read
+    planner = LinkPlanner(store, Projection(event()))
+    assert [row["node"]["id"] for row in planner.hydrate(["a", "b", "c"])] == ["a", "b", "c"]
+    store.read.side_effect = lambda *args, **kwargs: []
+    with pytest.raises(PublicationConflict, match="changed during hydration"):
+        planner.hydrate(["a"])
+    store.read.side_effect = Neo4jError._hydrate_neo4j(
+        code="Neo.TransientError.General.MemoryPoolOutOfMemoryError", message="budget"
+    )
+    with pytest.raises(PublicationMemoryError, match="hydration"):
+        planner.hydrate(["a"])
+    store.read.side_effect = Neo4jError._hydrate_neo4j(code="Neo.ClientError.Statement.SyntaxError", message="syntax")
+    with pytest.raises(Neo4jError):
+        planner.hydrate(["a"])

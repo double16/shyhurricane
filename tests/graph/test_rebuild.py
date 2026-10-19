@@ -1,6 +1,5 @@
 """Offline, resumable rebuild scheduling and durable policy selection."""
 
-import hashlib
 import json
 from unittest.mock import MagicMock
 
@@ -83,14 +82,29 @@ def test_worker_uses_durable_policy_and_only_marks_successful_publications(event
     artifacts.close()
 
 
-def test_policy_recognition_and_cli(monkeypatch, capsys, tmp_path):
+def test_policy_modes_and_cli(monkeypatch, capsys, tmp_path):
     monkeypatch.setenv("GRAPH_LIBRARY_ANALYSIS", "full")
     assert policy.library_analysis() == "full"
     assert policy.library_analysis("summary") == "summary"
-    assert policy.recognized_library("unknown mixed application") is None
-    source = "verified standalone"
-    monkeypatch.setitem(policy.LIBRARIES, hashlib.sha256(source.encode()).hexdigest(), "Fixture")
-    assert policy.recognized_library(source) == "Fixture"
+    with pytest.raises(ValueError, match="summary or full"):
+        policy.library_analysis("invalid")
     monkeypatch.setattr("sys.argv", ["rebuild", "--data-dir", str(tmp_path), "--target", "example.com", "--dry-run"])
     rebuild.main()
     assert json.loads(capsys.readouterr().out)["dry_run"]
+
+
+def test_previous_analyzer_policy_is_eligible_for_explicit_rebuild(event):
+    artifacts = ArtifactStore("db")
+    capture = artifacts.register(event())
+    with artifacts.connection:
+        artifacts.connection.execute(
+            "INSERT INTO analysis_policies(capture_id,mode,completed_version,completed_mode) "
+            "VALUES (?, 'summary', ?, 'summary')", (capture["id"], ANALYZER_VERSION - 1)
+        )
+    assert rebuild.rebuild("db", dry_run=True)["selected"] == 1
+    assert artifacts.connection.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='reanalysis'"
+    ).fetchone() is None
+    assert rebuild.rebuild("db")["queued"] == 1
+    assert rebuild.rebuild("db")["skipped"] == 1
+    artifacts.close()

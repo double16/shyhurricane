@@ -11,6 +11,15 @@ LLMs:
 
 An important feature of the server is the indexing of website content using embedding models. The `find_web_resources` tool uses LLM prompts to find vulnerabilities specific to content type: html, javascript, css, xml, HTTP headers. The content is indexed when found by the tools. Content may also be indexed by feeding external data into the `/index` endpoint. Formats supported are `katana jsonl`, `hal json` and Burp Suite Logger++ CSV. The `ingest.py` script also converts Burp Suite request/response XML exports for indexing. Extensions exist for Burp Suite, ZAP, Firefox and Chrome to send requests to the server as the site is browsed.
 
+## Runtime forensics skill
+
+The repository-local `$forensics` skill investigates ShyHurricane tracebacks, incorrect or incomplete
+results, and runtime efficiency using logs, persistent queues, graph artifacts, Qdrant, and Neo4j.
+For example: “Use $forensics to investigate why graph indexing stopped progressing after the
+latest ingestion.” It starts with bounded, read-only evidence collection and reports supported
+findings, uncertainties, and next steps. See [the skill](.agents/skills/forensics/SKILL.md) for the
+workflow and artifact inspection guide.
+
 ## Assessment prompts
 
 MCP clients can discover these reusable workflows with `prompts/list` and render them with
@@ -540,35 +549,136 @@ vulnerabilities. Recognized transformations do not prove sanitization. Captures 
 sessions, so journey paths are possibilities rather than recorded user sessions. Session storage is
 not joined across unrelated captures. Historical paths can span observations at different times.
 
-### Library summaries and graph size estimates
+### Large-script summaries and graph size estimates
 
-By default, exact verified copies of AngularJS 1.7.7, React development, and React DOM development
-are summarized. Recognition uses the entire response's SHA-256 hash, independently of its filename.
-Modified distributions, other versions, application code, and mixed bundles retain full analysis.
-The initial registry covers the three distributions observed during graph-size investigation; it is
-intentionally conservative. Set `GRAPH_LIBRARY_ANALYSIS=full` to disable library summarization.
+By default, scripts exceeding 2,000 generated nodes or 4,000 edges are compressed, regardless of
+library name, version, filename, or formatting. This includes application scripts and mixed bundles.
+Smaller scripts retain detailed graphs. Source-map recovery remains enabled, and embedded sources
+are analyzed individually. Set `GRAPH_LIBRARY_ANALYSIS=full` to bypass compression within the normal
+detailed-analysis limits; the variable keeps its existing name for compatibility.
 
-Summaries retain security sources/sinks, import/export and DOM boundaries, resource references,
-and original directed flow paths of up to 16 edges. Selection is deterministic and bounded to 500
-entities and 1,000 relationships per script when published, within the capture's overall limits.
-Internal analysis permits 50,000 nodes and 100,000 edges for recognized libraries before selecting
-summary paths, with at most 100,000 traversal steps. Gaps and `analysis_summaries` describe omitted
-internals and reached budgets; an absent path does not establish safety. Original captures remain
-available, and full analysis can be requested with the rebuild command.
+Summaries prioritize security sources/sinks, import/export and resolved callback boundaries, DOM
+bindings, then reference origins. They retain at most 500 endpoints, 500 flow relationships, and 50
+resource references per script. Direct endpoint edges retain their original evidence. Internal directed
+flow paths become `SUMMARIZED_FLOW` edges with original hop counts, endpoint locations, and samples
+of the first four and last four edges. Paths have no fixed depth cutoff; traversal stops at the next
+retained endpoint and is bounded to 100,000 edge visits per script. Summary edges participate in flow
+traces, not user journeys. They indicate static reachability with intermediate operations omitted;
+they do not prove runtime execution, sanitization, or exploitation.
 
-Monitor counts marked `≈` are publication estimates, not unique graph record counts. **Current graph**
+```mermaid
+flowchart LR
+    source[Application input] --> internal[Internal operations] --> sink[DOM sink]
+    retainedSource[Retained input] -->|SUMMARIZED_FLOW: original hop count and witness sample| retainedSink[Retained sink]
+```
+
+Summary-mode initial analysis permits 50,000 nodes and 100,000 edges; full mode retains its existing
+10,000-node and 20,000-edge limits. Parsing, subprocess, and capture limits still apply. Compression
+reduces stored graph size and downstream query work, but does not avoid initial parsing and analysis.
+Publication allows up to 1,000 nodes and 2,000 relationships per summarized script, including auxiliary
+reference/context facts, within capture-wide limits. Endpoint nodes and their flows precede references.
+`analysis_summaries` reports input/output counts, omitted endpoint categories and references, and
+separate analysis, traversal, selection, and publication limit flags. Limits can omit security endpoints
+or connections; a missing path does not establish safety. Original captures remain available.
+
+Existing stored graphs change only when rebuilt. The updated analyzer policy invalidates cached
+analysis and makes captures eligible for the normal rebuild workflow; it does not rebuild automatically.
+Use the rebuild command with `--mode full` to request detailed analysis.
+
+The `/status` graph counts are publication estimates, not unique graph record counts. **Current graph**
 sums the latest completed captures per resource; **retained history** sums all completed captures.
 Shared resources and other logical entities can be counted once per capture. Relationships whose
 external endpoints were subsequently replaced may be overcounted. Network documents are a separate
 vector-store representation and need not match the number of graph captures.
 
 Counts are computed during publication and read from capture metadata, without entity/relationship
-scans. The shared status service caches estimates for 60 seconds and refreshes in the background.
+scans. The shared status service caches estimates for five minutes and refreshes in the background.
 It shows unavailable or stale values if needed, and reports partial coverage for older captures
 without count summaries. Existing API fields `entities` and `relationships` alias the approximate
 retained-history counts; `current` and `retained_history` expose `entity_estimate`,
 `relationship_estimate`, capture/resource counts, and coverage. Status also includes refresh time
 and age. Empty graphs report zero; wholly uncovered graphs report unavailable estimates.
+Neo4j connection health and its address are reported independently of statistics refreshes.
+If a refresh fails, status includes the error type or Neo4j error code, and the diagnostic log
+contains the full exception. A green Neo4j indicator confirms connectivity, not successful statistics.
+Neo4j statistics use one five-second transaction without automatic retries and return gap flags
+rather than full gap descriptions. Unresolved-reference counts also refresh in the background at
+most once every five minutes, checking each distinct referenced URL once. Their independent
+`reference_statistics_refreshed_at`, `reference_statistics_age_seconds`,
+`reference_statistics_stale`, and `reference_statistics_error` fields describe freshness and failures;
+failed refreshes retain the last successful count. Queue and analysis counts still refresh with the
+monitor's 30-second cycle. Domain/host statistics fetch only domain and host payload fields.
+
+The terminal monitor uses **Application graph activity** instead of graph-size estimates. It reads
+Neo4j's indexed `publication_revision` state record in a single two-second read transaction, at
+most once every 30 seconds, without scanning captures, entities, relationships, or references.
+Each successful publication activation increments this counter atomically; reanalysis publications
+also increment it, so it is not a unique-capture count. The monitor's second row contains database
+statistics on the left,
+graph activity in the middle, and domain/host statistics on the right. The graph panel shows
+separate lines for each activity and continuation metric; graph queue counts are omitted from the
+queue panel to avoid duplication. The graph panel scrolls when its metrics exceed the available height:
+
+```text
+Publication revision: 19371
+Change since sample: +3
+Last observed advance: 0s ago
+Completed analyses: 18448
+Processing: 1
+Queue depth: 18680
+Failed: 0
+```
+
+The first successful sample establishes a baseline. An unchanged revision means no publication
+completed between samples; analysis or staging may still be working. The elapsed time starts when
+this server observes an increase, not at the actual commit time. A decreasing or missing counter
+clears the baseline. Failed refreshes keep the previous values and mark them stale; the monitor
+shows the error type or Neo4j code. Queue depth includes pending and claimed items. Activity fields
+in `/status` are `publication_revision`, `publication_revision_delta`,
+`seconds_since_observed_progress`, and `activity_refreshed_at`, `activity_age_seconds`,
+`activity_stale`, plus `activity_error`/`activity_error_code` on failures. Observation history resets
+when the server restarts. The monitor does not schedule the expensive estimate or reference-count
+refreshes; explicit `/status` requests retain those existing fields and caches.
+
+
+### Resumable shared-script linking
+
+External JavaScript and source-map captures with response bodies use durable continuation jobs.
+Dependency discovery reads referenced captures in deterministic pages, retaining all consuming page
+contexts rather than imposing a document-coverage cap. Cycles are deduplicated. The extracted
+projection is saved once; repeated context URL arrays are shared in checkpoints and publication
+digests to avoid serializing the same thousands of URLs for every evidence record.
+
+The worker alternates one normal queue item with one ready continuation slice. Discovery,
+planning, and reconciliation yield between bounded batches. Planning slices consider at most 100
+contexts or 200 database reads and check a 30-second budget between operations. Each planning
+read uses a five-second transaction without driver-managed retries. Extraction and final
+publication keep their existing operation bounds; the slice budget does not interrupt an AST
+analyzer or an in-flight operation. Identical selectors share context queries, matching elements
+are filtered before evidence hydration, and completed contexts are not reread after recovery.
+
+Only a finished plan proceeds to staged publication and atomic activation. The previous generation
+remains visible meanwhile. Existing node, edge, and inferred-link limits still produce explicit
+analysis gaps; continuations do not add a context-coverage cap. Late dependencies use the existing
+reanalysis scheduler and receive a fresh discovery pass.
+
+Timeouts and memory failures split candidate/hydration batches. Irreducible timeouts retain their
+checkpoint and retry after 5, 30, and 120 seconds; another failure marks the continuation failed.
+Generation conflicts restart planning from the saved extracted projection. Failed checkpoints and
+errors remain available for investigation. Successful jobs retain a small completion record and
+remove their saved projection. New work for the same capture runs in order; a successful replacement
+supersedes older failed continuations for that capture.
+
+Graph status adds `continuations`: pending/running/failed counts, the most recent stage,
+`contexts_completed`, `contexts_discovered`, and `checkpoint_age_seconds`. The monitor shows
+these values on separate lines in its graph panel. Checkpoints do not increment the publication revision.
+Retrieval indexing waits include continuation work after the original queue item is acknowledged,
+including delayed retries and failures, so a durable handoff cannot look like completed indexing.
+
+Continuation tables and indexes are added when the graph worker starts. Restarting reclaims running
+jobs and resumes their saved cursors. Existing queue payloads and published graphs remain compatible;
+failed queue items are not automatically retried or rebuilt. Explicit graph rebuild scheduling can
+create new work for failed continuations. No data-directory migration is needed.
 
 ### JavaScript data-flow coverage
 
@@ -634,7 +744,7 @@ unauthenticated connection model as Qdrant; external servers can use credentials
 
 | Environment variable | Default | Description |
 |----------------------|---------|-------------|
-| `GRAPH_LIBRARY_ANALYSIS` | `summary` | `summary` retains bounded security paths for verified standalone library distributions; `full` retains ordinary detailed analysis. Unknown or modified scripts always use full analysis |
+| `GRAPH_LIBRARY_ANALYSIS` | `summary` | `summary` compresses scripts exceeding 2,000 generated nodes or 4,000 edges while retaining bounded security endpoints and flow summaries; `full` bypasses compression within ordinary analysis limits |
 | `NEO4J` | Unset; `bolt://graph:7687` in Compose | External Bolt/Neo4j server URI; managed local storage uses `<data-dir>/graph` |
 | `NEO4J_USERNAME` | `neo4j` | Username when `NEO4J_PASSWORD` is supplied |
 | `NEO4J_PASSWORD` | Unset | Password for authenticated connections; also initializes authentication on a newly created managed container |
@@ -872,6 +982,7 @@ repeated notifications are suppressed. Other Neo4j warnings and errors remain vi
 | Environment variable | Default                      | Description                                                              |
 |----------------------|------------------------------|--------------------------------------------------------------------------|
 | `LOG_FILE`           | `<data-dir>/logs/shyhurricane.log` | Diagnostic log path, relative to the working directory or absolute. |
+| `ENABLE_HEAP_PROFILING` | `false` | Enable expensive Python heap summaries at existing worker/maintenance checkpoints. Accepts `1`, `true`, `yes`, or `on`, ignoring case and surrounding whitespace; also requires DEBUG logging. |
 
 ```shell
 uv run python mcp_service.py --log-file ./logs/server.log
@@ -889,6 +1000,13 @@ docker compose exec mcp tail -n 200 /tool_cache/logs/server.log
 The file uses append mode and has no automatic rotation. It records Python logging output;
 raw subprocess stdout/stderr and exceptions handled without logging are not redirected into it.
 The cache's `history.jsonl` remains a separate record of tool calls.
+
+Heap profiling is disabled by default even when diagnostic DEBUG logging is enabled. Set
+`ENABLE_HEAP_PROFILING=true` before starting the server to enable it; workers inherit the setting.
+Compose accepts the same variable from `.env`. Profiling traverses the Python heap and can slow
+large ingests, especially at the type-specific worker's per-document checkpoints. GPU diagnostics
+are independent of this setting.
+
 
 #### Ollama
 
@@ -1005,6 +1123,57 @@ uses the cached snapshot if an update fails.
 Indexing workers monitor Qdrant, Neo4j, and LLM readiness. If a dependency is unhealthy, `/index`
 requests continue to be accepted into the persistent queue, but ingest, graph, and type-specific indexing
 pause. Workers resume automatically after dependency health recovers; MCP tools report their own query errors.
+
+Indexing also pauses when the filesystem containing the resolved data directory has less than
+3% free space **or** less than 2 GiB (2,147,483,648 bytes). Ingest, graph, and type-specific
+workers finish their current item and stop starting new work. Checks run every 10 seconds;
+indexing starts blocked until the first successful check. Disk measurement failures also pause
+indexing. Scans and queued finding persistence continue, and incoming submissions are still
+accepted into persistent queues, so disk use can continue growing during a pause.
+
+After a disk pause, indexing resumes automatically when **both** enabled limits plus their
+recovery margins are met: 4% and 2.5 GiB by default. Dependency readiness and low-power settings
+still apply. The guard measures only the data-directory filesystem, not separately mounted
+caches or remote database storage.
+
+| Environment variable | Default | Description |
+|----------------------|---------|-------------|
+| `DISK_MIN_FREE_PERCENT` | `3` | Pause below this free percentage; `0` disables this limit |
+| `DISK_MIN_FREE_BYTES` | `2147483648` | Pause below this free byte count (2 GiB); `0` disables this limit |
+| `DISK_RESUME_MARGIN_PERCENT` | `1` | Additional percentage points required after a disk pause |
+| `DISK_RESUME_MARGIN_BYTES` | `536870912` | Additional bytes required after a disk pause (512 MiB) |
+
+Matching CLI flags (`--disk-min-free-percent`, `--disk-min-free-bytes`,
+`--disk-resume-margin-percent`, `--disk-resume-margin-bytes`) override environment values.
+All values must be finite and nonnegative; byte values must be integers and the percentage limit
+plus margin must not exceed 100. Set both minimums to `0` to disable the guard. Compose accepts
+these variables from `.env`; restart the server after configuration changes. For example:
+
+```shell
+python3 mcp_service.py --disk-min-free-percent 5 --disk-min-free-bytes 4294967296
+```
+
+The terminal monitor shows free capacity, pause reasons, and recovery targets. `/status` includes
+an additive `disk` object with `path`, `total_bytes`, `free_bytes`, `free_percent`, `checked_at`
+(Unix seconds), `state` (`checking`, `healthy`, `paused`, `disabled`), `error`, and the configured
+`min_free_percent`, `min_free_bytes`, `resume_margin_percent`, and `resume_margin_bytes`.
+Measurements are cached by the health monitor; before the first check or after a measurement
+failure, capacity values are null. `disk` is null if no disk monitor is available.
+Retrieval reports `indexing.status="paused"` promptly when relevant indexing remains blocked
+by the disk guard, while still returning available results.
+
+Duplicate-document checks use batched native Qdrant point-ID retrieval rather than filtering the
+unindexed document-ID payload. Existing collections need no new payload index or reindexing.
+The graph artifact store automatically adds a covering `(capture_id, url)` reference index on
+first open after upgrading; logs report creation time. Allow time for this one-time index build
+on large stores. Captures and queued work are preserved.
+
+Graph link planning selects bounded candidates using the relevant equality index before loading
+evidence and contexts by ID. DOM lookups filter elements before pagination, so unrelated code
+nodes do not consume the candidate limit. DEBUG logs report selection/hydration timings and counts;
+an INFO summary reports planning duration, selection/hydration read counts, candidates, and links. If a selected
+generation becomes unavailable before hydration, the worker replans instead of publishing missing
+links. No graph backfill or rebuild is required for these query changes.
 
 Queue status counts use a covering SQLite index. Existing ingest, document-type, and scan-finding
 queues gain this index automatically during startup, before workers and HTTP serving begin. The first

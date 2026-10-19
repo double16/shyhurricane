@@ -152,3 +152,33 @@ def test_lazy_dependency_contexts_are_bounded_and_handle_cycles(graph_paths, eve
     assert documents == [page] and not truncated
     assert cache.consuming_documents(chunk["data"]["url"], budget=1)[1]
     cache.close()
+
+
+
+def test_reference_index_upgrades_existing_database_and_avoids_scan(graph_paths, event, caplog):
+    import logging
+
+    store = ArtifactStore("db")
+    source = event()
+    target = event(url="https://example.com/app.js")
+    store.register(source)
+    store.register(target)
+    store.references(source["id"], [target["data"]["url"]])
+    store.connection.execute("DROP INDEX refs_capture_id")
+    store.connection.commit()
+    store.close()
+    with caplog.at_level(logging.INFO, logger="shyhurricane.graph.artifacts"):
+        for _ in range(2):
+            store = ArtifactStore("db")
+            assert store.targets(source["id"]) == [target]
+            assert store.dependents(target["data"]["url"]) == [source]
+            plan = store.connection.execute(
+                "EXPLAIN QUERY PLAN SELECT c.path FROM captures c JOIN refs r ON c.url=r.url WHERE r.capture_id=?",
+                (source["id"],),
+            ).fetchall()
+            assert any("refs_capture_id" in row[3] for row in plan)
+            assert not any("SCAN r" in row[3] for row in plan)
+            assert store.targets("missing") == []
+            store.close()
+    assert caplog.text.count("Creating graph reference index") == 1
+    assert "Created graph reference index" in caplog.text

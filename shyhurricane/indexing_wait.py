@@ -15,6 +15,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
+from shyhurricane.disk_space import disk_status
 from shyhurricane.persistent_queue import PERSISTENT_QUEUES, persistent_queue_path
 from shyhurricane.queue_scopes import scoped_queue_rows
 from shyhurricane.server_config import get_server_config
@@ -155,11 +156,33 @@ def _artifacts(db, matches, deadline):
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='reanalysis'"
         ).fetchone()
         outbox = (
-            list(connection.execute("SELECT capture_id FROM reanalysis WHERE state='pending' AND delivered=0"))
+            list(connection.execute(
+                "SELECT capture_id,'pending' FROM reanalysis WHERE state='pending' AND delivered=0"
+            ))
             if has_scheduler
             else []
         )
         return urls, captures, outbox
+    finally:
+        connection.close()
+
+
+def _continuation_rows(db, deadline):
+    """Read the durable handoff after its upstream queue to avoid a false empty snapshot."""
+    path = persistent_queue_path(db, "graph_state") / "artifacts.sqlite"
+    if not path.exists():
+        return []
+    connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=max(0, deadline - time.monotonic()))
+    try:
+        connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        if not connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='graph_continuations'"
+        ).fetchone():
+            return []
+        return list(connection.execute(
+            "SELECT capture_id,CASE WHEN state='running' THEN 'processing' ELSE state END "
+            "FROM graph_continuations WHERE state IN ('pending','running','failed')"
+        ))
     finally:
         connection.close()
 
@@ -194,12 +217,12 @@ def read_indexing_status(server, matches, stages, deadline, doc_id=None):
                 seen.add(row_id)
                 values["failed" if status == 9 else "processing" if status == 2 else "pending"] += 1
         if stage == "graph":
-            for (capture,) in outbox:
+            for capture, status in [*outbox, *_continuation_rows(server.db, deadline)]:
                 url = captures.get(capture)
                 if url is None:
                     unresolved = True
                 elif matches(url) or url in dependencies:
-                    values["pending"] += 1
+                    values[status] += 1
         counts[stage] = values
     return counts, unresolved
 
@@ -273,6 +296,10 @@ async def wait_for_indexing(ctx, server, matches, *, semantic=False, graph=False
                 failed = any(value["failed"] for value in counts.values())
                 paused = any(counts[stage]["pending"] + counts[stage]["processing"] for stage in skipped)
                 status = "failed" if failed else "paused" if paused else "complete"
+                break
+            disk = disk_status(server)
+            if disk is not None and disk["state"] in {"checking", "paused"}:
+                status = "paused"
                 break
             empty_reads = 0
             now = time.monotonic()

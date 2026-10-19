@@ -234,14 +234,10 @@ def test_map_fallbacks_and_recovered_imports(event, graph_paths, monkeypatch):
     artifacts.close()
 
 
-def test_library_policy_cache_separation_and_original_source_recognition(graph_paths, event, monkeypatch):
-    import hashlib
-
-    from shyhurricane.graph import policy
+def test_summary_policy_cache_separation_and_source_preparation(graph_paths, event, monkeypatch):
     from shyhurricane.graph.artifacts import ArtifactStore
 
     source = "standalone trusted library"
-    monkeypatch.setitem(policy.LIBRARIES, hashlib.sha256(source.encode()).hexdigest(), "Fixture")
     artifacts = ArtifactStore("db")
     monkeypatch.setattr(artifacts, "source_map", lambda *args, **kwargs: None)
     deobfuscated = []
@@ -257,7 +253,6 @@ def test_library_policy_cache_separation_and_original_source_recognition(graph_p
             "references": [],
             "analysis": {
                 "mode": request["mode"],
-                "library": "Fixture" if request["mode"] == "summary" else None,
                 "retained_nodes": 0,
                 "retained_edges": 0,
             },
@@ -267,12 +262,12 @@ def test_library_policy_cache_separation_and_original_source_recognition(graph_p
     monkeypatch.setattr("shyhurricane.graph.extract.subprocess.run", run)
     capture = event(url="https://example.com/renamed.js", mime="text/javascript", body=source)
     first = extract(capture, artifacts)
-    assert first.analysis[0]["mode"] == "summary" and not deobfuscated
+    assert first.analysis[0]["mode"] == "summary" and deobfuscated == [source]
     extract(capture, artifacts)
     assert len(calls) == 1
     full = extract({**capture, "library_analysis": "full"}, artifacts)
-    assert full.analysis[0]["mode"] == "full" and deobfuscated == [source]
-    assert full.analysis[0]["library"] == "Fixture"
+    assert full.analysis[0]["mode"] == "full" and deobfuscated == [source, source, source]
+    assert "library" not in full.analysis[0]
     assert len(calls) == 2 and calls[-1]["mode"] == "full"
     artifacts.close()
 
@@ -280,24 +275,24 @@ def test_library_policy_cache_separation_and_original_source_recognition(graph_p
 def test_library_publication_budgets_do_not_leave_dangling_edges_or_leak_to_other_scripts(event):
     from shyhurricane.graph.model import MAX_GRAPH_EDGES, MAX_GRAPH_NODES
 
-    nodes = [{"id": str(index), "name": str(index), "role": "sink"} for index in range(600)]
+    nodes = [{"id": str(index), "name": str(index), "role": "sink"} for index in range(1100)]
     edges = [
-        {"source": str(index), "target": str((index + offset) % 600), "kind": "FLOWS_TO"}
-        for index in range(600)
+        {"source": str(index), "target": str((index + offset) % 1100), "kind": "FLOWS_TO"}
+        for index in range(1100)
         for offset in (1, 2)
     ]
     output = {"nodes": nodes, "edges": edges, "references": [], "analysis": {"mode": "summary", "library": "Fixture"}}
     graph = extract(
         event(url="https://example.com/library.js", mime="text/javascript"), javascript_runner=lambda *a: output
     )
-    assert len(graph.nodes) <= 502 and len(graph.edges) <= 1001
+    assert len(graph.nodes) <= 1002 and len(graph.edges) <= 2001
     assert all(edge["source"] in graph.nodes and edge["target"] in graph.nodes for edge in graph.edges.values())
     assert graph.node_limit == MAX_GRAPH_NODES and graph.edge_limit == MAX_GRAPH_EDGES
     assert graph.analysis[0]["budget_limited"]
-    assert graph.analysis[0]["published_nodes"] == 500
+    assert graph.analysis[0]["published_nodes"] == 1000
     assert any("budget reached" in gap for gap in graph.gaps)
     resource = next(node for node in graph.nodes.values() if node["kind"] == "resource")
-    assert json.loads(resource["analysis_details"])[0]["published_nodes"] == 500
+    assert json.loads(resource["analysis_details"])[0]["published_nodes"] == 1000
 
 
 def test_form_successful_controls_respect_fieldsets_submitters_and_explicit_owners(event):
@@ -326,3 +321,94 @@ def test_form_successful_controls_respect_fieldsets_submitters_and_explicit_owne
         if graph.evidence[edge["evidence_id"]]["rule"] == "html.form-field"
     }
     assert submitted == {"legend", "checked", "text", "external", "otherField", "wrong"}
+
+
+def test_summary_edges_keep_distinct_path_evidence_and_auxiliary_allowance(event):
+    output = {
+        "nodes": [
+            {"id": "source", "role": "source", "name": "input", "callback_boundary": True},
+            {"id": "sink", "role": "sink", "name": "eval"},
+            {"id": "other", "role": "sink", "name": "write"},
+        ],
+        "edges": [
+            {
+                "source": "source",
+                "target": target,
+                "kind": "SUMMARIZED_FLOW",
+                "rule": "js.size-summary",
+                "location": "1:0",
+                "snippet": "Intermediate operations omitted",
+                "original_hops": hops,
+                "endpoint_locations": ["1:0", "20:0"],
+                "witness": [f"source -> {target}"],
+                "summary_notice": "Static reachability; intermediate operations omitted",
+            }
+            for target, hops in (("sink", 20), ("other", 30))
+        ],
+        "references": [{"source": "source", "url": "https://example.com/api", "kind": "REQUESTS"}],
+        "analysis": {"mode": "summary", "trigger": "graph_size", "budget_limited": False},
+    }
+    graph = extract(
+        event(url="https://example.com/app.js", mime="text/javascript"), javascript_runner=lambda *args: output
+    )
+    summaries = [edge for edge in graph.edges.values() if edge["kind"] == "SUMMARIZED_FLOW"]
+    assert len(summaries) == 2
+    assert len({edge["evidence_id"] for edge in summaries}) == 2
+    for edge in summaries:
+        proof = graph.evidence[edge["evidence_id"]]
+        assert proof["original_hops"] == edge["original_hops"]
+        assert proof["witness"] == edge["witness"]
+        assert proof["endpoint_locations"] == ["1:0", "20:0"]
+        assert proof["classification"] == "statically_inferred"
+        assert "omitted" in proof["summary_notice"]
+    assert "REQUESTS" in kinds(graph)
+    assert any(node.get("callback_boundary") for node in graph.nodes.values())
+    assert graph.analysis[0]["publication_limited"] is False
+    assert graph.analysis[0]["budget_limited"] is False
+
+
+def test_summary_source_map_recovery_is_not_skipped(graph_paths, event, monkeypatch):
+    artifacts = ArtifactStore("db")
+    source_map = json.dumps({"version": 3, "sources": ["node_modules/react/index.js", "app.js"],
+                             "sourcesContent": ["export const React = {};", "eval(location.hash)"]})
+    monkeypatch.setattr(artifacts, "source_map", lambda *args, **kwargs: source_map)
+    monkeypatch.setattr(artifacts, "deobfuscate", lambda *args: pytest.fail("Recovered sources need no deobfuscation"))
+    seen = []
+
+    def runner(source, filename):
+        seen.append((source, filename))
+        return {"nodes": [], "edges": [], "references": [], "analysis": {"mode": "full"}}
+
+    graph = extract(event(url="https://example.com/vendor.js", mime="text/javascript", body="/* React */"),
+                    artifacts, javascript_runner=runner)
+    assert [source for source, _ in seen] == ["export const React = {};", "eval(location.hash)"]
+    assert len(graph.analysis) == 2
+    artifacts.close()
+
+
+@pytest.mark.parametrize("budget", ["nodes", "edges"])
+def test_summary_reports_existing_capture_limits_and_prioritizes_flows(event, budget):
+    from shyhurricane.graph.extract import apply_javascript
+
+    graph = extract(event(body=""))
+    page = next(key for key, value in graph.nodes.items() if value["kind"] == "resource")
+    output = {
+        "nodes": [{"id": "s", "role": "source"}, {"id": "t", "role": "sink"}],
+        "edges": [{"source": "s", "target": "t", "kind": "FLOWS_TO"}],
+        "references": [],
+        "analysis": {"mode": "summary", "budget_limited": False},
+    }
+    if budget == "nodes":
+        graph.node_limit = len(graph.nodes)
+        graph.gaps.append("Capture entity budget reached")
+    else:
+        graph.edge_limit = len(graph.edges) + 1
+    limits = graph.node_limit, graph.edge_limit
+    for filename in ("first.js", "second.js"):
+        apply_javascript(graph, page, filename, output, lambda *args, **kwargs: None, [])
+        assert graph.analysis[-1]["publication_limited"]
+        assert graph.analysis[-1]["budget_limited"]
+        assert (graph.node_limit, graph.edge_limit) == limits
+    if budget == "edges":
+        assert any(edge["kind"] == "FLOWS_TO" for edge in graph.edges.values())
+    assert all(edge["source"] in graph.nodes and edge["target"] in graph.nodes for edge in graph.edges.values())

@@ -6,6 +6,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from shyhurricane.db import get_domain_and_host_counts
+from shyhurricane.disk_space import disk_status
 from shyhurricane.graph.status import graph_status
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server import get_server_context, mcp_instance
@@ -40,6 +41,7 @@ async def status(request: Request) -> Response:
             "domain_counts": domain_counts,
             "host_counts": host_counts,
             "queues": queues,
+            "disk": disk_status(server_ctx),
             "graph": await graph_status(server_ctx),
             "proxy_host": server_ctx.proxy_host,
             "proxy_port": server_ctx.proxy_port,

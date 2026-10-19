@@ -279,3 +279,28 @@ def test_publication_estimates_include_deduplicated_links_and_only_activate_afte
     assert '"library": "Fixture"' in capture["analysis_details"]
     publisher.publish(graph)
     assert activate.call_args.args[1] == capture
+
+
+def test_summary_path_metadata_survives_staging_as_neo4j_properties(event):
+    store = MagicMock()
+    store.read.return_value = []
+    session, transactions = session_with_transactions()
+    graph = extract(event(body=""))
+    source, target = list(graph.nodes)[:2]
+    edge_id = graph.fact(
+        source, target, "SUMMARIZED_FLOW", "js.size-summary", classification="statically_inferred",
+        original_hops=30, endpoint_locations=["1:0", "30:0"], witness=["input -> internal", "internal -> output"],
+        summary_notice="Intermediate operations omitted; static reachability only",
+    )
+    GraphPublisher(store).stage(session, {"id": graph.event["id"]}, "generation", graph, {})
+    calls = [tx.run.call_args for tx in transactions]
+    edges = [row for call in calls for row in call.kwargs.get("edges", [])]
+    proofs = [row for call in calls for row in call.kwargs.get("evidence", [])]
+    stored_edge = next(row for row in edges if row["_logical_id"] == edge_id)
+    proof = next(row for row in proofs if row["id"] == stored_edge["evidence_id"])
+    for record in (stored_edge, proof):
+        assert record["original_hops"] == 30
+        assert record["endpoint_locations"] == ["1:0", "30:0"]
+        assert record["witness"] == ["input -> internal", "internal -> output"]
+        assert "omitted" in record["summary_notice"]
+        assert all(isinstance(value, str | int | float | bool | list) or value is None for value in record.values())

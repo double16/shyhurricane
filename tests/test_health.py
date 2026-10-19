@@ -67,3 +67,30 @@ def test_neo4j_outage_pauses_all_consumers_and_recovers():
     assert not monitor.check()
     assert monitor.check()
     assert monitor.ready.is_set()
+
+
+def test_disk_gate_combines_dependencies_without_resetting_hysteresis(monkeypatch):
+    from types import SimpleNamespace
+
+    from shyhurricane.disk_space import DiskSpaceGuard
+    from shyhurricane.server_config import ServerConfig
+
+    capacity = SimpleNamespace(total=100 * 1024**3, free=1024**3)
+    monkeypatch.setattr("shyhurricane.disk_space.shutil.disk_usage", lambda path: capacity)
+    dependencies = [True]
+    guard = DiskSpaceGuard("/data", ServerConfig())
+    monitor = health.HealthMonitor(lambda: dependencies[0], lambda: True, disk_guard=guard)
+    assert not monitor.ready.is_set()
+    assert not monitor.check()
+    dependencies[0] = False
+    capacity.free = 3 * 1024**3
+    assert not monitor.check()
+    dependencies[0] = True
+    assert not monitor.check()
+    capacity.free = 4 * 1024**3
+    assert monitor.check()
+    assert monitor.ready.is_set()
+    dependencies[0] = False
+    assert not monitor.check()
+    assert not monitor.ready.is_set()
+    assert guard.snapshot()["state"] == "healthy"

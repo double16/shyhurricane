@@ -113,7 +113,7 @@ test("invalid input, parse recovery, typescript, and analysis budgets report gap
   assert(analyze("let a; let a;").gaps.some((gap) => gap.includes("Parse recovery")));
   assert.equal(analyze("const value: string = 'x'", "a.ts").gaps.length, 0);
   const many = Array.from({length:11000}, (_, i) => `const value${i}=location.hash;`).join("\n");
-  assert(analyze(many).gaps.some((gap) => gap.includes("budget")));
+  assert(analyze(many, "source.js", "full").gaps.some((gap) => gap.includes("budget")));
 });
 
 test("virtual framework source filenames retain typescript and DOM selector provenance", () => {

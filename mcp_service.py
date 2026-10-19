@@ -30,6 +30,7 @@ import shyhurricane.mcp_server.tools.register_http_headers  # noqa: F401
 import shyhurricane.mcp_server.tools.status  # noqa: F401
 from shyhurricane.config import configure
 from shyhurricane.data_paths import add_data_dir_argument, configure_data_dir
+from shyhurricane.disk_space import DISK_DEFAULTS, add_disk_arguments
 from shyhurricane.generator_config import GeneratorConfig, add_generator_args
 from shyhurricane.indexing_wait import indexing_timeout
 from shyhurricane.logging_config import (
@@ -119,6 +120,7 @@ async def main():
     ap.add_argument("--log-file", default=os.environ.get("LOG_FILE"),
                     help="Append Python logs here (or set LOG_FILE; default: <data-dir>/logs/shyhurricane.log)")
     add_data_dir_argument(ap)
+    add_disk_arguments(ap)
     ap.add_argument("--host", default="127.0.0.1", help="Host to listen on")
     ap.add_argument("--port", type=int, default=8000, help="Port to listen on for MCP")
     ap.add_argument("--proxy-port", type=int, default=8010, help="Port to listen on for HTTP/HTTPS proxy")
@@ -153,14 +155,18 @@ async def main():
     if torch.accelerator.device_count() == 0:
         logger.info("low_power: CPU is the default pytorch device, defaulting to low power mode")
     set_generator_config(GeneratorConfig.from_args(args).apply_summarizing_default().check())
-    set_server_config(ServerConfig(
-        data_dir=args.data_dir,
-        task_pool_size=args.task_pool_size,
-        ingest_pool_size=args.index_pool_size,
-        open_world=_str_to_bool(args.open_world),
-        low_power=_str_to_bool(args.low_power),
-        indexing_wait_timeout_seconds=args.indexing_wait_timeout_seconds,
-    ))
+    try:
+        set_server_config(ServerConfig(
+            data_dir=args.data_dir,
+            task_pool_size=args.task_pool_size,
+            ingest_pool_size=args.index_pool_size,
+            open_world=_str_to_bool(args.open_world),
+            low_power=_str_to_bool(args.low_power),
+            indexing_wait_timeout_seconds=args.indexing_wait_timeout_seconds,
+            **{name: getattr(args, name) for name in DISK_DEFAULTS},
+        ))
+    except ValueError as error:
+        ap.error(str(error))
     server_context = await get_server_context()
 
     uv_server = None

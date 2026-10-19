@@ -38,6 +38,11 @@ class Store:
         self.filters.append(filters)
         return self.existing
 
+    def get_documents_by_id(self, ids):
+        if self.exc:
+            raise self.exc
+        return [doc for doc in self.existing if doc.id in ids]
+
     def write_documents(self, documents, policy=None):
         if self.exc:
             raise self.exc
@@ -184,7 +189,7 @@ def test_filter_existing_documents_by_id_and_doc_type():
     new = Document(content="x", id="new", meta={"type": "content"})
 
     by_id = wrp.FilterExistingDocumentsById({"content": Store([existing])})
-    assert by_id.run([missing_type, no_id, existing, new])["documents"] == [missing_type]
+    assert by_id.run([missing_type, no_id, existing, new])["documents"] == [missing_type, no_id, new]
 
     doc = Document(content="x", id="doc", meta={
         "url": "https://example.com/",
@@ -468,3 +473,53 @@ def test_generate_title_and_description_ignores_invalid_generator_json():
     result = wrp.GenerateTitleAndDescription(Config()).run([doc])["documents"][0]
 
     assert "title" not in result.meta
+
+
+@pytest.mark.parametrize("count", [0, 1, 100, 101, 205])
+def test_native_id_filter_batches_collections_and_preserves_order(count):
+    from unittest.mock import Mock
+
+    docs = [Document(id=f"doc-{i}", content="x", meta={"type": "content"}) for i in range(count)]
+    network = Document(id="network", content="x", meta={"type": "network"})
+    unknown = Document(id="unknown", content="x", meta={"type": "absent"})
+    no_id = Document(content="x", meta={"type": "content"})
+    object.__setattr__(no_id, "id", "")
+    content_store = Mock()
+    content_store.get_documents_by_id.side_effect = lambda ids: [doc for doc in docs if doc.id in ids and
+                                                               int(doc.id.split("-")[1]) % 2 == 0]
+    network_store = Mock()
+    network_store.get_documents_by_id.return_value = [network]
+    supplied = [unknown, *docs, network, no_id, *(docs[:1])]
+    result = wrp.FilterExistingDocumentsById({"content": content_store, "network": network_store}).run(supplied)
+    assert result["documents"] == [unknown, *docs[1::2], no_id]
+    assert content_store.get_documents_by_id.call_count == (count + 99) // 100
+    assert all(len(call.args[0]) <= 100 for call in content_store.get_documents_by_id.call_args_list)
+    content_store.filter_documents.assert_not_called()
+    network_store.filter_documents.assert_not_called()
+
+
+def test_native_id_filter_propagates_failures():
+    doc = Document(id="doc", content="x", meta={"type": "content"})
+    with pytest.raises(RuntimeError, match="lookup failed"):
+        wrp.FilterExistingDocumentsById({"content": Store(exc=RuntimeError("lookup failed"))}).run([doc])
+
+
+
+def test_native_id_filter_with_real_local_qdrant(monkeypatch):
+    from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
+
+    store = QdrantDocumentStore(":memory:", embedding_dim=2)
+    existing = Document(id="arbitrary-document-id", content="stored", embedding=[1.0, 0.0], meta={"type": "content"})
+    new = Document(id="new-id", content="new", meta={"type": "content"})
+    try:
+        store.write_documents([existing])
+        monkeypatch.setattr(store, "filter_documents", lambda *args, **kwargs: pytest.fail("payload scan"))
+        assert wrp.FilterExistingDocumentsById({"content": store}).run([existing, new])["documents"] == [new]
+    finally:
+        store.close()
+
+
+
+def test_native_id_filter_missing_store_preserves_documents():
+    doc = Document(id="doc", content="x", meta={"type": "content"})
+    assert wrp.FilterExistingDocumentsById({"content": None}).run([doc])["documents"] == [doc]

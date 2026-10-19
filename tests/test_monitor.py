@@ -14,6 +14,7 @@ from shyhurricane.monitor import (
     format_configuration_panel,
     format_database_panel,
     format_domain_and_host_panel,
+    format_graph_panel,
     format_tools_panel,
     get_recent_indexed_urls,
     queue_size,
@@ -327,6 +328,7 @@ def test_health_monitor_recovers_after_qdrant_probe_failure():
 @pytest.mark.asyncio
 async def test_get_domain_and_host_counts_deduplicates_case_insensitively(monkeypatch):
     async def records(*args, **kwargs):
+        assert kwargs["fields"] == ["meta.domain", "meta.host"]
         for metadata in (
             {"domain": "Example.test", "host": "www.example.test"},
             {"domain": "example.test", "host": "WWW.EXAMPLE.TEST"},
@@ -402,7 +404,7 @@ async def test_collect_monitor_data_includes_runtime_configuration_and_statistic
     data = await collect_monitor_data(
         context, "127.0.0.1", 8000, ["port_scan"], [("find_urls", "complete")]
     )
-    graph_status.assert_awaited_once_with(context)
+    graph_status.assert_awaited_once_with(context, include_estimates=False)
 
     assert data == MonitorData(
         bound_address="127.0.0.1:8000",
@@ -442,6 +444,10 @@ async def test_collect_monitor_data_includes_runtime_configuration_and_statistic
         running_tools=["port_scan"],
         recent_tools=[("find_urls", "complete")],
     )
+    disk = {"state": "paused", "error": "missing mount"}
+    context.health_monitor.disk_guard = SimpleNamespace(snapshot=lambda: dict(disk))
+    refreshed = await collect_monitor_data(context, "127.0.0.1", 8000, [])
+    assert refreshed.disk == disk
 
 
 @pytest.mark.asyncio
@@ -715,13 +721,13 @@ async def test_monitor_app_key_press_toggles_low_power(monkeypatch):
     app = MonitorApp(context, "127.0.0.1", 8000, server)
     async with app.run_test() as pilot:
         assert context.low_power is False
-        assert "Low power: disabled" in app.query_one("#configuration", Static).content
+        assert "Low power: disabled" in app.query_one("#configuration-content", Static).content
 
         # Press 'l' (lowercase)
         await pilot.press("l")
         assert context.low_power is True
         assert server_config.low_power is True
-        assert "Low power: enabled" in app.query_one("#configuration", Static).content
+        assert "Low power: enabled" in app.query_one("#configuration-content", Static).content
 
 
 @pytest.mark.asyncio
@@ -786,33 +792,36 @@ async def test_monitor_refresh_key_updates_data_and_ignores_unrelated_keys(monke
         assert "No MCP tools run" not in content
 
 
-def test_graph_estimates_display_current_history_partial_stale_and_unavailable():
+def test_graph_panel_separates_progress_counts_and_failures_into_lines():
     graph = {
-        "current": {
-            "entity_estimate": 12,
-            "relationship_estimate": 20,
-            "captures": 3,
-            "resources": 2,
-            "coverage_complete": False,
-            "covered_captures": 2,
-        },
-        "retained_history": {
-            "entity_estimate": None,
-            "relationship_estimate": None,
-            "captures": 4,
-            "resources": 2,
-            "coverage_complete": False,
-            "covered_captures": 0,
-        },
-        "statistics_stale": True,
+        "publication_revision": 42, "publication_revision_delta": 3,
+        "seconds_since_observed_progress": 31.2,
+        "analyses": {"complete": 9, "processing": 1, "failed": 2}, "queue_depth": 12,
     }
-    text = format_database_panel({"network": 48}, graph)
-    assert "Current graph: ≈12 entities / ≈20 relationships" in text
-    assert "Retained history: unavailable" in text and "partial: 2 captures counted" in text
-    assert "stale" in text and "Captures: 3 / resources: 2" in text
-    graph["current"]["coverage_complete"] = True
-    assert "partial: 2" not in format_database_panel({}, graph)
-    assert "Current graph: unavailable" in format_database_panel({}, {"queue_depth": 1})
+    assert format_graph_panel(graph).splitlines() == [
+        "[b]Graph activity[/b]", "Publication revision: 42", "Change since sample: +3",
+        "Last observed advance: 31s ago", "Completed analyses: 9", "Processing: 1",
+        "Queue depth: 12", "Failed: 2",
+    ]
+    assert "Graph" not in format_database_panel({"network": 48})
+    graph["continuations"] = {
+        "pending": 1, "running": 0, "failed": 2, "stage": "planning",
+        "contexts_completed": 100, "contexts_discovered": 12538,
+    }
+    text = format_graph_panel(graph)
+    assert "Link stage: planning\nContexts: 100/12538" in text
+    assert "Continuations: 1 pending / 0 running\nContinuation failures: 2" in text
+    graph["publication_revision_delta"] = 0
+    assert "Change since sample: +0" in format_graph_panel(graph)
+    assert "Publication revision: unavailable" in format_graph_panel(None)
+    graph = {"activity_stale": True, "activity_error": "ClientError"}
+    text = format_graph_panel(graph)
+    assert "Change since sample: awaiting baseline" in text and "Last observed advance: not yet observed" in text
+    assert "Activity: stale or awaiting refresh\nActivity error: ClientError" in text
+    graph["statistics_error"] = "OperationalError"
+    assert "Analysis error: OperationalError" in format_graph_panel(graph)
+    graph["activity_error_code"] = "Neo.ClientError.Transaction.TransactionTimedOut"
+    assert "Activity error: Neo.ClientError.Transaction.TransactionTimedOut" in format_graph_panel(graph)
 
 
 def queue_counts(ingest=0, doc_type=0, graph=0):
@@ -826,7 +835,7 @@ def test_queue_panel_failed_counts():
 
     assert format_queue_panel({"index": 0, "scan findings": 2, "graph": None},
                               {"index": 3, "scan findings": 0}) == (
-        "index: 0, 3 failed\nscan findings: 2\ngraph: unavailable"
+        "index: 0, 3 failed\nscan findings: 2"
     )
 
 
@@ -891,3 +900,62 @@ def test_format_tools_panel_status_order_empty_state_and_escaping():
     assert format_tools_panel([], [("scan", "complete")]) == (
         "[b]MCP tools[/b]\n[green]●[/green] scan"
     )
+
+
+@pytest.mark.asyncio
+async def test_three_middle_panels_keep_graph_separate_and_scrollable(monkeypatch):
+    data = MonitorData(
+        bound_address="localhost:8000", proxy_address="not started", model="model", model_health=True,
+        certificate_fingerprint=None, database="db", qdrant_host_bind="localhost", qdrant_http_port=6333,
+        qdrant_health=True, low_power=False, document_counts={"network": 48}, domain_count=1, host_count=1,
+        top_domains=[("example.com", 48)], top_hosts=[("www.example.com", 48)],
+        queue_sizes={"index": 3, "graph": 12}, queue_failures={"graph": 2}, recent_urls=[], running_tools=[],
+        graph={"publication_revision": 42, "publication_revision_delta": 3, "seconds_since_observed_progress": 31,
+               "queue_depth": 12, "analyses": {"complete": 9, "processing": 1, "failed": 2},
+               "continuations": {"pending": 1, "running": 0, "failed": 2, "stage": "planning",
+                                 "contexts_completed": 100, "contexts_discovered": 12538}},
+    )
+    monkeypatch.setattr("shyhurricane.monitor.collect_monitor_data", AsyncMock(return_value=data))
+    app = MonitorApp(SimpleNamespace(), "localhost", 8000, SimpleNamespace(running_tools=[], recent_tools=[]))
+    async with app.run_test(size=(150, 60)) as pilot:
+        await pilot.pause()
+        configuration, queues, database, graph_panel, domains, urls, tools = [
+            app.query_one(f"#{name}")
+            for name in ("configuration", "queues", "database", "graph-panel", "domains", "urls", "tools")
+        ]
+        graph = app.query_one("#graph", Static)
+        assert configuration.region.y == queues.region.y < database.region.y
+        assert database.region.y == graph_panel.region.y == domains.region.y < urls.region.y == tools.region.y
+        assert database.region.right < graph_panel.region.x and graph_panel.region.right < domains.region.x
+        assert configuration.region.width > graph_panel.region.width and urls.region.width > graph_panel.region.width
+        assert "network: 48" in database.content and "Publication revision" not in database.content
+        assert "Queue depth: 12" in graph.content and "Change since sample: +3" in graph.content
+        assert "Last observed advance: 31s ago" in graph.content
+        assert queues.content == "[b]Queue status[/b]\nindex: 3"
+        await pilot.resize_terminal(80, 24)
+        await pilot.pause()
+        assert graph_panel.max_scroll_y > 0
+        graph_panel.scroll_end(animate=False, immediate=True)
+        await pilot.pause()
+        assert graph_panel.scroll_y > 0
+
+
+@pytest.mark.parametrize("state,error,minimums,expected", [
+    ("disabled", None, (0, 0), "Disk guard: disabled"),
+    ("checking", None, (3, 2147483648), "Disk: checking; indexing paused"),
+    ("paused", "missing [mount]", (3, 2147483648), "disk measurement unavailable"),
+    ("healthy", None, (3, 2147483648), "4.00 GiB (4.00%) free (healthy)"),
+    ("paused", None, (3, 2147483648), "resume at 4% and 2.5 GiB"),
+    ("paused", None, (0, 2147483648), "resume at 2.5 GiB"),
+    ("paused", None, (3, 0), "resume at 4%"),
+])
+def test_disk_status_rendering(state, error, minimums, expected):
+    from shyhurricane.monitor import format_disk_status
+
+    snapshot = {
+        "state": state, "error": error, "free_bytes": 4 * 1024**3, "free_percent": 4,
+        "min_free_percent": minimums[0], "min_free_bytes": minimums[1],
+        "resume_margin_percent": 1, "resume_margin_bytes": 512 * 1024**2,
+    }
+    assert expected in format_disk_status(snapshot)
+    assert format_disk_status(None) == "Disk: unavailable"

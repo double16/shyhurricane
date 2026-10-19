@@ -8,6 +8,7 @@ from mcp.types import CallToolResult
 
 import shyhurricane.mcp_server as mcp_server
 import shyhurricane.mcp_server.server_context as server_context
+from shyhurricane.disk_space import DISK_DEFAULTS
 from shyhurricane.task_queue.types import TaskPool, run_worker
 
 
@@ -164,6 +165,9 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
         task_pool_size = 3
         open_world = False
 
+    for name, default in DISK_DEFAULTS.items():
+        setattr(Config, name, default)
+
     class Store:
         def __init__(self):
             self.initialized = False
@@ -232,6 +236,7 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
         startup_events.append(("ingest", "db"))
         log_timestamps.append(kwargs["log_timestamp"])
         stop_events.append(kwargs["stop_event"])
+        assert kwargs["health_state"] is not None
         return Queue(), Pool()
 
     def start_task_worker(*args, stop_event=None):
@@ -282,6 +287,7 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
 
     ctx = await server_context.get_server_context()
 
+    assert ctx.health_monitor.disk_guard.snapshot()["path"] == str(tmp_path)
     assert ctx.db == "db"
     assert ctx.document_pipeline is not None
     assert ctx.website_context_pipeline is not None

@@ -132,3 +132,48 @@ def test_log_timestamp_uses_utc_and_minute_precision(monkeypatch):
 
     monkeypatch.setattr(utils.datetime, "datetime", Clock)
     assert utils.get_log_timestamp() == "202601020304"
+
+
+@pytest.mark.parametrize("value", [None, "false", "0", "off", "no", "invalid", ""])
+def test_heap_profiling_disabled_never_imports_guppy(monkeypatch, value):
+    import builtins
+
+    if value is None:
+        monkeypatch.delenv("ENABLE_HEAP_PROFILING", raising=False)
+    else:
+        monkeypatch.setenv("ENABLE_HEAP_PROFILING", value)
+    original = builtins.__import__
+    def guarded(name, *args, **kwargs):
+        assert name != "guppy", "Disabled profiling imported guppy"
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, "__import__", guarded)
+    monkeypatch.setattr(utils.logger, "isEnabledFor", lambda level: True)
+    utils.log_heap_stats()
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", " On "])
+@pytest.mark.parametrize("debug", [False, True])
+def test_heap_profiling_requires_opt_in_and_debug(monkeypatch, value, debug):
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    heap = Mock()
+    heap.heap.return_value = list(range(20))
+    factory = Mock(return_value=heap)
+    monkeypatch.setenv("ENABLE_HEAP_PROFILING", value)
+    monkeypatch.setitem(sys.modules, "guppy", SimpleNamespace(hpy=factory))
+    monkeypatch.setattr(utils.logger, "isEnabledFor", lambda level: debug)
+    utils.log_heap_stats()
+    assert factory.call_count == int(debug)
+    assert heap.heap.call_count == int(debug)
+
+
+def test_heap_profiling_missing_optional_module(monkeypatch, caplog):
+    import sys
+
+    monkeypatch.setenv("ENABLE_HEAP_PROFILING", "true")
+    monkeypatch.setitem(sys.modules, "guppy", None)
+    with caplog.at_level(logging.DEBUG, logger=utils.logger.name):
+        utils.log_heap_stats()
+    assert "Install guppy3" in caplog.text

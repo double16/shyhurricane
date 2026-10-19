@@ -953,3 +953,19 @@ async def test_queue_counts_use_background_thread_and_covering_index(monkeypatch
     monkeypatch.setattr(persistent_queue, "read_queue_counts", read)
     counts = await persistent_queue.persistent_queue_counts("db")
     assert all(value == {"pending": 0, "processing": 0, "failed": 0} for value in counts.values())
+
+
+def test_idle_queue_can_yield_ready_continuations_without_acknowledging_them(tmp_path):
+    import threading
+
+    from shyhurricane.persistent_queue import open_persistent_queue, persistent_queue_get
+
+    queue = open_persistent_queue(str(tmp_path / "queue"))
+    stop = threading.Event()
+    item = {"graph_continuation": "job"}
+    iterator = persistent_queue_get(queue, stop_event=stop, idle_callback=lambda: item)
+    assert next(iterator) == item
+    stop.set()
+    assert list(iterator) == []
+    assert queue.unack_count() == 0
+    queue.close()

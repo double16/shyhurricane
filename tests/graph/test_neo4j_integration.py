@@ -851,3 +851,133 @@ def test_legacy_frontier_is_frozen_while_first_generation_is_published(neo4j, ev
     assert service.paths("graph-test.invalid", source, end=sink, mode="flow")["results"]
     assert activated
     assert not service.paths("graph-test.invalid", source, end=sink, mode="flow")["results"]
+
+
+
+def test_link_planning_selects_indexed_candidates_before_hydration(neo4j, event, monkeypatch):
+    from shyhurricane.graph import links
+    from shyhurricane.graph.links import LinkPlanner
+    from shyhurricane.graph.model import Projection
+
+    url = "https://graph-test.invalid/link-planning"
+    projection = Projection(event(url=url))
+    capture = projection.event["id"]
+    with neo4j.connect().session() as session:
+        session.run(
+            "UNWIND $owners AS owner CREATE (c:GraphCapture) SET c=owner",
+            owners=[
+                {"id": "lp-legacy", "url": url, "complete": True, "context_capture_ids": [capture]},
+                {"id": "lp-active", "url": url, "complete": True, "active_publication_id": "lp-generation"},
+            ],
+        ).consume()
+        session.run(
+            "UNWIND range(1,6000) AS i CREATE (:GraphEntity {id:'lp-noise-'+toString(i),"
+            "url:$url, capture_id:'lp-legacy', kind:'symbol', module_key:'unrelated'})",
+            url=url,
+        ).consume()
+        session.run(
+            "UNWIND $nodes AS node CREATE (n:GraphEntity) SET n=node",
+            nodes=[
+                {"id": "lp-a", "url": url, "capture_id": "lp-legacy", "kind": "element", "html_id": "name"},
+                {"id": "lp-b", "url": url, "capture_id": "lp-active", "kind": "element",
+                 "_publication_id": "lp-generation", "_owner_capture_id": "lp-active", "html_id": "name"},
+                {"id": "lp-retired", "url": url, "capture_id": "lp-active", "kind": "element",
+                 "_publication_id": "lp-retired-generation", "_owner_capture_id": "lp-active"},
+                {"id": "lp-staged", "url": url, "capture_id": "lp-active", "kind": "element",
+                 "_publication_id": "lp-staged-generation", "_owner_capture_id": "lp-active"},
+                {"id": "lp-import", "url": url, "capture_id": "lp-legacy", "kind": "symbol",
+                 "import_key": "lp-module", "imported_name": "read", "parameter_index": 0, "selector": "#name"},
+                {"id": "lp-export", "url": url, "capture_id": "lp-legacy", "kind": "symbol",
+                 "module_key": "lp-module", "export_names": ["read"], "parameter_index": 0},
+                {"id": "lp-own", "url": url, "capture_id": capture, "kind": "element"},
+            ],
+        ).consume()
+        session.run(
+            "MATCH (a:GraphEntity {id:'lp-import'}), (b:GraphEntity {id:'lp-a'}) "
+            "CREATE (a)-[:RELATES {id:'lp-proof-z',capture_id:'lp-legacy',evidence_id:'z'}]->(b), "
+            "(a)-[:RELATES {id:'lp-proof-a',capture_id:'lp-legacy',evidence_id:'a'}]->(b)",
+        ).consume()
+    monkeypatch.setattr(links, "READ_BATCH_SIZE", 1)
+    original = neo4j.read
+    plans = []
+    def observed(statement, **parameters):
+        if "RETURN other.id AS id" in statement:
+            with neo4j.connect().session() as session:
+                summary = session.run("EXPLAIN " + statement, **parameters).consume()
+                def operators(plan):
+                    return [plan["operatorType"], *[
+                        name for child in plan.get("children", []) for name in operators(child)
+                    ]]
+                plans.append(operators(summary.plan))
+        return original(statement, **parameters)
+    monkeypatch.setattr(neo4j, "read", observed)
+    planner = LinkPlanner(neo4j, projection)
+    legacy = planner.candidates("capture_id", "lp-legacy")
+    assert [row["node"]["id"] for row in legacy] == ["lp-a"]
+    assert legacy[0]["evidence_id"] == "a"
+    assert legacy[0]["contexts"] == [capture]
+    assert [row["node"]["id"] for row in planner.candidates("capture_id", "lp-active")] == ["lp-b"]
+    assert planner.candidates("capture_id", capture) == []
+    assert planner.candidates("capture_id", "missing") == []
+    assert planner.candidates("module_key", "lp-module")[0]["node"]["id"] == "lp-export"
+    assert planner.candidates("import_key", "lp-module")[0]["node"]["id"] == "lp-import"
+    assert planner.candidates("selector", "#name")[0]["node"]["id"] == "lp-import"
+    assert all(not any("NodeByLabelScan" in operator for operator in plan) for plan in plans), plans
+    assert any(any("NodeIndexSeek" in operator for operator in plan) for plan in plans), plans
+
+
+def test_resumable_planning_covers_12538_contexts_before_atomic_activation(neo4j, event):
+    import time
+
+    from shyhurricane.graph.links import LinkPlanner
+    from shyhurricane.graph.model import Projection, projection_snapshot, restore_projection
+
+    count = 12538
+    projection = Projection(event(url="https://graph-test.invalid/resumable.js", body="script", mime="text/javascript"))
+    projection.library_analysis = "summary"
+    projection.contexts = [{"id": f"resume-page-{index:05}", "url": f"https://graph-test.invalid/resume/{index}"}
+                           for index in range(count)]
+    resource = projection.resource(projection.url)
+    selector = projection.node("symbol", "query", capture_id=projection.event["id"], selector="#match")
+    projection.fact(resource, selector, "CONTAINS", "test")
+    with neo4j.connect().session() as session:
+        for offset in range(0, count, 500):
+            rows = [{"id": f"resume-page-{index:05}", "url": f"https://graph-test.invalid/resume/{index}"}
+                    for index in range(offset, min(offset + 500, count))]
+            session.run(
+                "UNWIND $rows AS row CREATE (:GraphCapture {id:row.id,url:row.url,complete:true}) "
+                "CREATE (:GraphEntity {id:row.id+'-element',capture_id:row.id,url:row.url,"
+                "kind:'element',html_id:'match'}) "
+                "CREATE (:GraphEntity {id:row.id+'-noise',capture_id:row.id,url:row.url,kind:'symbol'})", rows=rows,
+            ).consume()
+    revision = neo4j.activity()["publication_revision"]
+    planner = LinkPlanner(neo4j, projection)
+    started = time.perf_counter()
+    slices, maximum = 0, 0
+    while True:
+        before = time.perf_counter()
+        complete = planner.plan_slice()
+        maximum = max(maximum, time.perf_counter() - before)
+        slices += 1
+        if slices == 10:
+            assert neo4j.activity()["publication_revision"] == revision
+            state = json.loads(json.dumps(planner.checkpoint()))
+            projection = restore_projection(json.loads(json.dumps(projection_snapshot(projection))))
+            planner = LinkPlanner(neo4j, projection)
+            planner.restore(state)
+        if complete:
+            break
+    elapsed = time.perf_counter() - started
+    assert slices == 126 and planner.cursor["context"] == count
+    assert planner.selection_reads == planner.hydration_reads == 126
+    assert len(planner.links) == count and maximum <= 35 and elapsed < 30
+    projection.planned_links = planner.links
+    neo4j.publish(projection)
+    assert neo4j.activity()["publication_revision"] == revision + 1
+    assert neo4j.read("MATCH (c:GraphCapture {id:$id}) RETURN c.entity_estimate AS entities, "
+                      "c.relationship_estimate AS relationships", id=projection.event["id"])[0] == {
+        "entities": len(projection.nodes), "relationships": len(projection.edges) + count,
+    }
+    print(json.dumps({"contexts": count, "slices": slices, "selection_reads": planner.selection_reads,
+                      "hydration_reads": planner.hydration_reads, "planning_seconds": round(elapsed, 3),
+                      "max_slice_seconds": round(maximum, 3)}))

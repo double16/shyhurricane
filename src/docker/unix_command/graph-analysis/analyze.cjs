@@ -2,12 +2,11 @@
 const parser = require("@babel/parser");
 const traverse = require("@babel/traverse").default;
 
-const { recognize, summarize } = require("./library.cjs");
+const { compress } = require("./library.cjs");
 
 function analyze(source, filename = "source.js", mode = "summary") {
   if (!["summary", "full"].includes(mode)) throw new Error("Invalid library analysis mode");
-  const library = recognize(source);
-  const LIMIT = library && mode === "summary" ? 50000 : 10000;
+  const LIMIT = mode === "summary" ? 50000 : 10000;
   const nodes = new Map();
   const edges = new Map();
   const references = [];
@@ -218,8 +217,8 @@ function analyze(source, filename = "source.js", mode = "summary") {
       const navigation = /(?:^|\.)(?:location|location\.href)$/.test(left);
       const target = sink || navigation ? make(node.left, left, "sink", "sink") : targets(node.left, path.scope)[0];
       for (const value of values(node.right, path.scope)) edge(value, target, node, "WRITES_TO");
-      if (library && mode === "summary" && nodes.has(target) &&
-          /^(?:exports\.|module\.exports)|(?:^|\.)(?:angular|React|ReactDOM)$/.test(left)) {
+      if (nodes.has(target) &&
+          /^(?:exports\.|module\.exports(?:\.|$)|(?:globalThis|window|self)\.)/.test(left)) {
         exports.push({ name: left, id: target });
         if (node.right.type === "Identifier") exports.push({ name: left, id: bindingId(node.right, path.scope) });
       }
@@ -414,6 +413,13 @@ function analyze(source, filename = "source.js", mode = "summary") {
     const { node, scope, result } = call;
     const name = nameOf(node.callee), member = method(node.callee);
     const summary = fnFor(node.callee, scope);
+    // Mark resolved callback boundaries without inventing invocation or dispatch edges.
+    for (const argument of node.arguments) {
+      const callback = fnFor(argument, scope);
+      if (callback) for (const id of [...callback.params, callback.returns, callback.rejects]) {
+        if (nodes.has(id)) nodes.get(id).callback_boundary = true;
+      }
+    }
     const receiverType = typeOf(node.callee.object, scope);
     const isPromise = receiverType.startsWith("promise:") && ["then", "catch", "finally"].includes(member);
     const isNetwork = global(node.callee, scope, "fetch") || receiverType === "xhr" && ["open", "send"].includes(member)
@@ -645,8 +651,8 @@ function analyze(source, filename = "source.js", mode = "summary") {
     gaps.add("External/dynamic calls are conservative summaries; runtime dispatch is unproven");
   }
   const result = { nodes: [...nodes.values()], edges: [...edges.values()], references: references.slice(0, LIMIT),
-    gaps: [...gaps], analysis: { mode: "full", library } };
-  return library && mode === "summary" ? summarize(result, library) : result;
+    gaps: [...gaps], analysis: { mode: "full" } };
+  return compress(result, mode);
 }
 
 module.exports = { analyze };

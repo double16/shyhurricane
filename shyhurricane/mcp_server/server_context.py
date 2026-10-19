@@ -16,6 +16,7 @@ from qdrant_client import AsyncQdrantClient
 
 from shyhurricane.data_paths import configure_data_dir, state_path
 from shyhurricane.db import create_qdrant_client, create_qdrant_document_store, qdrant_host_port
+from shyhurricane.disk_space import DiskSpaceGuard
 from shyhurricane.doc_type_model_map import doc_type_to_model
 from shyhurricane.graph.database import GraphStore, graph_location
 from shyhurricane.haystack_lifecycle import close_haystack_resources
@@ -207,7 +208,8 @@ async def get_server_context() -> ServerContext:
     qdrant_host, qdrant_port = qdrant_host_port(db)
     graph_store = GraphStore(graph_location())
     health_monitor = HealthMonitor(lambda: qdrant_probe(qdrant_host, qdrant_port), lambda: True,
-                                   neo4j_probe=graph_store.ready)
+                                   neo4j_probe=graph_store.ready,
+                                   disk_guard=DiskSpaceGuard(state_path("."), server_config))
     health_monitor.start()
 
     mcp_session_volume = os.environ.get("MCP_SESSION_VOLUME")

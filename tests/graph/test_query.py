@@ -620,3 +620,27 @@ def test_hydration_does_not_start_a_read_below_server_timeout_resolution(hydrati
     rows, _, reasons = GraphQuery(store).hydrate(references)
     assert not rows and reasons == ["time_limit"]
     store.read.assert_not_called()
+
+
+def test_compressed_edges_are_visible_in_flow_traces_and_evidence_but_not_journeys(event):
+    graph = extract(event(url="https://example.com/app.js", mime="text/javascript"), javascript_runner=lambda *args: {})
+    source = graph.node("symbol", "input", name="input", role="source", url=graph.url)
+    sink = graph.node("symbol", "output", name="eval", role="sink", url=graph.url)
+    edge = graph.fact(
+        source, sink, "SUMMARIZED_FLOW", "js.size-summary", classification="statically_inferred",
+        original_hops=25, endpoint_locations=["1:0", "25:0"], witness=["input -> output"],
+        summary_notice="Intermediate operations omitted; runtime execution is unproven",
+    )
+    service = GraphQuery(Store(graph))
+    paths = service.paths("example.com", source, end=sink, mode="flow", detail="compact")["results"]
+    step = paths[0]["steps"][0]
+    assert step["kind"] == "SUMMARIZED_FLOW"
+    assert step["original_hops"] == 25
+    assert "omitted" in step["summary_notice"]
+    assert "witness" not in step
+    full = service.paths("example.com", source, end=sink, mode="flow", detail="full")["results"]
+    assert full[0]["steps"][0]["witness"] == ["input -> output"]
+    proof = service.evidence("example.com", graph.edges[edge]["evidence_id"])
+    assert proof["original_hops"] == 25
+    assert proof["classification"] == "statically_inferred"
+    assert not service.paths("example.com", source, end=sink, mode="journey")["results"]

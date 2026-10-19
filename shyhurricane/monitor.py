@@ -8,10 +8,11 @@ from qdrant_client.http import models as qm
 from rich.markup import escape
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container
+from textual.containers import Container, VerticalScroll
 from textual.widgets import Footer, Header, Static
 
 from shyhurricane.db import get_domain_and_host_counts
+from shyhurricane.disk_space import disk_status
 from shyhurricane.graph.status import graph_status
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server.generator_config import get_generator_config
@@ -44,6 +45,7 @@ class MonitorData:
     recent_tools: list[tuple[str, str]] = field(default_factory=list)
     graph: dict | None = None
     queue_failures: dict[str, int] = field(default_factory=dict)
+    disk: dict | None = None
 
 
 def certificate_fingerprint(certificate_path: Path | None) -> str | None:
@@ -101,30 +103,49 @@ def top_counts(counts: dict[str, int], limit: int = 5) -> list[tuple[str, int]]:
     return sorted(counts.items(), key=lambda item: (-item[1], item[0]))[:limit]
 
 
-def format_database_panel(document_counts: dict[str, int], graph: dict | None = None) -> str:
+def format_database_panel(document_counts: dict[str, int]) -> str:
     counts = f"Findings: {document_counts.get('finding', 0)}"
     other_counts = {name: count for name, count in document_counts.items() if name != "finding"}
     for name, count in top_counts(other_counts):
         counts += f"\n{name}: {count}"
-    if graph:
-        counts += "\n[b]Application graph (estimates)[/b]"
-        for key, label in (("current", "Current graph"), ("retained_history", "Retained history")):
-            summary = graph.get(key)
-            if summary is None:
-                counts += f"\n{label}: unavailable"
-                continue
-            entities, relationships = summary["entity_estimate"], summary["relationship_estimate"]
-            values = f"≈{entities} entities / ≈{relationships} relationships" if entities is not None else "unavailable"
-            counts += f"\n{label}: {values}"
-            counts += f"\nCaptures: {summary['captures']} / resources: {summary['resources']}"
-            if not summary["coverage_complete"]:
-                counts += f" (partial: {summary['covered_captures']} captures counted)"
-        if graph.get("statistics_stale"):
-            counts += "\nStatistics: stale or awaiting first refresh"
-        counts += (f"\nQueued: {graph.get('queue_depth', 0)}"
-                   f"\nFailed: {graph.get('analyses', {}).get('failed', 0)}"
-                   f"\nUnresolved references: {graph.get('unresolved_references', 'unavailable')}")
     return f"[b]Database statistics[/b]\n{counts}"
+
+
+def format_graph_panel(graph: dict | None) -> str:
+    graph = graph or {}
+    revision = graph.get("publication_revision")
+    delta = graph.get("publication_revision_delta")
+    elapsed = graph.get("seconds_since_observed_progress")
+    change = f"+{delta}" if delta is not None else "awaiting baseline"
+    progress = f"{elapsed:.0f}s ago" if elapsed is not None else "not yet observed"
+    analyses = graph.get("analyses", {})
+    lines = [
+        "[b]Graph activity[/b]",
+        f"Publication revision: {revision if revision is not None else 'unavailable'}",
+        f"Change since sample: {change}",
+        f"Last observed advance: {progress}",
+        f"Completed analyses: {analyses.get('complete', 0)}",
+        f"Processing: {analyses.get('processing', 0)}",
+        f"Queue depth: {graph.get('queue_depth', 0)}",
+        f"Failed: {analyses.get('failed', 0)}",
+    ]
+    continuations = graph.get("continuations")
+    if continuations:
+        lines.extend([
+            f"Link stage: {continuations.get('stage', 'idle')}",
+            f"Contexts: {continuations.get('contexts_completed', 0)}/"
+            f"{continuations.get('contexts_discovered', 0)}",
+            f"Continuations: {continuations['pending']} pending / {continuations['running']} running",
+            f"Continuation failures: {continuations['failed']}",
+        ])
+    if graph.get("activity_stale"):
+        lines.append("Activity: stale or awaiting refresh")
+    if graph.get("activity_error"):
+        error = graph.get("activity_error_code") or graph["activity_error"]
+        lines.append(f"Activity error: {escape(str(error))}")
+    if graph.get("statistics_error"):
+        lines.append(f"Analysis error: {escape(str(graph['statistics_error']))}")
+    return "\n".join(lines)
 
 
 def format_domain_and_host_panel(data: MonitorData) -> str:
@@ -142,6 +163,27 @@ def health_label(healthy: bool | None) -> str:
     return "🟢" if healthy else "🔴"
 
 
+def format_disk_status(disk: dict | None) -> str:
+    if disk is None:
+        return "Disk: unavailable"
+    state = disk["state"]
+    if state == "disabled":
+        return "Disk guard: disabled"
+    if state == "checking":
+        return "Disk: checking; indexing paused"
+    if disk["error"] is not None:
+        return f"Indexing paused: disk measurement unavailable ({escape(disk['error'])})"
+    capacity = f"{disk['free_bytes'] / 1024**3:.2f} GiB ({disk['free_percent']:.2f}%) free"
+    if state == "paused":
+        targets = []
+        if disk["min_free_percent"]:
+            targets.append(f"{disk['min_free_percent'] + disk['resume_margin_percent']:g}%")
+        if disk["min_free_bytes"]:
+            targets.append(f"{(disk['min_free_bytes'] + disk['resume_margin_bytes']) / 1024**3:g} GiB")
+        return f"Indexing paused: low disk space\n{capacity}; resume at {' and '.join(targets)}"
+    return f"Disk: {capacity} (healthy)"
+
+
 def format_configuration_panel(data: MonitorData) -> str:
     fingerprint = data.certificate_fingerprint or "unavailable"
     qdrant_host_bind = data.qdrant_host_bind or "unavailable"
@@ -151,9 +193,10 @@ def format_configuration_panel(data: MonitorData) -> str:
         "[b]Configuration[/b]\n"
         f"Model: {data.model} {health_label(data.model_health)}\n"
         f"Qdrant: {data.database} {qdrant_host_bind}:{qdrant_http_port} {health_label(data.qdrant_health)}\n"
-        f"Neo4j: {(data.graph or {}).get('uri', 'unavailable')} "
+        f"Neo4j: {(data.graph or {}).get('uri') or 'unavailable'} "
         f"{health_label((data.graph or {}).get('healthy'))}\n"
         f"Low power: {low_power}\n"
+        f"{format_disk_status(data.disk)}\n"
         f"MCP: {data.bound_address}\n"
         f"Proxy: {data.proxy_address}\nTLS SHA-256: {fingerprint}"
     )
@@ -177,7 +220,7 @@ async def collect_monitor_data(
         counts = {}
     labels = {"index": "ingest", "type-specific index": "type_specific_index",
               "scan findings": "scan_findings", "graph": "graph"}
-    graph = await graph_status(server_context)
+    graph = await graph_status(server_context, include_estimates=False)
     queues = {
         **{label: counts[name]["pending"] + counts[name]["processing"] if name in counts else None
            for label, name in labels.items()},
@@ -229,6 +272,7 @@ async def collect_monitor_data(
         running_tools=sorted(running_tools),
         recent_tools=list(recent_tools),
         graph=graph,
+        disk=disk_status(server_context),
         queue_failures={label: counts[name]["failed"] for label, name in labels.items() if name in counts},
     )
 
@@ -236,6 +280,8 @@ async def collect_monitor_data(
 def format_queue_panel(sizes: dict[str, int | None], failures: dict[str, int]) -> str:
     lines = []
     for name, size in sizes.items():
+        if name == "graph":
+            continue
         line = f"{name}: {size if size is not None else 'unavailable'}"
         if failures.get(name, 0) > 0:
             line += f", {failures[name]} failed"
@@ -255,8 +301,10 @@ class MonitorApp(App[None]):
     TITLE = "shyhurricane"
     CSS = """
     Screen { layout: vertical; }
-    #panels { layout: grid; grid-size: 2; grid-gutter: 1; padding: 1; }
-    .panel { border: round $primary; padding: 1; height: 1fr; }
+    #panels { layout: grid; grid-size: 6; grid-gutter: 1; padding: 1; }
+    .panel { border: round $primary; padding: 1; height: 1fr; column-span: 3; }
+    #configuration { overflow-y: auto; }
+    #database, #graph-panel, #domains { column-span: 2; }
     #domains { height: 19; }
     #urls, #tools { height: 12; }
     #tools { overflow-y: auto; }
@@ -279,9 +327,12 @@ class MonitorApp(App[None]):
     def compose(self) -> ComposeResult:
         yield Header()
         with Container(id="panels"):
-            yield Static("Loading configuration…", id="configuration", classes="panel")
+            with VerticalScroll(id="configuration", classes="panel"):
+                yield Static("Loading configuration…", id="configuration-content")
             yield Static("Loading queue status…", id="queues", classes="panel")
             yield Static("Loading database statistics…", id="database", classes="panel")
+            with VerticalScroll(id="graph-panel", classes="panel"):
+                yield Static("Loading graph activity…", id="graph")
             yield Static("Loading domain and host statistics…", id="domains", classes="panel")
             yield Static("Loading recent URLs…", id="urls", classes="panel")
             yield Static("Loading MCP tools…", id="tools", classes="panel")
@@ -297,10 +348,11 @@ class MonitorApp(App[None]):
         )
         if not self.is_running:
             return
-        self.query_one("#configuration", Static).update(format_configuration_panel(data))
+        self.query_one("#configuration-content", Static).update(format_configuration_panel(data))
         queues = format_queue_panel(data.queue_sizes, data.queue_failures)
         self.query_one("#queues", Static).update(f"[b]Queue status[/b]\n{queues}")
-        self.query_one("#database", Static).update(format_database_panel(data.document_counts, data.graph))
+        self.query_one("#database", Static).update(format_database_panel(data.document_counts))
+        self.query_one("#graph", Static).update(format_graph_panel(data.graph))
         self.query_one("#domains", Static).update(format_domain_and_host_panel(data))
         urls = "\n".join(data.recent_urls) or "No URLs indexed"
         self.query_one("#urls", Static).update(f"[b]Last five URLs indexed[/b]\n{urls}")

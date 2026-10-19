@@ -113,7 +113,9 @@ def test_driver_read_schema_and_publication_handoff(monkeypatch, event):
     monkeypatch.setattr(
         store,
         "read",
-        lambda *args: [{"resource_key": "GET /", "observed_at": 1, "entity_estimate": 1, "relationship_estimate": 2}],
+        lambda *args, **kwargs: [
+            {"resource_key": "GET /", "observed_at": 1, "entity_estimate": 1, "relationship_estimate": 2}
+        ],
     )
     assert store.statistics()["entities"] == 1
     store.close()

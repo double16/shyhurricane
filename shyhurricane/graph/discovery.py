@@ -6,7 +6,9 @@ from urllib.parse import urlsplit
 from shyhurricane.graph.model import web_url
 
 NODE_FIELDS = {"id", "kind", "name", "role", "url", "method", "source_path", "location"}
-STEP_FIELDS = {"id", "kind", "source", "target", "classification", "evidence_id"}
+STEP_FIELDS = {
+    "id", "kind", "source", "target", "classification", "evidence_id", "original_hops", "summary_notice"
+}
 INTERPRETATION = (
     "Source/sink labels describe static operations, including network boundaries, not proven attacker control. "
     "Framework symbols and generic property reads do not establish prototype pollution or template injection. "

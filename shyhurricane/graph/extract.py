@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 
 from shyhurricane.graph.artifacts import recovered_sources
 from shyhurricane.graph.model import MAX_BYTES, Projection, identity, web_url
-from shyhurricane.graph.policy import ANALYZER_VERSION, library_analysis, recognized_library
+from shyhurricane.graph.policy import ANALYZER_VERSION, library_analysis
 from shyhurricane.index.javascript_analysis import javascript_url_from_map, source_map_url
 from shyhurricane.utils import unix_command_image
 
@@ -59,7 +59,9 @@ def run_javascript(source: str, filename: str, mode=None) -> dict:
     return json.loads(result.stdout)
 
 
-def extract(event: dict, artifacts=None, *, open_world=False, javascript_runner=run_javascript) -> Projection:
+def extract(
+    event: dict, artifacts=None, *, open_world=False, javascript_runner=run_javascript, document_contexts=None
+) -> Projection:
     mode = library_analysis(event.get("library_analysis"))
     runner = (
         (lambda source, filename: run_javascript(source, filename, mode))
@@ -323,9 +325,7 @@ def extract(event: dict, artifacts=None, *, open_world=False, javascript_runner=
         if hint and web_url(hint, graph.url):
             refs.append(web_url(hint, graph.url))
         sources = recovered_sources(source_map) if source_map else []
-        if recognized_library(body) and mode == "summary":
-            sources = []
-        if not sources and artifacts and not (mode == "summary" and recognized_library(body)):
+        if not sources and artifacts:
             from shyhurricane.index.web_resources_pipeline import _deobfuscate_javascript
 
             body = artifacts.deobfuscate(body, _deobfuscate_javascript)
@@ -385,6 +385,8 @@ def extract(event: dict, artifacts=None, *, open_world=False, javascript_runner=
             contexts = []
             if "html" in mime:
                 contexts.append({"url": graph.url, "base": base, "id": event["id"]})
+            elif document_contexts is not None:
+                contexts.extend(document_contexts)
             elif artifacts:
                 documents, truncated = artifacts.consuming_documents(javascript_url_from_map(graph.url) or graph.url)
                 if truncated:
@@ -430,10 +432,11 @@ def extract(event: dict, artifacts=None, *, open_world=False, javascript_runner=
 def apply_javascript(graph, page, filename, result, reference, contexts):
     limits = graph.node_limit, graph.edge_limit
     before = len(graph.nodes), len(graph.edges)
+    gaps_before = len(graph.gaps)
     summary = result.get("analysis", {}).get("mode") == "summary"
     if summary:
-        graph.node_limit = min(graph.node_limit, before[0] + 500)
-        graph.edge_limit = min(graph.edge_limit, before[1] + 1000)
+        graph.node_limit = min(graph.node_limit, before[0] + 1000)
+        graph.edge_limit = min(graph.edge_limit, before[1] + 2000)
     try:
         _apply_javascript(graph, page, filename, result, reference, contexts)
     finally:
@@ -441,15 +444,19 @@ def apply_javascript(graph, page, filename, result, reference, contexts):
     graph.analysis[-1].update(
         published_nodes=len(graph.nodes) - before[0], published_edges=len(graph.edges) - before[1]
     )
-    if summary and (len(graph.nodes) >= before[0] + 500 or len(graph.edges) >= before[1] + 1000):
-        graph.analysis[-1]["budget_limited"] = True
+    if summary:
+        publication_limited = any("budget reached" in gap for gap in graph.gaps[gaps_before:]) or (
+            len(graph.nodes) >= min(limits[0], before[0] + 1000) and "Capture entity budget reached" in graph.gaps
+            or len(graph.edges) >= min(limits[1], before[1] + 2000)
+            and "Capture relationship budget reached" in graph.gaps
+        )
+        graph.analysis[-1]["publication_limited"] = publication_limited
+        graph.analysis[-1]["budget_limited"] = graph.analysis[-1].get("budget_limited", False) or publication_limited
     graph.nodes[page]["analysis_details"] = json.dumps(graph.analysis, sort_keys=True)
 
 
 def _apply_javascript(graph, page, filename, result, reference, contexts):
     analysis = {**result.get("analysis", {"mode": "full"}), "source_path": filename}
-    if filename == graph.url and not analysis.get("library"):
-        analysis["library"] = recognized_library(graph.event["data"].get("response_body") or "")
     graph.analysis.append(analysis)
     symbols = {}
     bundle_url = javascript_url_from_map(graph.url) or graph.url
@@ -459,6 +466,7 @@ def _apply_javascript(graph, page, filename, result, reference, contexts):
     graph.nodes[page]["context_urls"] = [context["url"] for context in contexts]
     graph.nodes[page]["analysis_details"] = json.dumps(graph.analysis, sort_keys=True)
     origins = {f"{urlsplit(context['base']).scheme}://{urlsplit(context['base']).netloc}" for context in contexts}
+    containments = []
     for item in result.get("nodes", []):
         import_url = item.get("import_url")
         if import_url:
@@ -497,6 +505,7 @@ def _apply_javascript(graph, page, filename, result, reference, contexts):
             export_names=item.get("export_names") or ([item["reexport_name"]] if item.get("reexport_name") else None),
             parameter_index=item.get("parameter_index"),
             return_value=item.get("return_value"),
+            callback_boundary=item.get("callback_boundary"),
             selector=item.get("selector"),
             form_data=item.get("form_data"),
             form_field=item.get("form_field"),
@@ -505,14 +514,16 @@ def _apply_javascript(graph, page, filename, result, reference, contexts):
             context_urls=[context["url"] for context in contexts],
             capture_id=None if item.get("kind") == "storage" else graph.event["id"],
         )
-        graph.fact(
-            page,
-            symbols[item["id"]],
-            "CONTAINS",
-            "js.symbol",
-            location=f"{filename}:{item.get('location', '')}",
-            snippet=item.get("snippet", ""),
-        )
+        containments.append(item)
+        if analysis["mode"] != "summary":
+            graph.fact(
+                page,
+                symbols[item["id"]],
+                "CONTAINS",
+                "js.symbol",
+                location=f"{filename}:{item.get('location', '')}",
+                snippet=item.get("snippet", ""),
+            )
     for edge in result.get("edges", []):
         if edge["source"] in symbols and edge["target"] in symbols:
             graph.fact(
@@ -523,6 +534,21 @@ def _apply_javascript(graph, page, filename, result, reference, contexts):
                 classification="statically_inferred",
                 location=f"{filename}:{edge.get('location', '')}",
                 snippet=edge.get("snippet", ""),
+                **{
+                    key: edge[key]
+                    for key in ("original_hops", "endpoint_locations", "witness", "summary_notice")
+                    if key in edge
+                },
+            )
+    if analysis["mode"] == "summary":
+        for item in containments:
+            graph.fact(
+                page,
+                symbols[item["id"]],
+                "CONTAINS",
+                "js.symbol",
+                location=f"{filename}:{item.get('location', '')}",
+                snippet=item.get("snippet", ""),
             )
     for item in result.get("references", []):
         source = symbols.get(item.get("source"), page)

@@ -230,12 +230,22 @@ class GraphStore:
 
         GraphPublisher(self).cleanup()
 
+    def activity(self) -> dict:
+        """Read the indexed counter advanced atomically by publication activation."""
+        rows = self.read(
+            "MATCH (s:GraphState {id:'publication_revision'}) RETURN s.value AS revision",
+            timeout=2,
+        )
+        return {"publication_revision": rows[0]["revision"] if rows else None}
+
     def statistics(self) -> dict:
         rows = self.read(
             "MATCH (c:GraphCapture) WHERE c.complete=true "
             "RETURN coalesce(c.resource_key,c.id) AS resource_key,coalesce(c.observed_at,0) AS observed_at, "
             "c.entity_estimate AS entity_estimate,c.relationship_estimate AS relationship_estimate, "
-            "c.summarized AS summarized,c.budget_limited AS budget_limited,c.gaps AS gaps, "
-            "c.published_at AS published_at"
+            "c.summarized AS summarized,c.budget_limited AS budget_limited, "
+            "size(coalesce(c.gaps,[])) > 0 AS gaps, "
+            "c.published_at AS published_at",
+            timeout=5,
         )
         return {**summarize_captures(rows), "uri": self.uri}

@@ -10,7 +10,7 @@ from neo4j import unit_of_work
 from neo4j.exceptions import Neo4jError
 
 from shyhurricane.graph.links import LinkPlanner
-from shyhurricane.graph.model import identity
+from shyhurricane.graph.model import identity, projection_snapshot
 from shyhurricane.graph.policy import ANALYZER_VERSION, library_analysis
 from shyhurricane.graph.visibility import visible_node
 
@@ -204,7 +204,9 @@ class GraphPublisher:
         }
         # Validate the small activation payload before creating any staging records.
         list(payload_batches([capture]))
-        links = LinkPlanner(self.store, projection).plan()
+        links = projection.planned_links
+        if links is None:
+            links = LinkPlanner(self.store, projection).plan()
         capture.update(
             entity_estimate=len(projection.nodes),
             relationship_estimate=len(set(projection.edges) | {link["id"] for link in links.values()}),
@@ -213,7 +215,9 @@ class GraphPublisher:
             or any(item.get("budget_limited", False) for item in projection.analysis),
         )
         list(payload_batches([capture]))
-        digest = identity("analysis", capture, projection.nodes, projection.evidence, projection.edges, links)
+        snapshot = projection_snapshot(projection)
+        digest = identity("analysis", capture, snapshot["nodes"], snapshot["evidence"],
+                          projection.edges, snapshot["_context_lists"], links)
         with self.store.connect().session(database="neo4j") as session:
             try:
                 generation, completed = self.begin(session, capture, digest)
