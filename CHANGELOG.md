@@ -1,27 +1,18 @@
 # shyhurricane Change Log
 
-## 0.2.0
+## Unreleased
 
 ### Features
 
+- Add a read-only ingestion recovery exporter for `index.jsonl` and `findings.jsonl`,
+  preferring original `graph_state` captures and supplementing them from Qdrant, with
+  deterministic output and a recovery report describing missing or partial data.
 - Pause ingest, graph, and type-specific indexing on configurable low data-directory disk space,
   with automatic recovery margins. Show cached disk readiness in the terminal monitor and `/status`;
   retrieval reports disk-blocked indexing as paused. Submissions and scan/finding workers continue.
-
-- Add durable, fair continuation jobs for shared-script graph discovery, link planning, and
-  reconciliation. Resume checkpoints after restart, expose context progress in graph status and
-  the monitor, and keep retrieval waits aware of outstanding continuation work.
-
-- Replace terminal graph-size estimates with an indexed Neo4j publication activity gauge showing
-  revision changes, elapsed time since an observed advance, completed analyses, processing, queue
-  depth, and failures. Skip capture and reference statistics scans during monitor refreshes.
-
 - Add opt-in `ENABLE_HEAP_PROFILING` for expensive heap summaries; disable profiling by default,
   independently of diagnostic DEBUG logging. Pass the setting through Docker Compose.
-
-- Add a repository-local `$forensics` skill for investigating runtime tracebacks, correctness,
-  incomplete results, and efficiency using logs, persistent queues, and database artifacts.
-- Replace `--database` and `--graph-database` with `--data-dir`/`DATA_DIR` across the server and
+- Replace `--database` with `--data-dir`/`DATA_DIR` across the server and
   graph maintenance commands. Consolidate local application state, including database storage,
   queues, certificates, logs, tool results, and session work. Preserve automatic `/data` detection,
   otherwise use native OS state directories; resolve relative selections beneath that default.
@@ -50,33 +41,16 @@
 
 ### Fixes
 
-- Install HTTPX SOCKS proxy support so configured SOCKS proxies do not fail during client initialization.
-
-- Give the monitor's second row three panels, with graph activity in its own middle panel.
-  Show graph metrics on separate lines and remove redundant graph counts from the queue panel.
-
-- Batch shared-script context lookups, group selectors, and hydrate only matching elements.
-  Bound planning slices and split timed-out reads, retaining irreducible failures with backoff.
-  Preserve atomic graph activation and avoid repeated serialization of shared context arrays.
-
-- Compact monitor graph activity into one line above document counts and remove its separate header.
+- Close the ingestion exporter's Qdrant client explicitly; installed client versions do not
+  support the context manager protocol and previously caused exports to fail before collection reads.
 
 - Reduce monitoring load with five-minute background graph/reference statistics caches, distinct-URL
   reference lookups, five-second Neo4j statistics transactions without retries, and domain/host-only
   Qdrant payload reads. Preserve cached counts and expose reference freshness and refresh errors.
-
-- Show the Neo4j address even when graph statistics fail. Display statistics refresh errors in
-  the monitor and log their full exceptions, preserving cached counts after failures.
-
 - Use batched native Qdrant document-ID lookups for ingestion duplicate checks, avoiding unindexed
   payload scans and preserving document order.
-- Index graph artifact references by capture ID and URL when opening existing or new stores.
-- Select graph link candidates through equality indexes before bounded evidence/context hydration;
-  filter DOM elements before pagination, retain generation visibility, and log planning timings.
-
 - Check pending indexing before treating search targets as absent or offering another scan.
   Preserve an explicit incomplete status when pending content or graph evidence is unavailable.
-
 - Always show the primary Qdrant findings collection count first in dashboard database statistics,
   including when it is zero or outside the top five collections.
 
