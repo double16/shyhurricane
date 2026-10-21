@@ -123,6 +123,15 @@ saved page through this server. Keep tokens private.
 | `deobfuscate_javascript`                    | 8,192 characters    | Complete transformed script, or original script on failure |
 | `fetch_web_resource_content`                | 4,096 characters    | Existing offset-based retrieval                            |
 
+Domain, host, network-location, and URL inventories use Qdrant keyword-index facets to retrieve
+unique values rather than downloading metadata for every capture. Host and port filters constrain
+URL and network-location retrieval; domain contains, host suffix, and URL path matching retain
+their existing semantics. Complete inventories are collected before saved-page pagination, so
+`limit` controls page size rather than database work. Each facet request has a 10-second deadline;
+query execution is separate from the indexing wait. DEBUG logs report facet timings and value counts.
+Existing collections acquire missing indexes at document-store initialization, including the integer
+port index. No document reingestion is required.
+
 List `limit` arguments control page size and accept 1–1,000. `find_web_resources` separately accepts
 `retrieval_limit` from 1–1,000; `pagination.retrieval_truncated` reports when additional matches were
 excluded by that cap. Narrow the query to retrieve other matches. Cached spider responses similarly

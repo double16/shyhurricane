@@ -483,11 +483,12 @@ async def test_indexing_wait_progress_on_http_transports(
     monkeypatch.setattr(metadata, "log_tool_history", AsyncMock())
     context.qdrant_client = object()
 
-    async def records(**kwargs):
+    async def facets(client, key, filters):
         assert queue.size == 0
-        yield SimpleNamespace(payload={"meta": {"url": "https://example.com/app", "host": "example.com"}})
+        value = "example.com" if key == "meta.host" else "https://example.com/app"
+        return [SimpleNamespace(value=value, count=1)]
 
-    monkeypatch.setattr(metadata, "scroll_qdrant_collection", records)
+    monkeypatch.setattr(metadata, "facet_qdrant_values", facets)
     server.add_tool(metadata.find_urls)
     updates = []
     finish = None

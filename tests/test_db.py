@@ -375,6 +375,7 @@ def test_create_qdrant_store_client_and_list_collections(monkeypatch):
     assert created["timeout"] == 17
     assert created["use_sparse_embeddings"] is True
     assert {"field_name": "meta.url", "field_schema": "keyword"} in created["payload_fields_to_index"]
+    assert {"field_name": "meta.port", "field_schema": "integer"} in created["payload_fields_to_index"]
     for name, kind in [("timestamp_float", "float"), ("normalized", "bool"),
                        ("targets", "keyword"), ("runtime_ts", "float")]:
         assert {"field_name": f"meta.{name}", "field_schema": kind} in created["payload_fields_to_index"]

@@ -222,6 +222,45 @@ async def scroll_qdrant_collection(
             yield record
 
 
+async def facet_qdrant_values(
+        qdrant_client, key: str, filters: qm.Filter, *, timeout: int = 10, repair_index: bool = False,
+):
+    """Enumerate complete exact facets, preserving raw values for subsequent indexed filters."""
+    started = asyncio.get_running_loop().time()
+    requests = 0
+    limit = 256
+    repaired = False
+    while True:
+        try:
+            async with asyncio.timeout(timeout):
+                requests += 1
+                response = await qdrant_client.facet(
+                    collection_name="network", key=key, facet_filter=filters,
+                    limit=limit, exact=True, timeout=timeout,
+                )
+        except UnexpectedResponse as error:
+            missing_index = f"No appropriate index for faceting: `{key}`".encode()
+            if not repair_index or repaired or error.status_code != 400 or missing_index not in error.content:
+                raise
+            # Haystack only creates configured payload indexes for new collections.
+            # Upgrade an existing collection without recreating it or scanning its points.
+            logger.info("Creating missing Qdrant facet index network.%s", key)
+            async with asyncio.timeout(timeout):
+                await qdrant_client.create_payload_index(
+                    collection_name="network", field_name=key,
+                    field_schema=qm.PayloadSchemaType.KEYWORD, wait=True, timeout=timeout,
+                )
+            repaired = True
+            continue
+        if len(response.hits) < limit:
+            logger.debug(
+                "Qdrant facet key=%s requests=%d values=%d elapsed=%.3fs",
+                key, requests, len(response.hits), asyncio.get_running_loop().time() - started,
+            )
+            return response.hits
+        limit *= 2
+
+
 async def get_domain_and_host_counts(
         qdrant_client: AsyncQdrantClient, version: int
 ) -> tuple[dict[str, int], dict[str, int]]:
@@ -229,37 +268,13 @@ async def get_domain_and_host_counts(
         must=[qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=version))]
     )
     async def counts(key: str) -> dict[str, int]:
-        limit = 256
-        repaired = False
-        while True:
-            try:
-                async with asyncio.timeout(5):
-                    response = await qdrant_client.facet(
-                        collection_name="network", key=key, facet_filter=filters,
-                        limit=limit, exact=True, timeout=5,
-                    )
-            except UnexpectedResponse as error:
-                missing_index = f"No appropriate index for faceting: `{key}`".encode()
-                if repaired or error.status_code != 400 or missing_index not in error.content:
-                    raise
-                # Haystack only creates configured payload indexes for new collections.
-                # Upgrade an existing collection without recreating it or scanning its points.
-                logger.info("Creating missing Qdrant facet index network.%s", key)
-                async with asyncio.timeout(5):
-                    await qdrant_client.create_payload_index(
-                        collection_name="network", field_name=key,
-                        field_schema=qm.PayloadSchemaType.KEYWORD, wait=True, timeout=5,
-                    )
-                repaired = True
-                continue
-            if len(response.hits) < limit:
-                result: dict[str, int] = {}
-                for hit in response.hits:
-                    if isinstance(hit.value, str) and hit.value:
-                        value = hit.value.lower()
-                        result[value] = result.get(value, 0) + hit.count
-                return result
-            limit *= 2
+        hits = await facet_qdrant_values(qdrant_client, key, filters, timeout=5, repair_index=True)
+        result: dict[str, int] = {}
+        for hit in hits:
+            if isinstance(hit.value, str) and hit.value:
+                value = hit.value.lower()
+                result[value] = result.get(value, 0) + hit.count
+        return result
 
     # A deadline also bounds expansion for high-cardinality fields and callers outside the UI.
     tasks = [asyncio.create_task(counts(key)) for key in ("meta.domain", "meta.host")]
@@ -282,6 +297,7 @@ def create_qdrant_document_store(db: str, **kwargs) -> QdrantDocumentStore:
         {"field_name": "meta.url", "field_schema": "keyword"},
         {"field_name": "meta.netloc", "field_schema": "keyword"},
         {"field_name": "meta.host", "field_schema": "keyword"},
+        {"field_name": "meta.port", "field_schema": "integer"},
         {"field_name": "meta.domain", "field_schema": "keyword"},
         {"field_name": "meta.content_type", "field_schema": "keyword"},
         {"field_name": "meta.status_code", "field_schema": "integer"},
