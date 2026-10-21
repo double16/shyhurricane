@@ -153,3 +153,30 @@ def test_deadline_read_rejects_invalid_timeout_before_connecting(monkeypatch, ti
     with pytest.raises(ValueError, match="finite and positive"):
         store.read("RETURN 1", timeout=timeout)
     connect.assert_not_called()
+
+
+def test_budget_read_metadata_and_cancellation_termination(monkeypatch):
+    from shyhurricane.graph.budget import QueryBudget
+
+    driver = MagicMock()
+    session = driver.session.return_value.__enter__.return_value
+    tx = session.begin_transaction.return_value.__enter__.return_value
+    request = QueryBudget()
+    store = GraphStore("bolt://localhost:7687")
+    monkeypatch.setattr(store, "connect", lambda: driver)
+
+    def run(*args, **kwargs):
+        assert request.terminate is not None
+        session.run.return_value = MagicMock()
+        session.run.return_value.__iter__.return_value = iter([{"transactionId": "neo4j-42"}])
+        request.cancel()
+        return [{"value": 1}]
+
+    tx.run.side_effect = run
+    assert request.read(store, "RETURN 1") == [{"value": 1}]
+    assert session.begin_transaction.call_args.kwargs["metadata"] == {"graph_request": request.request_id}
+    assert request.terminate is None
+    assert any("TERMINATE TRANSACTIONS" in str(call.args[0]) for call in session.run.call_args_list)
+    session.run.return_value = []
+    store.terminate_read(request.request_id)
+    assert "SHOW TRANSACTIONS" in str(session.run.call_args.args[0])

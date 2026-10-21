@@ -6,6 +6,7 @@ import pytest
 from haystack import Document
 
 import shyhurricane.index.web_resources as web_resources
+from shyhurricane.index.web_resources_pipeline import IngestMultiStore
 
 
 @pytest.fixture(autouse=True)
@@ -307,7 +308,12 @@ def test_doc_type_worker_success_failure_and_bad_state(monkeypatch):
 
     def run(data):
         if data["input"]["documents"][0] is second:
-            raise RuntimeError("failed")
+            store = Mock(timeout=5)
+            store.write_documents.side_effect = TimeoutError("write failed")
+            IngestMultiStore({"content": store}).run([
+                Document(content="bad", id="bad", meta={"type": "content"})
+            ])
+            raise AssertionError("failed write must propagate")
         return {}
 
     pipeline.run = run

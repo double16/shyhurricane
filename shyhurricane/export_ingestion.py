@@ -16,10 +16,28 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from shyhurricane.data_paths import add_data_dir_argument, qdrant_location, resolve_data_dir
+from shyhurricane.graph.artifact_paths import resolve_artifact_path
 
 
 class GraphBackupTimeout(TimeoutError):
     """The consistent graph metadata snapshot exceeded its configured deadline."""
+
+
+class Progress:
+    """Emit bounded, content-free progress; library callers are silent by default."""
+
+    def __init__(self, sink=None):
+        self.sink = sink
+        self.started = time.perf_counter() if sink is not None else 0
+        self.last_update = self.started
+
+    def __call__(self, message, *, force=False):
+        if self.sink is None:
+            return
+        now = time.perf_counter()
+        if force or now - self.last_update >= 5:
+            self.sink(f"[{now - self.started:.1f}s] {message}")
+            self.last_update = now
 
 
 def positive_seconds(value):
@@ -29,21 +47,25 @@ def positive_seconds(value):
     return seconds
 
 
-def snapshot_graph_metadata(path, destination, timeout_seconds):
+def snapshot_graph_metadata(path, destination, timeout_seconds, *, progress=None):
     """Copy committed graph metadata, including WAL, without changing the live database."""
     deadline = time.monotonic() + timeout_seconds
+    reporter = progress or Progress()
+    reporter("Backing up graph metadata", force=True)
 
-    def progress(_status, remaining, total):
+    def on_backup(_status, remaining, total):
         if time.monotonic() > deadline:
             raise GraphBackupTimeout(
                 f"Graph metadata backup exceeded {timeout_seconds:g} seconds "
                 f"({total - remaining}/{total} pages copied). "
                 "Increase --graph-backup-timeout-seconds or pause ingestion and retry."
             )
+        reporter(f"Backing up graph metadata: {total - remaining:,}/{total:,} pages copied")
 
     with closing(sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=1)) as source:
         with closing(sqlite3.connect(destination)) as snapshot:
-            source.backup(snapshot, pages=256, progress=progress, sleep=0.05)
+            source.backup(snapshot, pages=256, progress=on_backup, sleep=0.05)
+    reporter("Graph metadata backup complete", force=True)
 
 
 def open_qdrant(**kwargs):
@@ -158,9 +180,10 @@ def compatible_headers(left, right, *, unknown=False):
 
 
 class Exporter:
-    def __init__(self, workspace, report):
+    def __init__(self, workspace, report, *, progress=None):
         self.workspace = workspace
         self.report = report
+        self.progress = progress or Progress()
         self.db = sqlite3.connect(workspace / "staging.sqlite")
         self.db.executescript(
             "CREATE TABLE inputs (grp TEXT, kind TEXT, record TEXT, hash TEXT, source_id TEXT);"
@@ -191,15 +214,17 @@ class Exporter:
         path = graph_root / "artifacts.sqlite"
         if not path.exists():
             self.report["warnings"].append("graph_state/artifacts.sqlite is missing")
+            self.progress("Graph captures unavailable: metadata database missing", force=True)
             return
         destination = self.workspace / "captures.sqlite"
-        snapshot_graph_metadata(path, destination, backup_timeout_seconds)
+        snapshot_graph_metadata(path, destination, backup_timeout_seconds, progress=self.progress)
+        self.progress("Reading graph captures", force=True)
+        seen = 0
         with closing(sqlite3.connect(f"{destination.as_uri()}?mode=ro", uri=True)) as snapshot:
             for identifier, stored_path in snapshot.execute("SELECT id,path FROM captures ORDER BY id"):
+                seen += 1
                 try:
-                    stored = Path(stored_path)
-                    # Artifacts may have been copied from a different container mount.
-                    candidate = graph_root / stored.name
+                    candidate = resolve_artifact_path(graph_root, stored_path)
                     if not candidate.is_file():
                         raise ValueError("Missing artifact")
                     if not candidate.resolve().is_relative_to(graph_root.resolve()):
@@ -214,18 +239,26 @@ class Exporter:
                     self.add(kind, katana(event["data"]), identifier)
                 except (OSError, ValueError, KeyError, TypeError, AttributeError):
                     self.issue("graph", identifier, "Missing or invalid capture artifact")
+                self.progress(f"Reading graph captures: {seen:,} processed; {self.report['skipped_records']:,} skipped")
+        self.progress(
+            f"Graph captures complete: {seen:,} processed; {self.report['skipped_records']:,} skipped", force=True
+        )
 
     def qdrant(self, client):
         for kind in ("content", "network", "forms", "finding"):
+            self.progress(f"Reading Qdrant {kind}", force=True)
             if not client.collection_exists(kind):
                 self.report["missing_collections"].append(kind)
+                self.progress(f"Qdrant {kind}: collection missing", force=True)
                 continue
             offset = None
+            seen = 0
             while True:
                 records, offset = client.scroll(
                     collection_name=kind, offset=offset, limit=100, with_payload=True, with_vectors=False
                 )
                 for point in records:
+                    seen += 1
                     try:
                         payload = point.payload or {}
                         meta = payload["meta"]
@@ -248,8 +281,10 @@ class Exporter:
                         self.add(kind, katana(data), point.id, meta.get("content_sha256"))
                     except (ValueError, KeyError, TypeError, AttributeError):
                         self.issue(kind, point.id, "Invalid Qdrant payload")
+                self.progress(f"Reading Qdrant {kind}: {seen:,} records processed")
                 if offset is None:
                     break
+            self.progress(f"Qdrant {kind} complete: {seen:,} records processed", force=True)
 
     def finding(self, identifier, payload, meta):
         host = meta.get("host") or meta.get("domain")
@@ -307,7 +342,10 @@ class Exporter:
             yield kind, json.loads(serialized), body_hash
 
     def reconcile(self):
+        self.progress("Reconciling captures and removing duplicates", force=True)
+        seen = 0
         for (group,) in self.db.execute("SELECT DISTINCT grp FROM inputs ORDER BY grp"):
+            seen += 1
             counts = dict(self.db.execute("SELECT kind,count(*) FROM inputs WHERE grp=? GROUP BY kind", (group,)))
             for _, record, _ in self.inputs(group, ("graph",)):
                 self.emit(record)
@@ -354,6 +392,10 @@ class Exporter:
             remaining = self.db.execute("SELECT count(*) FROM output WHERE grp=?", (group,)).fetchone()[0]
             if counts.get("content", 0) > 1 or (counts.get("forms", 0) and remaining > 1):
                 self.report["ambiguous_groups"] += 1
+            self.progress(f"Reconciling captures: {seen:,} groups processed; {self.report['duplicates']:,} duplicates")
+        self.progress(
+            f"Reconciliation complete: {seen:,} groups processed; {self.report['duplicates']:,} duplicates", force=True
+        )
 
     def write(self, directory):
         self.reconcile()
@@ -361,25 +403,34 @@ class Exporter:
             ("index.jsonl", "SELECT record FROM output ORDER BY stamp,hash"),
             ("findings.jsonl", "SELECT record FROM findings ORDER BY id"),
         ):
+            self.progress(f"Writing {filename}", force=True)
+            seen = 0
             with open(directory / filename, "x", encoding="utf-8", opener=private_open) as stream:
                 for (record,) in self.db.execute(query):
                     stream.write(f"{record}\n")
+                    seen += 1
+                    self.progress(f"Writing {filename}: {seen:,} records")
+            self.progress(f"Finished {filename}: {seen:,} records", force=True)
         self.report["output_records"] = {
             "index": self.db.execute("SELECT count(*) FROM output").fetchone()[0],
             "findings": self.db.execute("SELECT count(*) FROM findings").fetchone()[0],
         }
         # Stream potentially large provenance/issue lists rather than collecting them in RAM.
+        self.progress("Writing export-report.json", force=True)
         with open(directory / "export-report.json", "x", encoding="utf-8", opener=private_open) as stream:
             stream.write(canonical(self.report)[:-1])
             for name, query in (
                 ("issues", "SELECT record FROM issues"),
                 ("finding_provenance", "SELECT provenance FROM findings ORDER BY id"),
             ):
+                seen = 0
                 stream.write(f',"{name}":[')
                 separator = ""
                 for (record,) in self.db.execute(query):
                     stream.write(f"{separator}{record}")
                     separator = ","
+                    seen += 1
+                    self.progress(f"Writing report {name}: {seen:,} records")
                 stream.write("]")
             stream.write("}\n")
 
@@ -398,11 +449,13 @@ def private_open(path, flags):
     return os.open(path, flags, 0o600)
 
 
-def export(root, output, *, qdrant_url=None, graph_only=False, graph_backup_timeout_seconds=300):
+def export(root, output, *, qdrant_url=None, graph_only=False, graph_backup_timeout_seconds=300, progress=None):
     graph_backup_timeout_seconds = positive_seconds(graph_backup_timeout_seconds)
     root, output = Path(root).resolve(), Path(output).absolute()
     if output.exists():
         raise FileExistsError("Output directory already exists")
+    progress = progress or Progress()
+    progress("Starting ingestion export", force=True)
     report = {
         "started_at": datetime.now(timezone.utc).isoformat(),
         "data_dir": str(root),
@@ -424,10 +477,11 @@ def export(root, output, *, qdrant_url=None, graph_only=False, graph_backup_time
         workspace = Path(temporary)
         published = workspace / "result"
         published.mkdir(mode=0o700)
-        exporter = Exporter(workspace, report)
+        exporter = Exporter(workspace, report, progress=progress)
         try:
             exporter.graph(root, backup_timeout_seconds=graph_backup_timeout_seconds)
             if not graph_only:
+                progress("Locating Qdrant endpoint", force=True)
                 url = endpoint(root, qdrant_url)
                 # Store no URL credentials/query strings in the report.
                 parsed = urlsplit(url)
@@ -440,6 +494,7 @@ def export(root, output, *, qdrant_url=None, graph_only=False, graph_backup_time
                     exporter.qdrant(client)
             report["completed_at"] = datetime.now(timezone.utc).isoformat()
             exporter.write(published)
+            progress("Publishing export files", force=True)
             # mkdir reserves the destination and refuses races with other exporters.
             output.mkdir(mode=0o700)
             try:
@@ -449,6 +504,11 @@ def export(root, output, *, qdrant_url=None, graph_only=False, graph_backup_time
                 raise
         finally:
             exporter.db.close()
+    progress(
+        f"Export complete: {report['output_records']['index']:,} HTTP exchanges; "
+        f"{report['output_records']['findings']:,} findings; {report['skipped_records']:,} skipped",
+        force=True,
+    )
     return 2 if report["skipped_records"] else 0
 
 
@@ -458,6 +518,7 @@ def main(argv=None):
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--qdrant-url", help="Existing Qdrant HTTP(S) endpoint")
     parser.add_argument("--graph-only", action="store_true", help="Recover graph artifacts without Qdrant")
+    parser.add_argument("--quiet", action="store_true", help="Suppress progress messages; errors still go to stderr")
     parser.add_argument(
         "--graph-backup-timeout-seconds",
         type=positive_seconds,
@@ -472,6 +533,7 @@ def main(argv=None):
             qdrant_url=args.qdrant_url,
             graph_only=args.graph_only,
             graph_backup_timeout_seconds=args.graph_backup_timeout_seconds,
+            progress=Progress(None if args.quiet else lambda message: print(message, file=sys.stderr, flush=True)),
         )
     except GraphBackupTimeout as error:
         # This message is generated locally from numeric progress, never captured content.

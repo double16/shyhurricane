@@ -222,6 +222,8 @@ def test_tty_and_shutdown_keep_file_logging_active(tmp_path, capsys):
 
 
 def write_spawned_log(destination, number):
+    from qdrant_client.http.exceptions import ResponseHandlingException
+
     logging_config.configure_file_logging(destination, console_enabled=False)
     logger = logging.getLogger(f"spawned-worker-{number}")
     logger.debug("worker debug %s", number)
@@ -231,6 +233,10 @@ def write_spawned_log(destination, number):
         raise RuntimeError(f"worker traceback {number}")
     except RuntimeError:
         logger.exception("worker failed %s", number)
+    try:
+        raise ResponseHandlingException(ConnectionError("Qdrant unavailable"))
+    except ResponseHandlingException:
+        logger.exception("worker Qdrant failed %s", number)
 
 
 def test_spawned_workers_append_to_same_destination(tmp_path):
@@ -247,6 +253,8 @@ def test_spawned_workers_append_to_same_destination(tmp_path):
         for number in range(2):
             assert f"worker debug {number}" in text
             assert f"RuntimeError: worker traceback {number}" in text
+            assert f"worker Qdrant failed {number} (ResponseHandlingException): Qdrant unavailable" in text
+        assert text.count("Traceback (most recent call last)") == 2
         assert "worker driver payload" not in text
         assert text.count("worker driver warning") == 2
     finally:
@@ -274,3 +282,63 @@ async def test_mcp_tool_failure_traceback_reaches_log_file(tmp_path):
     assert "broken_tool" in text
     assert "Traceback (most recent call last)" in text
     assert "RuntimeError: original tool failure" in text
+
+
+@pytest.mark.parametrize("file_enabled", [False, True])
+@pytest.mark.parametrize("store_error", [False, True])
+def test_qdrant_transport_exception_is_one_line_in_all_outputs(tmp_path, capsys, file_enabled, store_error):
+    from haystack_integrations.document_stores.qdrant.document_store import QdrantStoreError
+    from qdrant_client.http.exceptions import ResponseHandlingException
+
+    error = (
+        QdrantStoreError(
+            "Error when calling QdrantDocumentStore.count_documents_async(): "
+            "Server disconnected without sending a response.\r\nRetry later."
+        )
+        if store_error
+        else ResponseHandlingException(ConnectionError("connection\r\nrefused"))
+    )
+    root = logging.getLogger()
+    root.handlers = [logging.StreamHandler()]
+    logger = logging.getLogger("qdrant-transport-test")
+    logger.setLevel(logging.WARNING)
+    path = tmp_path / "qdrant.log"
+    destination = str(path) if file_enabled else None
+    logging_config.configure_file_logging(destination)
+    logging_config.configure_file_logging(destination)
+    try:
+        try:
+            raise ConnectionError("underlying transport failure")
+        except ConnectionError as cause:
+            raise error from cause
+    except (ResponseHandlingException, QdrantStoreError):
+        logger.exception("Query %s\nfailed", "count", stack_info=True)
+    outputs = [capsys.readouterr().err]
+    if file_enabled:
+        outputs.append(path.read_text())
+    for output in outputs:
+        assert len(output.splitlines()) == 1
+        assert f"Query count failed ({type(error).__name__}): {' '.join(str(error).split())}" in output
+        assert "Traceback" not in output
+        assert "underlying transport failure" not in output
+    for handler in root.handlers:
+        assert sum(isinstance(item, logging_config.QdrantExceptionFilter) for item in handler.filters) == 1
+
+
+def test_qdrant_filter_clears_cached_traceback_and_preserves_other_errors():
+    from qdrant_client.http.exceptions import ResponseHandlingException
+
+    filter_ = logging_config.QdrantExceptionFilter()
+    error = ResponseHandlingException(TimeoutError("timed out"))
+    record = logging.LogRecord("test", logging.WARNING, __file__, 1, "operation failed", (), (type(error), error, None))
+    record.exc_text = "previously formatted traceback"
+    assert filter_.filter(record)
+    assert record.exc_info is None and record.exc_text is None
+    assert "ResponseHandlingException" in record.getMessage()
+    for exception in (None, ValueError("unexpected error")):
+        info = (type(exception), exception, None) if exception else None
+        other = logging.LogRecord("test", logging.ERROR, __file__, 1, "other %s", ("failure",), info)
+        assert filter_.filter(other)
+        assert other.exc_info is info
+        assert other.msg == "other %s"
+        assert other.args == ("failure",)

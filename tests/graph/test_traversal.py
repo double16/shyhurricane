@@ -113,7 +113,7 @@ def test_frontier_adjacency_cache_and_deadline_preserve_complete_paths(applicati
     reader.read = record
     reader.expand([source], "forward", FLOW_KINDS)
     assert not calls
-    reader.started -= 121
+    reader.budget.deadline -= 121
     assert not reader.read("expired")
     assert reader.stopped
     reader.expand([source], "forward", FLOW_KINDS)
@@ -178,7 +178,7 @@ def test_frontier_database_failure_handling(application, kind, monkeypatch):
         if kind == "ids" and len(parameters["ids"]) == 1 or kind == "limit" and parameters["limit"] == 1:
             return [{"ok": True}]
         if kind == "timeout":
-            reader.started -= 121
+            reader.budget.deadline -= 121
         code = {
             "syntax": "Neo.ClientError.Statement.SyntaxError",
             "timeout": "Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration",

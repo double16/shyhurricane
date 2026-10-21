@@ -1,6 +1,10 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 
 import shyhurricane.mcp_server.tools.find_indexed_metadata as metadata
+from shyhurricane.db import scroll_qdrant_collection
 
 
 class Record:
@@ -59,6 +63,19 @@ async def test_find_domains_filters_contains_query(indexed_metadata):
     assert result.query == "example"
     assert result.domains == ["example.com"]
     assert result.instructions.startswith("These are indexed domains")
+
+
+@pytest.mark.asyncio
+async def test_domain_inventory_includes_domain_after_first_thousand_records(indexed_metadata, monkeypatch):
+    client = SimpleNamespace(scroll=AsyncMock(side_effect=[
+        ([Record({"domain": "first.test"}) for _ in range(1000)], 999),
+        ([Record({"domain": "last.test"})], None),
+    ]))
+    monkeypatch.setattr(ServerContext, "qdrant_client", client)
+    monkeypatch.setattr(metadata, "scroll_qdrant_collection", scroll_qdrant_collection)
+    result = await metadata.find_domains(None)
+    assert result.domains == ["first.test", "last.test"]
+    assert client.scroll.await_count == 2
 
 
 @pytest.mark.asyncio

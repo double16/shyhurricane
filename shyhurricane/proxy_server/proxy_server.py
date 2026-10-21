@@ -111,7 +111,8 @@ class ContentStore:
                 )
                 metadatas = []
                 async for record in scroll_qdrant_collection(qdrant_client=self.qdrant_client, index="content",
-                                                             scroll_filter=filters, fields=["meta"]):
+                                                             scroll_filter=filters, fields=["meta"],
+                                                             newest_limit=1000):
                     if len(metadatas) >= 1000:
                         break
                     metadatas.append(record.payload["meta"])
@@ -134,7 +135,8 @@ class ContentStore:
                 )
                 metadatas = []
                 async for record in scroll_qdrant_collection(qdrant_client=self.qdrant_client, index="content",
-                                                             scroll_filter=filters, fields=["meta"]):
+                                                             scroll_filter=filters, fields=["meta"],
+                                                             newest_limit=10000):
                     if len(metadatas) >= 10000:
                         break
                     metadatas.append(record.payload["meta"])

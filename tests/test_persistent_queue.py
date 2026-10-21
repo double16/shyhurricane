@@ -50,6 +50,36 @@ class FakeQueue:
         self.shrink_calls += 1
 
 
+@pytest.mark.parametrize("stop_on_claim", [False, True])
+def test_raw_queue_receipts_preserve_sentinel_and_shutdown_handling(tmp_path, monkeypatch, stop_on_claim):
+    queue = SQLiteAckQueue(str(tmp_path / "raw-queue"), auto_commit=True)
+    stop = Event()
+    if not stop_on_claim:
+        queue.put(None)
+    queue.put({"id": "work"})
+    get = queue.get
+
+    def claim(**kwargs):
+        receipt = get(**kwargs)
+        if stop_on_claim:
+            stop.set()
+        return receipt
+
+    monkeypatch.setattr(queue, "get", claim)
+    items = persistent_queue.persistent_queue_get(queue, stop_event=stop, raw=True)
+    if stop_on_claim:
+        assert list(items) == []
+        assert queue.ready_count() == 1
+    else:
+        receipt = next(items)
+        assert receipt["data"] == {"id": "work"}
+        assert queue.acked_count() == 1
+        queue.ack_failed(receipt)
+        assert queue.ack_failed_count() == 1
+        items.close()
+    queue.close()
+
+
 def test_active_queue_size_uses_total_unacknowledged_count():
     class Queue:
         def active_size(self):

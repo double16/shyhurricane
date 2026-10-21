@@ -1,6 +1,9 @@
+import asyncio
 import json
 import sqlite3
 import subprocess
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from haystack import Document
@@ -162,6 +165,91 @@ async def test_scroll_qdrant_collection_stops_on_none_and_empty_point_id():
     assert [record async for record in db.scroll_qdrant_collection(Client(), "network")] == ["record-1"]
 
 
+@pytest.mark.asyncio
+async def test_scroll_reads_beyond_first_thousand_without_timestamp_ordering():
+    client = SimpleNamespace(scroll=AsyncMock(side_effect=[
+        (list(range(1000)), 999), ([1000, 1001], None),
+    ]))
+    filters = object()
+    records = [record async for record in db.scroll_qdrant_collection(
+        client, "network", fields=["meta.domain"], scroll_filter=filters,
+    )]
+    assert records == list(range(1002))
+    calls = client.scroll.call_args_list
+    assert [call.kwargs["offset"] for call in calls] == [None, 999]
+    assert all(call.kwargs["order_by"] is None for call in calls)
+    assert all(call.kwargs["scroll_filter"] is filters for call in calls)
+    assert all(call.kwargs["with_vectors"] is False for call in calls)
+    client.scroll.side_effect = ConnectionError("offline")
+    with pytest.raises(ConnectionError, match="offline"):
+        _ = [record async for record in db.scroll_qdrant_collection(client, "network")]
+
+
+@pytest.mark.asyncio
+async def test_scroll_empty_and_explicit_newest_sample():
+    client = SimpleNamespace(scroll=AsyncMock(return_value=([], None)))
+    assert [record async for record in db.scroll_qdrant_collection(client, "network")] == []
+    client.scroll.return_value = (["latest"], 123)
+    assert [record async for record in db.scroll_qdrant_collection(client, "content", newest_limit=10000)] == ["latest"]
+    assert client.scroll.call_count == 2
+    kwargs = client.scroll.call_args.kwargs
+    assert kwargs["limit"] == 10000
+    assert kwargs["order_by"].key == "meta.timestamp_float"
+    assert kwargs["order_by"].direction == "desc"
+
+
+@pytest.mark.asyncio
+async def test_facets_expand_until_complete_and_filter_current_version():
+    calls = []
+
+    async def facet(**kwargs):
+        calls.append(kwargs)
+        hits = [SimpleNamespace(value=f"host-{index}.test", count=2) for index in range(600)]
+        return SimpleNamespace(hits=hits[:kwargs["limit"]])
+
+    domains, hosts = await db.get_domain_and_host_counts(SimpleNamespace(facet=facet), 7)
+    assert len(domains) == len(hosts) == 600
+    assert domains["host-599.test"] == 2
+    for key in ("meta.domain", "meta.host"):
+        assert [call["limit"] for call in calls if call["key"] == key] == [256, 512, 1024]
+    assert all(call["facet_filter"].must[0].match.value == 7 for call in calls)
+    assert all(call["timeout"] == 5 and call["exact"] for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_facets_empty_invalid_values_and_dependency_failure():
+    client = SimpleNamespace(facet=AsyncMock(return_value=SimpleNamespace(hits=[
+        SimpleNamespace(value="", count=1), SimpleNamespace(value=4, count=1),
+    ])))
+    assert await db.get_domain_and_host_counts(client, 1) == ({}, {})
+    client.facet.return_value = SimpleNamespace(hits=[])
+    assert await db.get_domain_and_host_counts(client, 1) == ({}, {})
+    client.facet.side_effect = RuntimeError("facet index missing")
+    with pytest.raises(RuntimeError, match="index missing"):
+        await db.get_domain_and_host_counts(client, 1)
+
+
+@pytest.mark.asyncio
+async def test_facets_have_request_and_total_deadlines(monkeypatch):
+    timeout = asyncio.timeout
+    deadlines = []
+
+    def fast_timeout(seconds):
+        deadlines.append(seconds)
+        return timeout(0.01)
+
+    monkeypatch.setattr(db.asyncio, "timeout", fast_timeout)
+    client = SimpleNamespace(facet=AsyncMock(side_effect=lambda **kwargs: None))
+
+    async def blocked(**kwargs):
+        await asyncio.Event().wait()
+
+    client.facet.side_effect = blocked
+    with pytest.raises(TimeoutError):
+        await db.get_domain_and_host_counts(client, 1)
+    assert deadlines == [10, 5, 5]
+
+
 def test_find_available_port_uses_requested_host_and_closes_socket(monkeypatch):
     calls = []
 
@@ -269,7 +357,7 @@ def test_create_qdrant_store_client_and_list_collections(monkeypatch):
 
     monkeypatch.setattr(db, "qdrant_host_port", lambda database: ("host", 6333))
     monkeypatch.setattr(db, "AsyncQdrantClient", Client)
-    monkeypatch.setattr(db, "QdrantDocumentStore", Store)
+    monkeypatch.setattr(db, "IndexedQdrantDocumentStore", Store)
 
     import asyncio
 
@@ -282,6 +370,78 @@ def test_create_qdrant_store_client_and_list_collections(monkeypatch):
     assert created["host"] == "host"
     assert created["port"] == 6333
     assert created["index"] == "content"
+    assert created["timeout"] == 10
+    db.create_qdrant_document_store("db", timeout=17)
+    assert created["timeout"] == 17
     assert created["use_sparse_embeddings"] is True
     assert {"field_name": "meta.url", "field_schema": "keyword"} in created["payload_fields_to_index"]
+    for name, kind in [("timestamp_float", "float"), ("normalized", "bool"),
+                       ("targets", "keyword"), ("runtime_ts", "float")]:
+        assert {"field_name": f"meta.{name}", "field_schema": kind} in created["payload_fields_to_index"]
     assert collections == ["content", "network"]
+
+
+def facet_error(key="meta.domain", status=400):
+    from qdrant_client.http.exceptions import UnexpectedResponse
+
+    return UnexpectedResponse(
+        status_code=status, reason_phrase="Bad Request", headers={},
+        content=json.dumps({"status": {"error": f"Wrong input: No appropriate index for faceting: `{key}`"}}).encode(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_facets_repair_each_missing_index_once():
+    repaired = set()
+
+    async def facet(**kwargs):
+        if kwargs["key"] not in repaired:
+            raise facet_error(kwargs["key"])
+        return SimpleNamespace(hits=[SimpleNamespace(value="Example.COM", count=3)])
+
+    async def create_index(**kwargs):
+        repaired.add(kwargs["field_name"])
+
+    client = SimpleNamespace(facet=AsyncMock(side_effect=facet),
+                             create_payload_index=AsyncMock(side_effect=create_index))
+    assert await db.get_domain_and_host_counts(client, 1) == ({"example.com": 3}, {"example.com": 3})
+    assert repaired == {"meta.domain", "meta.host"}
+    for call in client.create_payload_index.call_args_list:
+        assert call.kwargs["collection_name"] == "network"
+        assert call.kwargs["field_schema"] == db.qm.PayloadSchemaType.KEYWORD
+        assert call.kwargs["wait"] is True and call.kwargs["timeout"] == 5
+    await db.get_domain_and_host_counts(client, 1)
+    assert client.create_payload_index.call_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [facet_error(status=403), facet_error("meta.other")])
+async def test_facets_do_not_repair_unrelated_errors(error):
+    client = SimpleNamespace(facet=AsyncMock(side_effect=error), create_payload_index=AsyncMock())
+    with pytest.raises(type(error)):
+        await db.get_domain_and_host_counts(client, 1)
+    client.create_payload_index.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_facets_stop_after_unsuccessful_repair():
+    async def facet(**kwargs):
+        raise facet_error(kwargs["key"])
+
+    client = SimpleNamespace(facet=AsyncMock(side_effect=facet), create_payload_index=AsyncMock())
+    with pytest.raises(type(facet_error())):
+        await db.get_domain_and_host_counts(client, 1)
+    assert client.create_payload_index.await_count == 2
+    assert client.facet.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_facets_propagate_index_creation_failure():
+    async def facet(**kwargs):
+        raise facet_error(kwargs["key"])
+
+    client = SimpleNamespace(facet=AsyncMock(side_effect=facet),
+                             create_payload_index=AsyncMock(side_effect=PermissionError("read only")))
+    with pytest.raises(PermissionError, match="read only"):
+        await db.get_domain_and_host_counts(client, 1)
+    assert client.facet.await_count == 2

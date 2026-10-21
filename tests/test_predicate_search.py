@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from haystack import Document
@@ -7,6 +8,20 @@ from qdrant_client.local.payload_filters import check_filter
 
 from shyhurricane import predicate_search
 from shyhurricane.search_predicates import Predicate
+
+
+@pytest.mark.asyncio
+async def test_candidate_selection_traverses_all_qdrant_pages():
+    def record(index):
+        return SimpleNamespace(id=index, payload={"meta": {
+            "url": f"https://example.test/{index}", "type": "network", "content_type": "text/html",
+        }})
+
+    client = SimpleNamespace(scroll=AsyncMock(side_effect=[
+        ([record(index) for index in range(1000)], 999), ([record(1000)], None),
+    ]))
+    selected = await predicate_search.select_candidates(client, ["network"], [], qm.Filter(), [], AsyncMock())
+    assert [point_id for point_id, _ in selected["network"]] == list(range(1001))
 
 
 @pytest.mark.asyncio

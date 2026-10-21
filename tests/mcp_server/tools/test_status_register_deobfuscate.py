@@ -1,3 +1,4 @@
+import asyncio
 import json
 from unittest.mock import AsyncMock
 
@@ -62,6 +63,39 @@ async def test_status_aggregates_counts_and_metadata(monkeypatch):
     assert body["queues"] == queue_counts(4, 5)
     assert "index_active" not in body
     assert "type_specific_index_active" not in body
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["count", "facets", "timeout"])
+async def test_status_does_not_publish_partial_qdrant_counts_and_cancels_other_queries(monkeypatch, failure):
+    monkeypatch.setattr(status_tool, "get_server_context", get_status_server_context)
+    monkeypatch.setattr(status_tool, "persistent_queue_counts", AsyncMock(return_value=queue_counts(0, 0)))
+    cancelled = []
+
+    async def blocked():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(True)
+
+    async def count(store):
+        if failure == "count":
+            raise ConnectionError("count failed")
+        return await blocked()
+
+    async def facets(*args):
+        if failure == "facets":
+            raise ConnectionError("facets failed")
+        return await blocked()
+
+    monkeypatch.setattr(status_tool, "bounded_count", count)
+    monkeypatch.setattr(status_tool, "get_domain_and_host_counts", facets)
+    timeout = asyncio.timeout
+    if failure == "timeout":
+        monkeypatch.setattr(asyncio, "timeout", lambda seconds: timeout(0.01))
+    with pytest.raises(TimeoutError if failure == "timeout" else ConnectionError):
+        await status_tool.status(None)
+    assert cancelled
 
 
 @pytest.mark.asyncio

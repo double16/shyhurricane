@@ -109,7 +109,7 @@ def test_restart_and_publication_wait_for_complete_plan(jobs, event):
     assert resumed.ready() is None and resumed.load(key)["stage"] == "complete"
 
 
-def test_failures_backoff_conflict_and_checkpoint_version(jobs, event, monkeypatch):
+def test_transient_failures_keep_retrying_conflicts_replan_and_checkpoint_version(jobs, event, monkeypatch):
     capture = script(event)
     key = jobs.enqueue(capture, capture, False)
     state = jobs.load(key)
@@ -119,17 +119,15 @@ def test_failures_backoff_conflict_and_checkpoint_version(jobs, event, monkeypat
     state.update(stage="planning", projection=projection.__dict__, base_projection=str(base))
     jobs.save(key, state)
     monkeypatch.setattr(LinkPlanner, "plan_slice", MagicMock(side_effect=timeout()))
-    for attempt, delay in enumerate([5, 30, 120]):
+    for attempt, delay in enumerate([5, 30, 120, 120, 120]):
         before = continuations.time.time()
         jobs.step(key, MagicMock())
         row = jobs.connection.execute(
-            "SELECT retries,state,next_attempt,error FROM graph_continuations WHERE id=?", (key,)
+            "SELECT state,retries,next_attempt FROM graph_continuations WHERE id=?", (key,)
         ).fetchone()
-        assert row[0] == attempt + 1 and row[1] == "pending" and row[2] >= before + delay
-        assert "TransactionTimedOut" in row[3] and jobs.ready() is None
-    jobs.step(key, MagicMock())
-    assert jobs.connection.execute("SELECT state FROM graph_continuations").fetchone()[0] == "failed"
-    assert jobs.connection.execute("SELECT status FROM work").fetchone()[0] == "failed"
+        assert row[0] == "pending" and row[1] == attempt + 1 and row[2] >= before + delay
+        assert jobs.ready() is None
+        assert jobs.connection.execute("SELECT status FROM work").fetchone()[0] == "pending"
     monkeypatch.setattr(LinkPlanner, "plan_slice", MagicMock(side_effect=PublicationConflict("stale")))
     jobs.step(key, MagicMock())
     assert "planner" not in jobs.load(key) and jobs.load(key)["stage"] == "planning"
@@ -363,7 +361,7 @@ def test_scheduler_recovery_does_not_requeue_owned_jobs_and_finishes_failed_tick
     assert jobs.connection.execute("SELECT state FROM reanalysis").fetchone()[0] == "running"
     jobs.save(key, jobs.load(key), status="failed")
     scheduler.recover()
-    assert jobs.connection.execute("SELECT state FROM reanalysis").fetchone()[0] == "done"
+    assert jobs.connection.execute("SELECT state FROM reanalysis").fetchone()[0] == "failed"
 
 
 def test_worker_alternates_normal_work_and_continuations(jobs, event, monkeypatch):
@@ -543,3 +541,44 @@ def test_candidate_page_resume_and_timeout_reduction(event):
 
     store.read.side_effect = smaller
     assert len(LinkPlanner(store, planner.graph).candidates("selector", "#search")) == 3
+
+
+def test_relocated_legacy_checkpoints_resume_and_cleanup(jobs, event, monkeypatch):
+    capture = script(event)
+    page = event(body='<script src="/app.js"></script>')
+    jobs.artifacts.register(page)
+    jobs.artifacts.references(page["id"], [capture["data"]["url"]])
+    key = jobs.enqueue(capture, capture, False)
+    checkpoint = jobs.connection.execute("SELECT checkpoint FROM graph_continuations").fetchone()[0]
+    assert checkpoint == jobs.artifacts.resolve(checkpoint).name
+    state = jobs.load(key)
+    projection = jobs.artifacts.write("base", Projection(capture).__dict__)
+    state["base_projection"] = str(projection)
+    jobs.save(key, state)
+    assert jobs.load(key)["base_projection"] == projection.name
+    # Emulate legacy absolute references in both SQLite and the checkpoint JSON.
+    old_root = jobs.artifacts.root
+    checkpoint = jobs.connection.execute("SELECT checkpoint FROM graph_continuations").fetchone()[0]
+    state["base_projection"] = str(projection)
+    jobs.artifacts.resolve(checkpoint).write_text(json.dumps(state))
+    jobs.connection.execute("UPDATE graph_continuations SET checkpoint=?", (str(old_root / checkpoint),))
+    jobs.connection.execute("UPDATE captures SET path=?", (str(old_root / jobs.connection.execute(
+        "SELECT path FROM captures"
+    ).fetchone()[0]),))
+    jobs.connection.commit()
+    jobs.artifacts.close()
+    moved = old_root.with_name("moved")
+    old_root.rename(moved)
+    monkeypatch.chdir(moved.parent)
+    monkeypatch.setattr("shyhurricane.graph.artifacts.persistent_queue_path", lambda *args: moved)
+    jobs.artifacts = ArtifactStore("db")
+    jobs.connection = jobs.artifacts.connection
+    loaded = jobs.load(key)
+    jobs.discover(loaded)
+    assert page["id"] in loaded["contexts"]
+    jobs.save(key, loaded)
+    assert not (moved / checkpoint).exists()
+    assert jobs.load(key)["base_projection"] == projection.name
+    jobs.finish(key, loaded)
+    assert not (moved / projection.name).exists()
+    assert jobs.load(key)["stage"] == "complete"

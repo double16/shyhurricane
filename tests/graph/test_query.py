@@ -13,6 +13,8 @@ class Store:
         self.graph = graph
 
     def read(self, statement, **parameters):
+        if "traversal:lookup-state" in statement:
+            return [{"ready": False}]
         if "traversal:revision" in statement:
             return [{"revision": 0}]
         if "traversal:contexts" in statement:
@@ -148,7 +150,8 @@ def test_evidence_by_id_preserves_public_metadata_without_scope():
         "snippet": "input -> sink",
         "analysis_summaries": [{"status": "complete"}],
     }
-    assert store.read.call_args.kwargs == {"id": "proof"}
+    assert store.read.call_args.kwargs["id"] == "proof"
+    assert 0 < store.read.call_args.kwargs["timeout"] <= 30
 
 
 def test_journeys_exclude_assets_and_return_evidence(event):
@@ -483,7 +486,7 @@ def test_elements_push_filters_into_membership_selection(event, role, context):
 
     store.read = record
     GraphQuery(store).elements("example.com", role=role, context_url=context)
-    statement, parameters = calls[0]
+    statement, parameters = next(call for call in calls if "AS membership_id" in call[0])
     assert parameters["role"] == role
     assert parameters["context_url"] == ("https://example.com/form" if context else None)
     if role is not None or context is not None:

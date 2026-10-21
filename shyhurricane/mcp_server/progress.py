@@ -16,7 +16,11 @@ _P = ParamSpec("_P")
 _R = TypeVar("_R")
 logger = logging.getLogger(__name__)
 PROGRESS_INTERVAL_SECONDS = 20.0
-LONG_RUNNING_TOOLS = frozenset({
+GRAPH_TOOLS = frozenset({
+    "find_application_endpoints", "find_application_elements", "find_application_relationships",
+    "trace_application_data_flow", "find_user_journey_paths", "fetch_application_graph_evidence",
+})
+LONG_RUNNING_TOOLS = GRAPH_TOOLS | frozenset({
     "spider_website",
     "directory_buster",
     "port_scan",
@@ -28,6 +32,7 @@ LONG_RUNNING_TOOLS = frozenset({
 
 class ProgressReporter:
     def __init__(self) -> None:
+        self.interval = PROGRESS_INTERVAL_SECONDS
         self.count = 0
         self.lock = asyncio.Lock()
         self.last_progress = time.monotonic()
@@ -40,10 +45,10 @@ class ProgressReporter:
 
     async def heartbeat(self, ctx: Context | ServerSession, message: str) -> None:
         while True:
-            await asyncio.sleep(max(0, self.last_progress + PROGRESS_INTERVAL_SECONDS - time.monotonic()))
+            await asyncio.sleep(max(0, self.last_progress + self.interval - time.monotonic()))
             failed = False
             async with self.lock:
-                if time.monotonic() - self.last_progress < PROGRESS_INTERVAL_SECONDS:
+                if time.monotonic() - self.last_progress < self.interval:
                     continue
                 self.count += 1
                 try:
@@ -55,7 +60,7 @@ class ProgressReporter:
                     self.last_progress = time.monotonic()
             if failed:
                 # Back off without holding the notification lock or recording delivery.
-                await asyncio.sleep(PROGRESS_INTERVAL_SECONDS)
+                await asyncio.sleep(self.interval)
 
 
 _reporter: ContextVar[ProgressReporter | None] = ContextVar("shyhurricane_progress", default=None)
@@ -68,6 +73,8 @@ async def idle_progress(ctx: Context | ServerSession, tool_name: str) -> AsyncIt
     if tool_name not in LONG_RUNNING_TOOLS or reporter is None:
         yield
         return
+    if tool_name in GRAPH_TOOLS:
+        reporter.interval = 5.0
     task = asyncio.create_task(reporter.heartbeat(ctx, f"{tool_name} is still running"))
     try:
         yield

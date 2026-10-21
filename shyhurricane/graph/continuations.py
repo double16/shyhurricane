@@ -2,18 +2,16 @@
 
 import json
 import logging
-import sqlite3
 import time
-from pathlib import Path
 from uuid import uuid4
 
 from bs4 import BeautifulSoup, SoupStrainer
-from neo4j.exceptions import Neo4jError, ServiceUnavailable, SessionExpired
 
 from shyhurricane.graph.extract import extract
 from shyhurricane.graph.links import LinkPlanner
 from shyhurricane.graph.model import identity, projection_snapshot, restore_projection, web_url
 from shyhurricane.graph.publication import PublicationConflict
+from shyhurricane.graph.retry_policy import transient_neo4j_error
 from shyhurricane.index.javascript_analysis import javascript_url_from_map
 
 logger = logging.getLogger(__name__)
@@ -67,7 +65,7 @@ class Continuations:
             self.connection.execute(
                 "INSERT INTO graph_continuations(id,capture_id,ticket,state,stage,checkpoint,updated_at) "
                 "VALUES (?,?,?,'pending','discovery',?,?)",
-                (key, event["id"], item.get("reanalysis_ticket"), str(path), time.time()),
+                (key, event["id"], item.get("reanalysis_ticket"), self.artifacts.reference(path), time.time()),
             )
         return key
 
@@ -82,26 +80,29 @@ class Continuations:
 
     def load(self, key):
         row = self.connection.execute("SELECT checkpoint FROM graph_continuations WHERE id=?", (key,)).fetchone()
-        state = json.loads(Path(row[0]).read_text())
+        state = json.loads(self.artifacts.resolve(row[0]).read_text())
         if state.get("version") != CHECKPOINT_VERSION:
             raise ValueError("Unsupported graph continuation checkpoint version")
         return state
 
     def save(self, key, state, *, status="pending", error="", delay=0, retries=0):
         old = self.connection.execute("SELECT checkpoint FROM graph_continuations WHERE id=?", (key,)).fetchone()[0]
+        if "base_projection" in state:
+            state["base_projection"] = self.artifacts.reference(state["base_projection"])
         path = self.artifacts.write(f"continuation-{uuid4().hex}", state)
         cursor = state.get("planner", {}).get("cursor", {})
         with self.connection:
             self.connection.execute(
                 "UPDATE graph_continuations SET state=?,stage=?,checkpoint=?,next_attempt=?,retries=?,"
                 "updated_at=?,error=?,contexts_done=?,contexts_total=? WHERE id=?",
-                (status, state["stage"], str(path), time.time() + delay, retries, time.time(), error[:1000],
+                (status, state["stage"], self.artifacts.reference(path), time.time() + delay,
+                 retries, time.time(), error[:1000],
                  cursor.get("context", state.get("contexts_completed", 0)),
                  len(state["contexts"]) if "contexts" in state else state.get("contexts_total", 0), key),
             )
         # A crash before this deletion leaves an unreferenced JSON file, never a lost checkpoint.
         try:
-            Path(old).unlink(missing_ok=True)
+            self.artifacts.resolve(old).unlink(missing_ok=True)
         except OSError:
             logger.warning("Graph checkpoint cleanup deferred: %s", old, exc_info=True)
 
@@ -124,7 +125,7 @@ class Continuations:
             for capture_id, path in rows:
                 if count >= SLICE_CONTEXTS or time.monotonic() >= deadline:
                     return
-                event = json.loads(Path(path).read_text())
+                event = json.loads(self.artifacts.resolve(path).read_text())
                 data = event["data"]
                 headers = {key.lower(): value for key, value in data.get("response_headers", {}).items()}
                 mime = headers.get("content-type", "").lower()
@@ -172,7 +173,10 @@ class Continuations:
                     document_contexts=list(state["contexts"].values()),
                 )
                 base = self.artifacts.write(f"projection-{key}", projection_snapshot(projection))
-                state.update(projection=projection_snapshot(projection), base_projection=str(base), stage="planning")
+                state.update(
+                    projection=projection_snapshot(projection),
+                    base_projection=self.artifacts.reference(base), stage="planning",
+                )
             elif state["stage"] == "planning":
                 projection = restore_projection(state["projection"])
                 planner = LinkPlanner(store, projection)
@@ -199,33 +203,27 @@ class Continuations:
             if planner is not None:
                 state.update(projection=projection_snapshot(planner.graph), planner=planner.checkpoint())
             if isinstance(error, PublicationConflict):
-                state["projection"] = json.loads(Path(state["base_projection"]).read_text())
+                state["projection"] = json.loads(self.artifacts.resolve(state["base_projection"]).read_text())
                 state.pop("planner", None)
                 state["stage"] = "planning"
                 self.save(key, state, error=str(error), delay=5)
-            elif isinstance(error, (ServiceUnavailable, SessionExpired, OSError, sqlite3.OperationalError)) or (
-                isinstance(error, Neo4jError) and (
-                    "TransactionTimedOut" in (error.code or "") or error.is_retryable()
-                    or "ReadOnly" in (error.code or "") or ".Security." in (error.code or "")
-                )
-            ):
-                retries = self.connection.execute(
-                    "SELECT retries FROM graph_continuations WHERE id=?", (key,)
-                ).fetchone()[0]
-                if retries < len(RETRY_DELAYS):
-                    self.save(key, state, error=f"{getattr(error, 'code', type(error).__name__)}: {error}",
-                              delay=RETRY_DELAYS[retries], retries=retries + 1)
-                else:
-                    self.save(
-                        key, state, status="failed",
-                        error=f"{getattr(error, 'code', type(error).__name__)}: {error}", retries=retries,
-                    )
-                    self.artifacts.status(state["event"]["id"], "failed", str(error))
+            elif transient_neo4j_error(error):
+                self.retry(key, state, error)
             else:
                 self.save(key, state, status="failed", error=f"{type(error).__name__}: {error}")
                 self.artifacts.status(state["event"]["id"], "failed", str(error))
             logger.warning("Graph continuation %s retained stage=%s after failure", key, state["stage"], exc_info=True)
         return None
+
+    def retry(self, key, state, error):
+        """Keep transient failures pending with capped backoff until recovery."""
+        retries = self.connection.execute(
+            "SELECT retries FROM graph_continuations WHERE id=?", (key,)
+        ).fetchone()[0]
+        delay = RETRY_DELAYS[min(retries, len(RETRY_DELAYS) - 1)]
+        self.save(key, state, error=f"{type(error).__name__}: {error}",
+                  delay=delay, retries=retries + 1)
+        self.artifacts.status(state["event"]["id"], "pending", str(error))
 
     def finish(self, key, state):
         base = state.get("base_projection")
@@ -237,7 +235,7 @@ class Continuations:
         self.save(key, completed, status="done")
         if base:
             try:
-                Path(base).unlink(missing_ok=True)
+                self.artifacts.resolve(base).unlink(missing_ok=True)
             except OSError:
                 logger.warning("Graph projection cleanup deferred: %s", base, exc_info=True)
         with self.connection:

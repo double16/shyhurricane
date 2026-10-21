@@ -91,9 +91,12 @@ def test_worker_commit_retry_and_retained_failures(graph_paths, event, monkeypat
         health.clear.assert_not_called()
     elif isinstance(failure, (ServiceUnavailable, TransientError)):
         queue.nack.assert_called_once_with(capture)
+        queue.ack.assert_not_called()
+        queue.ack_failed.assert_not_called()
         health.clear.assert_called_once()
     else:
         queue.ack_failed.assert_called_once_with(capture)
+        queue.ack.assert_not_called()
         health.clear.assert_not_called()
     store.close.assert_called()
     queue.close.assert_called_once()
@@ -211,12 +214,13 @@ def test_managed_ticket_success_retry_failure_and_obsolete_delivery(graph_paths,
     artifacts = ArtifactStore("db")
     state = artifacts.connection.execute("SELECT state FROM reanalysis").fetchone()[0]
     artifacts.close()
-    if isinstance(failure, (ServiceUnavailable, TransientError, PublicationConflict)):
+    if isinstance(failure, (PublicationConflict, ServiceUnavailable, TransientError)):
         queue.nack.assert_called_once_with(item)
         assert state == "pending"
     elif failure:
         queue.ack_failed.assert_called_once_with(item)
-        assert state == "done"
+        queue.ack.assert_not_called()
+        assert state == "failed"
     else:
         assert queue.ack.call_count == 2
         assert state == "done"

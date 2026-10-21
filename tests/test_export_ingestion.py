@@ -554,3 +554,132 @@ def test_backup_timeout_library_validation(tmp_path, value):
     with pytest.raises(ValueError, match="finite and greater than zero"):
         ex.export(tmp_path, tmp_path / "out", graph_only=True, graph_backup_timeout_seconds=value)
     assert not (tmp_path / "out").exists()
+
+
+def test_progress_throttles_updates_and_forces_phase_messages(monkeypatch):
+    ticks = iter([10, 10, 11, 15, 15, 16])
+    monkeypatch.setattr(ex.time, "perf_counter", lambda: next(ticks))
+    messages = []
+    progress = ex.Progress(messages.append)
+    progress("Starting", force=True)
+    progress("Too soon")
+    progress("Five seconds")
+    progress("Next phase", force=True)
+    progress("Still too soon")
+    assert messages == ["[0.0s] Starting", "[5.0s] Five seconds", "[5.0s] Next phase"]
+
+
+def test_disabled_progress_does_not_read_clock(monkeypatch):
+    def forbidden():
+        raise AssertionError("Disabled progress should not read the clock")
+
+    monkeypatch.setattr(ex.time, "perf_counter", forbidden)
+    ex.Progress()("Nothing", force=True)
+
+
+def test_cli_progress_covers_phases_counts_and_redacts_content(tmp_path, monkeypatch, capsys):
+    import itertools
+
+    ticks = itertools.count(step=6)
+    monkeypatch.setattr(ex.time, "perf_counter", lambda: next(ticks))
+    root = tmp_path / "data"
+    graph(root, [{"data": capture()}, {"data": {}}])
+    client = client_for(
+        {
+            "content": [point()],
+            "finding": [
+                SimpleNamespace(
+                    id="finding",
+                    payload={"meta": {"host": "example.com", "title": "secret-title"}, "content": "secret-markdown"},
+                )
+            ],
+        }
+    )
+    monkeypatch.setattr(ex, "open_qdrant", lambda **kwargs: client)
+    output = tmp_path / "out"
+    assert (
+        ex.main(
+            ["--data-dir", str(root), "--output-dir", str(output), "--qdrant-url", "http://user:secret@localhost:6333"]
+        )
+        == 2
+    )
+    streams = capsys.readouterr()
+    assert streams.out == ""
+    for expected in (
+        "Starting ingestion export",
+        "Backing up graph metadata:",
+        "pages copied",
+        "Graph metadata backup complete",
+        "Reading graph captures: 2 processed; 1 skipped",
+        "Graph captures complete",
+        "Locating Qdrant endpoint",
+        "Reading Qdrant content",
+        "Qdrant content complete: 1 records processed",
+        "Qdrant network: collection missing",
+        "Qdrant finding complete: 1 records processed",
+        "Reconciling captures:",
+        "Reconciliation complete",
+        "Writing index.jsonl: 1 records",
+        "Finished findings.jsonl: 1 records",
+        "Writing report issues: 1 records",
+        "Writing report finding_provenance: 1 records",
+        "Publishing export files",
+        "Export complete: 1 HTTP exchanges; 1 findings; 1 skipped",
+    ):
+        assert expected in streams.err
+    for secret in ("example.com", "private", "important", "secret-title", "secret-markdown", "user:secret"):
+        assert secret not in streams.err
+    assert len(lines(output / "index.jsonl")) == 1
+    assert len(lines(output / "findings.jsonl")) == 1
+
+
+def test_quiet_and_library_calls_stay_silent_but_errors_remain(tmp_path, capsys):
+    assert ex.export(tmp_path, tmp_path / "library", graph_only=True) == 0
+    assert (
+        ex.main(["--data-dir", str(tmp_path), "--output-dir", str(tmp_path / "quiet"), "--graph-only", "--quiet"]) == 0
+    )
+    assert capsys.readouterr().err == ""
+    assert (
+        ex.main(["--data-dir", str(tmp_path), "--output-dir", str(tmp_path / "quiet"), "--graph-only", "--quiet"]) == 1
+    )
+    assert "Export failed" in capsys.readouterr().err
+
+
+def test_empty_graph_progress_reports_zero_records(tmp_path, capsys):
+    graph(tmp_path, [])
+    assert ex.main(["--data-dir", str(tmp_path), "--output-dir", str(tmp_path / "out"), "--graph-only"]) == 0
+    streams = capsys.readouterr()
+    assert "Graph captures complete: 0 processed; 0 skipped" in streams.err
+    assert "Finished index.jsonl: 0 records" in streams.err
+    assert "Export complete: 0 HTTP exchanges; 0 findings; 0 skipped" in streams.err
+
+
+def test_failed_publish_progress_never_reports_success(tmp_path, monkeypatch, capsys):
+    def fail(*args):
+        raise OSError("sensitive failure details")
+
+    monkeypatch.setattr(ex.os, "replace", fail)
+    output = tmp_path / "out"
+    assert ex.main(["--data-dir", str(tmp_path), "--output-dir", str(output), "--graph-only"]) == 1
+    error = capsys.readouterr().err
+    assert "Publishing export files" in error
+    assert "Export failed" in error
+    assert "Export complete" not in error
+    assert "sensitive failure details" not in error
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("reference_kind", ["relative", "absolute", "external", "traversal"])
+def test_graph_reference_resolution(tmp_path, reference_kind):
+    root = tmp_path / "data"
+    directory = graph(root, [{"data": capture()}])
+    path = directory / "0.json"
+    reference = path.name if reference_kind == "relative" else str(path)
+    if reference_kind in {"external", "traversal"}:
+        external = tmp_path / "0.json"
+        external.write_text(path.read_text())
+        reference = str(external) if reference_kind == "external" else "../../0.json"
+    with closing(sqlite3.connect(directory / "artifacts.sqlite")) as db, db:
+        db.execute("UPDATE captures SET path=?", (reference,))
+    expected = 2 if reference_kind in {"external", "traversal"} else 0
+    assert ex.export(root, tmp_path / "out", graph_only=True) == expected

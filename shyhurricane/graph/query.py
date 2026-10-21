@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 from neo4j.exceptions import Neo4jError
 
+from shyhurricane.graph.budget import QueryBudget
 from shyhurricane.graph.config import graph_timeouts
 from shyhurricane.graph.discovery import INTERPRETATION, ResourceDiscovery, in_context, present
 from shyhurricane.graph.model import FLOW_KINDS, JOURNEY_KINDS, identity, web_url
@@ -48,10 +49,26 @@ def scope_predicate(scope: str):
 
 
 class GraphQuery:
-    def __init__(self, store):
+    def __init__(self, store, *, budget=None):
         self.store = store
+        self.budget = budget or QueryBudget()
 
-    def snapshot(self, scope: str, *, historical=False, as_of: float | None = None, context_url=None, role=None):
+    def read(self, statement, **parameters):
+        return self.budget.read(self.store, statement, **parameters)
+
+    def snapshot(self, scope, **arguments):
+        try:
+            return self._snapshot(scope, **arguments)
+        except (TimeoutError, Neo4jError) as error:
+            if isinstance(error, Neo4jError) and "TransactionTimedOut" not in (error.code or ""):
+                raise
+            return {}, [], {
+                "analysis_gaps": ["Snapshot selection exceeded its query budget; lookup migration may still be pending"],
+                "analysis_summaries": [], "retrieval_truncated": True, "truncation_reasons": ["time_limit"],
+                "instructions": INTERPRETATION,
+            }
+
+    def _snapshot(self, scope: str, *, historical=False, as_of: float | None = None, context_url=None, role=None):
         contains = scope_predicate(scope)
         # Filter membership before the bounded working set is selected. Context archives have
         # no digest; ordinary publications always have one, even after retirement.
@@ -69,7 +86,7 @@ class GraphQuery:
                 "WHERE $context_url IN urls RETURN 1 AS matched })) "
             )
         # Fetch one bounded immutable working set and save result pages after traversal.
-        references = self.store.read(
+        references = self.read(
             "MATCH (c:GraphCapture) WHERE c.complete=true AND ($as_of IS NULL OR c.observed_at <= $as_of) "
             "AND ($historical OR NOT EXISTS { MATCH (newer:GraphCapture) "
             "WHERE newer.complete=true AND newer.resource_key=c.resource_key AND newer.observed_at>c.observed_at "
@@ -156,7 +173,7 @@ class GraphQuery:
         """Hydrate complete membership windows within the immutable-generation grace period."""
         state = {} if state is None else state
         started = state.setdefault("started", time.monotonic())
-        deadline = started + 120
+        deadline = min(started + 120, self.budget.deadline)
         entities, metadata, contexts = (state.setdefault(key, {}) for key in ("entities", "metadata", "contexts"))
         attempted_nodes, attempted_owners, attempted_contexts = (
             state.setdefault(key, set()) for key in ("attempted_nodes", "attempted_owners", "attempted_contexts")
@@ -175,7 +192,7 @@ class GraphQuery:
                 timed_out = True
                 return []
             try:
-                rows = self.store.read(statement, timeout=min(graph_timeouts().read, remaining), **{parameter: list(batch)})
+                rows = self.read(statement, timeout=min(graph_timeouts().read, remaining), **{parameter: list(batch)})
                 if len(rows) < len(batch):
                     unavailable = True
                 logger.debug(
@@ -187,22 +204,28 @@ class GraphQuery:
                     max(0, deadline - time.monotonic()),
                 )
                 return rows
+            except TimeoutError:
+                timed_out = True
+                return []
             except Neo4jError as error:
                 code = error.code or ""
                 if "TransactionTimedOut" in code and time.monotonic() >= deadline:
                     timed_out = True
                     return []
-                if not code.endswith("MemoryPoolOutOfMemoryError"):
+                if not code.endswith("MemoryPoolOutOfMemoryError") and "TransactionTimedOut" not in code:
                     raise
                 logger.warning(
-                    "Graph hydration memory limit stage=%s batch=%s seconds=%.3f remaining_seconds=%.3f",
+                    "Graph hydration resource limit stage=%s batch=%s seconds=%.3f remaining_seconds=%.3f",
                     stage,
                     len(batch),
                     time.monotonic() - read_started,
                     max(0, deadline - time.monotonic()),
                 )
                 if len(batch) == 1:
-                    memory_blocked = True
+                    if "TransactionTimedOut" in code:
+                        timed_out = True
+                    else:
+                        memory_blocked = True
                     return []
                 subdivisions += 1
                 middle = len(batch) // 2
@@ -333,13 +356,37 @@ class GraphQuery:
         return result, gaps, reasons
 
     def endpoints(self, scope, *, url=None, method=None, historical=False, as_of=None):
-        nodes, relationships, metadata = self.snapshot(scope, historical=historical, as_of=as_of)
+        from shyhurricane.graph.traversal import ASSOCIATIONS, TraversalSnapshot
+
+        reader = TraversalSnapshot(self, scope, historical=historical, as_of=as_of)
+        if reader.indexed():
+            reader.candidates(scope, kinds=["resource"], url=web_url(url, fragment=True) if url else None, method=method)
+            selected = list(reader.nodes)
+            if len(selected) > MAX_RESULTS:
+                reader.limit("result_limit")
+                selected = sorted(selected, key=lambda key: (
+                    reader.nodes[key]["url"], reader.nodes[key].get("method", ""), key
+                ))[:MAX_RESULTS]
+            relationships = reader.load(selected, "both", ASSOCIATIONS | {"HOSTED_AT"})
+            for batch in batched([reader.nodes[key]["url"] for key in selected], 500):
+                reader._indexed_context(batch)
+            discovery = ResourceDiscovery(reader.nodes, list(relationships.values()))
+            scripts = sorted({script for key in selected for script in discovery.associated(key)[2]})
+            relationships.update(reader.load(scripts, "both", ASSOCIATIONS))
+            reader.describe()
+            nodes, metadata = reader.nodes, reader.metadata
+            relationships = list(relationships.values())
+            allowed = set(selected)
+        else:
+            nodes, relationships, metadata = self.snapshot(scope, historical=historical, as_of=as_of)
+            allowed = None
         discovery = ResourceDiscovery(nodes, relationships)
         contains = scope_predicate(scope)
         matches = [
             node
             for node in discovery.resources.values()
-            if (contains(node["url"]) or any(contains(value) for value in node.get("context_urls", [])))
+            if (allowed is None or node["id"] in allowed)
+            and (contains(node["url"]) or any(contains(value) for value in node.get("context_urls", [])))
             and (url is None or node["url"] == web_url(url, fragment=True))
             and (method is None or node.get("method", "").upper() == method.upper())
         ]
@@ -367,9 +414,21 @@ class GraphQuery:
     ):
         present({}, detail)
         normalized_context = web_url(context_url, fragment=True) if context_url is not None else None
-        nodes, _, metadata = self.snapshot(
-            scope, historical=historical, as_of=as_of, context_url=normalized_context, role=role
-        )
+        from shyhurricane.graph.traversal import TraversalSnapshot
+
+        reader = TraversalSnapshot(self, scope, historical=historical, as_of=as_of)
+        if reader.indexed():
+            reader.candidates(scope, kinds=kinds, role=role, context_url=normalized_context,
+                              url=web_url(url, fragment=True) if url else None)
+            if not reader.metadata["retrieval_truncated"]:
+                reader.boundaries(scope, kinds=kinds, role=role, context_url=normalized_context,
+                                  url=web_url(url, fragment=True) if url else None)
+            reader.describe()
+            nodes, metadata = reader.nodes, reader.metadata
+        else:
+            nodes, _, metadata = self.snapshot(
+                scope, historical=historical, as_of=as_of, context_url=normalized_context, role=role
+            )
         matches = [
             node
             for node in nodes.values()
@@ -543,7 +602,7 @@ class GraphQuery:
         return {**metadata, "results": result}
 
     def evidence(self, evidence_id):
-        rows = self.store.read(
+        rows = self.read(
             "MATCH (e:GraphEvidence {id:$id}) "
             "WHERE (e._publication_id IS NULL AND EXISTS { "
             "MATCH (c:GraphCapture {id:e.capture_id}) "

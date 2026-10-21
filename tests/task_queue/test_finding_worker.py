@@ -1,8 +1,11 @@
 import json
 from dataclasses import replace
+from unittest.mock import Mock
 
+import httpx
 import pytest
 from haystack import Document
+from qdrant_client.http.exceptions import ResponseHandlingException
 
 import shyhurricane.task_queue.finding_worker as finding_worker
 from shyhurricane.task_queue.finding_worker import FindingContext, save_finding_worker
@@ -57,6 +60,18 @@ def make_context(tmp_path, title_generator=None):
     ctx.gen_title = title_generator or TitleGenerator()
     ctx.finding_log_path = str(tmp_path / "findings.jsonl")
     return ctx
+
+
+def test_qdrant_write_failure_propagates_before_downstream_queueing(tmp_path):
+    ctx = make_context(tmp_path)
+    failure = ResponseHandlingException(httpx.ReadTimeout("write timeout"))
+    ctx.stores["finding"].write_documents = Mock(side_effect=failure)
+    item = SaveFindingQueueItem("https://example.com/", "finding", "Title", "stable-id")
+    with pytest.raises(ResponseHandlingException) as raised:
+        save_finding_worker(ctx, item)
+    assert raised.value is failure
+    assert ctx.doc_type_queue.items == []
+    ctx.stores["finding"].write_documents.assert_called_once()
 
 
 def test_finding_context_warm_up_calls_embedders(tmp_path):

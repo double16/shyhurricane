@@ -572,3 +572,48 @@ async def test_content_indexing_status_union_validates_for_real_clients(workflow
         missing = await client.call_tool("fetch_web_resource_content", {"url": "https://example.com/app"})
         assert not missing.is_error
         assert missing.structured_content["result"] is None
+
+
+@pytest.mark.parametrize("http_endpoint", ["streamable-http", "streamable-http-modern"], indirect=True)
+@pytest.mark.parametrize("with_progress", [True, False])
+async def test_graph_progress_over_http(http_endpoint, workflow_server, monkeypatch, request, with_progress):
+    import os
+    import time
+
+    from shyhurricane.mcp_server import graph_execution
+
+    server, _ = workflow_server
+    duration = float(os.environ.get("GRAPH_PROGRESS_TEST_SECONDS", "0.08"))
+    updates = []
+
+    class Service:
+        def __init__(self, store, *, budget):
+            self.budget = budget
+
+        def endpoints(self, scope):
+            self.budget.progress("Selecting endpoint resources")
+            time.sleep(duration)
+            return {"results": [], "instructions": "complete"}
+
+    monkeypatch.setattr(graph_execution, "GraphQuery", Service)
+
+    async def endpoints(ctx: Context, scope: str) -> dict[str, Any]:
+        return await graph_execution.execute_graph(ctx, object(), "endpoints", scope)
+
+    server.add_tool(endpoints, name="find_application_endpoints")
+
+    async def progress(value, total, message):
+        updates.append((value, message))
+
+    mode = "legacy" if request.node.callspec.params["http_endpoint"] == "streamable-http" else "2026-07-28"
+    async with Client(f"{http_endpoint}/mcp", mode=mode) as client:
+        result = await client.call_tool("find_application_endpoints", {"scope": "example.com"},
+                                        progress_callback=progress if with_progress else None)
+    assert not result.is_error
+    if with_progress:
+        assert updates and updates[-1][1].startswith("Graph query: completed")
+        assert [value for value, _ in updates] == list(range(1, len(updates) + 1))
+        if duration > 5:
+            assert any(message.endswith("is still running") for _, message in updates)
+    else:
+        assert not updates

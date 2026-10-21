@@ -877,7 +877,7 @@ async def is_spider_time_recent(server_ctx: ServerContext, url: str) -> Optional
         # count the number of urls to make sure it's not a one-off
         count = 0
         async for record in scroll_qdrant_collection(qdrant_client=qdrant_client, index="network", fields=["meta"],
-                                                     scroll_filter=filters):
+                                                     scroll_filter=filters, newest_limit=1000):
             metadata = record.payload["meta"]
             try:
                 ts = metadata.get("timestamp_float", 0.0)

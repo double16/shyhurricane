@@ -16,7 +16,6 @@ from haystack.components.joiners import ListJoiner
 from haystack.components.preprocessors import DocumentCleaner, DocumentSplitter
 from haystack.components.routers import ConditionalRouter
 from haystack.core.component import Component
-from haystack.document_stores.types import DuplicatePolicy
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 
 from shyhurricane.clean_css import normalize_css
@@ -31,6 +30,7 @@ from shyhurricane.doc_type_model_map import (
 from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.index.input_documents import HarDocument, HttpRawDocument, IngestableRequestResponse, KatanaDocument
+from shyhurricane.index.write_diagnostics import write_document
 from shyhurricane.utils import (
     BeautifulSoupExtractor,
     batch_iterable,
@@ -463,7 +463,8 @@ class FilterExistingDocumentsById:
         new_documents = []
         for doc in documents:
             collection = doc.meta.get("type")
-            if doc.id in existing.get(collection, set()):
+            # Content must reach downstream queueing again after a partial ingestion failure.
+            if collection != "content" and doc.id in existing.get(collection, set()):
                 logger.info("Skipping existing document %s %s", collection, doc.id)
             else:
                 new_documents.append(doc)
@@ -472,57 +473,21 @@ class FilterExistingDocumentsById:
 
 @component
 class FilterExistingDocumentsByDocType:
+    """Validate indexing metadata; defer completeness checks until chunks are known."""
+
     def __init__(self, stores: Dict[str, QdrantDocumentStore]):
         self.stores = stores
 
     @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]):
-        new_documents = []
+        # Chunk completeness is checked after splitting, across every destination collection.
+        accepted = []
         for doc in documents:
-            url = doc.meta.get("url", "")
-            raw_mime = doc.meta.get("content_type", "")
-            timestamp = doc.meta.get("timestamp", "")
-            if not url or not raw_mime or not timestamp:
-                logger.warning(f"No url or raw_mime or timestamp found for {doc}")
+            if not all(doc.meta.get(field) for field in ("url", "content_type", "timestamp")):
+                logger.warning("Skipping document %s: missing url, content_type, or timestamp", doc.id)
                 continue
-
-            doc_type = map_mime_to_type(raw_mime)
-            token_length = doc.meta.get("token_length", sys.maxsize)
-            collection_name = get_qdrant_collection_name_by_doc_type_token_length(doc_type, token_length)
-            store = self.stores.get(collection_name)
-            if store is None:
-                # This can happen if the only collection has the token length as a suffix
-                logger.debug(f"No collection '{collection_name}' found for {doc}")
-                continue
-
-            existing_docs = []
-            content_sha256 = doc.meta.get("content_sha256", "")
-            if content_sha256:
-                filters = {
-                    "operator": "AND",
-                    "conditions": [
-                        {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
-                        {"field": "meta.url", "operator": "==", "value": url},
-                        {"field": "meta.content_sha256", "operator": "==", "value": content_sha256}
-                    ]}
-                logger.debug("Checking for existing document: doc_type %s, filters %s", doc_type, filters)
-                existing_docs.extend(store.filter_documents(filters=filters))
-            if not existing_docs:
-                filters = {
-                    "operator": "AND",
-                    "conditions": [
-                        {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
-                        {"field": "meta.url", "operator": "==", "value": url},
-                        {"field": "meta.timestamp", "operator": "==", "value": timestamp}
-                    ]}
-                logger.debug("Checking for existing document: doc_type %s, filters %s", doc_type, filters)
-                existing_docs.extend(store.filter_documents(filters=filters))
-            if len(existing_docs) == 0:
-                new_documents.append(doc)
-            else:
-                logger.info("Skipping existing document %s", doc.id)
-
-        return {"documents": new_documents}
+            accepted.append(doc)
+        return {"documents": accepted}
 
 
 @component
@@ -582,6 +547,7 @@ class IndexDocTypeDocuments:
                 )
                 collection_name = get_qdrant_collection_name_by_doc_type_token_length(doc_type, token_length)
                 split_docs = self.splitters[collection_name].run(documents=[new_doc])["documents"]
+                split_docs = self.multi_store.missing_documents(collection_name, split_docs)
                 if hasattr(embedder, "to_dict"):
                     batch_size = embedder.to_dict().get("batch_size", 1)
                 else:
@@ -600,22 +566,23 @@ class IngestMultiStore:
         self.stores = stores
         self.should_update = should_update
 
+    def missing_documents(self, collection_name, documents):
+        """Check every deterministic chunk ID so partial writes remain recoverable."""
+        store = self.stores[collection_name]
+        found = set()
+        for batch in batch_iterable(documents, 100):
+            found.update(doc.id for doc in store.get_documents_by_id([doc.id for doc in batch]))
+        return [doc for doc in documents if doc.id not in found]
+
     @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]):
         for doc in documents:
-            doc_type = "???"
-            try:
-                doc_type = doc.meta.get("type")
-                token_length = doc.meta.get("token_length", sys.maxsize)
-                collection_name = get_qdrant_collection_name_by_doc_type_token_length(doc_type, token_length)
-                store = self.stores.get(collection_name)
-                if store is None:
-                    logger.error(f"No store for collection {collection_name}")
-                else:
-                    store.write_documents([doc], policy=DuplicatePolicy.OVERWRITE)
-            except Exception as e:
-                logger.warning(f"Document {doc_type} {doc.id} not written to the store: {e}", exc_info=e)
-
+            doc_type = doc.meta.get("type")
+            token_length = doc.meta.get("token_length", sys.maxsize)
+            collection_name = get_qdrant_collection_name_by_doc_type_token_length(doc_type, token_length)
+            if collection_name not in self.stores:
+                raise ValueError(f"No store for collection {collection_name}")
+            write_document(self.stores[collection_name], collection_name, doc)
         return {"documents": documents}
 
 

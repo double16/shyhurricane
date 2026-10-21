@@ -11,6 +11,7 @@ from neo4j.exceptions import Neo4jError
 
 from shyhurricane.graph.config import graph_timeouts
 from shyhurricane.graph.links import LinkPlanner
+from shyhurricane.graph.lookup import context_records, reverse_host, write_contexts
 from shyhurricane.graph.model import identity, projection_snapshot
 from shyhurricane.graph.policy import ANALYZER_VERSION, library_analysis
 from shyhurricane.graph.visibility import visible_node
@@ -150,6 +151,10 @@ class GraphPublisher:
                         "published_at": current.get("published_at", 0),
                     },
                 ).consume()
+            if current.get("complete") and not expected:
+                write_contexts(tx, context_records(
+                    identity("legacy-publication", capture["id"]), "GraphPublication", current.get("context_urls", [])
+                ))
             return generation, False
 
         return session.execute_write(begin)
@@ -278,6 +283,11 @@ class GraphPublisher:
                 raise PublicationConflict("An inferred link dependency changed during publication; replan the capture")
 
     def stage(self, session, capture, generation, projection, links):
+        write_batches(
+            session, capture["id"], "context-lookup",
+            "UNWIND $rows AS row MERGE (n:GraphContext {id:row.id}) SET n += row", "rows",
+            context_records(generation, "GraphPublication", capture.get("context_urls", [])),
+        )
         def stored(record):
             result = {
                 **record,
@@ -325,7 +335,7 @@ class GraphPublisher:
             "entities",
             "UNWIND $nodes AS n MERGE (e:GraphEntity {id:n.id}) SET e += n",
             "nodes",
-            (stored(node) for node in projection.nodes.values()),
+            ({**stored(node), "_reverse_host": reverse_host(node["url"])} for node in projection.nodes.values()),
         )
         write_batches(
             session,
@@ -471,9 +481,14 @@ class GraphPublisher:
             (
                 f"MATCH (n:GraphEntity) WHERE {owner} AND NOT EXISTS {{ MATCH (n)--() }} "
                 "RETURN n.id AS id ORDER BY n.id LIMIT $limit",
-                "UNWIND $rows AS row MATCH (n:GraphEntity {id:row.id}) WHERE NOT EXISTS { MATCH (n)--() } DELETE n",
+                "UNWIND $rows AS row MATCH (n:GraphEntity {id:row.id}) WHERE NOT EXISTS { MATCH (n)--() } "
+                "OPTIONAL MATCH (lookup:GraphContext {owner_id:n.id,owner_kind:'GraphEntity'}) DELETE lookup,n",
             ),
         ]
+        stages.append((
+            "MATCH (n:GraphContext {owner_id:$id}) RETURN n.id AS id ORDER BY n.id LIMIT $limit",
+            "UNWIND $rows AS row MATCH (n:GraphContext {id:row.id}) DELETE n",
+        ))
         if publication["abandoned"]:
             stages.append(
                 (

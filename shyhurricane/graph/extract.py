@@ -11,6 +11,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 from bs4 import BeautifulSoup
 
+from shyhurricane.graph.analyzer_diagnostics import stderr_summary
 from shyhurricane.graph.artifacts import recovered_sources
 from shyhurricane.graph.model import MAX_BYTES, Projection, identity, web_url
 from shyhurricane.graph.policy import ANALYZER_VERSION, library_analysis
@@ -35,27 +36,44 @@ def _successful_control(tag):
     )
 
 
-def run_javascript(source: str, filename: str, mode=None) -> dict:
-    result = subprocess.run(
-        [
-            "docker",
-            "run",
-            "--rm",
-            "--network=none",
-            "--memory=3g",
-            "--cpus=2",
-            "-i",
-            unix_command_image(),
-            "node",
-            "--max-old-space-size=2048",
-            "/opt/graph-analysis/analyze.cjs",
-        ],
-        input=json.dumps({"source": source, "filename": filename, "mode": library_analysis(mode)}),
-        text=True,
-        capture_output=True,
-        timeout=240,
-        check=True,
-    )
+def run_javascript(source: str, filename: str, mode=None, *, capture_id=None) -> dict:
+    image = unix_command_image()
+    mode = library_analysis(mode)
+    started = time.monotonic()
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network=none",
+                "--memory=3g",
+                "--cpus=2",
+                "-i",
+                image,
+                "node",
+                "--max-old-space-size=2048",
+                "/opt/graph-analysis/analyze.cjs",
+            ],
+            input=json.dumps({"source": source, "filename": filename, "mode": mode}),
+            text=True,
+            capture_output=True,
+            timeout=240,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        logger.warning(
+            "JavaScript analyzer filename=%s image=%s mode=%s source_bytes=%s seconds=%.3f "
+            "capture=%s error=%s exit_status=%s timeout=%s stderr=%s",
+            filename.split("?", 1)[0].split("#", 1)[0], image, mode, len(source.encode("utf-8")),
+            time.monotonic() - started, capture_id, type(error).__name__,
+            error.returncode if isinstance(error, subprocess.CalledProcessError) else None,
+            error.timeout if isinstance(error, subprocess.TimeoutExpired) else None,
+            stderr_summary(error.stderr if isinstance(error, (subprocess.CalledProcessError,
+                                                               subprocess.TimeoutExpired)) else None, source),
+        )
+        raise
+
     return json.loads(result.stdout)
 
 
@@ -64,7 +82,7 @@ def extract(
 ) -> Projection:
     mode = library_analysis(event.get("library_analysis"))
     runner = (
-        (lambda source, filename: run_javascript(source, filename, mode))
+        (lambda source, filename: run_javascript(source, filename, mode, capture_id=event["id"]))
         if javascript_runner is run_javascript
         else javascript_runner
     )
@@ -262,7 +280,7 @@ def extract(
                     if method != "DIALOG"
                     else None
                 )
-                if target:
+                if element in graph.nodes and target in graph.nodes:
                     graph.nodes[element]["form_target_url"] = graph.nodes[target]["url"]
                     graph.nodes[element]["form_target_method"] = method
                 controls = list(tag.find_all(["input", "textarea", "select", "button"]))

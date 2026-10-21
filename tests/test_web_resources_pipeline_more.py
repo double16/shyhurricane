@@ -31,6 +31,7 @@ class Store:
     def __init__(self, existing=None, exc=None):
         self.existing = existing or []
         self.exc = exc
+        self.timeout = 5
         self.written = []
         self.filters = []
 
@@ -189,7 +190,7 @@ def test_filter_existing_documents_by_id_and_doc_type():
     new = Document(content="x", id="new", meta={"type": "content"})
 
     by_id = wrp.FilterExistingDocumentsById({"content": Store([existing])})
-    assert by_id.run([missing_type, no_id, existing, new])["documents"] == [missing_type, no_id, new]
+    assert by_id.run([missing_type, no_id, existing, new])["documents"] == [missing_type, no_id, existing, new]
 
     doc = Document(content="x", id="doc", meta={
         "url": "https://example.com/",
@@ -199,7 +200,7 @@ def test_filter_existing_documents_by_id_and_doc_type():
     })
     missing = Document(content="x", id="missing", meta={"url": "", "content_type": "", "timestamp": ""})
     assert wrp.FilterExistingDocumentsByDocType({"html": Store()}).run([doc, missing])["documents"] == [doc]
-    assert wrp.FilterExistingDocumentsByDocType({"html": Store([doc])}).run([doc])["documents"] == []
+    assert wrp.FilterExistingDocumentsByDocType({"html": Store([doc])}).run([doc])["documents"] == [doc]
 
 
 def test_ingest_multi_store_writes_by_collection_and_keeps_documents():
@@ -211,9 +212,12 @@ def test_ingest_multi_store_writes_by_collection_and_keeps_documents():
         Document(content="unknown", id="u", meta={"type": "unknown", "token_length": sys.maxsize}),
     ]
 
-    result = wrp.IngestMultiStore({"html": html_store, "network": network_store}).run(docs)
-
-    assert result["documents"] == docs
+    writer = wrp.IngestMultiStore({"html": html_store, "network": network_store})
+    assert writer.run(docs[:1])["documents"] == docs[:1]
+    with pytest.raises(RuntimeError, match="fail"):
+        writer.run(docs[1:])
+    with pytest.raises(ValueError, match="No store"):
+        writer.run(docs[2:])
     assert html_store.written == [docs[0]]
 
 
@@ -364,6 +368,9 @@ def test_index_doc_type_documents_splits_embeds_and_stores(monkeypatch):
         def __init__(self):
             self.batches = []
 
+        def missing_documents(self, collection, documents):
+            return documents
+
         def run(self, documents):
             self.batches.append(list(documents))
 
@@ -387,6 +394,48 @@ def test_index_doc_type_documents_splits_embeds_and_stores(monkeypatch):
     assert len(multi_store.batches) >= 1
     assert {d.meta["type"] for d in multi_store.batches[0]} == {"html"}
 
+
+
+def test_partial_indexing_recovery_across_chunk_sizes(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(wrp, "get_qdrant_collection_name_by_doc_type_token_length",
+                        lambda doc_type, length: f"{doc_type}_{length}")
+    first, second = Store(), Store()
+    stores = {"html_2": first, "html_4": second}
+    writer = wrp.IngestMultiStore(stores)
+    embedder = Embedder()
+    component = wrp.IndexDocTypeDocuments({"default": embedder}, Embedder(), writer)
+    component._doc_type_to_model = {"html": SimpleNamespace(token_lengths=[2, 4])}
+
+    class Splitter:
+        def run(self, documents):
+            parent = documents[0]
+            return {"documents": [replace(parent, id=f"{parent.id}_{i}") for i in range(3)]}
+
+    component.splitters = {name: Splitter() for name in stores}
+    original_write = second.write_documents
+
+    def partial_write(documents, policy=None):
+        if second.written:
+            raise TimeoutError("partial write")
+        original_write(documents, policy)
+
+    second.write_documents = partial_write
+    doc = Document(content="html body", meta={
+        "url": "https://example.com/", "content_type": "text/html",
+        "timestamp": "2026-10-20T11:00:00", "response_headers": "{}",
+    })
+    with pytest.raises(TimeoutError):
+        component.run([doc])
+    assert len(first.written) == 3 and len(second.written) == 1
+    first.existing = first.written.copy()
+    second.existing = second.written.copy()
+    second.write_documents = original_write
+    accepted = wrp.FilterExistingDocumentsByDocType(stores).run([doc])["documents"]
+    assert component.run(accepted) == {}
+    assert len(first.written) == 3 and len(second.written) == 3
+    assert len({item.id for item in second.written}) == 3
 
 def test_index_doc_type_documents_warm_up_and_skip_branches(monkeypatch):
     sparse = Embedder()
@@ -491,7 +540,7 @@ def test_native_id_filter_batches_collections_and_preserves_order(count):
     network_store.get_documents_by_id.return_value = [network]
     supplied = [unknown, *docs, network, no_id, *(docs[:1])]
     result = wrp.FilterExistingDocumentsById({"content": content_store, "network": network_store}).run(supplied)
-    assert result["documents"] == [unknown, *docs[1::2], no_id]
+    assert result["documents"] == [unknown, *docs, no_id, *docs[:1]]
     assert content_store.get_documents_by_id.call_count == (count + 99) // 100
     assert all(len(call.args[0]) <= 100 for call in content_store.get_documents_by_id.call_args_list)
     content_store.filter_documents.assert_not_called()
@@ -514,7 +563,7 @@ def test_native_id_filter_with_real_local_qdrant(monkeypatch):
     try:
         store.write_documents([existing])
         monkeypatch.setattr(store, "filter_documents", lambda *args, **kwargs: pytest.fail("payload scan"))
-        assert wrp.FilterExistingDocumentsById({"content": store}).run([existing, new])["documents"] == [new]
+        assert wrp.FilterExistingDocumentsById({"content": store}).run([existing, new])["documents"] == [existing, new]
     finally:
         store.close()
 

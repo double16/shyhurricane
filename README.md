@@ -494,16 +494,24 @@ Queries cap exploration at 10,000 entities, 20,000 relationships, 1,000 results,
 traversal CPU time. Database reads default to 30 seconds per transaction. `retrieval_truncated` and `truncation_reasons` report reached limits; `analysis_gaps` reports missing
 artifacts or incomplete analysis. Cross-origin request/navigation destinations are boundaries;
 supplied scripts used by scoped documents remain available for dependency and flow analysis.
-Queries first select a bounded set of relationship IDs, then hydrate immutable relationships,
-entities, capture metadata, and shared context in windows of at most 500 relationships. Each window
-loads its dependencies before the next window; shared entities and metadata are cached across windows.
-Indexed ID-list lookups avoid per-ID query expansion. Every database request contains at most 500
-input records. Startup waits for schema indexes to become available before serving hinted reads.
-Hydration keeps its 120-second total budget, within the five-minute cleanup grace period. Each read
-uses the configured read timeout (default 30 seconds) or the remaining budget, whichever is shorter,
-without automatic transaction retries. If a budget
-is reached, completed records remain available and results report applicable time, memory, and missing
-generation limits. Repeat the query when a generation is unavailable.
+Endpoint and element discovery select indexed resource/entity candidates before hydration. Exact URL,
+method, kind, role, and context filters apply during selection. Endpoint summaries load only the
+selected resources' associations. Context lookup uses indexed URL records instead of scanning entity
+or publication context lists; normalized reversed hostnames preserve subdomain label boundaries.
+A checkpointed maintenance backfill adds these access paths to existing data in bounded transactions.
+New publications stage lookup records before activation. Until the backfill completes, discovery
+uses the compatibility query within the same request budget; a timeout is reported as truncation.
+
+All graph queries share a 120-second query budget after the separate indexing wait, within the
+five-minute generation cleanup grace period. Reads use the configured transaction timeout (default
+30 seconds) or the remaining budget, whichever is shorter, without automatic transaction retries.
+Hydration loads immutable relationships, entities, metadata, and shared contexts in windows of at
+most 500 input records. Shared dependencies and adjacency are cached per request. Resource-limit
+failures subdivide batches; completed records remain available and results report time, memory,
+and missing-generation limits. Repeat the query when a generation is unavailable.
+Cancellation stops new batches and attempts to terminate only database reads tagged for that request;
+external Neo4j users need permission to inspect and terminate their own transactions. If termination
+is unavailable, the transaction timeout remains the bound for an already running read.
 DEBUG logs report stage, batch size, returned records, elapsed time, and remaining budget. A completion
 summary reports selected/completed relationships, memory subdivisions, and incompleteness reasons;
 incomplete hydration is logged at WARNING. See [hydration measurements](docs/graph_hydration.md).
@@ -521,7 +529,7 @@ application-wide absence of sources or sinks.
 Each traversal reads a publication revision once. Activation atomically stamps publication and
 retirement revisions, so reanalysis between frontier reads cannot mix generations. Existing active
 publications are revision zero; older retired publications remain excluded, and legacy archives remain
-readable. Startup initializes the revision counter and logical-ID index without a bulk data backfill.
+readable. Startup initializes the revision counter and indexes; lookup backfill runs separately in maintenance.
 **Upgrade with all older server processes stopped:** mixed-version writers do not maintain the revision
 protocol. Keep the existing single-server deployment model. MCP arguments and saved-page schemas are
 unchanged. DEBUG logs report frontier depth, batch/read counts, and cache sizes; completion logs report
@@ -615,7 +623,8 @@ most once every five minutes, checking each distinct referenced URL once. Their 
 `reference_statistics_refreshed_at`, `reference_statistics_age_seconds`,
 `reference_statistics_stale`, and `reference_statistics_error` fields describe freshness and failures;
 failed refreshes retain the last successful count. Queue and analysis counts still refresh with the
-monitor's 30-second cycle. Domain/host statistics fetch only domain and host payload fields.
+monitor's 30-second cycle. Qdrant domain/host statistics use exact indexed facet counts
+and refresh at most once every five minutes, independently of graph activity.
 
 The terminal monitor uses **Application graph activity** instead of graph-size estimates. It reads
 Neo4j's indexed `publication_revision` state record in a single two-second read transaction, at
@@ -670,8 +679,11 @@ remains visible meanwhile. Existing node, edge, and inferred-link limits still p
 analysis gaps; continuations do not add a context-coverage cap. Late dependencies use the existing
 reanalysis scheduler and receive a fresh discovery pass.
 
-Timeouts and memory failures split candidate/hydration batches. Irreducible timeouts retain their
-checkpoint and retry after 5, 30, and 120 seconds; another failure marks the continuation failed.
+Timeouts and memory failures split candidate/hydration batches. Transient Neo4j connection,
+transaction-timeout, read-only, and retryable server errors remain pending for automatic retry.
+Continuation retries back off for 5, 30, then 120 seconds, capped at 120 seconds until recovery;
+their queue receipts remain processing without a success or failed acknowledgement.
+Terminal storage failures mark the continuation and its original queue items failed and require explicit retry.
 Generation conflicts restart planning from the saved extracted projection. Failed checkpoints and
 errors remain available for investigation. Successful jobs retain a small completion record and
 remove their saved projection. New work for the same capture runs in order; a successful replacement
@@ -680,13 +692,18 @@ supersedes older failed continuations for that capture.
 Graph status adds `continuations`: pending/running/failed counts, the most recent stage,
 `contexts_completed`, `contexts_discovered`, and `checkpoint_age_seconds`. The monitor shows
 these values on separate lines in its graph panel. Checkpoints do not increment the publication revision.
-Retrieval indexing waits include continuation work after the original queue item is acknowledged,
-including delayed retries and failures, so a durable handoff cannot look like completed indexing.
+The original graph queue items remain processing through continuation publication and reconciliation.
+Durable queue receipts preserve their row IDs across restarts, including duplicate deliveries.
+Only completed publication and reconciliation acknowledge success; terminal failures mark those rows failed.
+Retrieval indexing waits include both queue and continuation work, so a handoff cannot look complete.
 
 Continuation tables and indexes are added when the graph worker starts. Restarting reclaims running
 jobs and resumes their saved cursors. Existing queue payloads and published graphs remain compatible;
 failed queue items are not automatically retried or rebuilt. Explicit graph rebuild scheduling can
-create new work for failed continuations. No data-directory migration is needed.
+create new work for failed continuations; the failed-queue retry action resumes their checkpoints.
+Existing continuations handed off by older versions lack queue receipts: their failures remain in
+graph continuation/work status, but previously acknowledged queue rows cannot be reconstructed.
+No data-directory migration is needed.
 
 ### JavaScript data-flow coverage
 
@@ -773,23 +790,21 @@ budget and the five-minute generation-retention grace period. Indexing waits rem
 Transaction timeouts are not strict wall-clock limits on commits, retries, or filesystem operations.
 
 Cleanup eligibility uses a `GraphCleanupPending` label indexed by retirement time and publication ID.
-Successful cleanup removes the label while retaining published evidence. On upgrade, background
-maintenance scans existing publication IDs once in ordered batches of up to 500, atomically saving its
-cursor after each batch. It labels only uncleaned retired/abandoned publications and resumes after
-interruption. Completed migrations do not rescan history. Stop older server processes before upgrading;
-older writers do not maintain the pending label. No capture rebuild or backfill is required.
-Cleanup runs before migration, with separate cooperative 30-second budgets and independent retry
-schedules. Slow or failed migration cannot consume cleanup's budget or put cleanup into backoff;
-cleanup failures likewise do not prevent migration. Each operation normally runs 60 seconds after
+Publication retirement and abandonment apply the label directly; successful cleanup removes it while
+retaining published evidence. Background maintenance does not scan older publications to add the label.
+Cleanup runs before lookup migration, with separate cooperative 30-second budgets and independent retry
+schedules. Slow or failed lookup migration cannot consume cleanup's budget or put cleanup into backoff;
+cleanup failures likewise do not prevent lookup migration. Each operation normally runs 60 seconds after
 completion. Failures do not affect readiness and independently back off for 60, 120, 240, 480, then
 at most 900 seconds; success resets only that operation's retry schedule.
-Migration scans at most ten batches per attempt, initially 500 records per batch. It halves its next
-batch after a transaction timeout, transaction-memory failure, or successful attempt taking more
-than 15 seconds, down to one record. The learned size lasts for the server process; restarting starts
-at 500 again while resuming the durable cursor. Failed transactions never advance that cursor.
+Lookup migration scans at most 1,000 batches per attempt within its time budget, initially 500 records
+per batch. It halves its next batch after a transaction timeout, transaction-memory failure, or a
+successful attempt taking more than 15 seconds, down to one record. The learned size lasts for the
+server process; restarting starts at 500 again while resuming the durable cursor. Failed transactions
+never advance that cursor.
 Cleanup selects at most five candidates and deletes at most ten batches of 500 records. Shutdown
 is checked between transactions and operations; slow commits can exceed cooperative budgets.
-Logs report migration progress, selected/completed publications, deleted records, elapsed time,
+Logs report lookup progress, selected/completed publications, deleted records, elapsed time,
 failed operation, and next-attempt delay.
 
 Memory overrides accept positive integer sizes with `k`, `m`, or `g` suffixes, ignoring case.
@@ -932,7 +947,12 @@ These tools, port scanning, JavaScript deobfuscation, and URL indexing also send
 after 20 seconds without another progress update while a call is running. Informative updates reset
 the idle deadline, and nested operations share one timer. Quick tools such as `find_wordlists` do not
 send idle notifications. The interval depends on event-loop scheduling and transport availability.
+All six application-graph tools also send progress every five seconds while running, including
+blocked database reads, with stage/read counts as batches complete. Progress counters are scoped to
+the request and shared with indexing notifications. Progress delivery failures do not fail queries.
 Clients must request progress updates to receive these messages; server logging remains available.
+Progress can prevent a client inactivity timeout when supported, but cannot override a fixed request
+deadline. Saved-page navigation reads already completed results and does not repeat graph queries.
 Progress values count status events and do not estimate the total work.
 
 Modern continuation tokens expire after ten minutes between rounds and are protected with a process-local key.
@@ -1282,6 +1302,13 @@ counts, skipped record identifiers, finding provenance, and recovery limitations
 to the current user because captures may contain credentials or sensitive response bodies.
 Exit codes are `0` for a completed export, `2` for a completed export with skipped corrupt or
 invalid records, and `1` for a fatal failure without a published export.
+
+The CLI prints elapsed time, phase changes, and progress counts to stderr, including graph backup
+pages, captures read, Qdrant records read, reconciliation groups, and records written. Counts update
+at most once every five seconds as work advances; phase starts, phase completions, and the final
+summary print immediately. Captured URLs, headers, bodies, and finding text are omitted.
+Use `--quiet` to suppress progress while retaining errors. Direct Python calls to `export()` remain
+silent unless a `Progress` reporter is supplied.
 
 `--data-dir` and `DATA_DIR` follow the application storage conventions above. Without
 `--qdrant-url`, the exporter uses the existing `QDRANT` environment variable, or inspects the

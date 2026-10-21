@@ -6,6 +6,7 @@ import pytest
 
 from shyhurricane.graph.artifacts import ArtifactStore
 from shyhurricane.graph.extract import extract, run_javascript
+from shyhurricane.graph.model import MAX_GRAPH_NODES, Projection
 
 
 def kinds(graph):
@@ -42,6 +43,34 @@ def test_html_dialog_forms_do_not_create_network_journeys(event):
     assert len(submits) == 1
     target = graph.nodes[submits[0]["target"]]
     assert target["method"] == "GET" and target["url"].endswith("/fallback")
+
+
+@pytest.mark.parametrize("limit,retained", [(2, set()), (3, {"element"}), (4, {"element", "resource"})])
+def test_form_target_metadata_respects_node_budget(event, monkeypatch, limit, retained):
+    original = Projection.__init__
+
+    def initialize(graph, capture):
+        original(graph, capture)
+        graph.node_limit = limit
+
+    monkeypatch.setattr(Projection, "__init__", initialize)
+    graph = extract(event(body='<form action="/save"><input name="value"></form>'))
+    forms = [node for node in graph.nodes.values() if node["kind"] == "element"]
+    assert bool(forms) == ("element" in retained)
+    if forms:
+        assert ("form_target_url" in forms[0]) == ("resource" in retained)
+    assert len(graph.nodes) <= limit
+    assert "Capture entity budget reached" in graph.gaps
+    assert all(edge[side] in graph.nodes for edge in graph.edges.values() for side in ("source", "target"))
+
+
+def test_large_form_page_publishes_bounded_projection(event):
+    body = "".join(f'<form action="/save/{index}"></form>' for index in range(5100))
+    graph = extract(event(body=body))
+    assert len(graph.nodes) == MAX_GRAPH_NODES
+    assert "Capture entity budget reached" in graph.gaps
+    assert graph.edges
+    assert all(edge[side] in graph.nodes for edge in graph.edges.values() for side in ("source", "target"))
 
 
 @pytest.mark.parametrize(

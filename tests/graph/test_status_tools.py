@@ -6,6 +6,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from shyhurricane.graph.artifacts import ArtifactStore
 from shyhurricane.graph.status import graph_status
+from shyhurricane.mcp_server import graph_execution
 from shyhurricane.mcp_server.tools import application_graph as tools
 
 
@@ -84,7 +85,7 @@ async def test_evidence_reads_directly_without_scope_or_indexing(monkeypatch, re
     monkeypatch.setattr(tools, "log_tool_history", history)
     monkeypatch.setattr(tools, "wait_for_indexing", wait)
     monkeypatch.setattr(tools, "query", scoped_query)
-    monkeypatch.setattr(tools, "GraphQuery", lambda store: SimpleNamespace(evidence=lookup))
+    monkeypatch.setattr(graph_execution, "GraphQuery", lambda store, **kwargs: SimpleNamespace(evidence=lookup))
     assert await tools.fetch_application_graph_evidence(None, " \tevidence\n") == result
     lookup.assert_called_once_with("evidence")
     history.assert_awaited_once_with(None, "fetch_application_graph_evidence", evidence_id="evidence")
@@ -103,7 +104,7 @@ async def test_evidence_errors_preserve_logging_and_hide_database_details(monkey
     server.graph_store = object()
     failure = RuntimeError("private database failure")
     monkeypatch.setattr(
-        tools, "GraphQuery", lambda store: SimpleNamespace(evidence=Mock(side_effect=failure))
+        graph_execution, "GraphQuery", lambda store, **kwargs: SimpleNamespace(evidence=Mock(side_effect=failure))
     )
     with pytest.raises(ToolError, match="Application graph query failed") as caught:
         await tools.fetch_application_graph_evidence(None, "evidence")
@@ -131,7 +132,7 @@ async def test_query_errors_are_explicit_and_no_fetch_occurs(monkeypatch):
     with pytest.raises(ToolError, match="unavailable"):
         await tools.query(None, "test", "elements", "example.com")
     server.graph_store = object()
-    monkeypatch.setattr(tools, "GraphQuery", lambda store: SimpleNamespace(elements=lambda scope: {"results": []}))
+    monkeypatch.setattr(graph_execution, "GraphQuery", lambda store, **kwargs: SimpleNamespace(elements=lambda scope: {"results": []}))
     result = await tools.query(None, "test", "elements", "example.com")
     assert result["results"] == []
     assert result["indexing"]["status"] == "unavailable"
@@ -140,7 +141,7 @@ async def test_query_errors_are_explicit_and_no_fetch_occurs(monkeypatch):
         def fail(scope):
             raise error
 
-        monkeypatch.setattr(tools, "GraphQuery", lambda store: SimpleNamespace(elements=fail))
+        monkeypatch.setattr(graph_execution, "GraphQuery", lambda store, **kwargs: SimpleNamespace(elements=fail))
         with pytest.raises(ToolError):
             await tools.query(None, "test", "elements", "example.com")
 
@@ -253,8 +254,10 @@ async def test_graph_pages_retain_results_and_metadata(tool_name, tmp_path, monk
         seed_ids_limited=True,
         retrieval_truncated=True,
         truncation_reasons=["entity_limit"],
+        analysis_summaries=[{"mode": "summary", "input_nodes": 2000, "output_nodes": 20}],
     )
     first = await result_pages.paginate_result(tool_name, result, "results", 1, True)
+    assert first.model_dump()["analysis_summaries"] == result.analysis_summaries
     page = await get_result_page(None, first.pagination.next_page_token)
     assert page.source_tool == tool_name
     assert page.result.results == [{"id": "two"}]
@@ -263,6 +266,14 @@ async def test_graph_pages_retain_results_and_metadata(tool_name, tmp_path, monk
     assert page.result.retrieval_truncated and page.result.truncation_reasons == ["entity_limit"]
     previous = await get_result_page(None, page.result.pagination.previous_page_token)
     assert previous.result.results == first.results
+    assert page.result.analysis_summaries == previous.result.analysis_summaries == result.analysis_summaries
+
+
+def test_graph_result_defaults_to_independent_empty_summaries():
+    first = tools.GraphResult(results=[], instructions="Candidates only")
+    second = tools.GraphResult(results=[], instructions="Candidates only")
+    first.analysis_summaries.append({"mode": "full"})
+    assert second.model_dump()["analysis_summaries"] == []
 
 
 async def test_endpoint_tool_paginates_defaults_and_filters(tmp_path, monkeypatch):
@@ -271,13 +282,17 @@ async def test_endpoint_tool_paginates_defaults_and_filters(tmp_path, monkeypatc
 
     store = result_pages.ResultPageStore(str(tmp_path))
     monkeypatch.setattr(result_pages, "get_result_store", AsyncMock(return_value=store))
-    query = AsyncMock(return_value={"results": [{"id": str(index)} for index in range(7)], "instructions": "partial"})
+    summaries = [{"mode": "summary", "publication_limited": True}]
+    query = AsyncMock(return_value={"results": [{"id": str(index)} for index in range(7)],
+                                  "instructions": "partial", "analysis_summaries": summaries})
     monkeypatch.setattr(tools, "query", query)
     first = await tools.find_application_endpoints(None, "example.com", method="post", historical=True, as_of=42)
     assert len(first.results) == 5 and first.pagination.total_items == 7
+    assert first.model_dump()["analysis_summaries"] == summaries
     assert query.call_args.kwargs == {"url": None, "method": "post", "historical": True, "as_of": 42}
     second = await get_result_page(None, first.pagination.next_page_token)
     assert [item["id"] for item in second.result.results] == ["5", "6"]
+    assert second.result.model_dump()["analysis_summaries"] == summaries
     query.assert_awaited_once()
     with pytest.raises(ToolError, match="limit must be"):
         await tools.find_application_endpoints(None, "example.com", limit=0)
@@ -302,7 +317,7 @@ async def test_graph_query_waits_before_read_and_preserves_incomplete_results(mo
     monkeypatch.setattr(tools, "get_server_context", AsyncMock(return_value=server))
     monkeypatch.setattr(tools, "log_tool_history", AsyncMock())
     monkeypatch.setattr(tools, "wait_for_indexing", wait)
-    monkeypatch.setattr(tools, "GraphQuery", lambda store: SimpleNamespace(elements=elements))
+    monkeypatch.setattr(graph_execution, "GraphQuery", lambda store, **kwargs: SimpleNamespace(elements=elements))
     result = await tools.query(None, "test", "elements", "example.com")
     assert order == ["wait", "query"]
     assert result["indexing"]["status"] == "timed_out"
@@ -357,7 +372,7 @@ async def test_graph_input_validation_trims_before_literals_and_preserves_conten
 
             return run
 
-    monkeypatch.setattr(tools, "GraphQuery", lambda store: Service())
+    monkeypatch.setattr(graph_execution, "GraphQuery", lambda store, **kwargs: Service())
     # Also exercise Python calls which bypass Pydantic validation.
     target = function.__wrapped__ if hasattr(function, "__wrapped__") else function
     await target(None, **padded)
@@ -397,7 +412,7 @@ async def test_unexpected_graph_failure_logs_original_traceback(monkeypatch, cap
     def fail(scope):
         raise failure
 
-    monkeypatch.setattr(tools, "GraphQuery", lambda store: SimpleNamespace(elements=fail))
+    monkeypatch.setattr(graph_execution, "GraphQuery", lambda store, **kwargs: SimpleNamespace(elements=fail))
     with caplog.at_level("ERROR", logger=tools.__name__):
         with pytest.raises(ToolError, match="Application graph query failed") as caught:
             await tools.query(None, "find_application_elements", "elements", " example.com ")

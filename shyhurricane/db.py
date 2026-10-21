@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import json
 import logging
@@ -12,8 +13,10 @@ from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.conversions import common_types as types
 from qdrant_client.http import models as qm
+from qdrant_client.http.exceptions import UnexpectedResponse
 
 from shyhurricane.haystack_lifecycle import managed_resource
+from shyhurricane.qdrant_indexes import IndexedQdrantDocumentStore
 
 logger = logging.getLogger(__name__)
 
@@ -192,20 +195,23 @@ async def scroll_qdrant_collection(
         index: str,
         fields: Sequence[str] = None,
         scroll_filter: types.Filter | None = None,
+        newest_limit: int | None = None,
 ) -> AsyncGenerator[types.Record, None]:
+    """Read all matching points by ID, or one explicitly bounded newest-first sample."""
     next_offset = None
     stop_scrolling = False
     while not stop_scrolling:
         records, next_offset = await qdrant_client.scroll(
             collection_name=index,
             scroll_filter=scroll_filter,
-            limit=1000,
+            limit=newest_limit if newest_limit is not None else 1000,
             offset=next_offset,
             with_payload=fields or False,
             with_vectors=False,
-            order_by=qm.OrderBy(key="meta.timestamp_float", direction=qm.Direction.DESC),
+            order_by=(qm.OrderBy(key="meta.timestamp_float", direction=qm.Direction.DESC)
+                      if newest_limit is not None else None),
         )
-        stop_scrolling = next_offset is None or (
+        stop_scrolling = newest_limit is not None or next_offset is None or (
                 hasattr(next_offset, "num")
                 and hasattr(next_offset, "uuid")
                 and next_offset.num == 0
@@ -222,19 +228,49 @@ async def get_domain_and_host_counts(
     filters = qm.Filter(
         must=[qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=version))]
     )
-    domain_counts: dict[str, int] = {}
-    host_counts: dict[str, int] = {}
-    async for record in scroll_qdrant_collection(
-        qdrant_client=qdrant_client, index="network", fields=["meta.domain", "meta.host"], scroll_filter=filters
-    ):
-        metadata = record.payload.get("meta", {})
-        if domain := metadata.get("domain"):
-            domain = domain.lower()
-            domain_counts[domain] = domain_counts.get(domain, 0) + 1
-        if host := metadata.get("host"):
-            host = host.lower()
-            host_counts[host] = host_counts.get(host, 0) + 1
-    return domain_counts, host_counts
+    async def counts(key: str) -> dict[str, int]:
+        limit = 256
+        repaired = False
+        while True:
+            try:
+                async with asyncio.timeout(5):
+                    response = await qdrant_client.facet(
+                        collection_name="network", key=key, facet_filter=filters,
+                        limit=limit, exact=True, timeout=5,
+                    )
+            except UnexpectedResponse as error:
+                missing_index = f"No appropriate index for faceting: `{key}`".encode()
+                if repaired or error.status_code != 400 or missing_index not in error.content:
+                    raise
+                # Haystack only creates configured payload indexes for new collections.
+                # Upgrade an existing collection without recreating it or scanning its points.
+                logger.info("Creating missing Qdrant facet index network.%s", key)
+                async with asyncio.timeout(5):
+                    await qdrant_client.create_payload_index(
+                        collection_name="network", field_name=key,
+                        field_schema=qm.PayloadSchemaType.KEYWORD, wait=True, timeout=5,
+                    )
+                repaired = True
+                continue
+            if len(response.hits) < limit:
+                result: dict[str, int] = {}
+                for hit in response.hits:
+                    if isinstance(hit.value, str) and hit.value:
+                        value = hit.value.lower()
+                        result[value] = result.get(value, 0) + hit.count
+                return result
+            limit *= 2
+
+    # A deadline also bounds expansion for high-cardinality fields and callers outside the UI.
+    tasks = [asyncio.create_task(counts(key)) for key in ("meta.domain", "meta.host")]
+    try:
+        async with asyncio.timeout(10):
+            domains, hosts = await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    return domains, hosts
 
 
 @managed_resource
@@ -253,9 +289,14 @@ def create_qdrant_document_store(db: str, **kwargs) -> QdrantDocumentStore:
         {"field_name": "meta.title", "field_schema": "text"},
         {"field_name": "meta.description", "field_schema": "text"},
         {"field_name": "meta.content_sha256", "field_schema": "keyword"},
+        {"field_name": "meta.normalized", "field_schema": "bool"},
+        {"field_name": "meta.targets", "field_schema": "keyword"},
+        {"field_name": "meta.runtime_ts", "field_schema": "float"},
     ]
     host, port = qdrant_host_port(db)
-    return QdrantDocumentStore(
+    # Allow startup index creation and document operations more time than the REST default.
+    kwargs.setdefault("timeout", 10)
+    return IndexedQdrantDocumentStore(
         host=host,
         port=int(port),
         use_sparse_embeddings=True,

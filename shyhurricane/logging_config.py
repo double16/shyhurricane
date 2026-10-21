@@ -6,6 +6,33 @@ import re
 import threading
 from pathlib import Path
 
+from haystack_integrations.document_stores.qdrant.document_store import QdrantStoreError
+from qdrant_client.http.exceptions import ResponseHandlingException
+
+
+class QdrantExceptionFilter(logging.Filter):
+    """Keep Qdrant client and document store failures concise across logging paths."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.exc_info and isinstance(record.exc_info[1], (ResponseHandlingException, QdrantStoreError)):
+            error = record.exc_info[1]
+            record.msg = " ".join(f"{record.getMessage()} ({type(error).__name__}): {error}".split())
+            record.args = ()
+            record.exc_info = None
+            record.exc_text = None
+            record.stack_info = None
+        return True
+
+
+def limit_qdrant_tracebacks() -> None:
+    """Apply the transport exception policy to existing output handlers."""
+    root = logging.getLogger()
+    loggers = [root, *[value for value in root.manager.loggerDict.values() if isinstance(value, logging.Logger)]]
+    for logger in loggers:
+        for handler in logger.handlers:
+            if not any(isinstance(item, QdrantExceptionFilter) for item in handler.filters):
+                handler.addFilter(QdrantExceptionFilter())
+
 
 class DiagnosticFileHandler(logging.FileHandler):
     """Identify the application's file handler when logging is configured again."""
@@ -85,6 +112,7 @@ def configure_file_logging(filename: str | None, console_enabled: bool = True) -
     """
     if not filename:
         limit_neo4j_logging()
+        limit_qdrant_tracebacks()
         return
     path = Path(filename).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -119,5 +147,6 @@ def configure_file_logging(filename: str | None, console_enabled: bool = True) -
                 existing.addFilter(_console_filter)
     limit_neo4j_logging()
     limit_http_client_logging()
+    limit_qdrant_tracebacks()
     set_console_logging_enabled(console_enabled)
     os.environ["LOG_FILE"] = str(path)

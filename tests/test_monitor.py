@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -15,11 +16,14 @@ from shyhurricane.monitor import (
     format_database_panel,
     format_domain_and_host_panel,
     format_graph_panel,
+    format_monitor_database_panel,
+    format_qdrant_freshness,
     format_tools_panel,
     get_recent_indexed_urls,
     queue_size,
     top_counts,
 )
+from shyhurricane.monitoring_qdrant import MonitorQdrantCache
 from shyhurricane.server_config import ServerConfig
 
 
@@ -101,9 +105,84 @@ async def test_get_recent_indexed_urls_filters_missing_metadata():
     class Client:
         async def scroll(self, **kwargs):
             assert kwargs["collection_name"] == "network"
+            assert kwargs["timeout"] == kwargs["limit"] == 5
+            assert kwargs["order_by"].direction == "desc"
+            assert kwargs["with_vectors"] is False
             return records, None
 
     assert await get_recent_indexed_urls(Client()) == ["https://example.test/one"]
+
+
+@pytest.mark.asyncio
+async def test_recent_urls_timeout_and_connection_errors_propagate(monkeypatch):
+    timeout = asyncio.timeout
+    monkeypatch.setattr(asyncio, "timeout", lambda seconds: timeout(0.01))
+
+    async def blocked(**kwargs):
+        await asyncio.Event().wait()
+
+    client = SimpleNamespace(scroll=AsyncMock(side_effect=blocked))
+    with pytest.raises(TimeoutError):
+        await get_recent_indexed_urls(client)
+    client.scroll.side_effect = ConnectionError("offline")
+    with pytest.raises(ConnectionError, match="offline"):
+        await get_recent_indexed_urls(client)
+
+
+def test_qdrant_freshness_panels_distinguish_unavailable_empty_and_stale():
+    assert format_qdrant_freshness({}) == ""
+    assert format_qdrant_freshness({"status": "cached", "age_seconds": 299}) == ""
+    assert format_qdrant_freshness({"status": "unavailable", "age_seconds": None}) == "\nUnavailable"
+    assert format_qdrant_freshness({"status": "stale", "age_seconds": 301}) == "\nStale (301s old)"
+    data = SimpleNamespace(
+        document_counts={"finding": 0, "network": 12}, domain_count=1, host_count=1,
+        top_domains=[("example.test", 12)], top_hosts=[("www.example.test", 12)],
+        qdrant_freshness={
+            "domains": {"status": "unavailable", "age_seconds": None},
+            "documents:finding": {"status": "unavailable", "age_seconds": None},
+            "documents:network": {"status": "stale", "age_seconds": 360},
+        },
+    )
+    assert "Domains: 0" not in format_domain_and_host_panel(data)
+    assert "Statistics unavailable" in format_domain_and_host_panel(data)
+    panel = format_monitor_database_panel(data)
+    assert "Findings: unavailable" in panel
+    assert "network: 12\nStale (360s old)" in panel
+    data.qdrant_freshness["domains"] = {"status": "stale", "age_seconds": 300}
+    panel = format_domain_and_host_panel(data)
+    assert "Stale (300s old)" in panel and "Domains: 1" in panel
+
+
+@pytest.mark.asyncio
+async def test_monitor_cache_integration_retains_all_qdrant_samples(monkeypatch):
+    now = [0.0]
+    cache = MonitorQdrantCache(lambda: now[0])
+    store = SimpleNamespace(count_documents_async=AsyncMock(return_value=12))
+    context = SimpleNamespace(
+        db="db", stores={"network": store}, task_queue=Queue(0), spider_result_queue=Queue(0),
+        port_scan_result_queue=Queue(0), dir_busting_result_queue=Queue(0), proxy_host=None,
+        proxy_port=None, proxy_ca_cert_path=None, qdrant_client=object(), health_monitor=None, low_power=False,
+    )
+    monkeypatch.setattr("shyhurricane.monitor.persistent_queue_counts", AsyncMock(return_value=queue_counts()))
+    monkeypatch.setattr("shyhurricane.monitor.graph_status", AsyncMock(return_value={}))
+    monkeypatch.setattr("shyhurricane.monitor.get_generator_config", lambda: SimpleNamespace(describe=lambda: "model"))
+    urls = AsyncMock(return_value=["https://example.test/"])
+    domains = AsyncMock(return_value=({"example.test": 12}, {"www.example.test": 12}))
+    monkeypatch.setattr("shyhurricane.monitor.get_recent_indexed_urls", urls)
+    monkeypatch.setattr("shyhurricane.monitor.get_domain_and_host_counts", domains)
+    first = await collect_monitor_data(context, "localhost", 8000, [], qdrant_cache=cache)
+    now[0] = 30
+    await collect_monitor_data(context, "localhost", 8000, [], qdrant_cache=cache)
+    assert urls.await_count == 2
+    assert domains.await_count == store.count_documents_async.await_count == 1
+    now[0] = 300
+    for loader in (urls, domains, store.count_documents_async):
+        loader.side_effect = ConnectionError("offline")
+    stale = await collect_monitor_data(context, "localhost", 8000, [], qdrant_cache=cache)
+    assert stale.document_counts == first.document_counts
+    assert stale.top_domains == first.top_domains
+    assert stale.recent_urls == first.recent_urls
+    assert all(sample["status"] == "stale" for sample in stale.qdrant_freshness.values())
 
 
 def test_top_counts_limits_results_and_sorts_ties_by_name():
@@ -201,8 +280,9 @@ def test_format_configuration_panel_orders_dependencies_and_shows_health_indicat
     )
 
     panel = format_configuration_panel(data)
-    assert panel.index("Model: model 🟢") < panel.index("Qdrant: qdrant 127.0.0.1:49201 🔴")
-    assert "Qdrant: qdrant 127.0.0.1:49201 🔴" in panel
+    assert panel.index("Model: model 🟢") < panel.index("Qdrant: 127.0.0.1:49201 🔴")
+    assert "Qdrant: 127.0.0.1:49201 🔴" in panel
+    assert data.database not in panel
     assert "healthy" not in panel
     assert "unhealthy" not in panel
     assert "Host bind:" not in panel
@@ -233,7 +313,8 @@ def test_format_configuration_panel_marks_missing_qdrant_endpoint_unavailable():
 
     panel = format_configuration_panel(data)
 
-    assert "Qdrant: qdrant unavailable:unavailable (unavailable)" in panel
+    assert "Qdrant: unavailable:unavailable (unavailable)" in panel
+    assert data.database not in panel
 
 
 def test_format_configuration_panel_shows_low_power_setting():
@@ -327,19 +408,14 @@ def test_health_monitor_recovers_after_qdrant_probe_failure():
 
 @pytest.mark.asyncio
 async def test_get_domain_and_host_counts_deduplicates_case_insensitively(monkeypatch):
-    async def records(*args, **kwargs):
-        assert kwargs["fields"] == ["meta.domain", "meta.host"]
-        for metadata in (
-            {"domain": "Example.test", "host": "www.example.test"},
-            {"domain": "example.test", "host": "WWW.EXAMPLE.TEST"},
-            {"domain": "other.test", "host": "api.other.test"},
-            {},
-        ):
-            yield SimpleNamespace(payload={"meta": metadata})
+    async def facet(**kwargs):
+        assert kwargs["exact"] is True
+        values = (["Example.test", "example.test", "other.test", ""]
+                  if kwargs["key"] == "meta.domain"
+                  else ["www.example.test", "WWW.EXAMPLE.TEST", "api.other.test", ""])
+        return SimpleNamespace(hits=[SimpleNamespace(value=value, count=1) for value in values])
 
-    monkeypatch.setattr("shyhurricane.db.scroll_qdrant_collection", records)
-
-    domain_counts, host_counts = await get_domain_and_host_counts(object(), 1)
+    domain_counts, host_counts = await get_domain_and_host_counts(SimpleNamespace(facet=facet), 1)
 
     assert domain_counts == {"example.test": 2, "other.test": 1}
     assert host_counts == {"www.example.test": 2, "api.other.test": 1}

@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from neo4j import GraphDatabase, Query, unit_of_work
 
 from shyhurricane.db import _find_available_port, _get_published_port, _inspect_container, _is_running, _run
+from shyhurricane.graph.budget import current_budget
 from shyhurricane.graph.config import graph_timeouts
 from shyhurricane.graph.statistics import summarize_captures
 
@@ -152,14 +153,40 @@ class GraphStore:
             if timeout is not None:
                 # Explicit transactions do not perform driver-managed retries, which could
                 # otherwise outlive the caller's remaining hydration budget.
-                with session.begin_transaction(timeout=min(self.timeouts.read, timeout)) as transaction:
-                    return [dict(row) for row in transaction.run(statement, **parameters)]
+                budget = current_budget.get()
+                metadata = {"graph_request": budget.request_id} if budget else None
+                if budget:
+                    with budget.lock:
+                        budget.terminate = lambda: self.terminate_read(budget.request_id)
+                try:
+                    if budget and budget.cancelled.is_set():
+                        raise TimeoutError("Graph query cancelled")
+                    with session.begin_transaction(
+                        timeout=min(self.timeouts.read, timeout), **({"metadata": metadata} if metadata else {})
+                    ) as tx:
+                        if budget and budget.cancelled.is_set():
+                            raise TimeoutError("Graph query cancelled")
+                        return [dict(row) for row in tx.run(statement, **parameters)]
+                finally:
+                    if budget:
+                        with budget.lock:
+                            budget.terminate = None
 
             @unit_of_work(timeout=self.timeouts.read)
             def read(tx):
                 return [dict(row) for row in tx.run(statement, **parameters)]
 
             return session.execute_read(read)
+
+    def terminate_read(self, request_id):
+        """Terminate only transactions carrying this request's unguessable metadata."""
+        with self.connect().session(database="neo4j") as session:
+            ids = [row["transactionId"] for row in session.run(Query(
+                "SHOW TRANSACTIONS YIELD transactionId,metaData "
+                "WHERE metaData.graph_request=$request RETURN transactionId", timeout=self.timeouts.health,
+            ), request=request_id)]
+            if ids:
+                session.run(Query("TERMINATE TRANSACTIONS $ids", timeout=self.timeouts.health), ids=ids).consume()
 
     def ready(self) -> bool:
         self.connect().verify_connectivity()
@@ -182,11 +209,20 @@ class GraphStore:
             "GraphArtifact",
             "GraphState",
             "GraphPublication",
+            "GraphContext",
         ):
             run(
                 f"CREATE CONSTRAINT {label.lower()}_id IF NOT EXISTS FOR (n:{label}) REQUIRE n.id IS UNIQUE"
             ).consume()
         run("CREATE INDEX graph_entity_url IF NOT EXISTS FOR (n:GraphEntity) ON (n.url)").consume()
+        run("CREATE INDEX graph_entity_host IF NOT EXISTS FOR (n:GraphEntity) ON (n._reverse_host)").consume()
+        for field in ("url", "reverse_host", "owner_id"):
+            run(f"CREATE INDEX graph_context_{field} IF NOT EXISTS FOR (n:GraphContext) ON (n.{field})").consume()
+        for label, fields in (("GraphEntity", ("url", "_reverse_host")),
+                              ("GraphContext", ("url", "reverse_host"))):
+            for field in fields:
+                run(f"CREATE INDEX {label.lower()}_{field}_page IF NOT EXISTS "
+                    f"FOR (n:{label}) ON (n.{field},n.id)").consume()
         for field in (
             "module_key",
             "import_key",

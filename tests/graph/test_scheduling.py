@@ -5,6 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from shyhurricane.graph.artifacts import ArtifactStore
+from shyhurricane.graph.continuations import Continuations
 from shyhurricane.graph.scheduling import ReanalysisScheduler
 from shyhurricane.persistent_queue import get_persistent_queue
 
@@ -115,6 +116,87 @@ def test_failed_delivery_remains_recoverable(scheduling):
         broken.flush()
     scheduler.recover()
     assert scheduler.claim(queue.get(block=False))
+
+
+def test_old_failed_continuation_does_not_block_new_ticket_recovery(scheduling):
+    scheduler, artifacts, queue, capture = scheduling
+    jobs = Continuations(artifacts)
+    scheduler.request(capture["id"], [], 0)
+    scheduler.flush()
+    old_receipt = queue.get(block=False, raw=True)
+    old_item = old_receipt["data"]
+    old_event = scheduler.claim(old_item)
+    old_key = jobs.enqueue(old_event, old_item, False)
+    jobs.save(old_key, jobs.load(old_key), status="failed")
+    scheduler.retry(old_item, failed=True)
+    queue.ack_failed(old_receipt)
+    scheduler.request(capture["id"], [], 2)
+    scheduler.flush()
+    interrupted = queue.get(block=False, raw=True)
+    assert scheduler.claim(interrupted["data"])
+    # Crash after claiming the new ticket, before its continuation is committed.
+    queue.resume_unack_tasks()
+    replacement = ReanalysisScheduler(artifacts, queue)
+    replacement.recover()
+    replacement.recover()
+    assert queue.acked_count() == 0 and queue.ack_failed_count() == 1
+    receipt = queue.get(block=False, raw=True)
+    recovered = replacement.claim(receipt["data"])
+    assert recovered is not None and recovered["reconcile_remaining"] == 2
+    assert receipt["data"]["reanalysis_ticket"] != old_item["reanalysis_ticket"]
+    replacement.finish(receipt["data"])
+    queue.ack(receipt)
+    while queue.ready_count():
+        duplicate = queue.get(block=False, raw=True)
+        assert replacement.claim(duplicate["data"]) is None
+        queue.ack(duplicate)
+    assert queue.ready_count() == queue.unack_count() == 0
+    assert queue.ack_failed_count() == 1
+    assert artifacts.connection.execute("SELECT state FROM reanalysis").fetchone()[0] == "done"
+
+
+@pytest.mark.parametrize("state", ["pending", "running", "failed"])
+def test_matching_continuation_keeps_ownership_during_recovery(scheduling, state):
+    scheduler, artifacts, queue, capture = scheduling
+    jobs = Continuations(artifacts)
+    scheduler.request(capture["id"], [], 0)
+    scheduler.flush()
+    item = queue.get(block=False)
+    claimed = scheduler.claim(item)
+    key = jobs.enqueue(claimed, item, False)
+    jobs.save(key, jobs.load(key), status=state)
+    scheduler.recover()
+    scheduler.recover()
+    expected = "failed" if state == "failed" else "running"
+    assert artifacts.connection.execute("SELECT state FROM reanalysis").fetchone()[0] == expected
+    assert queue.ready_count() == queue.acked_count() == 0
+
+
+@pytest.mark.parametrize("rebuild", [False, True])
+def test_failed_publication_waits_for_explicit_retry_or_rebuild(scheduling, rebuild):
+    scheduler, artifacts, queue, capture = scheduling
+    scheduler.request(capture["id"], [], 0)
+    scheduler.flush()
+    receipt = queue.get(block=False, raw=True)
+    item = receipt["data"]
+    scheduler.claim(item)
+    scheduler.retry(item, failed=True)
+    queue.ack_failed(receipt)
+    scheduler.recover()
+    assert queue.ready_count() == 0 and queue.ack_failed_count() == 1
+    assert artifacts.connection.execute("SELECT state FROM reanalysis").fetchone()[0] == "failed"
+    if rebuild:
+        scheduler.request(capture["id"], [], 0)
+        scheduler.flush()
+        assert scheduler.claim(item) is None
+    else:
+        queue.nack(id=receipt["pqid"])
+    retried = queue.get(block=False, raw=True)
+    assert (retried["data"]["reanalysis_ticket"] != item["reanalysis_ticket"]) is rebuild
+    assert scheduler.claim(retried["data"])["id"] == capture["id"]
+    scheduler.finish(retried["data"])
+    queue.ack(retried)
+    assert artifacts.connection.execute("SELECT state FROM reanalysis").fetchone()[0] == "done"
 
 
 @pytest.mark.parametrize("remaining,visited", [(-1, []), (31, []), (0, ["self"])])
@@ -232,3 +314,13 @@ def test_restart_after_completion_before_acknowledgement(scheduling, newer):
     finally:
         restarted_queue.close()
         artifacts.close()
+
+
+def test_claim_uses_filename_fallback_for_legacy_capture(scheduling, tmp_path):
+    scheduler, artifacts, queue, capture = scheduling
+    reference = artifacts.connection.execute("SELECT path FROM captures").fetchone()[0]
+    artifacts.connection.execute("UPDATE captures SET path=?", (str(tmp_path / "old" / reference),))
+    artifacts.connection.commit()
+    scheduler.request(capture["id"], ["root"], 1)
+    scheduler.flush()
+    assert scheduler.claim(queue.get(block=False))["data"] == capture["data"]

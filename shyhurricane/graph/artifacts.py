@@ -13,6 +13,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import unquote
 
+from shyhurricane.graph.artifact_paths import artifact_reference, resolve_artifact_path
 from shyhurricane.graph.model import MAX_BYTES, identity
 from shyhurricane.persistent_queue import persistent_queue_path
 
@@ -43,6 +44,12 @@ class ArtifactStore:
             with self.connection:
                 self.connection.execute("CREATE INDEX IF NOT EXISTS refs_capture_id ON refs(capture_id,url)")
             logger.info("Created graph reference index in %.3f seconds", time.monotonic() - started)
+
+    def resolve(self, reference: str | Path) -> Path:
+        return resolve_artifact_path(self.root, reference)
+
+    def reference(self, path: str | Path) -> str:
+        return artifact_reference(self.root, path)
 
     def close(self):
         self.connection.close()
@@ -80,16 +87,16 @@ class ArtifactStore:
         with self.lock(event["id"]):
             existing = self.connection.execute("SELECT path FROM captures WHERE id=?", (event["id"],)).fetchone()
             if existing:
-                return json.loads(Path(existing[0]).read_text())
+                return json.loads(self.resolve(existing[0]).read_text())
             path = self.write(event["id"], event)
             with self.connection:
                 self.connection.execute(
                     "INSERT OR IGNORE INTO captures VALUES (?,?,?,?)",
-                    (event["id"], event["data"]["url"], event["observed_at"], str(path)),
+                    (event["id"], event["data"]["url"], event["observed_at"], self.reference(path)),
                 )
                 digest = hashlib.sha256((event["data"].get("response_body") or "").encode()).hexdigest()
                 self.connection.execute(
-                    "INSERT OR IGNORE INTO bodies VALUES (?,?,?)", (event["data"]["url"], digest, str(path))
+                    "INSERT OR IGNORE INTO bodies VALUES (?,?,?)", (event["data"]["url"], digest, self.reference(path))
                 )
             return event
 
@@ -97,7 +104,7 @@ class ArtifactStore:
         row = self.connection.execute(
             "SELECT path FROM captures WHERE url=? ORDER BY stamp DESC, id LIMIT 1", (url,)
         ).fetchone()
-        return json.loads(Path(row[0]).read_text()) if row else None
+        return json.loads(self.resolve(row[0]).read_text()) if row else None
 
     def references(self, capture_id: str, urls: list[str]):
         with self.connection:
@@ -107,13 +114,13 @@ class ArtifactStore:
         rows = self.connection.execute(
             "SELECT c.path FROM captures c JOIN refs r ON c.id=r.capture_id " "WHERE r.url=?", (url,)
         ).fetchall()
-        return [json.loads(Path(row[0]).read_text()) for row in rows]
+        return [json.loads(self.resolve(row[0]).read_text()) for row in rows]
 
     def targets(self, capture_id: str) -> list[dict]:
         rows = self.connection.execute(
             "SELECT c.path FROM captures c JOIN refs r ON c.url=r.url " "WHERE r.capture_id=?", (capture_id,)
         ).fetchall()
-        return [json.loads(Path(row[0]).read_text()) for row in rows]
+        return [json.loads(self.resolve(row[0]).read_text()) for row in rows]
 
     def consuming_documents(self, url: str, budget: int = 1000) -> tuple[list[dict], bool]:
         """Follow supplied script dependencies back to their documents, including lazy chunks."""
@@ -161,7 +168,7 @@ class ArtifactStore:
         row = self.connection.execute(
             "SELECT path FROM bodies WHERE url=? AND digest=?", (url, original_hash)
         ).fetchone()
-        raw = json.loads(Path(row[0]).read_text()) if row else None
+        raw = json.loads(self.resolve(row[0]).read_text()) if row else None
         raw_source = (raw or {}).get("data", {}).get("response_body") or ""
         if raw_source and original_hash and hashlib.sha256(raw_source.encode()).hexdigest() == original_hash:
             source = raw_source

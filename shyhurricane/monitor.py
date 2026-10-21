@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import sqlite3
 from dataclasses import dataclass, field
@@ -16,6 +17,7 @@ from shyhurricane.disk_space import disk_status
 from shyhurricane.graph.status import graph_status
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server.generator_config import get_generator_config
+from shyhurricane.monitoring_qdrant import MonitorQdrantCache, bounded_count
 from shyhurricane.persistent_queue import active_queue_size, persistent_queue_counts, retry_failed_queue_items
 from shyhurricane.server_config import get_server_config
 
@@ -46,6 +48,7 @@ class MonitorData:
     graph: dict | None = None
     queue_failures: dict[str, int] = field(default_factory=dict)
     disk: dict | None = None
+    qdrant_freshness: dict = field(default_factory=dict)
 
 
 def certificate_fingerprint(certificate_path: Path | None) -> str | None:
@@ -84,14 +87,16 @@ async def get_recent_indexed_urls(qdrant_client) -> list[str]:
     filters = qm.Filter(
         must=[qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION))]
     )
-    records, _ = await qdrant_client.scroll(
-        collection_name="network",
-        scroll_filter=filters,
-        limit=5,
-        with_payload=["meta.url"],
-        with_vectors=False,
-        order_by=qm.OrderBy(key="meta.timestamp_float", direction=qm.Direction.DESC),
-    )
+    async with asyncio.timeout(5):
+        records, _ = await qdrant_client.scroll(
+            collection_name="network",
+            scroll_filter=filters,
+            limit=5,
+            with_payload=["meta.url"],
+            with_vectors=False,
+            order_by=qm.OrderBy(key="meta.timestamp_float", direction=qm.Direction.DESC),
+            timeout=5,
+        )
     return [
         metadata["url"]
         for record in records
@@ -149,12 +154,38 @@ def format_graph_panel(graph: dict | None) -> str:
 
 
 def format_domain_and_host_panel(data: MonitorData) -> str:
+    freshness = data.qdrant_freshness.get("domains", {})
+    if freshness.get("status") == "unavailable":
+        return "[b]Domains and hosts[/b]\nStatistics unavailable"
     domains = "\n".join(f"{domain}: {count}" for domain, count in data.top_domains) or "No domains indexed"
     hosts = "\n".join(f"{host}: {count}" for host, count in data.top_hosts) or "No hosts indexed"
     return (
-        f"[b]Domains and hosts[/b]\nDomains: {data.domain_count}\nHosts: {data.host_count}\n"
+        f"[b]Domains and hosts[/b]{format_qdrant_freshness(freshness)}\n"
+        f"Domains: {data.domain_count}\nHosts: {data.host_count}\n"
         f"[b]Top domains[/b]\n{domains}\n[b]Top hosts[/b]\n{hosts}"
     )
+
+
+def format_qdrant_freshness(freshness: dict) -> str:
+    if not freshness or freshness["status"] == "cached":
+        return ""
+    if freshness["status"] == "unavailable":
+        return "\nUnavailable"
+    return f"\n{freshness['status'].capitalize()} ({freshness['age_seconds']:.0f}s old)"
+
+
+def format_monitor_database_panel(data: MonitorData) -> str:
+    panel = format_database_panel(data.document_counts)
+    for name, count in data.document_counts.items():
+        freshness = data.qdrant_freshness.get(f"documents:{name}", {})
+        value = "unavailable" if freshness.get("status") == "unavailable" else count
+        label = "Findings" if name == "finding" else name
+        # Replace whole lines so collection names cannot accidentally match one another.
+        panel = "\n".join(
+            f"{label}: {value}{format_qdrant_freshness(freshness)}" if line == f"{label}: {count}" else line
+            for line in panel.splitlines()
+        )
+    return panel
 
 
 def health_label(healthy: bool | None) -> str:
@@ -192,7 +223,7 @@ def format_configuration_panel(data: MonitorData) -> str:
     return (
         "[b]Configuration[/b]\n"
         f"Model: {data.model} {health_label(data.model_health)}\n"
-        f"Qdrant: {data.database} {qdrant_host_bind}:{qdrant_http_port} {health_label(data.qdrant_health)}\n"
+        f"Qdrant: {qdrant_host_bind}:{qdrant_http_port} {health_label(data.qdrant_health)}\n"
         f"Neo4j: {(data.graph or {}).get('uri') or 'unavailable'} "
         f"{health_label((data.graph or {}).get('healthy'))}\n"
         f"Low power: {low_power}\n"
@@ -205,14 +236,16 @@ def format_configuration_panel(data: MonitorData) -> str:
 async def collect_monitor_data(
     server_context, host: str, port: int, running_tools: Iterable[str],
     recent_tools: Iterable[tuple[str, str]] = (),
+    *, qdrant_cache: MonitorQdrantCache | None = None,
 ) -> MonitorData:
-    document_counts = {}
-    for collection_name, store in server_context.stores.items():
-        try:
-            document_counts[collection_name] = await store.count_documents_async()
-        except Exception:
-            logger.debug("Unable to load document count for %s", collection_name, exc_info=True)
-            document_counts[collection_name] = 0
+    cache = qdrant_cache if qdrant_cache is not None else MonitorQdrantCache()
+
+    async def document_count(name, store):
+        return name, await cache.get(f"documents:{name}", lambda: bounded_count(store), 300, 0)
+
+    document_counts = dict(await asyncio.gather(*(
+        document_count(name, store) for name, store in server_context.stores.items()
+    )))
     try:
         counts = await persistent_queue_counts(server_context.db)
     except (OSError, sqlite3.Error):
@@ -232,21 +265,13 @@ async def collect_monitor_data(
     proxy_address = "not started"
     if server_context.proxy_host is not None and server_context.proxy_port is not None:
         proxy_address = f"{server_context.proxy_host}:{server_context.proxy_port}"
-    try:
-        recent_urls = await get_recent_indexed_urls(server_context.qdrant_client)
-    except Exception:
-        logger.debug("Unable to load recently indexed URLs", exc_info=True)
-        recent_urls = []
-    try:
-        domain_counts, host_counts = await get_domain_and_host_counts(
-            server_context.qdrant_client, WEB_RESOURCE_VERSION
-        )
-        domain_count, host_count = len(domain_counts), len(host_counts)
-        top_domains, top_hosts = top_counts(domain_counts), top_counts(host_counts)
-    except Exception:
-        logger.debug("Unable to load domain and host counts", exc_info=True)
-        domain_count, host_count = 0, 0
-        top_domains, top_hosts = [], []
+    recent_urls, (domain_counts, host_counts) = await asyncio.gather(
+        cache.get("urls", lambda: get_recent_indexed_urls(server_context.qdrant_client), 30, []),
+        cache.get("domains", lambda: get_domain_and_host_counts(
+            server_context.qdrant_client, WEB_RESOURCE_VERSION), 300, ({}, {})),
+    )
+    domain_count, host_count = len(domain_counts), len(host_counts)
+    top_domains, top_hosts = top_counts(domain_counts), top_counts(host_counts)
     health_monitor = getattr(server_context, "health_monitor", None)
     low_power = getattr(server_context, "low_power", None)
     if low_power is None:
@@ -274,6 +299,7 @@ async def collect_monitor_data(
         graph=graph,
         disk=disk_status(server_context),
         queue_failures={label: counts[name]["failed"] for label, name in labels.items() if name in counts},
+        qdrant_freshness=cache.freshness() if qdrant_cache is not None else {},
     )
 
 
@@ -323,6 +349,7 @@ class MonitorApp(App[None]):
         self.port = port
         self.server = server
         self._retrying_failed = False
+        self.qdrant_cache = MonitorQdrantCache()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -344,18 +371,23 @@ class MonitorApp(App[None]):
 
     async def refresh_data(self) -> None:
         data = await collect_monitor_data(
-            self.server_context, self.host, self.port, self.server.running_tools, self.server.recent_tools
+            self.server_context, self.host, self.port, self.server.running_tools, self.server.recent_tools,
+            qdrant_cache=self.qdrant_cache,
         )
         if not self.is_running:
             return
         self.query_one("#configuration-content", Static).update(format_configuration_panel(data))
         queues = format_queue_panel(data.queue_sizes, data.queue_failures)
         self.query_one("#queues", Static).update(f"[b]Queue status[/b]\n{queues}")
-        self.query_one("#database", Static).update(format_database_panel(data.document_counts))
+        self.query_one("#database", Static).update(format_monitor_database_panel(data))
         self.query_one("#graph", Static).update(format_graph_panel(data.graph))
         self.query_one("#domains", Static).update(format_domain_and_host_panel(data))
-        urls = "\n".join(data.recent_urls) or "No URLs indexed"
-        self.query_one("#urls", Static).update(f"[b]Last five URLs indexed[/b]\n{urls}")
+        freshness = data.qdrant_freshness.get("urls", {})
+        urls = ("Unavailable" if freshness.get("status") == "unavailable"
+                else "\n".join(data.recent_urls) or "No URLs indexed")
+        self.query_one("#urls", Static).update(
+            f"[b]Last five URLs indexed[/b]{format_qdrant_freshness(freshness)}\n{urls}"
+        )
         self.query_one("#tools", Static).update(format_tools_panel(data.running_tools, data.recent_tools))
 
     async def action_refresh(self) -> None:

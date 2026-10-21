@@ -1,6 +1,5 @@
 """Closed-world relationship and data-flow tools over captured application artifacts."""
 
-import asyncio
 import logging
 from typing import Annotated, Literal
 
@@ -9,9 +8,10 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, BeforeValidator, Field
 
-from shyhurricane.graph.query import GraphQuery, scope_predicate
+from shyhurricane.graph.query import scope_predicate
 from shyhurricane.indexing_wait import IndexingStatus, indexing_scope, wait_for_indexing
 from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
+from shyhurricane.mcp_server.graph_execution import execute_graph
 from shyhurricane.result_pages import Pagination, paged_results
 
 logger = logging.getLogger(__name__)
@@ -99,6 +99,7 @@ class GraphResult(BaseModel):
     indexing: IndexingStatus | None = None
     results: list[dict]
     analysis_gaps: list[str] = Field(default_factory=list)
+    analysis_summaries: list[dict] = Field(default_factory=list)
     instructions: str
     retrieval_truncated: bool = False
     truncation_reasons: list[str] = Field(default_factory=list)
@@ -124,8 +125,7 @@ async def query(ctx, tool, operation, scope, **arguments):
     try:
         matches = scope_predicate(scope)
         indexing = await wait_for_indexing(ctx, server, matches, graph=True)
-        service = GraphQuery(server.graph_store)
-        result = await asyncio.to_thread(getattr(service, operation), scope, **arguments)
+        result = await execute_graph(ctx, server.graph_store, operation, scope, **arguments)
         if result is not None:
             return {**result, "indexing": indexing.model_dump()}
         return {"indexing": indexing.model_dump()} if indexing.potentially_incomplete else None
@@ -397,7 +397,7 @@ async def fetch_application_graph_evidence(
     if server.graph_store is None:
         raise ToolError("Application graph is unavailable")
     try:
-        return await asyncio.to_thread(GraphQuery(server.graph_store).evidence, evidence_id)
+        return await execute_graph(ctx, server.graph_store, "evidence", evidence_id)
     except Exception as error:
         logger.exception(
             "Application graph query failed: tool=fetch_application_graph_evidence operation=evidence evidence_id=%s",

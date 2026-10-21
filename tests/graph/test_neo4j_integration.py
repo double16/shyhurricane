@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -23,6 +24,8 @@ def neo4j():
     store.ready()
 
     def clean():
+        with store.connect().session(database="neo4j") as session:
+            session.run("MATCH (m:GraphState {id:'graph_lookup_v1'}) DELETE m").consume()
         scope = "n.url STARTS WITH 'https://graph-test.invalid/' OR n.url STARTS WITH 'https://cdn.graph-test.invalid/'"
         with store.connect().session() as session:
             while session.run(
@@ -78,14 +81,9 @@ def test_latest_history_idempotency_and_reopen(neo4j, event):
     )["results"]
 
 
-def test_pending_cleanup_migration_resumes_and_excludes_cleaned_history(neo4j):
-    import time
-
-    from shyhurricane.graph.maintenance import MIGRATION_ID, migrate_cleanup
-
+def test_pending_cleanup_uses_index_and_excludes_cleaned_history(neo4j):
     url = "https://graph-test.invalid/cleanup"
     with neo4j.connect().session(database="neo4j") as session:
-        session.run("MATCH (m:GraphState {id:$id}) DELETE m", id=MIGRATION_ID).consume()
         session.run(
             "UNWIND range(0,4999) AS i CREATE (p:GraphPublication "
             "{id:'cleanup-history-'+toString(i),url:$url,state:'retired',retired_at:0,cleaned:true})",
@@ -93,7 +91,7 @@ def test_pending_cleanup_migration_resumes_and_excludes_cleaned_history(neo4j):
         ).consume()
         session.run(
             "CREATE (c:GraphCapture {id:'cleanup-owner',url:$url}), "
-            "(p:GraphPublication {id:'cleanup-pending',capture_id:'cleanup-owner',url:$url,"
+            "(p:GraphPublication:GraphCleanupPending {id:'cleanup-pending',capture_id:'cleanup-owner',url:$url,"
             "state:'abandoned',retired_at:0}), "
             "(e:GraphEvidence {id:'cleanup-abandoned-proof',_publication_id:'cleanup-pending',url:$url}), "
             "(active:GraphPublication:GraphCleanupPending "
@@ -104,22 +102,6 @@ def test_pending_cleanup_migration_resumes_and_excludes_cleaned_history(neo4j):
             url=url,
         ).consume()
 
-    class Interrupted:
-        calls = 0
-
-        def is_set(self):
-            self.calls += 1
-            return self.calls > 1
-
-    assert migrate_cleanup(neo4j, time.monotonic() + 60, Interrupted()) == 500
-    marker = neo4j.read("MATCH (m:GraphState {id:$id}) RETURN properties(m) AS m", id=MIGRATION_ID)[0]["m"]
-    assert marker["cursor"] and marker["complete"] is False
-    neo4j.close()
-    neo4j.ready()
-    migrate_cleanup(neo4j, time.monotonic() + 60, threading.Event())
-    assert neo4j.read(
-        "MATCH (m:GraphState {id:$id}) RETURN m.complete AS done", id=MIGRATION_ID,
-    )[0]["done"]
     with neo4j.connect().session(database="neo4j", default_access_mode="READ") as session:
         with session.begin_transaction(timeout=10) as tx:
             result = tx.run(
@@ -145,8 +127,6 @@ def test_pending_cleanup_migration_resumes_and_excludes_cleaned_history(neo4j):
     assert len(neo4j.read(
         "MATCH (p:GraphPublication) WHERE p.id IN ['cleanup-active','cleanup-staging'] RETURN p.id"
     )) == 2
-    # A completed migration never scans historical publications again.
-    assert migrate_cleanup(neo4j, time.monotonic() + 60, threading.Event()) == 0
 
 
 def test_staged_publication_preserves_previous_graph_and_replays(neo4j, event, monkeypatch):
@@ -1052,3 +1032,186 @@ def test_resumable_planning_covers_12538_contexts_before_atomic_activation(neo4j
     print(json.dumps({"contexts": count, "slices": slices, "selection_reads": planner.selection_reads,
                       "hydration_reads": planner.hydration_reads, "planning_seconds": round(elapsed, 3),
                       "max_slice_seconds": round(maximum, 3)}))
+
+
+def test_indexed_discovery_matches_legacy_and_avoids_global_scans(neo4j, event):
+    from shyhurricane.graph.lookup import migrate_lookup
+
+    url = "https://graph-test.invalid/indexed"
+    graph = extract(event(url=url, body='<form action="/save"><input name="value"></form><script src="/app.js"></script>'))
+    neo4j.publish(graph)
+    legacy = GraphQuery(neo4j)
+    expected_elements = legacy.elements("graph-test.invalid")["results"]
+    expected_endpoints = legacy.endpoints("graph-test.invalid")["results"]
+    migrate_lookup(neo4j, time.monotonic() + 60, threading.Event())
+    statements = []
+    original = neo4j.read
+
+    def record(statement, **parameters):
+        statements.append((statement, dict(parameters)))
+        return original(statement, **parameters)
+
+    neo4j.read = record
+    try:
+        actual = GraphQuery(neo4j)
+        assert actual.elements("graph-test.invalid")["results"] == expected_elements
+        assert actual.endpoints("graph-test.invalid")["results"] == expected_endpoints
+        assert actual.elements("graph-test.invalid", kinds=["field"], url=url)["results"]
+        assert not actual.elements("badgraph-test.invalid")["results"]
+        assert not actual.elements("graph-test.invalid:8443")["results"]
+        assert actual.elements(url, context_url=url)["results"]
+        assert not actual.endpoints("graph-test.invalid", method="POST")["results"]
+    finally:
+        neo4j.read = original
+    with neo4j.connect().session() as session:
+        for statement, parameters in statements:
+            if "traversal:candidates" not in statement and "indexed-context" not in statement:
+                continue
+            parameters.pop("timeout", None)
+            summary = session.run("EXPLAIN " + statement, **parameters).consume()
+            plan = str(summary.plan)
+            assert "NodeByLabelScan" not in plan and "AllNodesScan" not in plan
+            assert "Index" in plan
+
+
+def test_indexed_context_resolves_resource_flow_without_scanning(neo4j, event):
+    import time
+
+    from shyhurricane.graph.lookup import migrate_lookup
+    from shyhurricane.graph.model import Projection
+
+    page = "https://graph-test.invalid/context-page"
+    script = "https://cdn.graph-test.invalid/context.js"
+    graph = Projection(event(url=script, mime="text/javascript"))
+    graph.contexts = [{"id": graph.event["id"], "url": page}]
+    resource = graph.resource(script)
+    source = graph.node("source", "location", role="source", context_urls=[page])
+    sink = graph.node("sink", "eval", role="sink", context_urls=[page])
+    graph.fact(resource, source, "CONTAINS", "test")
+    graph.fact(resource, sink, "CONTAINS", "test")
+    graph.fact(source, sink, "FLOWS_TO", "test")
+    neo4j.publish(graph)
+    migrate_lookup(neo4j, time.monotonic() + 60, threading.Event())
+    actual = GraphQuery(neo4j)
+    assert actual.elements(page, role="source", context_url=page)["results"][0]["id"] == source
+    result = actual.paths("graph-test.invalid", resource, mode="flow")
+    assert result["results"] and not result["retrieval_truncated"]
+    assert all(step["kind"] == "FLOWS_TO" for path in result["results"] for step in path["steps"])
+
+
+@pytest.mark.parametrize("label,field", [("GraphEntity", "url"), ("GraphContext", "url"),
+                                         ("GraphEntity", "_reverse_host"), ("GraphContext", "reverse_host")])
+def test_candidate_keyset_pages_cover_repeated_values_with_reverse_ids(neo4j, label, field):
+    from shyhurricane.graph.lookup import reverse_host
+    from shyhurricane.graph.traversal import TraversalSnapshot
+
+    url = "https://graph-test.invalid/keyset/"
+    prefix = url if field == "url" else reverse_host(url)
+    records = [
+        {"id": f"keyset-{1200 - index:04}", "url": f"{url}{index // 3:04}",
+         field: f"{prefix}{index // 3:04}"}
+        for index in range(1200)
+    ]
+    with neo4j.connect().session(database="neo4j") as session:
+        session.run(f"UNWIND $rows AS row CREATE (n:{label}) SET n=row", rows=records).consume()
+    reader = TraversalSnapshot(GraphQuery(neo4j), "graph-test.invalid")
+    pages = []
+    for page in reader.lookup_pages(label, field, prefix):
+        pages.append(page)
+        assert len(pages) <= 3, "Candidate pagination revisited an earlier page"
+    expected = sorted(records, key=lambda row: (row[field], row["id"]))
+    assert [row["seed"]["id"] for page in pages for row in page] == [row["id"] for row in expected]
+    assert [len(page) for page in pages] == [500, 500, 200]
+    assert not reader.metadata["retrieval_truncated"]
+
+
+def test_cancel_graph_read_terminates_only_its_tagged_transaction(neo4j):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from shyhurricane.graph.budget import QueryBudget
+
+    budget = QueryBudget()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(budget.read, neo4j, "UNWIND range(1,1000000000) AS n RETURN sum(n) AS total")
+        deadline = time.monotonic() + 10
+        found = False
+        while time.monotonic() < deadline:
+            rows = neo4j.read(
+                "SHOW TRANSACTIONS YIELD transactionId,metaData WHERE metaData.graph_request=$id RETURN transactionId",
+                timeout=5, id=budget.request_id,
+            )
+            if rows:
+                found = True
+                break
+            time.sleep(0.02)
+        assert found
+        budget.cancel()
+        with pytest.raises(Exception, match="terminated|cancelled"):
+            future.result(timeout=10)
+        assert neo4j.read("RETURN 1 AS alive", timeout=5) == [{"alive": 1}]
+
+
+def test_focused_queries_ignore_tenfold_disconnected_noise(neo4j, event):
+    from neo4j import Query
+
+    from shyhurricane.graph.lookup import migrate_lookup, reverse_host
+
+    url = "https://graph-test.invalid/efficient-page"
+    graph = extract(event(url=url, body='<input name="value"><a href="/next">next</a>'))
+    neo4j.publish(graph)
+    migrate_lookup(neo4j, time.monotonic() + 60, threading.Event())
+    baseline = None
+    trials = []
+    read = neo4j.read
+    for count in (0, 1000, 10000):
+        if count:
+            with neo4j.connect().session() as session:
+                session.run(
+                    "UNWIND range(1,$count) AS i "
+                    "MERGE (n:GraphEntity {id:'efficiency-noise-'+toString(i)}) "
+                    "SET n.url=$prefix+toString(i),n.kind='resource',n._reverse_host=$host "
+                    "MERGE (context:GraphContext {id:'efficiency-context-'+toString(i)}) "
+                    "SET context.url=n.url,context.reverse_host=$host,context.owner_kind='GraphEntity',context.owner_id=n.id",
+                    count=count, prefix="https://graph-test.invalid/noise/", host=reverse_host(url),
+                ).consume()
+        hits = []
+
+        def profile(statement, **parameters):
+            timeout = parameters.pop("timeout", 10)
+            with neo4j.connect().session(default_access_mode="READ") as session:
+                result = session.run(Query("PROFILE " + statement, timeout=timeout), **parameters)
+                rows = [dict(row) for row in result]
+                plan = result.consume().profile
+
+            def total(node):
+                return node.get("dbHits", 0) + sum(total(child) for child in node.get("children", []))
+
+            hits.append(total(plan))
+            if count == 10000 and total(plan) > 1000:
+                def costly(node):
+                    if node.get("dbHits", 0) > 1000:
+                        print(node["operatorType"], node.get("dbHits"), node.get("args", {}).get("Details", "")[:300])
+                    for child in node.get("children", []):
+                        costly(child)
+                print(statement.split("*/")[0], total(plan))
+                costly(plan)
+            assert "NodeByLabelScan" not in str(plan) and "AllNodesScan" not in str(plan)
+            return rows
+
+        neo4j.read = profile
+        started = time.monotonic()
+        try:
+            actual = GraphQuery(neo4j).elements(url, url=url)
+            endpoints = GraphQuery(neo4j).endpoints(url, url=url)
+        finally:
+            neo4j.read = read
+        assert actual["results"] and endpoints["results"]
+        assert not actual["retrieval_truncated"] and not endpoints["retrieval_truncated"]
+        if baseline is None:
+            baseline = (actual["results"], endpoints["results"])
+        assert (actual["results"], endpoints["results"]) == baseline
+        trials.append({"noise": count, "seconds": time.monotonic() - started, "db_hits": sum(hits)})
+    print(json.dumps({"focused_query_trials": trials}))
+    assert trials[-1]["db_hits"] <= 2 * trials[1]["db_hits"]
+    assert all(trial["seconds"] < 10 for trial in trials)
+    print(json.dumps({"focused_query_trials": trials}))

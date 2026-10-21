@@ -2,7 +2,6 @@
 
 import json
 import logging
-from pathlib import Path
 from uuid import uuid4
 
 logger = logging.getLogger(__name__)
@@ -82,7 +81,7 @@ class ReanalysisScheduler:
             for capture_id, ticket in self.connection.execute(
                 "SELECT capture_id,ticket FROM graph_continuations WHERE state='failed' AND ticket IS NOT NULL"
             ).fetchall():
-                self.finish({"id": capture_id, "reanalysis_ticket": ticket})
+                self.retry({"id": capture_id, "reanalysis_ticket": ticket}, failed=True)
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
             has_continuations = self.connection.execute(
@@ -90,7 +89,8 @@ class ReanalysisScheduler:
             ).fetchone()
             continuation_filter = (
                 " AND NOT EXISTS (SELECT 1 FROM graph_continuations j "
-                "WHERE j.capture_id=reanalysis.capture_id AND j.state IN ('pending','running','failed'))"
+                "WHERE j.capture_id=reanalysis.capture_id AND j.ticket=reanalysis.ticket "
+                "AND j.state IN ('pending','running','failed'))"
                 if has_continuations else ""
             )
             rows = self.connection.execute(
@@ -109,7 +109,7 @@ class ReanalysisScheduler:
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
             row = self.connection.execute(
-                "SELECT pending FROM reanalysis WHERE capture_id=? AND ticket=? AND state='pending'",
+                "SELECT pending FROM reanalysis WHERE capture_id=? AND ticket=? AND state IN ('pending','failed')",
                 (item["id"], item["reanalysis_ticket"]),
             ).fetchone()
             if row is None:
@@ -123,7 +123,7 @@ class ReanalysisScheduler:
         path = self.connection.execute("SELECT path FROM captures WHERE id=?", (item["id"],)).fetchone()
         if path is None:
             raise ValueError("Reanalysis capture is unavailable")
-        event = json.loads(Path(path[0]).read_text())
+        event = json.loads(self.artifacts.resolve(path[0]).read_text())
         route = json.loads(row[0])
         return {
             **event,
@@ -132,7 +132,8 @@ class ReanalysisScheduler:
             "reconcile_remaining": route["remaining"],
         }
 
-    def retry(self, item):
+    def retry(self, item, *, failed=False):
+        """Retain routing for redelivery; failed routes require an explicit queue retry."""
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
             row = self.connection.execute(
@@ -142,8 +143,8 @@ class ReanalysisScheduler:
             if row:
                 route = merge_routes(json.loads(row[0]) if row[0] else None, json.loads(row[1]))
                 self.connection.execute(
-                    "UPDATE reanalysis SET state='pending',pending=?,running=NULL WHERE capture_id=?",
-                    (json.dumps(route), item["id"]),
+                    "UPDATE reanalysis SET state=?,pending=?,running=NULL WHERE capture_id=?",
+                    ("failed" if failed else "pending", json.dumps(route), item["id"]),
                 )
 
     def finish(self, item):
