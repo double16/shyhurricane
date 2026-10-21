@@ -406,6 +406,11 @@ class TraversalSnapshot:
                                       filters=self.candidate_filter(), parameters=parameters):
             if not cache(rows):
                 return
+        # An in-scope exact URL is fully covered by the direct URL index, including
+        # context-owned nodes. Context discovery is only needed to admit nodes whose
+        # own URL is outside scope through an in-scope document association.
+        if url is not None and self.contains(url):
+            return
         context_field = "url" if context_url or "://" in scope else "reverse_host"
         context_value = context_url or (web_url(scope, fragment=True) if "://" in scope else reverse_host(parsed.geturl()))
         for owners in self.lookup_pages("GraphContext", context_field, context_value, exact=bool(context_url)):

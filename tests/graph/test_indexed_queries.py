@@ -94,6 +94,9 @@ def test_indexed_endpoint_summaries_match_legacy(event, filters):
     actual = GraphQuery(store).endpoints("example.com", **filters)
     assert actual["results"] == expected["results"]
     assert not actual["retrieval_truncated"]
+    if filters.get("url"):
+        assert not any("MATCH (n:GraphContext)" in statement for statement, _ in store.calls)
+        assert not any("traversal:context-candidates" in statement for statement, _ in store.calls)
 
 
 def test_context_discovery_and_flow_keep_associations_out_of_paths(event):

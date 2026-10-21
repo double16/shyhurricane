@@ -256,3 +256,40 @@ def test_scope_checks_use_each_membership_context_not_merged_logical_context(app
     monkeypatch.setattr(reader.service, "hydrate", outside_source)
     assert not reader.load([source], "forward", FLOW_KINDS)
     assert reader.nodes[source]["context_urls"] == [graph.url]
+
+
+@pytest.mark.parametrize("matched", [True, False])
+@pytest.mark.parametrize("context_url", [None, "https://example.com/page"])
+def test_exact_in_scope_candidates_do_not_scan_contexts(application, monkeypatch, matched, context_url):
+    graph, page, *_ = application
+    reader = TraversalSnapshot(GraphQuery(Store(graph)), "example.com")
+    calls = []
+
+    def pages(label, field, value, **arguments):
+        calls.append((label, field, value, arguments))
+        assert label == "GraphEntity"
+        if matched:
+            yield [{"seed": {**graph.nodes[page], "context_urls": [context_url] if context_url else []}}]
+
+    monkeypatch.setattr(reader, "lookup_pages", pages)
+    reader.candidates("example.com", kinds=["resource"], url=graph.url, context_url=context_url, method="get")
+    assert set(reader.nodes) == ({page} if matched else set())
+    assert len(calls) == 1
+    assert calls[0][3]["parameters"]["url"] == graph.url
+    assert calls[0][3]["parameters"]["method"] == "GET"
+    assert not reader.metadata["retrieval_truncated"]
+
+
+@pytest.mark.parametrize("url", [None, "https://other.test/"])
+def test_candidates_keep_context_discovery_without_in_scope_exact_url(application, monkeypatch, url):
+    graph, *_ = application
+    reader = TraversalSnapshot(GraphQuery(Store(graph)), "example.com")
+    labels = []
+
+    def pages(label, *args, **kwargs):
+        labels.append(label)
+        return iter(())
+
+    monkeypatch.setattr(reader, "lookup_pages", pages)
+    reader.candidates("example.com", url=url)
+    assert labels == ["GraphEntity", "GraphContext"]
