@@ -216,6 +216,9 @@ class GraphStore:
             ).consume()
         run("CREATE INDEX graph_entity_url IF NOT EXISTS FOR (n:GraphEntity) ON (n.url)").consume()
         run("CREATE INDEX graph_entity_host IF NOT EXISTS FOR (n:GraphEntity) ON (n._reverse_host)").consume()
+        for field in ("url", "_reverse_host"):
+            run(f"CREATE INDEX graph_resource_{field}_page IF NOT EXISTS "
+                f"FOR (n:GraphEntity) ON (n.kind,n.{field},n.id)").consume()
         for field in ("url", "reverse_host", "owner_id"):
             run(f"CREATE INDEX graph_context_{field} IF NOT EXISTS FOR (n:GraphContext) ON (n.{field})").consume()
         for label, fields in (("GraphEntity", ("url", "_reverse_host")),

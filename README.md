@@ -388,7 +388,7 @@ subdomains on hostname boundaries; URL scopes restrict scheme, host, and path pr
 
 | Tool | Purpose |
 |------|---------|
-| `find_application_endpoints` | Start with URL/method summaries, captured/referenced status, inputs, scripts, and flow candidates |
+| `find_application_endpoints` | Discover URL/method inventories quickly; request focused summaries for inputs, scripts, and flow candidates |
 | `find_application_elements` | Discover resources, elements, fields, source reads, and sink operations; filter by `kinds`, `role`, or exact `url` |
 | `find_application_relationships` | Inspect incoming or outgoing relationships around a returned element ID |
 | `trace_application_data_flow` | Follow possible data flow forward to sinks or backward to sources |
@@ -406,14 +406,33 @@ Use the same application scope when passing element/resource IDs between discove
 Evidence retrieval accepts only `evidence_id` and reads published evidence without waiting for indexing.
 Possession of an evidence ID permits retrieval regardless of its URL or consuming-document context.
 It returns the evidence object or `null` for missing or unpublished evidence, without an `indexing` field.
-Begin with `find_application_endpoints`, optionally narrowing to an exact `url` and HTTP `method`.
-Each entry identifies one resource ID, URL, and method, including assets. `capture_status` is
-`captured` when an observed capture is in the selected snapshot, otherwise `referenced`; this does
-not mean the resource has never been captured. Inputs/forms, scripts, sources, and sinks each have
-`count`, at most three `examples`, `examples_limited`, and a list of concrete `follow_up` tool calls.
-Counts describe graph elements in the bounded snapshot, not unique business inputs or a complete
+Begin domain/host discovery with `find_application_endpoints(detail="inventory")` (the default).
+Each record includes a resource ID, URL, method, `capture_status`, and focused `follow_up` calls.
+Inventory includes resources whose own URL matches scope, including assets; external dependencies
+remain discoverable through focused relationship tools. Uncomputed inputs, scripts, sources, and
+sinks are omitted, not reported as zero. `capture_status` is `captured` when a visible observed
+`HOSTED_AT` relationship exists, `referenced` when that check completes without one, and `unknown`
+when classification cannot finish. Referenced does not mean the resource has never been captured.
+
+For inputs/forms, scripts, sources, and sinks, request `detail="summary"` with an exact `url` and
+HTTP `method` when known. If the endpoint is already known and needs rich details, request its
+summary directly. Avoid domain-wide summaries during reconnaissance. Summary sections each have
+`count`, at most three `examples`, `examples_limited`, and concrete `follow_up` tool calls.
+Counts describe graph elements in a bounded snapshot, not unique business inputs or a complete
 application inventory. `association` distinguishes directly related nodes from script-context
 candidates; a related script does not prove that an endpoint input reaches its sinks.
+
+Inventory uses resource indexes and validates candidates in batches without loading summaries.
+Graph execution has a 30-second budget with five-second read deadlines, separate from the
+configurable indexing wait (default 60 seconds). Database termination and response delivery may add
+small overhead. It scans at most 5,000 storage candidates and saves at most 1,000 unique resources;
+`limit` controls saved-page size only. Completed records survive budget exhaustion. Inspect
+`retrieval_truncated`, `truncation_reasons`, `analysis_gaps`, and indexing status. `scan_limit`,
+`result_limit`, `time_limit`, and `memory_limit` explain incomplete selection. `classification_limit`
+means capture-status checks stopped while resource selection continued. `lookup_unavailable`
+means lookup migration or the resource index is not ready. Startup creates resource indexes for
+existing data without reingestion; queries wait for online indexes rather than doing a broad scan.
+Summaries retain the existing 120-second graph budget and captured/referenced classification.
 
 Element discovery applies `context_url` and `role` filters in Neo4j before selecting and hydrating
 its bounded snapshot. Context matching includes direct URL matches and consuming-document contexts
@@ -430,6 +449,7 @@ IDs on saved pages have the same meaning as IDs on the first page (`get_result_p
 
 | Argument | Tools | Type / default | Purpose and values |
 |----------|-------|----------------|--------------------|
+| `detail` | `find_application_endpoints` | string; default `inventory` | `inventory` returns fast own-URL records; `summary` enriches selected endpoints, preferably with exact `url` and `method` |
 | `method` | `find_application_endpoints` | string or null; default null | Exact HTTP method filter, ignoring case; e.g. `GET` or `POST` |
 | `detail` | Elements, relationships, data flow, journeys | string; default `compact` | `compact` keeps essential identity and evidence fields; `full` returns all public properties |
 | `context_url` | `find_application_elements` | string or null; default null | Exact page URL matched against an element’s own URL or its consuming-document contexts, including external scripts |
@@ -450,10 +470,22 @@ IDs on saved pages have the same meaning as IDs on the first page (`get_result_p
 | `limit` | All except evidence retrieval | integer; default 5 for endpoints, 20 otherwise | Results per saved page, 1–1,000; follow `pagination.next_page_token` with `get_result_page` |
 | `evidence_id` | `fetch_application_graph_evidence` | string, required | Copy `results[].steps[].evidence_id` from `find_application_relationships`, `trace_application_data_flow`, or `find_user_journey_paths` |
 
-For example, call `find_application_endpoints` for a known URL:
+For domain discovery, call `find_application_endpoints`:
 
 ```json
-{"scope":"example.com","url":"https://example.com/blog","method":"GET"}
+{"scope":"taxact.com","detail":"inventory"}
+```
+
+For a known endpoint needing rich details, call it directly with `detail="summary"`:
+
+```json
+{"scope":"taxact.com","url":"https://tst.taxact.com/authuimw/v1/time","method":"GET","detail":"summary"}
+```
+
+For another page-associated summary:
+
+```json
+{"scope":"example.com","url":"https://example.com/blog","method":"GET","detail":"summary"}
 ```
 
 Follow its suggested calls, or discover page-associated sources with `find_application_elements`:

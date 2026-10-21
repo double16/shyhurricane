@@ -26,7 +26,8 @@ async def execute_graph(ctx, store, operation, *args, **kwargs):
     def progress(message):
         loop.call_soon_threadsafe(enqueue, message)
 
-    budget = QueryBudget(progress)
+    inventory = operation == "endpoints" and kwargs.get("detail", "inventory") == "inventory"
+    budget = QueryBudget(progress, seconds=30 if inventory else 120)
     service = GraphQuery(store, budget=budget)
 
     async def notify(message):

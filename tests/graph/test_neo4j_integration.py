@@ -1042,7 +1042,7 @@ def test_indexed_discovery_matches_legacy_and_avoids_global_scans(neo4j, event):
     neo4j.publish(graph)
     legacy = GraphQuery(neo4j)
     expected_elements = legacy.elements("graph-test.invalid")["results"]
-    expected_endpoints = legacy.endpoints("graph-test.invalid")["results"]
+    expected_endpoints = legacy.endpoints("graph-test.invalid", detail="summary")["results"]
     migrate_lookup(neo4j, time.monotonic() + 60, threading.Event())
     statements = []
     original = neo4j.read
@@ -1055,12 +1055,12 @@ def test_indexed_discovery_matches_legacy_and_avoids_global_scans(neo4j, event):
     try:
         actual = GraphQuery(neo4j)
         assert actual.elements("graph-test.invalid")["results"] == expected_elements
-        assert actual.endpoints("graph-test.invalid")["results"] == expected_endpoints
+        assert actual.endpoints("graph-test.invalid", detail="summary")["results"] == expected_endpoints
         assert actual.elements("graph-test.invalid", kinds=["field"], url=url)["results"]
         assert not actual.elements("badgraph-test.invalid")["results"]
         assert not actual.elements("graph-test.invalid:8443")["results"]
         assert actual.elements(url, context_url=url)["results"]
-        assert not actual.endpoints("graph-test.invalid", method="POST")["results"]
+        assert not actual.endpoints("graph-test.invalid", detail="summary", method="POST")["results"]
     finally:
         neo4j.read = original
     with neo4j.connect().session() as session:
@@ -1202,7 +1202,7 @@ def test_focused_queries_ignore_tenfold_disconnected_noise(neo4j, event):
         started = time.monotonic()
         try:
             actual = GraphQuery(neo4j).elements(url, url=url)
-            endpoints = GraphQuery(neo4j).endpoints(url, url=url)
+            endpoints = GraphQuery(neo4j).endpoints(url, detail="summary", url=url)
         finally:
             neo4j.read = read
         assert actual["results"] and endpoints["results"]
@@ -1215,3 +1215,67 @@ def test_focused_queries_ignore_tenfold_disconnected_noise(neo4j, event):
     assert trials[-1]["db_hits"] <= 2 * trials[1]["db_hits"]
     assert all(trial["seconds"] < 10 for trial in trials)
     print(json.dumps({"focused_query_trials": trials}))
+
+
+@pytest.mark.parametrize("scope_kind", ["domain", "prefix", "exact"])
+def test_endpoint_inventory_indexed_selection_and_summary_parity(neo4j, event, scope_kind):
+    from neo4j import Query
+
+    from shyhurricane.graph.lookup import migrate_lookup
+
+    url = "https://graph-test.invalid/inventory/page"
+    graph = extract(event(url=url, body='<form method="post" action="/inventory/save">'
+                                       '<input name="value"></form><script src="https://cdn.other.invalid/a.js"></script>'))
+    neo4j.publish(graph)
+    migrate_lookup(neo4j, time.monotonic() + 30, threading.Event())
+    with neo4j.connect().session() as session:
+        session.run("CALL db.awaitIndexes(30)").consume()
+    service = GraphQuery(neo4j)
+    scope = "graph-test.invalid" if scope_kind == "domain" else "https://graph-test.invalid/inventory/"
+    arguments = {"url": url} if scope_kind == "exact" else {}
+    expected = service.endpoints(scope, detail="summary", **arguments)["results"]
+    read = neo4j.read
+    plans = []
+
+    def explain(statement, **parameters):
+        timeout = parameters.pop("timeout", 5)
+        if "inventory:candidates" in statement:
+            with neo4j.connect().session(default_access_mode="READ") as session:
+                plan = session.run(Query("EXPLAIN " + statement, timeout=timeout), **parameters).consume().plan
+                plans.append(str(plan))
+        return read(statement, timeout=timeout, **parameters)
+
+    neo4j.read = explain
+    try:
+        actual = GraphQuery(neo4j).endpoints(scope, **arguments)
+    finally:
+        neo4j.read = read
+    assert actual["results"] and not actual["retrieval_truncated"]
+    actual_signatures = {(node["id"], node["url"], node["method"], node["capture_status"])
+                         for node in actual["results"]}
+    expected_signatures = {(node["id"], node["url"], node["method"], node["capture_status"])
+                           for node in expected if node["url"].startswith("https://graph-test.invalid/")}
+    assert actual_signatures == expected_signatures
+    assert plans and all("NodeIndexSeek" in plan for plan in plans)
+    assert all("NodeByLabelScan" not in plan and "AllNodesScan" not in plan for plan in plans)
+
+
+@pytest.mark.parametrize("historical,cutoff,expected", [
+    (False, None, {"new"}), (False, 1735689600, {"old"}), (True, None, {"old", "new"}),
+])
+def test_endpoint_inventory_capture_time_visibility(neo4j, event, historical, cutoff, expected):
+    from shyhurricane.graph.lookup import migrate_lookup
+
+    url = "https://graph-test.invalid/inventory-temporal"
+    old = extract(event(url=url, body='<a href="/old">old</a>', timestamp="2025-01-01T00:00:00Z"))
+    recent = extract(event(url=url, body='<a href="/new">new</a>', timestamp="2026-01-01T00:00:00Z"))
+    neo4j.publish(old)
+    neo4j.publish(recent)
+    migrate_lookup(neo4j, time.monotonic() + 30, threading.Event())
+    with neo4j.connect().session() as session:
+        session.run("CALL db.awaitIndexes(30)").consume()
+    result = GraphQuery(neo4j).endpoints("graph-test.invalid", historical=historical, as_of=cutoff)
+    paths = {node["url"].rsplit("/", 1)[-1] for node in result["results"]}
+    assert not result["retrieval_truncated"]
+    assert paths == expected | {"inventory-temporal"}
+    assert next(node for node in result["results"] if node["url"] == url)["capture_status"] == "captured"

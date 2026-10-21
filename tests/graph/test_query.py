@@ -320,13 +320,13 @@ def test_endpoint_overview_uses_captured_http_fields_and_resource_identity(event
         )
     )
     service = GraphQuery(Store(graph))
-    (endpoint,) = service.endpoints("example.com", url=graph.url, method="post")["results"]
+    (endpoint,) = service.endpoints("example.com", detail="summary", url=graph.url, method="post")["results"]
     assert endpoint["capture_status"] == "captured" and endpoint["method"] == "POST"
     assert {node["name"] for node in endpoint["inputs"]["examples"]} == {"product", "quantity"}
     assert endpoint["sources"]["examples"][0]["name"] == "product"
     assert endpoint["sinks"]["examples"][0]["name"] == "quantity"
     assert endpoint["scripts"]["follow_up"] == []
-    (referenced,) = service.endpoints("example.com", url="https://example.com/next")["results"]
+    (referenced,) = service.endpoints("example.com", detail="summary", url="https://example.com/next")["results"]
     assert referenced["capture_status"] == "referenced"
     assert not service.paths("example.com", endpoint["id"], mode="flow")["results"]
 

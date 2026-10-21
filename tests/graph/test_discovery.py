@@ -70,7 +70,7 @@ def application(event):
 
 def test_overview_resources_methods_contexts_and_scope(application):
     graph, service, page, script, source, sink, separate, calls = application
-    overview = service.endpoints("example.com", url=graph.url, method="get", historical=True, as_of=42)
+    overview = service.endpoints("example.com", detail="summary", url=graph.url, method="get", historical=True, as_of=42)
     assert calls == [("example.com", {"historical": True, "as_of": 42})]
     (endpoint,) = overview["results"]
     assert endpoint["id"] == page and endpoint["capture_status"] == "captured"
@@ -81,16 +81,16 @@ def test_overview_resources_methods_contexts_and_scope(application):
     assert separate not in {item["id"] for item in endpoint["sources"]["examples"]}
     assert endpoint["sinks"]["examples"][0]["association"] == "script_context"
     assert endpoint["sources"]["follow_up"][0]["arguments"]["context_url"] == graph.url
-    assert not service.endpoints("example.com", url=graph.url, method="post")["results"]
-    endpoint = service.endpoints("example.com", url="https://example.com/submit", method="POST")["results"][0]
+    assert not service.endpoints("example.com", detail="summary", url=graph.url, method="post")["results"]
+    endpoint = service.endpoints("example.com", detail="summary", url="https://example.com/submit", method="POST")["results"][0]
     assert endpoint["capture_status"] == "referenced"
     assert endpoint["inputs"]["count"] == 1
     graph.resource("https://example.com/submit", "GET")
-    resources = service.endpoints("example.com")["results"]
+    resources = service.endpoints("example.com", detail="summary")["results"]
     assert [item["method"] for item in resources if item["url"].endswith("/submit")] == ["GET", "POST"]
     assert resources == sorted(resources, key=lambda item: (item["url"], item["method"], item["id"]))
-    assert not service.endpoints("unrelated.test")["results"]
-    assert not service.endpoints("example.com", url="https://example.com/missing")["results"]
+    assert not service.endpoints("unrelated.test", detail="summary")["results"]
+    assert not service.endpoints("example.com", detail="summary", url="https://example.com/missing")["results"]
     assert all(item["url"] != "https://outside.test/" for item in resources)
     assert "bounded snapshot" in overview["instructions"]
 
@@ -100,13 +100,13 @@ def test_overview_bounded_examples_and_result_caps(application, monkeypatch):
     for index in range(5):
         node = graph.node("field", f"input-{index}", role="source")
         graph.fact(node, page, "SENDS_FIELD", "test.field", location=str(index))
-    endpoint = service.endpoints("example.com", url=graph.url)["results"][0]
+    endpoint = service.endpoints("example.com", detail="summary", url=graph.url)["results"][0]
     assert endpoint["inputs"]["count"] > 3
     assert len(endpoint["inputs"]["examples"]) == 3
     assert endpoint["inputs"]["examples_limited"]
     assert {call["arguments"]["direction"] for call in endpoint["inputs"]["follow_up"]} == {"forward", "backward"}
     monkeypatch.setattr("shyhurricane.graph.query.MAX_RESULTS", 1)
-    result = service.endpoints("example.com")
+    result = service.endpoints("example.com", detail="summary")
     assert len(result["results"]) == 1 and result["retrieval_truncated"]
     assert result["truncation_reasons"] == ["result_limit"]
 
@@ -210,7 +210,7 @@ def test_extensionless_scripts_and_inline_code_are_distinguished(application):
     inline = graph.node("sink", "inline", source_path="html:1:script", role="sink")
     graph.fact(page, inline, "CONTAINS", "html.inline")
     graph.nodes[page]["context_urls"] = [graph.url]
-    endpoint = service.endpoints("example.com", url=graph.url)["results"][0]
+    endpoint = service.endpoints("example.com", detail="summary", url=graph.url)["results"][0]
     scripts = {node["id"] for node in endpoint["scripts"]["examples"]}
     assert runtime in scripts and page not in scripts
     assert inline in {node["id"] for node in endpoint["sinks"]["examples"]}

@@ -69,20 +69,28 @@ async def test_each_workflow_renders_without_running_tools(name, mode, monkeypat
     assert "get_result_page" in text
     assert "fetch_application_graph_evidence" in text
     assert "no scope is required and this lookup does not wait for indexing" in text
-    assert text.index("find_application_endpoints(scope=target)") < text.index("context_url=<selected exact page URL>")
+    assert text.index('find_application_endpoints(scope=target, detail="inventory")') < text.index("context_url=<selected exact page URL>")
     assert "Avoid scope-wide symbol enumeration" in text
     assert 'detail="full"' in text
     assert "seed_ids_limited" in text
+    assert 'detail="summary" with an exact url' in text
+    assert "Avoid domain-wide summaries" in text
+    assert "Inventory omits uncomputed sections" in text
+    assert "Unknown capture status" in text
+    assert "options are separate from endpoint inventory/summary" in text
     assert "bounded examples" in text
     assert "Framework symbols and generic property reads do not establish" in text
     assert "Captured HTTP traffic cannot establish backend" in text
     assert "find_application_elements(scope=target)" not in text
     assert "find_application_elements(role=source)" not in text
     if name == "map_attack_surface":
+        assert 'detail="inventory", select URLs' in text
         assert "distinguish captured endpoints from referenced" in text
     if name == "trace_input_to_sink":
+        assert "For a known endpoint, skip inventory" in text
         assert "Only actual flow edges support a source-to-sink path" in text
     if name == "find_vulnerability_chains":
+        assert 'queries with detail="summary" and exact url' in text
         assert "Anchor find_application_endpoints" in text
         assert "Keep possible navigation journeys separate" in text
     assert "Static reachability is not runtime proof" in text

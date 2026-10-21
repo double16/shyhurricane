@@ -185,7 +185,12 @@ async def test_graph_tools_publish_complete_argument_schemas():
             assert properties["limit"]["type"] == "integer"
             assert properties["historical"]["type"] == "boolean"
             assert properties["as_of"]["anyOf"] == [{"type": "number"}, {"type": "null"}]
-        if "detail" in properties:
+        if tool.name == "find_application_endpoints":
+            assert properties["detail"]["default"] == "inventory"
+            assert properties["detail"]["enum"] == ["inventory", "summary"]
+            assert "exact url" in properties["detail"]["description"]
+            assert "Avoid broad summaries" in tool.description
+        elif "detail" in properties:
             assert properties["detail"]["default"] == "compact"
             assert properties["detail"]["enum"] == ["compact", "full"]
         if "direction" in properties:
@@ -289,7 +294,9 @@ async def test_endpoint_tool_paginates_defaults_and_filters(tmp_path, monkeypatc
     first = await tools.find_application_endpoints(None, "example.com", method="post", historical=True, as_of=42)
     assert len(first.results) == 5 and first.pagination.total_items == 7
     assert first.model_dump()["analysis_summaries"] == summaries
-    assert query.call_args.kwargs == {"url": None, "method": "post", "historical": True, "as_of": 42}
+    assert query.call_args.kwargs == {
+        "url": None, "method": "post", "historical": True, "as_of": 42, "detail": "inventory",
+    }
     second = await get_result_page(None, first.pagination.next_page_token)
     assert [item["id"] for item in second.result.results] == ["5", "6"]
     assert second.result.model_dump()["analysis_summaries"] == summaries

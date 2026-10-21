@@ -14,9 +14,9 @@ QUERY_SECONDS = 120
 
 
 class QueryBudget:
-    def __init__(self, progress=None):
+    def __init__(self, progress=None, *, seconds=QUERY_SECONDS):
         self.started = time.monotonic()
-        self.deadline = self.started + QUERY_SECONDS
+        self.deadline = self.started + seconds
         self.cancelled = threading.Event()
         self.progress = progress or (lambda message: None)
         self.lock = threading.Lock()

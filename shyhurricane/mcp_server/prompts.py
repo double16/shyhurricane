@@ -32,14 +32,22 @@ Follow pagination.next_page_token with get_result_page. Report retrieval_truncat
 truncation_reasons, analysis_gaps, missing captures, and incomplete scan/indexing status.
 Empty results do not prove security. Do not repeat pending scans; indexing is asynchronous.
 
-Use graph tools when they can substantiate a candidate. Start with
-find_application_endpoints(scope=target), narrowing url and method to URLs from existing findings.
+Use graph tools when they can substantiate a candidate. Start discovery with
+find_application_endpoints(scope=target, detail="inventory") for URLs, methods and reusable IDs.
+Inventory includes own-URL matches only; external dependencies need focused relationships.
+Select candidates, then request detail="summary" with an exact url and method when known for
+inputs, forms, scripts and source/sink associations. If a URL is already known and needs rich
+details, request its summary directly. Avoid domain-wide summaries during reconnaissance.
+Inventory omits uncomputed sections; absence does not mean zero inputs, scripts or sinks.
+Unknown capture status means classification did not finish. Inspect indexing and truncation.
 Choose captured or referenced resources explicitly; assets are not automatically business endpoints.
-Overview sections contain bounded examples, not complete inventories. Inspect counts and follow_up
-arguments, then get_result_page for more endpoint summaries. Use find_application_elements with
-context_url=<selected exact page URL> and role=source or role=sink for focused candidates;
-kinds=["resource"] restricts discovery to resources. Avoid scope-wide symbol enumeration.
-Compact detail is the default; request detail="full" only when additional properties are needed.
+Summary sections contain bounded examples, not complete inventories. Inspect counts and follow_up
+arguments, then get_result_page for more records in the same saved inventory or summary.
+Use find_application_elements with context_url=<selected exact page URL> and role=source or role=sink
+for focused candidates; kinds=["resource"] restricts discovery to resources.
+Avoid scope-wide symbol enumeration. Element, relationship and flow tools use compact detail by
+default; request detail="full" only when additional properties are needed. Their compact/full
+options are separate from endpoint inventory/summary.
 Inspect find_application_relationships with returned IDs or exact resource URLs. Use max_depth=1,
 increasing only as needed within its maximum of 3. trace_application_data_flow accepts element IDs,
 resource IDs, or exact resource URLs. Resource starts select associated sources forward or sinks
@@ -126,8 +134,9 @@ def map_attack_surface(target: Target, mode: Mode = "analysis") -> str:
         mode,
         """
 Inventory endpoints, HTTP methods, forms and fields, JavaScript API routes, observed services,
-authentication boundaries, and existing findings. Use find_application_endpoints to summarize
-methods, inputs, forms, and related scripts; distinguish captured endpoints from referenced
+authentication boundaries, and existing findings. Start find_application_endpoints with
+detail="inventory", select URLs, then request detail="summary" with exact url and method when
+known for inputs, forms and related scripts; distinguish captured endpoints from referenced
 destinations and assets. Follow focused candidates to connect resources, forms, scripts, and routes.
 Identify sensitive operations and coverage gaps.
 Rank assessment opportunities with evidence and suggested follow-up prompts; distinguish observed
@@ -263,8 +272,10 @@ def trace_input_to_sink(target: Target, mode: Mode = "analysis") -> str:
         target,
         mode,
         """
-Select an endpoint with find_application_endpoints, then use its follow-up arguments or
-find_application_elements with context_url and role=source or role=sink for focused candidates.
+Select an endpoint with find_application_endpoints(detail="inventory"), then request a focused
+summary with detail="summary" and exact url, or use find_application_elements with context_url
+and role=source or role=sink for focused candidates. For a known endpoint, skip inventory and
+use a focused summary or source/sink query directly.
 Prioritize attacker-influenced sources and security-sensitive sinks. Trace forward from sources
 and backward from sinks with trace_application_data_flow, using optional end IDs or exact URLs.
 When selecting resource entry points, inspect resolved seed IDs and counts before interpreting
@@ -284,7 +295,8 @@ def find_vulnerability_chains(target: Target, mode: Mode = "analysis") -> str:
         mode,
         """
 Start from existing findings and evidence-backed candidates. Anchor find_application_endpoints
-queries to their affected URLs, select focused candidates, then inspect specific relationships
+queries with detail="summary" and exact url to their affected URLs; skip domain enumeration
+when findings already identify endpoints. Select focused candidates, then inspect specific relationships
 and data-flow evidence. Keep possible navigation journeys separate from data-flow paths. Investigate whether one
 weakness supplies the input, access, or capability required by another: for example, unsafe
 rendering plus token exposure, or exposed configuration plus a privileged endpoint.

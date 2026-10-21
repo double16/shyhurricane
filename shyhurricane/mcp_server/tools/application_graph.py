@@ -153,17 +153,32 @@ async def find_application_endpoints(
         Field(
             ge=1,
             le=1000,
-            description="Endpoint summaries per saved page, 1–1000; default 5. "
+            description="Endpoint records per saved page, 1–1000; default 5. "
             "Use pagination.next_page_token with get_result_page for more.",
         ),
     ] = 5,
+    detail: Annotated[
+        Literal["inventory", "summary"],
+        BeforeValidator(trim_input),
+        Field(description="inventory (default): fast own-URL discovery with IDs, methods and capture status. "
+              "summary: inputs/scripts/source/sink associations; supply an exact url and method when known. "
+              "Use summary directly for a known endpoint when rich details are needed."),
+    ] = "inventory",
 ) -> GraphResult:
-    """Start graph investigation with compact URL/method summaries and reusable resource IDs.
+    """Discover endpoints with inventory; enrich selected exact URLs with summary.
 
-    Includes captured and referenced resources, including assets; does not infer business operations.
-    Inputs, scripts and source/sink sections show counts and at most three examples, with follow-up
-    tool arguments. Counts cover the bounded snapshot; inspect retrieval_truncated and analysis_gaps.
-    Script association is not flow evidence. Use returned IDs or exact URLs for relationships/flows.
+    Start domain/host enumeration with detail="inventory" and follow saved pages for more.
+    Inventory includes own-URL matches, including assets, and omits uncomputed association counts.
+    For inputs, forms, scripts and source/sink associations use detail="summary" with an exact url
+    and method when known. A known endpoint needing details can go directly to summary.
+    Avoid broad summaries during reconnaissance. Summary examples are bounded, not complete.
+    Inspect truncation, indexing, analysis gaps and unknown capture status before drawing conclusions.
+    External dependencies need focused relationship discovery; inventory does not enumerate them.
+    Script association is not flow evidence. Neither mode infers business operations.
+
+    Examples: find_application_endpoints(scope="taxact.com", detail="inventory");
+    find_application_endpoints(scope="taxact.com", url="https://tst.taxact.com/authuimw/v1/time",
+    method="GET", detail="summary"). Other graph tools use compact/full, not inventory/summary.
     """
     return GraphResult(
         **await query(
@@ -175,6 +190,7 @@ async def find_application_endpoints(
             method=method,
             historical=historical,
             as_of=as_of,
+            detail=detail,
         )
     )
 

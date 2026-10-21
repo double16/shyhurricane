@@ -355,7 +355,13 @@ class GraphQuery:
         )
         return result, gaps, reasons
 
-    def endpoints(self, scope, *, url=None, method=None, historical=False, as_of=None):
+    def endpoints(self, scope, *, url=None, method=None, historical=False, as_of=None, detail="inventory"):
+        if detail == "inventory":
+            from shyhurricane.graph.inventory import endpoint_inventory
+
+            return endpoint_inventory(self, scope, url=url, method=method, historical=historical, as_of=as_of)
+        if detail != "summary":
+            raise ValueError("detail must be inventory or summary")
         from shyhurricane.graph.traversal import ASSOCIATIONS, TraversalSnapshot
 
         reader = TraversalSnapshot(self, scope, historical=historical, as_of=as_of)

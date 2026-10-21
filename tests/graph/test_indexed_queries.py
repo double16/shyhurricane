@@ -89,9 +89,9 @@ def test_indexed_elements_match_legacy(event, scope, filters):
 @pytest.mark.parametrize("filters", [{}, {"method": "get"}, {"method": "post"}, {"url": "https://example.com/page"}])
 def test_indexed_endpoint_summaries_match_legacy(event, filters):
     graph = extract(event(body='<form action="/save"><input name="name"></form><script src="/app.js"></script>'))
-    expected = GraphQuery(Store(graph)).endpoints("example.com", **filters)
+    expected = GraphQuery(Store(graph)).endpoints("example.com", detail="summary", **filters)
     store = IndexedStore(graph)
-    actual = GraphQuery(store).endpoints("example.com", **filters)
+    actual = GraphQuery(store).endpoints("example.com", detail="summary", **filters)
     assert actual["results"] == expected["results"]
     assert not actual["retrieval_truncated"]
     if filters.get("url"):
@@ -130,7 +130,7 @@ def test_discovery_stops_at_result_cap_and_preserves_paging(event, endpoints):
         resource = graph.resource(f"https://example.com/{index:05}")
         graph.fact(resource, origin, "HOSTED_AT", "test", classification="observed")
     service = GraphQuery(IndexedStore(graph))
-    result = service.endpoints("example.com") if endpoints else service.elements("example.com", kinds=["resource"])
+    result = service.endpoints("example.com", detail="summary") if endpoints else service.elements("example.com", kinds=["resource"])
     assert len(result["results"]) == 1000
     assert result["retrieval_truncated"] and "result_limit" in result["truncation_reasons"]
 

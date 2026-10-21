@@ -129,3 +129,20 @@ async def test_late_worker_updates_are_discarded(monkeypatch):
     callbacks[0]("too late")
     await asyncio.sleep(0)
     assert notify.await_count == calls
+
+
+@pytest.mark.parametrize("arguments,seconds", [({}, 30), ({"detail": "inventory"}, 30), ({"detail": "summary"}, 120)])
+async def test_endpoint_detail_selects_graph_budget(monkeypatch, arguments, seconds):
+    budgets = []
+
+    class Service:
+        def __init__(self, store, *, budget):
+            budgets.append(budget)
+
+        def endpoints(self, scope, **kwargs):
+            return {"results": []}
+
+    monkeypatch.setattr(graph_execution, "GraphQuery", Service)
+    monkeypatch.setattr(graph_execution, "report_progress", AsyncMock())
+    await graph_execution.execute_graph(None, object(), "endpoints", "example.com", **arguments)
+    assert budgets[0].deadline - budgets[0].started == seconds
