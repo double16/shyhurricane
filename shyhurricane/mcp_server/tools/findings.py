@@ -7,11 +7,13 @@ from mcp.server.mcpserver import Context
 from mcp.types import ToolAnnotations
 from openai import BaseModel
 from pydantic import Field
+from qdrant_client.http import models as qm
 from starlette.requests import Request
 from starlette.responses import Response
 
 from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
 from shyhurricane.nuclei_findings import is_nuclei_finding, nuclei_finding_to_markdown
+from shyhurricane.qdrant_reads import read_documents
 from shyhurricane.result_pages import Pagination, paged_results
 from shyhurricane.target_info import filter_targets_str, parse_target_info
 from shyhurricane.task_queue import SaveFindingQueueItem
@@ -150,51 +152,27 @@ async def query_findings(
             limit=limit,
         )
 
-    store = server_ctx.stores["finding"]
-    docs = []
+    fields = ["id", "content", "meta.url", "meta.netloc", "meta.host", "meta.domain", "meta.title"]
 
+    async def matching(field, values):
+        match = qm.MatchAny(any=values) if isinstance(values, list) else qm.MatchValue(value=values)
+        filters = qm.Filter(must=[
+            qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=FINDING_VERSION)),
+            qm.FieldCondition(key=f"meta.{field}", match=match),
+        ])
+        return await read_documents(server_ctx.qdrant_client, "finding", filters, fields)
+
+    docs = []
     if target_info.url:
-        url_prefix, urls_munged = munge_urls(target_info.url)
-        logger.info("Searching for findings for %s", urls_munged)
-        filters = {
-            "operator": "AND",
-            "conditions": [
-                {"field": "meta.version", "operator": "==", "value": FINDING_VERSION},
-                {"field": "meta.url", "operator": "in", "value": urls_munged}
-            ]}
-        logger.info("Query findings by url %s", filters)
-        docs.extend(await store.filter_documents_async(filters=filters))
+        _, variants = munge_urls(target_info.url)
+        docs = await matching("url", variants)
     elif target_info.netloc:
-        logger.info("Searching for findings for %s", target_info.netloc)
-        filters = {
-            "operator": "AND",
-            "conditions": [
-                {"field": "meta.version", "operator": "==", "value": FINDING_VERSION},
-                {"field": "meta.netloc", "operator": "==", "value": target_info.netloc}
-            ]}
-        logger.info("Query findings by netloc %s", filters)
-        docs.extend(await store.filter_documents_async(filters=filters))
+        docs = await matching("netloc", target_info.netloc)
     else:
         if target_info.host:
-            logger.info("Searching for findings for %s", target_info.host)
-            filters = {
-                "operator": "AND",
-                "conditions": [
-                    {"field": "meta.version", "operator": "==", "value": FINDING_VERSION},
-                    {"field": "meta.host", "operator": "==", "value": target_info.host}
-                ]}
-            logger.info("Query findings by host %s", filters)
-            docs.extend(await store.filter_documents_async(filters=filters))
-        if target_info.domain == target_info.host and len(docs) == 0:
-            logger.info("Searching for findings for %s", target_info.domain)
-            filters = {
-                "operator": "AND",
-                "conditions": [
-                    {"field": "meta.version", "operator": "==", "value": FINDING_VERSION},
-                    {"field": "meta.domain", "operator": "==", "value": target_info.domain}
-                ]}
-            logger.info("Query findings by domain %s", filters)
-            docs.extend(await store.filter_documents_async(filters=filters))
+            docs = await matching("host", target_info.host)
+        if target_info.domain == target_info.host and not docs:
+            docs = await matching("domain", target_info.domain)
 
     findings = []
     for doc in docs:

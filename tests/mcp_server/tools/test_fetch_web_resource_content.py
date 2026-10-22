@@ -3,6 +3,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 from haystack import Document
+from haystack_integrations.document_stores.qdrant.converters import convert_id
+from qdrant_client.http import models as qm
 
 import shyhurricane.mcp_server.tools.fetch_web_resource_content as fetch
 
@@ -42,6 +44,25 @@ class AsyncStore:
 class ServerContext:
     def __init__(self, stores):
         self.stores = stores
+        self.qdrant_client = self
+
+    async def retrieve(self, **kwargs):
+        store = self.stores[kwargs["collection_name"]]
+        store.async_filters.append(kwargs)
+        docs = [doc for doc in store.docs if convert_id(doc.id) in kwargs["ids"]]
+        points = []
+        for doc in docs:
+            payload = doc.to_dict(flatten=False)
+            if kwargs["with_payload"] is not True:
+                payload = {"id": doc.id, "meta": {"url": doc.meta["url"]}}
+            points.append(qm.Record(id=convert_id(doc.id), payload=payload))
+        return points
+
+    async def scroll(self, **kwargs):
+        store = self.stores[kwargs["collection_name"]]
+        store.sync_filters.append(kwargs["scroll_filter"])
+        return [qm.Record(id=convert_id(doc.id), payload=doc.to_dict(flatten=False))
+                for doc in store.docs[:kwargs["limit"]]], None
 
 
 async def noop(*args, **kwargs):
@@ -69,8 +90,9 @@ async def test_find_document_by_type_and_id_uses_async_store(monkeypatch):
     store = AsyncStore([doc])
     patch_server_context(monkeypatch, ServerContext({"content": store}))
 
-    assert await fetch._find_document_by_type_and_id("content", "doc-1") is doc
-    assert store.async_filters == [{"field": "id", "operator": "==", "value": "doc-1"}]
+    assert await fetch._find_document_by_type_and_id("content", "doc-1") == doc
+    assert store.async_filters[0]["ids"] == [convert_id("doc-1")]
+    assert store.async_filters[0]["with_vectors"] is False
 
 
 @pytest.mark.asyncio
@@ -100,7 +122,7 @@ async def test_fetch_web_resource_content_by_http_url_and_offset_past_end(monkey
 
     assert result.contents.text == ""
     assert result.contents.has_more is False
-    assert store.sync_filters[0]["conditions"][1]["value"] == "https://example.com/app.js"
+    assert store.sync_filters[0].must[1].match.value == "https://example.com/app.js"
 
 
 @pytest.mark.asyncio

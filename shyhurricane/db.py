@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import re
 import socket
 import subprocess
@@ -17,6 +18,8 @@ from qdrant_client.http.exceptions import UnexpectedResponse
 
 from shyhurricane.haystack_lifecycle import managed_resource
 from shyhurricane.qdrant_indexes import IndexedQdrantDocumentStore
+from shyhurricane.search_metadata import SEARCH_FIELDS
+from shyhurricane.search_predicates import HTTP_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -183,10 +186,14 @@ def qdrant_host_port(db: str) -> Tuple[str, int]:
 
 
 async def create_qdrant_client(db: str) -> AsyncQdrantClient:
+    timeout = int(os.environ.get("QDRANT_ASYNC_TIMEOUT_SECONDS", "30"))
+    if timeout <= 0:
+        raise ValueError("QDRANT_ASYNC_TIMEOUT_SECONDS must be a positive integer")
     host, port = qdrant_host_port(db)
     return AsyncQdrantClient(
         host=host,
         port=port,
+        timeout=timeout,
     )
 
 
@@ -196,15 +203,19 @@ async def scroll_qdrant_collection(
         fields: Sequence[str] = None,
         scroll_filter: types.Filter | None = None,
         newest_limit: int | None = None,
+        page_size: int = 1000,
 ) -> AsyncGenerator[types.Record, None]:
     """Read all matching points by ID, or one explicitly bounded newest-first sample."""
     next_offset = None
     stop_scrolling = False
+    page = 0
     while not stop_scrolling:
+        started = asyncio.get_running_loop().time()
+        page += 1
         records, next_offset = await qdrant_client.scroll(
             collection_name=index,
             scroll_filter=scroll_filter,
-            limit=newest_limit if newest_limit is not None else 1000,
+            limit=newest_limit if newest_limit is not None else page_size,
             offset=next_offset,
             with_payload=fields or False,
             with_vectors=False,
@@ -217,6 +228,10 @@ async def scroll_qdrant_collection(
                 and next_offset.num == 0
                 and next_offset.uuid == ""
         )  # PointId always has num and uuid
+        logger.debug(
+            "Qdrant scroll collection=%s page=%d records=%d has_more=%s seconds=%.3f",
+            index, page, len(records), not stop_scrolling, asyncio.get_running_loop().time() - started,
+        )
 
         for record in records:
             yield record
@@ -290,6 +305,11 @@ async def get_domain_and_host_counts(
 
 @managed_resource
 def create_qdrant_document_store(db: str, **kwargs) -> QdrantDocumentStore:
+    if "timeout" not in kwargs:
+        timeout = int(os.environ.get("QDRANT_DOCUMENT_STORE_TIMEOUT_SECONDS", "120"))
+        if timeout <= 0:
+            raise ValueError("QDRANT_DOCUMENT_STORE_TIMEOUT_SECONDS must be a positive integer")
+        kwargs["timeout"] = timeout
     payload_fields_to_index = [
         {"field_name": "meta.version", "field_schema": "integer"},
         {"field_name": "meta.timestamp", "field_schema": "datetime"},
@@ -309,9 +329,11 @@ def create_qdrant_document_store(db: str, **kwargs) -> QdrantDocumentStore:
         {"field_name": "meta.targets", "field_schema": "keyword"},
         {"field_name": "meta.runtime_ts", "field_schema": "float"},
     ]
+    if kwargs.get("index", "").split("_", 1)[0] in HTTP_TYPES:
+        payload_fields_to_index.extend(
+            {"field_name": f"meta.{field}", "field_schema": "keyword"} for field in (*SEARCH_FIELDS, "type")
+        )
     host, port = qdrant_host_port(db)
-    # Allow startup index creation and document operations more time than the REST default.
-    kwargs.setdefault("timeout", 10)
     return IndexedQdrantDocumentStore(
         host=host,
         port=int(port),

@@ -2,6 +2,7 @@ import json
 
 import pytest
 from haystack import Document
+from qdrant_client.http import models as qm
 
 import shyhurricane.mcp_server.tools.findings as findings
 
@@ -23,15 +24,19 @@ class Store:
         self.docs = list(docs)
         self.filters = []
 
-    async def filter_documents_async(self, filters):
-        self.filters.append(filters)
-        return self.docs
+    async def scroll(self, **kwargs):
+        assert kwargs["with_vectors"] is False
+        assert "content" in kwargs["with_payload"]
+        self.filters.append(kwargs["scroll_filter"])
+        return [qm.Record(id=index, payload=doc.to_dict(flatten=False))
+                for index, doc in enumerate(self.docs)], None
 
 
 class ServerContext:
     def __init__(self, store=None):
         self.task_queue = Queue()
         self.stores = {"finding": store or Store([])}
+        self.qdrant_client = self.stores["finding"]
 
 
 def patch_context(monkeypatch, server_context):
@@ -84,7 +89,7 @@ async def test_query_findings_by_url_and_limit(monkeypatch):
     assert result.pagination.next_page_token is not None
     assert [finding.title for finding in result.findings] == ["Finding"]
     assert result.pagination.total_items == 2
-    assert store.filters[0]["conditions"][1]["field"] == "meta.url"
+    assert store.filters[0].must[1].key == "meta.url"
 
 
 @pytest.mark.asyncio
@@ -101,7 +106,7 @@ async def test_query_findings_by_netloc_host_domain_and_invalid(monkeypatch):
     assert host.instructions == findings.finding_not_found_instructions
     assert domain.instructions == findings.finding_not_found_instructions
     assert invalid.instructions == findings.finding_target_invalid_instructions
-    assert [call["conditions"][1]["field"] for call in store.filters] == [
+    assert [call.must[1].key for call in store.filters] == [
         "meta.netloc",
         "meta.host",
         "meta.host",

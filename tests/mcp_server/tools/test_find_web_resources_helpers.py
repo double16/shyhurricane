@@ -1,9 +1,12 @@
 import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from haystack import Document
+from haystack_integrations.document_stores.qdrant.converters import convert_id
+from qdrant_client.http import models as qm
 
 import shyhurricane.mcp_server.tools.find_web_resources as resources
 from shyhurricane import predicate_search
@@ -32,6 +35,17 @@ class AsyncStore:
     def __init__(self, responses):
         self.responses = list(responses)
         self.filters = []
+        self.documents = {}
+
+    async def scroll(self, **kwargs):
+        self.filters.append(kwargs["scroll_filter"])
+        docs = self.responses.pop(0)
+        self.documents.update({convert_id(doc.id): doc for doc in docs})
+        return [qm.Record(id=convert_id(doc.id), payload=doc.to_dict(flatten=False)) for doc in docs], None
+
+    async def retrieve(self, **kwargs):
+        return [qm.Record(id=value, payload=self.documents[value].to_dict(flatten=False))
+                for value in kwargs["ids"] if value in self.documents]
 
     async def filter_documents_async(self, filters):
         self.filters.append(filters)
@@ -41,6 +55,7 @@ class AsyncStore:
 class ServerContext:
     def __init__(self, store):
         self.stores = {"content": store}
+        self.qdrant_client = store
         self.document_pipeline = None
         self.website_context_pipeline = None
         self.open_world = True
@@ -96,8 +111,8 @@ async def test_find_web_resources_by_url_returns_exact_and_child_resources(monke
     result = await resources._find_web_resources_by_url(None, "https://example.com/app", limit=10)
 
     assert [item.url for item in result] == ["https://example.com/app", "https://example.com/app/settings"]
-    assert store.filters[0]["conditions"][1]["field"] == "meta.url"
-    assert store.filters[1]["conditions"][1]["field"] == "meta.netloc"
+    assert store.filters[0].must[1].key == "meta.url"
+    assert store.filters[1].must[1].key == "meta.netloc"
 
 
 @pytest.mark.asyncio
@@ -131,6 +146,48 @@ async def test_find_web_resources_exact_queries_return_none_when_store_is_empty(
     assert await resources._find_web_resources_by_url(None, "https://example.com/", limit=10) is None
     assert await resources._find_web_resources_by_netloc(None, "example.com:443", limit=10) is None
     assert await resources._find_web_resources_by_hostname(None, "example.com", limit=10) is None
+
+
+@pytest.mark.asyncio
+async def test_direct_resource_reads_project_filter_and_hydrate_only_selected(monkeypatch):
+    from qdrant_client import AsyncQdrantClient
+
+    from shyhurricane.search_metadata import derive_search_metadata
+
+    client = AsyncQdrantClient(":memory:")
+    try:
+        await client.create_collection("content", vectors_config={})
+        docs = []
+        for index in range(600):
+            path = f"audit-defense/{index}" if index % 100 == 0 else f"other/{index}"
+            url = f"https://example.com/{path}"
+            doc = make_doc(str(index), url, timestamp_float=index, version=resources.WEB_RESOURCE_VERSION)
+            doc.meta.update(derive_search_metadata(url, "GET", {}, host="example.com", domain="example.com"))
+            docs.append(qm.PointStruct(id=index, vector={}, payload=doc.to_dict(flatten=False)))
+        await client.upsert("content", docs)
+        measured = SimpleNamespace(scroll=AsyncMock(wraps=client.scroll), retrieve=AsyncMock(wraps=client.retrieve))
+        patch_server_context(monkeypatch, SimpleNamespace(qdrant_client=measured))
+        found = await resources._find_web_resources_by_url(None, "https://example.com/audit-defense", limit=3)
+        assert [item.url for item in found] == [f"https://example.com/audit-defense/{i}" for i in (500, 400, 300)]
+        assert measured.retrieve.call_args.kwargs["ids"] == [500, 400, 300]
+        assert all(call.kwargs["with_vectors"] is False for call in measured.scroll.call_args_list)
+        assert all("meta" not in call.kwargs["with_payload"] for call in measured.scroll.call_args_list)
+        assert len(measured.scroll.call_args_list) == 2
+        measured.scroll.reset_mock()
+        found = await resources._find_web_resources_by_hostname(None, "example.com", limit=2)
+        assert [item.url for item in found] == [f"https://example.com/other/{i}" for i in (599, 598)]
+        assert len(measured.scroll.call_args_list) == 3
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_direct_resource_failure_is_not_a_miss(monkeypatch):
+    client = SimpleNamespace(scroll=AsyncMock(side_effect=TimeoutError("read failed")))
+    patch_server_context(monkeypatch, SimpleNamespace(qdrant_client=client))
+    with pytest.raises(TimeoutError):
+        await resources._find_web_resources_by_url(None, "https://example.com/app")
+    assert client.scroll.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -247,7 +304,7 @@ async def test_is_spider_time_recent_returns_true_after_enough_recent_records(mo
         for idx in range(11)
     ]
     monkeypatch.setattr(resources.time, "time", lambda: now)
-    monkeypatch.setattr(resources, "scroll_qdrant_collection", lambda **kwargs: scroll(records))
+    monkeypatch.setattr(resources, "scroll_records", lambda *args, **kwargs: scroll(records))
 
     assert await resources.is_spider_time_recent(type("Ctx", (), {"qdrant_client": object()})(),
                                                  "https://example.com/path") is True
@@ -261,7 +318,7 @@ async def test_is_spider_time_recent_returns_false_for_old_bad_or_invalid_record
         Record({"timestamp_float": "bad", "url": "https://example.com/path/bad"}),
     ]
     monkeypatch.setattr(resources.time, "time", lambda: now)
-    monkeypatch.setattr(resources, "scroll_qdrant_collection", lambda **kwargs: scroll(records))
+    monkeypatch.setattr(resources, "scroll_records", lambda *args, **kwargs: scroll(records))
 
     assert await resources.is_spider_time_recent(type("Ctx", (), {"qdrant_client": object()})(),
                                                  "https://example.com/path") is False
@@ -316,6 +373,41 @@ class SpiderServerContext:
     def __init__(self, results=None):
         self.task_queue = Queue()
         self.spider_result_queue = Queue(results)
+
+
+@pytest.mark.asyncio
+async def test_spider_read_failure_does_not_start_another_scan(monkeypatch):
+    server = SpiderServerContext()
+    server.qdrant_client = SimpleNamespace(scroll=AsyncMock(side_effect=TimeoutError("read failed")))
+    patch_server_context(monkeypatch, server)
+    monkeypatch.setattr(resources, "log_tool_history", noop)
+    with pytest.raises(TimeoutError):
+        await resources.spider_website(ToolCtx(), "https://example.com/")
+    assert server.task_queue.put_items == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("count,age,expected", [(10, 1, False), (11, 1, True), (11, 86400, False)])
+async def test_spider_freshness_boundaries_and_projection(monkeypatch, count, age, expected):
+    now = 100000.0
+    monkeypatch.setattr(resources.time, "time", lambda: now)
+    calls = []
+
+    async def records(client, collection, filters, fields, **kwargs):
+        calls.append((collection, filters, fields, kwargs))
+        for index in range(count):
+            yield SimpleNamespace(payload={"meta": {
+                "timestamp_float": now - age, "url": f"https://example.com/app/{index}",
+            }})
+
+    monkeypatch.setattr(resources, "scroll_records", records)
+    server = SimpleNamespace(qdrant_client=object())
+    assert await resources.is_spider_time_recent(server, "https://example.com/app") is expected
+    collection, filters, fields, options = calls[0]
+    assert collection == "network"
+    assert fields == ["meta.url", "meta.timestamp_float"]
+    assert options == {"limit": 1000, "newest": True}
+    assert filters.must[2].range.gte == now - 86400
 
 
 @pytest.mark.asyncio
@@ -442,6 +534,13 @@ def predicate_context(monkeypatch):
                  version=resources.WEB_RESOURCE_VERSION, type="network", content_type="text/plain",
                  response_headers='{"Content-Type":"application/javascript"}'),
     ]
+    from shyhurricane.search_metadata import derive_search_metadata
+
+    for doc in docs:
+        headers = json.loads(doc.meta.get("response_headers", "{}"))
+        if not headers:
+            headers = {"Content-Type": doc.meta.get("content_type", "")}
+        doc.meta.update(derive_search_metadata(doc.meta["url"], doc.meta["http_method"], headers))
     points = {
         "content": [
             SimpleNamespace(id=index, payload=doc.to_dict(flatten=False)) for index, doc in enumerate(docs[:3])
@@ -458,7 +557,7 @@ def predicate_context(monkeypatch):
 
     scopes = []
 
-    async def scroll(client, collection, fields, scroll_filter):
+    async def scroll(client, collection, fields, scroll_filter, page_size):
         scopes.append(scroll_filter)
         for point in points[collection]:
             if check_filter(scroll_filter, point.payload, point.id, {}):
@@ -494,7 +593,7 @@ async def test_predicate_only_search_needs_no_llm_and_includes_nonstandard_ports
     assert result.query == "site:example.com ext:js -inurl:admin"
     assert server_ctx.website_context_pipeline.calls == []
     assert server_ctx.document_pipeline.calls == []
-    assert scopes[0].must[1].match.any == ["example.com:443", "sub.example.com:9443"]
+    assert scopes[0].must[0].must[1].match.any == ["example.com:443", "sub.example.com:9443"]
 
 
 @pytest.mark.asyncio

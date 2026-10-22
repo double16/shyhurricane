@@ -1,28 +1,27 @@
 """Select indexed candidates before semantic ranking without reading response bodies."""
 
+import logging
+import time
+
 from haystack import Document
 from qdrant_client.http import models as qm
 
 from shyhurricane.db import scroll_qdrant_collection
-from shyhurricane.search_predicates import HTTP_TYPES, resource_key, response_mime
+from shyhurricane.search_metadata import candidate_scope
+from shyhurricane.search_predicates import HTTP_TYPES
 from shyhurricane.utils import documents_sort_unique
+
+logger = logging.getLogger(__name__)
+
+CANDIDATE_FIELDS = [f"meta.{field}" for field in (
+    "url", "http_method", "status_code", "type", "timestamp", "timestamp_float",
+    "content_type", "search_response_mime",
+)]
 
 
 async def select_candidates(client, collections, predicates, scope, methods, progress):
     selected = {}
-    mime_by_resource = {}
-    must = [scope]
-    must_not = []
-    # Existing ingest records do not normalize method casing; evaluate methods in Python.
-    fields = {"status": "status_code", "type": "type"}
-    for predicate in predicates:
-        if predicate.operator in fields:
-            condition = qm.FieldCondition(
-                key=f"meta.{fields[predicate.operator]}",
-                match=qm.MatchValue(value=int(predicate.value) if predicate.operator == "status" else predicate.value),
-            )
-            (must_not if predicate.exclude else must).append(condition)
-    filtered_scope = qm.Filter(must=must, must_not=must_not)
+    filtered_scope = candidate_scope(scope, predicates, methods)
     collections = sorted(
         (name for name in collections if name.split("_", 1)[0] in HTTP_TYPES),
         key=lambda name: (name != "network", name),
@@ -30,22 +29,33 @@ async def select_candidates(client, collections, predicates, scope, methods, pro
     for collection in collections:
         await progress(f"Filtering indexed {collection} resources")
         candidates = []
-        # Read the canonical network MIME even when a type predicate excludes network results.
-        collection_scope = scope if collection == "network" else filtered_scope
-        async for record in scroll_qdrant_collection(
-            client, collection, fields=["meta"], scroll_filter=collection_scope,
-        ):
-            meta = (record.payload or {}).get("meta", {})
-            mime = response_mime(meta)
-            key = resource_key(meta)
-            if collection == "network":
-                mime_by_resource[key] = mime
-            if meta.get("type") not in HTTP_TYPES:
-                continue
-            if methods and meta.get("http_method", "").upper() not in methods:
-                continue
-            if all(predicate.matches(meta, mime or mime_by_resource.get(key)) for predicate in predicates):
-                candidates.append((record.id, meta))
+        started = time.monotonic()
+        examined = 0
+        try:
+            async for record in scroll_qdrant_collection(
+                client, collection, fields=CANDIDATE_FIELDS, scroll_filter=filtered_scope, page_size=256,
+            ):
+                examined += 1
+                meta = (record.payload or {}).get("meta", {})
+                mime = meta.get("search_response_mime") or None
+                if meta.get("type") not in HTTP_TYPES:
+                    continue
+                if methods and meta.get("http_method", "").upper() not in methods:
+                    continue
+                if all(predicate.matches(meta, mime) for predicate in predicates):
+                    candidates.append((record.id, meta))
+        except Exception as error:
+            source = getattr(error, "source", error)
+            logger.error(
+                "Qdrant operation=predicate_scroll collection=%s seconds=%.3f records=%d "
+                "error=%s transport_error=%s",
+                collection, time.monotonic() - started, examined, type(error).__name__, type(source).__name__,
+            )
+            raise
+        logger.debug(
+            "Qdrant predicate collection=%s records=%d candidates=%d seconds=%.3f",
+            collection, examined, len(candidates), time.monotonic() - started,
+        )
         selected[collection] = candidates
     return selected
 

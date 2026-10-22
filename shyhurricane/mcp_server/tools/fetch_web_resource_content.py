@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from typing import Annotated, Optional
 
@@ -6,6 +5,7 @@ from haystack import Document
 from mcp.server.mcpserver import Context
 from mcp.types import TextResourceContents, ToolAnnotations
 from pydantic import Field
+from qdrant_client.http import models as qm
 
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.indexing_wait import (
@@ -16,6 +16,7 @@ from shyhurricane.indexing_wait import (
     wait_for_indexing,
 )
 from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
+from shyhurricane.qdrant_reads import read_documents, retrieve_records, to_document
 from shyhurricane.utils import HttpResourceOffset, TextResourcePartialContents
 
 logger = logging.getLogger(__name__)
@@ -25,20 +26,15 @@ class IndexedResourceContent(HttpResourceOffset):
     indexing: IndexingStatus | None = None
 
 
-async def _find_document_by_type_and_id(doc_type: str, doc_id: str) -> Optional[Document]:
+async def _find_document_by_type_and_id(doc_type: str, doc_id: str, *, metadata_only=False) -> Optional[Document]:
     server_ctx = await get_server_context()
-    store = server_ctx.stores.get(doc_type, None)
-    if not store:
-        logger.info("Not Found document type %s", doc_type)
+    if doc_type not in server_ctx.stores:
         return None
-    filters = {"field": "id", "operator": "==", "value": doc_id}
-    result = await store.filter_documents_async(filters=filters)
-    if not result:
-        logger.info("Not Found document %s/%s", doc_type, doc_id)
-        return None
-    doc: Document = result[0]
-    logger.info("Found document %s", doc.id)
-    return doc
+    points = await retrieve_records(
+        server_ctx.qdrant_client, doc_type, [doc_id], opaque_ids=True,
+        fields=["id", "meta.url"] if metadata_only else True,
+    )
+    return to_document(points[0]) if points else None
 
 
 @mcp_instance.tool(
@@ -91,7 +87,7 @@ async def fetch_web_resource_content(
             url = doc_id
             try_http_url = True
         else:
-            doc = await _find_document_by_type_and_id(doc_type, doc_id)
+            doc = await _find_document_by_type_and_id(doc_type, doc_id, metadata_only=True)
     else:
         try_http_url = True
 
@@ -104,13 +100,11 @@ async def fetch_web_resource_content(
     if not try_http_url:
         doc = await _find_document_by_type_and_id(doc_type, doc_id)
     if try_http_url:
-        filters = {"operator": "AND",
-                   "conditions": [
-                       {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
-                       {"field": "meta.url", "operator": "==", "value": url},
-                   ]}
-        store = server_ctx.stores["content"]
-        docs = await asyncio.to_thread(store.filter_documents, filters=filters)
+        filters = qm.Filter(must=[
+            qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION)),
+            qm.FieldCondition(key="meta.url", match=qm.MatchValue(value=url)),
+        ])
+        docs = await read_documents(server_ctx.qdrant_client, "content", filters, limit=1)
         if docs:
             logger.info("Found indexed web resource %s", url)
             doc = docs[0]

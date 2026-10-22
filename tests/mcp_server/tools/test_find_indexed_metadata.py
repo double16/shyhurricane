@@ -4,6 +4,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 import shyhurricane.mcp_server.tools.find_indexed_metadata as metadata
+from shyhurricane.search_metadata import derive_search_metadata
 
 
 class Record:
@@ -43,6 +44,9 @@ def indexed_metadata(monkeypatch):
     monkeypatch.setattr(metadata, "get_server_context", get_fake_server_context)
     monkeypatch.setattr(metadata, "log_tool_history", noop)
     def matches(record, filters):
+        meta = record.payload["meta"]
+        meta.update(derive_search_metadata(meta.get("url", ""), "GET", {},
+                                          host=meta.get("host", ""), domain=meta.get("domain", "")))
         for condition in filters.must:
             if isinstance(condition, metadata.qm.FieldCondition):
                 name = condition.key.removeprefix("meta.")
@@ -53,7 +57,7 @@ def indexed_metadata(monkeypatch):
                 if isinstance(match, metadata.qm.MatchAny):
                     if value not in match.any:
                         return False
-                elif value != match.value:
+                elif (match.value not in value if isinstance(value, list) else value != match.value):
                     return False
             elif isinstance(condition, metadata.qm.IsEmptyCondition):
                 if record.payload["meta"].get("netloc") is not None:
@@ -186,7 +190,8 @@ async def test_inventory_filters_batches_and_missing_netloc(indexed_metadata):
     assert result.urls == []
     requests = ServerContext.qdrant_client.facet.call_args_list
     host_filters = [call.kwargs["facet_filter"] for call in requests if call.kwargs["key"] == "meta.url"]
-    assert all(len(filters.must[-1].match.any) <= 256 for filters in host_filters)
+    assert all(len(condition.match.any) <= 256 for filters in host_filters for condition in filters.must
+               if isinstance(condition, metadata.qm.FieldCondition) and condition.key == "meta.host")
 
 
 @pytest.mark.asyncio

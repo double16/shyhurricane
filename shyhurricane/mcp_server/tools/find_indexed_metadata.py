@@ -14,6 +14,7 @@ from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.indexing_wait import IndexingStatus, indexed_inventory
 from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
 from shyhurricane.result_pages import Pagination, paged_results
+from shyhurricane.search_metadata import trigram_conditions
 from shyhurricane.utils import query_to_netloc
 
 logger = logging.getLogger(__name__)
@@ -55,15 +56,18 @@ async def _facet_strings(client, key, filters):
 
 
 async def _matching_hosts(client, query, port):
-    hosts = await _facet_strings(client, "meta.host", _inventory_filter(port))
+    filters = _inventory_filter(port)
+    filters.must.extend(trigram_conditions("meta.search_host_trigrams", query or ""))
+    hosts = await _facet_strings(client, "meta.host", filters)
     return sorted(host for host in hosts if not query or host.lower().endswith(query))
 
 
-async def _host_inventory(client, query, port, key):
+async def _host_inventory(client, query, port, key, path_query=None):
     hosts = await _matching_hosts(client, query, port)
     result = set()
     for offset in range(0, len(hosts), 256):
         filters = _inventory_filter(port, hosts[offset:offset + 256])
+        filters.must.extend(trigram_conditions("meta.search_url_trigrams", path_query or ""))
         result.update(await _facet_strings(client, key, filters))
         if key == "meta.netloc":
             # Older records can omit netloc; retain the original hostname fallback.
@@ -121,7 +125,9 @@ async def find_domains(
     qdrant_client: AsyncQdrantClient = server_ctx.qdrant_client
     original_query = query
     query, port = query_to_netloc(query)
-    domains = await _facet_strings(qdrant_client, "meta.domain", _inventory_filter())
+    filters = _inventory_filter()
+    filters.must.extend(trigram_conditions("meta.search_domain_trigrams", query or ""))
+    domains = await _facet_strings(qdrant_client, "meta.domain", filters)
     result = {domain.lower() for domain in domains if domain and (not query or query.lower() in domain.lower())}
     return FindDomainsResult(
         instructions=_finder_instructions("domains", result),
@@ -263,7 +269,7 @@ async def find_urls(
     qdrant_client: AsyncQdrantClient = server_ctx.qdrant_client
     original_host_query = host_query
     host_query, port = query_to_netloc(host_query)
-    urls = await _host_inventory(qdrant_client, host_query, port, "meta.url")
+    urls = await _host_inventory(qdrant_client, host_query, port, "meta.url", path_query)
     result = {url for url in urls if not path_query or path_query in url}
     return FindURLsResult(
         instructions=_finder_instructions("URLs", result),

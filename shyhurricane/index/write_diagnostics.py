@@ -34,3 +34,10 @@ def write_document(store, collection, doc):
             exc_info=not isinstance(error, (ResponseHandlingException, QdrantStoreError)),
         )
         raise
+    elapsed = time.monotonic() - started
+    if elapsed >= 10:
+        logger.warning(
+            "Qdrant operation=write_documents collection=%s document_id=%s document_type=%s "
+            "seconds=%.3f timeout=%s outcome=succeeded_slow",
+            collection, doc.id, doc.meta.get("type"), elapsed, store.timeout,
+        )

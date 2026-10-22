@@ -123,6 +123,38 @@ saved page through this server. Keep tokens private.
 | `deobfuscate_javascript`                    | 8,192 characters    | Complete transformed script, or original script on failure |
 | `fetch_web_resource_content`                | 4,096 characters    | Existing offset-based retrieval                            |
 
+Predicate searches in `find_web_resources` use indexed derived metadata for HTTP methods,
+file extensions, response MIME types, schemes, and case-sensitive URL trigrams. Qdrant narrows
+candidates before exact predicate verification; `inurl:` retains substring matching across the
+full URL, including query strings. Short substrings and negative substring/path conditions are
+verified in Python. Candidate reads use only small metadata fields, with 256 records per page;
+headers and bodies are fetched only for selected results. MIME predicates use the original
+response MIME across network, forms, content, and chunk representations. This works in low-power
+mode without document-type indexing. DEBUG logs report per-collection candidate counts and timings.
+
+Direct URL, host, and network-location resource searches also select small metadata records before
+fetching content, preserving exact URL variants, descendant prefixes, and newest unique captures.
+Content reads and finding queries omit embeddings. HTTP content lookups select the first matching
+point in ascending point-ID order, as before; opaque `web://` reads fetch only URL metadata before
+the indexing wait and refresh the document afterward. Finding queries still collect complete markdown
+results before saving pages.
+
+Domain, host, and URL inventories prefilter their facets with indexed trigrams, then verify exact
+substring or suffix semantics. Host suffix matching remains literal, including partial DNS labels;
+domain matching is case-insensitive, and URL matching is case-sensitive. Host/domain trigram fields
+are derived from lowercase canonical metadata. Strings shorter than three characters use exact
+Python verification without trigram prefilters.
+
+Spider freshness checks filter the last 24 hours and URL candidates in Qdrant, read only URL and
+timestamp metadata newest-first, and stop after 11 qualifying records. The 1,000-record safety bound
+applies after server-side narrowing. Database read failures propagate instead of being treated as
+missing resources or permission to start another spider.
+
+Existing HTTP collections must be recreated and reindexed before using these search fields.
+There is no automatic deletion, backfill, or legacy-data fallback. Replaying into populated
+collections is insufficient because duplicate-ID checks can skip existing records. Derived URL
+trigrams increase payload/index storage and ingestion work; embeddings are unchanged.
+
 Domain, host, network-location, and URL inventories use Qdrant keyword-index facets to retrieve
 unique values rather than downloading metadata for every capture. Host and port filters constrain
 URL and network-location retrieval; domain contains, host suffix, and URL path matching retain
@@ -473,13 +505,13 @@ IDs on saved pages have the same meaning as IDs on the first page (`get_result_p
 For domain discovery, call `find_application_endpoints`:
 
 ```json
-{"scope":"taxact.com","detail":"inventory"}
+{"scope":"example.com","detail":"inventory"}
 ```
 
 For a known endpoint needing rich details, call it directly with `detail="summary"`:
 
 ```json
-{"scope":"taxact.com","url":"https://tst.taxact.com/authuimw/v1/time","method":"GET","detail":"summary"}
+{"scope":"example.com","url":"https://app.example.com/api/v1/time","method":"GET","detail":"summary"}
 ```
 
 For another page-associated summary:
@@ -1054,7 +1086,18 @@ uv run python mcp_service.py --data-dir /srv/shyhurricane
 | `XDG_STATE_HOME` | `~/.local/state` | Linux state-directory base when `/data` is absent; relative values are ignored |
 | `LOCALAPPDATA` | `~/AppData/Local` | Windows state-directory base when `/data` is absent |
 | `QDRANT` | Unset; `db:6333` in Compose | External Qdrant `host:port`; managed local storage uses `<data-dir>/qdrant` |
+| `QDRANT_ASYNC_TIMEOUT_SECONDS` | `30` | Positive integer transport timeout in seconds for raw async Qdrant clients, including MCP metadata reads; separate from the Haystack document-store timeout and 300-second predicate-query deadline |
+| `QDRANT_DOCUMENT_STORE_TIMEOUT_SECONDS` | `120` | Positive integer read/write inactivity timeout in seconds for Haystack Qdrant stores, including ingestion, findings, chunk writes, and duplicate-ID lookups; REST connection establishment is capped at 5 seconds |
 | `MCP_SESSION_VOLUME` | Unset; `mcp_session` in Compose | Compose compatibility override for the Docker session volume; local runs bind `<data-dir>/sessions` |
+
+Qdrant document stores allow background operations up to 120 seconds of read/write inactivity,
+while REST connection establishment remains capped at 5 seconds. The connect cap also applies
+to collection setup; Qdrant's constructor compatibility probe uses its own client behavior.
+This is separate from MCP raw-client timeouts and monitor/query deadlines. Successful ingestion
+and chunk writes lasting at least 10 seconds produce a WARNING with collection, document ID,
+elapsed time, and configured timeout, without logging captured content. Connection failures still propagate immediately;
+timeouts remain finite. Both Compose configurations forward the setting. Restart the service to
+apply changes; previously failed queue items are not retried automatically.
 
 `--database` and `--graph-database` have been removed from all commands. `QDRANT` and `NEO4J`
 accept remote endpoints, not local storage paths. Existing data is not moved, copied, or deleted;

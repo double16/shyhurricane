@@ -8,6 +8,7 @@ from haystack import Document
 
 from shyhurricane.index import web_resources_pipeline as wrp
 from shyhurricane.index.input_documents import IngestableRequestResponse
+from shyhurricane.search_metadata import derive_search_metadata
 
 
 class Embedder:
@@ -107,6 +108,10 @@ def test_request_response_to_document_creates_content_network_and_form_docs():
     assert {doc.meta["type"] for doc in docs} == {"content", "network", "forms"}
     content = next(doc for doc in docs if doc.meta["type"] == "content")
     network = next(doc for doc in docs if doc.meta["type"] == "network")
+    expected = derive_search_metadata("https://example.com:443/index.html", "GET", {"Content-Type": "text/html"},
+                                      host="example.com", domain="example.com")
+    for doc in docs:
+        assert {key: doc.meta[key] for key in expected} == expected
     assert content.meta["host"] == "example.com"
     assert content.meta["domain"] == "example.com"
     assert content.meta["title"] == "Home"
@@ -340,7 +345,9 @@ def test_suffix_id_splitter_sets_child_ids_and_serializes_overlap(monkeypatch):
 ])
 def test_suffix_id_splitter_uses_native_chunk_boundaries(content, config):
     splitter = wrp.SuffixIdSplitter(**config)
-    documents = splitter.run(documents=[Document(content=content, id="parent")])["documents"]
+    search = derive_search_metadata("https://example.com/a", "GET", {})
+    documents = splitter.run(documents=[Document(content=content, id="parent", meta=search)])["documents"]
+    assert all({key: doc.meta[key] for key in search} == search for doc in documents)
     assert [doc.content for doc in documents] == [content]
     assert [doc.id for doc in documents] == ["parent_0"]
     assert documents[0].meta["_split_overlap"] == "[]"
@@ -384,6 +391,8 @@ def test_index_doc_type_documents_splits_embeds_and_stores(monkeypatch):
         "response_headers": "{}",
         "type": "content",
     })
+    search = derive_search_metadata(doc.meta["url"], "GET", {"Content-Type": "text/html"})
+    doc.meta.update(search)
     object.__setattr__(doc, "content", b"<html></html>")
 
     assert component.run([doc]) == {}
@@ -393,6 +402,9 @@ def test_index_doc_type_documents_splits_embeds_and_stores(monkeypatch):
     assert len(sparse.documents) == len(html_embedder.documents)
     assert len(multi_store.batches) >= 1
     assert {d.meta["type"] for d in multi_store.batches[0]} == {"html"}
+    for batch in multi_store.batches:
+        for stored in batch:
+            assert {key: stored.meta[key] for key in search} == search
 
 
 

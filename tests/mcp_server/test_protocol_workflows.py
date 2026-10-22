@@ -554,6 +554,15 @@ async def test_content_indexing_status_union_validates_for_real_clients(workflow
     server, context = workflow_server
     documents = [Document(id="doc", content="saved content", meta={"url": "https://example.com/app"})]
     context.stores = {"content": SimpleNamespace(filter_documents=lambda **kwargs: list(documents))}
+
+    async def scroll(**kwargs):
+        from qdrant_client.http import models as qm
+
+        assert kwargs["limit"] == 1
+        assert kwargs["with_vectors"] is False
+        return [qm.Record(id=1, payload=document.to_dict(flatten=False)) for document in documents], None
+
+    context.qdrant_client = SimpleNamespace(scroll=scroll)
     monkeypatch.setattr(fetch, "get_server_context", AsyncMock(return_value=context))
     monkeypatch.setattr(fetch, "log_tool_history", AsyncMock())
     wait = AsyncMock(return_value=IndexingStatus(status="complete"))

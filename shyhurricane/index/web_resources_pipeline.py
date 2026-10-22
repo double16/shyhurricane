@@ -31,6 +31,7 @@ from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.index.input_documents import HarDocument, HttpRawDocument, IngestableRequestResponse, KatanaDocument
 from shyhurricane.index.write_diagnostics import write_document
+from shyhurricane.search_metadata import derive_search_metadata
 from shyhurricane.utils import (
     BeautifulSoupExtractor,
     batch_iterable,
@@ -243,7 +244,8 @@ class RequestResponseToDocument:
         request_headers = request_response.request_headers
         response_body = remove_unencodable(request_response.response_body)
         response_headers = request_response.response_headers
-        raw_mime = response_headers.get("Content-Type", "").lower().split(";")[0].strip()
+        search_meta = derive_search_metadata(url, request_response.method, response_headers, host=host, domain=domain)
+        raw_mime = search_meta["search_response_mime"]
         technologies_str = json.dumps(request_response.technologies or [], indent=None, separators=(',', ':'),
                                       sort_keys=True)
 
@@ -253,6 +255,7 @@ class RequestResponseToDocument:
             title, description = self._soup_extractor.extract(response_body)
 
         base_meta = {
+            **search_meta,
             "version": WEB_RESOURCE_VERSION,
             "url": url,
             "netloc": netloc,

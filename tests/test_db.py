@@ -3,7 +3,7 @@ import json
 import sqlite3
 import subprocess
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from haystack import Document
@@ -339,6 +339,8 @@ def test_qdrant_reused_container_requires_matching_mount(monkeypatch, tmp_path):
 
 
 def test_create_qdrant_store_client_and_list_collections(monkeypatch):
+    monkeypatch.delenv("QDRANT_ASYNC_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("QDRANT_DOCUMENT_STORE_TIMEOUT_SECONDS", raising=False)
     created = {}
 
     class Client:
@@ -365,13 +367,13 @@ def test_create_qdrant_store_client_and_list_collections(monkeypatch):
     store = db.create_qdrant_document_store("db", index="content")
     collections = asyncio.run(db.list_collections("db"))
 
-    assert client.kwargs == {"host": "host", "port": 6333}
+    assert client.kwargs == {"host": "host", "port": 6333, "timeout": 30}
     assert isinstance(store, Store)
     assert created["host"] == "host"
     assert created["port"] == 6333
     assert created["index"] == "content"
-    assert created["timeout"] == 10
-    db.create_qdrant_document_store("db", timeout=17)
+    assert created["timeout"] == 120
+    db.create_qdrant_document_store("db", index="content", timeout=17)
     assert created["timeout"] == 17
     assert created["use_sparse_embeddings"] is True
     assert {"field_name": "meta.url", "field_schema": "keyword"} in created["payload_fields_to_index"]
@@ -380,6 +382,52 @@ def test_create_qdrant_store_client_and_list_collections(monkeypatch):
                        ("targets", "keyword"), ("runtime_ts", "float")]:
         assert {"field_name": f"meta.{name}", "field_schema": kind} in created["payload_fields_to_index"]
     assert collections == ["content", "network"]
+    from shyhurricane.search_metadata import SEARCH_FIELDS
+
+    for field in (*SEARCH_FIELDS, "type"):
+        assert {"field_name": f"meta.{field}", "field_schema": "keyword"} in created["payload_fields_to_index"]
+    db.create_qdrant_document_store("db", index="finding")
+    assert not any(field["field_name"].startswith("meta.search_") for field in created["payload_fields_to_index"])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "", "1.5"])
+async def test_async_qdrant_timeout_rejects_invalid_values(monkeypatch, value):
+    monkeypatch.setenv("QDRANT_ASYNC_TIMEOUT_SECONDS", value)
+    with pytest.raises(ValueError):
+        await db.create_qdrant_client("unused")
+
+
+@pytest.mark.asyncio
+async def test_async_qdrant_timeout_override(monkeypatch):
+    monkeypatch.setenv("QDRANT_ASYNC_TIMEOUT_SECONDS", "47")
+    monkeypatch.setattr(db, "qdrant_host_port", lambda database: ("host", 6333))
+    client = MagicMock()
+    monkeypatch.setattr(db, "AsyncQdrantClient", client)
+    await db.create_qdrant_client("db")
+    client.assert_called_once_with(host="host", port=6333, timeout=47)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "", "nan", "1.5"])
+def test_document_store_timeout_rejects_invalid_configuration(monkeypatch, value):
+    monkeypatch.setenv("QDRANT_DOCUMENT_STORE_TIMEOUT_SECONDS", value)
+    endpoint = MagicMock()
+    monkeypatch.setattr(db, "qdrant_host_port", endpoint)
+    with pytest.raises(ValueError):
+        db.create_qdrant_document_store("unused", index="content")
+    endpoint.assert_not_called()
+
+
+def test_document_store_timeout_override_and_explicit_precedence(monkeypatch):
+    monkeypatch.setenv("QDRANT_DOCUMENT_STORE_TIMEOUT_SECONDS", "240")
+    monkeypatch.setattr(db, "qdrant_host_port", lambda database: ("host", 6333))
+    constructor = MagicMock()
+    monkeypatch.setattr(db, "IndexedQdrantDocumentStore", constructor)
+    db.create_qdrant_document_store("unused", index="finding")
+    assert constructor.call_args.kwargs["timeout"] == 240
+    monkeypatch.setenv("QDRANT_DOCUMENT_STORE_TIMEOUT_SECONDS", "invalid")
+    db.create_qdrant_document_store("unused", index="finding", timeout=17)
+    assert constructor.call_args.kwargs["timeout"] == 17
 
 
 def facet_error(key="meta.domain", status=400):

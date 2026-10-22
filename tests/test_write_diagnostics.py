@@ -1,6 +1,7 @@
 """Write failures remain visible and propagate without retries."""
 
 import logging
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import httpx
@@ -17,6 +18,21 @@ def test_successful_write():
     doc = Document(content="secret", id="id")
     write_document(store, "content", doc)
     assert store.write_documents.call_count == 1
+
+
+@pytest.mark.parametrize("elapsed,logged", [(9.99, False), (10, True), (24.4, True)])
+def test_slow_successful_writes_are_logged_without_payloads(monkeypatch, caplog, elapsed, logged):
+    from shyhurricane.index import write_diagnostics
+
+    monkeypatch.setattr(write_diagnostics, "time", SimpleNamespace(monotonic=Mock(side_effect=[100, 100 + elapsed])))
+    store = Mock(timeout=120)
+    write_document(store, "content", Document(id="slow-id", content="private capture", meta={"type": "content"}))
+    assert store.write_documents.call_count == 1
+    assert bool(caplog.records) is logged
+    if logged:
+        assert "outcome=succeeded_slow" in caplog.text
+        assert "timeout=120" in caplog.text
+        assert "private capture" not in caplog.text
 
 
 @pytest.mark.parametrize("transport", [True, False])
