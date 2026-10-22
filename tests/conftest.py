@@ -4,6 +4,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# Disable telemetry before importing Haystack or any integration that imports it.
+# Changing the environment after import leaves its initialized background client active.
+os.environ["HAYSTACK_TELEMETRY_ENABLED"] = "False"
+
 import pytest
 import requests
 from tldextract import tldextract as tldextract_module

@@ -118,6 +118,8 @@ def test_http_client_request_traces_are_suppressed_but_warnings_and_app_debug_re
         logging.getLogger("httpcore.connection"),
         logging.getLogger("httpcore.http11"),
         logging.getLogger("urllib3.connectionpool"),
+        logging.getLogger("posthog"),
+        logging.getLogger("posthog.request"),
     ]
 
     for logger in http_loggers:
@@ -305,9 +307,15 @@ def test_qdrant_transport_exception_is_one_line_in_all_outputs(tmp_path, capsys,
     logger = logging.getLogger("qdrant-transport-test")
     logger.setLevel(logging.WARNING)
     path = tmp_path / "qdrant.log"
+    # Simulate the noisy telemetry logger regardless of suite timing or telemetry settings.
+    telemetry_logger = logging.getLogger("posthog")
+    telemetry_logger.setLevel(logging.DEBUG)
+    telemetry_logger.propagate = True
     destination = str(path) if file_enabled else None
     logging_config.configure_file_logging(destination)
     logging_config.configure_file_logging(destination)
+    telemetry_logger.debug("making request: %s", "telemetry request body")
+    assert not telemetry_logger.isEnabledFor(logging.DEBUG)
     try:
         try:
             raise ConnectionError("underlying transport failure")
@@ -494,3 +502,10 @@ def test_unusable_lock_path_stops_configuration(tmp_path):
         logging_config.configure_file_logging(str(path))
     assert logging.getLogger().handlers == previous
     assert not logging_config.file_logging_enabled()
+
+
+def test_test_process_disables_haystack_telemetry_before_initialization():
+    from importlib import import_module
+
+    telemetry = import_module("haystack.telemetry._telemetry")
+    assert telemetry.telemetry is None

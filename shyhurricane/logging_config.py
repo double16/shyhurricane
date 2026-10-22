@@ -130,7 +130,7 @@ def limit_neo4j_logging() -> None:
 
 def limit_http_client_logging() -> None:
     """Keep third-party HTTP request/response traces out of diagnostic logs."""
-    http_loggers = ("httpx", "httpcore", "urllib3")
+    http_loggers = ("httpx", "httpcore", "urllib3", "posthog")
     for name in http_loggers:
         logging.getLogger(name).setLevel(logging.WARNING)
     for name, logger in logging.getLogger().manager.loggerDict.copy().items():
@@ -148,6 +148,7 @@ def configure_file_logging(
     Files are opened before changing logging state so invalid destinations fail cleanly.
     """
     if not filename:
+        limit_http_client_logging()
         limit_neo4j_logging()
         limit_qdrant_tracebacks()
         return
