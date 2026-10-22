@@ -6,6 +6,7 @@ import re
 import threading
 from pathlib import Path
 
+from concurrent_log_handler import ConcurrentRotatingFileHandler
 from haystack_integrations.document_stores.qdrant.document_store import QdrantStoreError
 from qdrant_client.http.exceptions import ResponseHandlingException
 
@@ -34,8 +35,41 @@ def limit_qdrant_tracebacks() -> None:
                 handler.addFilter(QdrantExceptionFilter())
 
 
-class DiagnosticFileHandler(logging.FileHandler):
-    """Identify the application's file handler when logging is configured again."""
+DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
+DEFAULT_LOG_BACKUP_COUNT = 5
+
+
+def log_max_bytes(value: str | int) -> int:
+    """Validate the rotation threshold; zero disables rotation."""
+    result = int(value)
+    if result < 0:
+        raise ValueError("log max bytes must be nonnegative")
+    return result
+
+
+def log_backup_count(value: str | int) -> int:
+    """Require at least one retained archive."""
+    result = int(value)
+    if result < 1:
+        raise ValueError("log backup count must be at least one")
+    return result
+
+
+class DiagnosticFileHandler(ConcurrentRotatingFileHandler):
+    """Coordinate process writes and eagerly verify both log and lock access."""
+
+    def verify_destination(self) -> None:
+        # CLH defers opening files. Verify them before changing application logging state.
+        try:
+            self._do_lock()
+            try:
+                with self.do_open():
+                    pass
+            finally:
+                self._do_unlock()
+        except Exception:
+            self.close()
+            raise
 
 
 class ConsoleFilter(logging.Filter):
@@ -104,19 +138,29 @@ def limit_http_client_logging() -> None:
             logger.setLevel(logging.WARNING)
 
 
-def configure_file_logging(filename: str | None, console_enabled: bool = True) -> None:
+def configure_file_logging(
+    filename: str | None, console_enabled: bool = True, *,
+    max_bytes: int | None = None, backup_count: int | None = None,
+) -> None:
     """Append diagnostics while limiting noisy driver and HTTP client logs to warnings.
 
-    Worker processes inherit LOG_FILE and configure their own append handler. The file is
-    opened before changing logging state so an invalid destination fails startup cleanly.
+    Workers inherit the destination and rotation settings and create their own handlers.
+    Files are opened before changing logging state so invalid destinations fail cleanly.
     """
     if not filename:
         limit_neo4j_logging()
         limit_qdrant_tracebacks()
         return
+    max_bytes = log_max_bytes(os.environ.get("LOG_MAX_BYTES", DEFAULT_LOG_MAX_BYTES) if max_bytes is None else max_bytes)
+    backup_count = log_backup_count(
+        os.environ.get("LOG_BACKUP_COUNT", DEFAULT_LOG_BACKUP_COUNT) if backup_count is None else backup_count
+    )
     path = Path(filename).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    handler = DiagnosticFileHandler(path, mode="a", encoding="utf-8")
+    handler = DiagnosticFileHandler(
+        str(path), mode="a", encoding="utf-8", maxBytes=max_bytes, backupCount=backup_count, use_gzip=False,
+    )
+    handler.verify_destination()
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)s %(name)s [%(processName)s:%(process)d] %(message)s")
@@ -150,3 +194,5 @@ def configure_file_logging(filename: str | None, console_enabled: bool = True) -
     limit_qdrant_tracebacks()
     set_console_logging_enabled(console_enabled)
     os.environ["LOG_FILE"] = str(path)
+    os.environ["LOG_MAX_BYTES"] = str(max_bytes)
+    os.environ["LOG_BACKUP_COUNT"] = str(backup_count)

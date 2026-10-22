@@ -34,8 +34,12 @@ from shyhurricane.disk_space import DISK_DEFAULTS, add_disk_arguments
 from shyhurricane.generator_config import GeneratorConfig, add_generator_args
 from shyhurricane.indexing_wait import indexing_timeout
 from shyhurricane.logging_config import (
+    DEFAULT_LOG_BACKUP_COUNT,
+    DEFAULT_LOG_MAX_BYTES,
     configure_file_logging,
     file_logging_enabled,
+    log_backup_count,
+    log_max_bytes,
     set_console_logging_enabled,
 )
 from shyhurricane.mcp_server import get_server_context, mcp_instance
@@ -120,6 +124,12 @@ async def main():
     ap.add_argument("--log-file", default=os.environ.get("LOG_FILE"),
                     help="Append Python logs here (or set LOG_FILE; default: <data-dir>/logs/shyhurricane.log)")
     add_data_dir_argument(ap)
+    ap.add_argument("--log-max-bytes", type=log_max_bytes,
+                    default=os.environ.get("LOG_MAX_BYTES", str(DEFAULT_LOG_MAX_BYTES)),
+                    help="Rotate logs at this many bytes; 0 disables rotation (default: 10485760)")
+    ap.add_argument("--log-backup-count", type=log_backup_count,
+                    default=os.environ.get("LOG_BACKUP_COUNT", str(DEFAULT_LOG_BACKUP_COUNT)),
+                    help="Number of rotated logs to retain, at least 1 (default: 5)")
     add_disk_arguments(ap)
     ap.add_argument("--host", default="127.0.0.1", help="Host to listen on")
     ap.add_argument("--port", type=int, default=8000, help="Port to listen on for MCP")
@@ -147,8 +157,9 @@ async def main():
     if not args.log_file:
         args.log_file = os.path.join(args.data_dir, "logs", "shyhurricane.log")
     try:
-        configure_file_logging(args.log_file, console_enabled=not is_tty)
-    except OSError as error:
+        configure_file_logging(args.log_file, console_enabled=not is_tty,
+                               max_bytes=args.log_max_bytes, backup_count=args.log_backup_count)
+    except (OSError, RuntimeError) as error:
         ap.error(f"Cannot open log file {args.log_file!r}: {error}")
     if is_tty:
         configure_tty_logging()

@@ -154,15 +154,20 @@ def test_qdrant_freshness_panels_distinguish_unavailable_empty_and_stale():
 
 
 @pytest.mark.asyncio
-async def test_monitor_cache_integration_retains_all_qdrant_samples(monkeypatch):
+@pytest.mark.parametrize("has_primary_store", [False, True])
+async def test_monitor_cache_integration_retains_all_qdrant_samples(monkeypatch, has_primary_store):
     now = [0.0]
     cache = MonitorQdrantCache(lambda: now[0])
     store = SimpleNamespace(count_documents_async=AsyncMock(return_value=12))
     context = SimpleNamespace(
         db="db", stores={"network": store}, task_queue=Queue(0), spider_result_queue=Queue(0),
         port_scan_result_queue=Queue(0), dir_busting_result_queue=Queue(0), proxy_host=None,
-        proxy_port=None, proxy_ca_cert_path=None, qdrant_client=object(), health_monitor=None, low_power=False,
+        proxy_port=None, proxy_ca_cert_path=None, qdrant_client=SimpleNamespace(
+            collection_exists=AsyncMock(return_value=True), count=AsyncMock(return_value=SimpleNamespace(count=193)),
+        ), health_monitor=None, low_power=False,
     )
+    if has_primary_store:
+        context.stores["finding"] = Store(0)
     monkeypatch.setattr("shyhurricane.monitor.persistent_queue_counts", AsyncMock(return_value=queue_counts()))
     monkeypatch.setattr("shyhurricane.monitor.graph_status", AsyncMock(return_value={}))
     monkeypatch.setattr("shyhurricane.monitor.get_generator_config", lambda: SimpleNamespace(describe=lambda: "model"))
@@ -175,8 +180,10 @@ async def test_monitor_cache_integration_retains_all_qdrant_samples(monkeypatch)
     await collect_monitor_data(context, "localhost", 8000, [], qdrant_cache=cache)
     assert urls.await_count == 2
     assert domains.await_count == store.count_documents_async.await_count == 1
+    assert first.document_counts["finding"] == 193
+    assert context.qdrant_client.count.await_count == 1
     now[0] = 300
-    for loader in (urls, domains, store.count_documents_async):
+    for loader in (urls, domains, store.count_documents_async, context.qdrant_client.count):
         loader.side_effect = ConnectionError("offline")
     stale = await collect_monitor_data(context, "localhost", 8000, [], qdrant_cache=cache)
     assert stale.document_counts == first.document_counts
@@ -449,7 +456,9 @@ async def test_collect_monitor_data_includes_runtime_configuration_and_statistic
         proxy_host="127.0.0.1",
         proxy_port=8010,
         proxy_ca_cert_path=certificate,
-        qdrant_client=object(),
+        qdrant_client=SimpleNamespace(
+            collection_exists=AsyncMock(return_value=True), count=AsyncMock(return_value=SimpleNamespace(count=193)),
+        ),
         qdrant_host="127.0.0.1",
         qdrant_port=49201,
         health_monitor=SimpleNamespace(llm_healthy=True, qdrant_healthy=False),
@@ -495,7 +504,7 @@ async def test_collect_monitor_data_includes_runtime_configuration_and_statistic
         low_power=False,
         graph={"healthy": None, "queue_depth": graph_depth},
         queue_failures={name: 0 for name in ("index", "type-specific index", "scan findings", "graph")},
-        document_counts={"content": 12, "network": 8},
+        document_counts={"content": 12, "network": 8, "finding": 193},
         domain_count=3,
         host_count=5,
         top_domains=[("second.test", 2), ("first.test", 1), ("third.test", 1)],
@@ -558,10 +567,11 @@ async def test_collect_monitor_data_tolerates_unavailable_qdrant_document_counts
         lambda *args: ({}, {}),
     )
 
-    data = await collect_monitor_data(context, "127.0.0.1", 8000, [])
+    data = await collect_monitor_data(context, "127.0.0.1", 8000, [], qdrant_cache=MonitorQdrantCache())
 
     assert data.document_counts == {"javascript": 0, "finding": 0}
     assert format_database_panel(data.document_counts).splitlines()[1] == "Findings: 0"
+    assert "Findings: unavailable" in format_monitor_database_panel(data)
     assert data.qdrant_health is False
 
 

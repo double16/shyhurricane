@@ -49,6 +49,7 @@ dependencies = [
     "pydantic",
     "litellm-haystack>=1.2.0",
     "textual>=7.3,<8.3",
+    "concurrent-log-handler>=0.9.31,<1",
 ]
 
 [project.optional-dependencies]

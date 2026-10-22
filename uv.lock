@@ -628,6 +628,18 @@ wheels = [
 ]
 
 [[package]]
+name = "concurrent-log-handler"
+version = "0.9.31"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "portalocker" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/51/e8/1f74620f511493a3e89b5dbfe9fccd55e6fa1de45ecc91bb1d6f5058acb0/concurrent_log_handler-0.9.31.tar.gz", hash = "sha256:2f973d574f083e5692dfef471931f416daf274bbde8b430ed5d9796c532b97cd", size = 47161, upload-time = "2026-10-21T20:09:58.755Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/85/ea/f5593cecb8c0092ce8b5a28f0837c1b14b66dc463add1da6082031cefa24/concurrent_log_handler-0.9.31-py3-none-any.whl", hash = "sha256:b8c39896862e11bef707051af96bbe381b2e5deec662361076d696b4896dee95", size = 36337, upload-time = "2026-10-21T20:09:57.738Z" },
+]
+
+[[package]]
 name = "coverage"
 version = "7.14.3"
 source = { registry = "https://pypi.org/simple" }
@@ -3961,6 +3973,7 @@ dependencies = [
     { name = "beautifulsoup4" },
     { name = "bitarray" },
     { name = "cachetools" },
+    { name = "concurrent-log-handler" },
     { name = "einops" },
     { name = "fastembed-haystack" },
     { name = "google-genai-haystack" },
@@ -4016,6 +4029,7 @@ requires-dist = [
     { name = "bitarray", specifier = ">=3.10.1,<3.12.0" },
     { name = "black", marker = "extra == 'dev'" },
     { name = "cachetools", specifier = ">=7.1.7,<7.3.0" },
+    { name = "concurrent-log-handler", specifier = ">=0.9.31,<1" },
     { name = "einops", specifier = "~=0.8.1" },
     { name = "fastembed-haystack", specifier = "~=2.7.0" },
     { name = "flake8", marker = "extra == 'dev'" },

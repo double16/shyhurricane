@@ -17,7 +17,7 @@ from shyhurricane.disk_space import disk_status
 from shyhurricane.graph.status import graph_status
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
 from shyhurricane.mcp_server.generator_config import get_generator_config
-from shyhurricane.monitoring_qdrant import MonitorQdrantCache, bounded_count
+from shyhurricane.monitoring_qdrant import MonitorQdrantCache, bounded_collection_count, bounded_count
 from shyhurricane.persistent_queue import active_queue_size, persistent_queue_counts, retry_failed_queue_items
 from shyhurricane.server_config import get_server_config
 
@@ -244,8 +244,11 @@ async def collect_monitor_data(
         return name, await cache.get(f"documents:{name}", lambda: bounded_count(store), 300, 0)
 
     document_counts = dict(await asyncio.gather(*(
-        document_count(name, store) for name, store in server_context.stores.items()
+        document_count(name, store) for name, store in server_context.stores.items() if name != "finding"
     )))
+    document_counts["finding"] = await cache.get(
+        "documents:finding", lambda: bounded_collection_count(server_context.qdrant_client, "finding"), 300, 0,
+    )
     try:
         counts = await persistent_queue_counts(server_context.db)
     except (OSError, sqlite3.Error):

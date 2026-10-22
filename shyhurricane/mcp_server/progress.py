@@ -25,6 +25,7 @@ LONG_RUNNING_TOOLS = GRAPH_TOOLS | frozenset({
     "directory_buster",
     "port_scan",
     "find_web_resources",
+    "query_findings",
     "deobfuscate_javascript",
     "index_http_url",
 })

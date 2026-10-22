@@ -58,7 +58,7 @@ class ReanalysisScheduler:
                     (capture_id, uuid4().hex, json.dumps(route)),
                 )
                 action = "created"
-        logger.info("Graph reanalysis %s capture=%s", action, capture_id)
+        logger.debug("Graph reanalysis %s capture=%s", action, capture_id)
 
     def flush(self):
         # A crash after put and before delivered=1 can redeliver a ticket; claim is idempotent.
@@ -102,7 +102,7 @@ class ReanalysisScheduler:
                     "UPDATE reanalysis SET state='pending',pending=?,running=NULL,delivered=0 WHERE capture_id=?",
                     (json.dumps(route), capture_id),
                 )
-                logger.info("Graph reanalysis reclaimed capture=%s", capture_id)
+                logger.debug("Graph reanalysis reclaimed capture=%s", capture_id)
         self.flush()
 
     def claim(self, item):
@@ -113,7 +113,7 @@ class ReanalysisScheduler:
                 (item["id"], item["reanalysis_ticket"]),
             ).fetchone()
             if row is None:
-                logger.info("Graph reanalysis skipped obsolete ticket capture=%s", item["id"])
+                logger.debug("Graph reanalysis skipped obsolete ticket capture=%s", item["id"])
                 return None
             self.connection.execute(
                 "UPDATE reanalysis SET state='running',running_generation=generation,running=pending,pending=NULL "
@@ -162,7 +162,7 @@ class ReanalysisScheduler:
                     "UPDATE reanalysis SET state='pending',ticket=?,running=NULL,delivered=0 WHERE capture_id=?",
                     (uuid4().hex, item["id"]),
                 )
-                logger.info("Graph reanalysis follow-up scheduled capture=%s", item["id"])
+                logger.debug("Graph reanalysis follow-up scheduled capture=%s", item["id"])
             else:
                 self.connection.execute(
                     "UPDATE reanalysis SET state='done',running=NULL WHERE capture_id=?", (item["id"],)

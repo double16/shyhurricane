@@ -386,8 +386,31 @@ def test_create_qdrant_store_client_and_list_collections(monkeypatch):
 
     for field in (*SEARCH_FIELDS, "type"):
         assert {"field_name": f"meta.{field}", "field_schema": "keyword"} in created["payload_fields_to_index"]
+    from shyhurricane.qdrant_indexes import tuned_indexes
+
+    tuned = {item["field_name"]: item["field_schema"] for item in tuned_indexes(created["payload_fields_to_index"])}
+    assert {name for name, params in tuned.items() if params.enable_hnsw} == {
+        "meta.version", "meta.netloc", "meta.domain", "meta.http_method", "meta.status_code",
+    }
+    assert {name for name, params in tuned.items() if params.type == "integer"} == {
+        "meta.version", "meta.port", "meta.status_code",
+    }
+    for params in tuned.values():
+        if params.type == "integer":
+            assert params.lookup is True
+            assert params.range is False
+    assert tuned["meta.timestamp_float"].type == "float"
+    assert tuned["meta.timestamp"].type == "datetime"
     db.create_qdrant_document_store("db", index="finding")
-    assert not any(field["field_name"].startswith("meta.search_") for field in created["payload_fields_to_index"])
+    finding_fields = {
+        field["field_name"] for field in created["payload_fields_to_index"]
+        if field["field_name"].startswith("meta.search_") or field["field_name"] == "meta.finding_fingerprint"
+    }
+    assert finding_fields == {f"meta.{name}" for name in (*db.FINDING_SEARCH_FIELDS, "finding_fingerprint")}
+    tuned = {item["field_name"]: item["field_schema"] for item in tuned_indexes(created["payload_fields_to_index"])}
+    assert all(tuned[name].enable_hnsw is False for name in finding_fields)
+    assert tuned["meta.port"].lookup is True
+    assert tuned["meta.port"].range is False
 
 
 @pytest.mark.asyncio

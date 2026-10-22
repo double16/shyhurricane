@@ -4,6 +4,9 @@
 
 ### Features
 
+- Add indexed `site:`, `inurl:`, and `filetype:`/`ext:` predicates to `query_findings`, with
+  tuned hostname-suffix, extension, scheme, and URL-trigram indexes. Replaced `target` with `query`
+  and consider any non-predicate text as search for embedding vectors.
 - Add a read-only ingestion recovery exporter for `index.jsonl` and `findings.jsonl`,
   preferring original `graph_state` captures and supplementing them from Qdrant, with
   deterministic output and a recovery report describing missing or partial data.

@@ -63,7 +63,11 @@ async def test_each_workflow_renders_without_running_tools(name, mode, monkeypat
     text = result.messages[0].content.text
     assert CATALOG[name] in text
     assert "site:app.example.com:8443" in text
-    assert "query_findings(target)" in text
+    assert "query_findings using the explicit site:" in text
+    assert "retrieve all scoped findings" in text
+    assert "after the scope predicates in query_findings" in text
+    assert "page exhaustion does not establish completeness" in text
+    assert "URL filters omit host-level findings" in text
     assert "fetch_web_resource_content" in text
     assert "contents.offset + len(contents.text)" in text
     assert "get_result_page" in text
@@ -128,11 +132,15 @@ def test_default_mode_is_analysis(name):
         "[2001:db8::1]:8443",
         "app.example.com:8443",
         "https://app.example.com:8443/api/",
+        "https://app.example.com/",
+        "http://app.example.com:8080/",
     ],
 )
 def test_target_scope_is_preserved(target):
     text = prompts.map_attack_surface(target)
     assert f"site:{target}\n" in text
+    finding_scope = json.dumps(f"site:{target}")
+    assert f"query_findings(query={finding_scope})" in text
     assert "retain any explicit port restriction" in text
 
 
@@ -208,6 +216,10 @@ async def test_protocol_prompt_discovery_rendering_and_errors(mode):
         for name in CATALOG:
             result = await client.get_prompt(name, arguments(name))
             assert CATALOG[name] in result.messages[0].content.text
+        for target in ("https://example.com/", "https://example.com:8443/api/", "[2001:db8::1]:8443"):
+            scoped = await client.get_prompt("map_attack_surface", {"target": target})
+            finding_scope = json.dumps(f"site:{target}")
+            assert f"query_findings(query={finding_scope})" in scoped.messages[0].content.text
         active = await client.get_prompt(
             "find_vulnerability_chains", arguments("find_vulnerability_chains", mode="active")
         )
@@ -223,3 +235,13 @@ async def test_protocol_prompt_discovery_rendering_and_errors(mode):
             await client.get_prompt("hunt_vulnerability", {"target": "example.com"})
         with pytest.raises(MCPError, match=unknown_message):
             await client.get_prompt("missing_prompt", {})
+
+
+@pytest.mark.parametrize("name", CATALOG)
+def test_focused_prompts_render_semantic_call_and_inventory_remains_exhaustive(name):
+    text = getattr(prompts, name)(**arguments(name))
+    lookup = next(line for line in text.splitlines() if line.startswith("Scoped finding lookup:"))
+    focused = name.startswith("hunt_") or name.startswith("review_")
+    assert ("site:app.example.com:8443 " in lookup) == focused
+    if name == "hunt_vulnerability":
+        assert 'query="site:app.example.com:8443 SQL injection"' in lookup

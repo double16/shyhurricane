@@ -176,8 +176,8 @@ async def find_application_endpoints(
     External dependencies need focused relationship discovery; inventory does not enumerate them.
     Script association is not flow evidence. Neither mode infers business operations.
 
-    Examples: find_application_endpoints(scope="example.com", detail="inventory");
-    find_application_endpoints(scope="example.com", url="https://app.example.com/api/v1/time",
+    Examples: find_application_endpoints(scope="target.local", detail="inventory");
+    find_application_endpoints(scope="target.local", url="https://app.target.local/api/v1/time",
     method="GET", detail="summary"). Other graph tools use compact/full, not inventory/summary.
     """
     return GraphResult(

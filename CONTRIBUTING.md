@@ -195,3 +195,22 @@ Generate a system prompt that takes common vulnerability types and emits 10 HTTP
   - example.com config
   - example.com server header
 ```
+
+
+## Finding predicate index integration checks
+
+| Environment variable | Default | Description |
+|----------------------|---------|-------------|
+| `QDRANT_TEST_URL` | Unset; integration check skipped | HTTP URL for a test Qdrant 1.17+ server. The test creates and deletes only its own uniquely named collection. |
+
+```shell
+QDRANT_TEST_URL=http://127.0.0.1:6333 KMP_DUPLICATE_LIB_OK=TRUE UV_CACHE_DIR="$PWD/.uv-cache" \
+  uv run pytest tests/test_finding_search_integration.py -q -s
+```
+
+The check verifies payload index tuning, retrieval correctness, and candidate reduction, and reports
+median version-only scan and indexed query latency without imposing timing-sensitive assertions.
+
+The same Qdrant test module checks exact semantic ranking over 5,348 scoped findings and
+out-of-scope distractors using deterministic vectors, including thresholds and bounded hydration.
+It reuses existing indexes and reports elapsed search time without enforcing timing thresholds.

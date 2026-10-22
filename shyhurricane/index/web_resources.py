@@ -82,7 +82,7 @@ def _ingest_worker(db: str, generator_config: GeneratorConfig, health_state=None
             if health_state is not None and not health_state.is_set():
                 queue.nack(item)
                 continue
-            logger.info(f"Processing {item[0:128]} in PID {os.getpid()}")
+            logger.debug(f"Processing {item[0:128]} in PID {os.getpid()}")
 
             if index_log_path is not None:
                 try:
@@ -240,7 +240,7 @@ def _doc_type_worker(db: str, generator_config: GeneratorConfig, health_state=No
             if health_state is not None and not health_state.is_set():
                 doc_type_queue.nack(item)
                 continue
-            logger.info(f"Processing document {item.id} in PID {os.getpid()}")
+            logger.debug(f"Processing document {item.id} in PID {os.getpid()}")
             try:
                 pipeline.run({"input": {"documents": [item]}})
                 doc_type_queue.ack(item)

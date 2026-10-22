@@ -19,6 +19,8 @@ def all_loggers():
 @pytest.fixture(autouse=True)
 def restore_logging(monkeypatch):
     monkeypatch.delenv("LOG_FILE", raising=False)
+    monkeypatch.delenv("LOG_MAX_BYTES", raising=False)
+    monkeypatch.delenv("LOG_BACKUP_COUNT", raising=False)
     original = {
         logger: (logger.level, logger.disabled, logger.propagate, logger.handlers[:], logger.filters[:])
         for logger in all_loggers()
@@ -342,3 +344,153 @@ def test_qdrant_filter_clears_cached_traceback_and_preserves_other_errors():
         assert other.exc_info is info
         assert other.msg == "other %s"
         assert other.args == ("failure",)
+
+
+@pytest.mark.parametrize("max_bytes,backups", [(None, None), (0, 1), (2048, 3)])
+def test_rotation_settings_are_exported(tmp_path, max_bytes, backups):
+    logging_config.configure_file_logging(
+        str(tmp_path / "settings.log"), console_enabled=False, max_bytes=max_bytes, backup_count=backups,
+    )
+    handler = next(h for h in logging.getLogger().handlers if isinstance(h, logging_config.DiagnosticFileHandler))
+    assert handler.maxBytes == (10485760 if max_bytes is None else max_bytes)
+    assert handler.backupCount == (5 if backups is None else backups)
+    assert logging_config.os.environ["LOG_MAX_BYTES"] == str(handler.maxBytes)
+    assert logging_config.os.environ["LOG_BACKUP_COUNT"] == str(handler.backupCount)
+
+
+@pytest.mark.parametrize("variable,value", [
+    ("LOG_MAX_BYTES", "-1"), ("LOG_MAX_BYTES", "bad"), ("LOG_MAX_BYTES", "1.5"),
+    ("LOG_BACKUP_COUNT", "0"), ("LOG_BACKUP_COUNT", "-1"), ("LOG_BACKUP_COUNT", ""),
+])
+def test_invalid_rotation_environment_preserves_logging(tmp_path, monkeypatch, variable, value):
+    monkeypatch.setenv(variable, value)
+    previous = logging.getLogger().handlers[:]
+    with pytest.raises(ValueError):
+        logging_config.configure_file_logging(str(tmp_path / "bad.log"))
+    assert logging.getLogger().handlers == previous
+
+
+def test_explicit_settings_override_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOG_MAX_BYTES", "invalid")
+    monkeypatch.setenv("LOG_BACKUP_COUNT", "invalid")
+    logging_config.configure_file_logging(str(tmp_path / "override.log"), max_bytes=1234, backup_count=2)
+    assert logging_config.os.environ["LOG_MAX_BYTES"] == "1234"
+    assert logging_config.os.environ["LOG_BACKUP_COUNT"] == "2"
+
+
+def test_rollover_retention_and_restart(tmp_path):
+    path = tmp_path / "rotation.log"
+    logging_config.configure_file_logging(str(path), console_enabled=False, max_bytes=1, backup_count=2)
+    logger = logging.getLogger("rotation-test")
+    for index in range(4):
+        logger.info("record-%s π🙂", index)
+    assert "record-3 π🙂" in path.read_text()
+    assert "record-2 π🙂" in Path(f"{path}.1").read_text()
+    assert "record-1 π🙂" in Path(f"{path}.2").read_text()
+    assert not Path(f"{path}.3").exists()
+    logging_config.configure_file_logging(str(path), console_enabled=False, max_bytes=10000)
+    logger.info("restart")
+    assert "record-3 π🙂" in path.read_text()
+    assert "restart" in path.read_text()
+
+
+def test_existing_oversized_file_is_archived_intact(tmp_path):
+    path = tmp_path / "existing.log"
+    original = "existing π🙂\n" * 100
+    path.write_text(original)
+    logging_config.configure_file_logging(str(path), console_enabled=False, max_bytes=100)
+    logging.getLogger("oversized").info("new entry")
+    assert Path(f"{path}.1").read_text() == original
+    assert "new entry" in path.read_text()
+
+
+def test_zero_threshold_disables_rotation(tmp_path):
+    path = tmp_path / "unbounded.log"
+    logging_config.configure_file_logging(str(path), console_enabled=False, max_bytes=0)
+    for index in range(100):
+        logging.getLogger("unbounded").info("entry-%s", index)
+    assert "entry-0" in path.read_text() and "entry-99" in path.read_text()
+    assert not Path(f"{path}.1").exists()
+
+
+@pytest.mark.parametrize("operation", ["_do_lock", "do_open"])
+def test_preflight_failure_closes_new_handler_and_preserves_previous(tmp_path, monkeypatch, operation):
+    logging_config.configure_file_logging(str(tmp_path / "previous.log"), console_enabled=False)
+    previous = logging.getLogger().handlers[:]
+    closed = []
+    original_close = logging_config.DiagnosticFileHandler.close
+
+    def close(handler):
+        closed.append(handler)
+        original_close(handler)
+
+    def fail(handler):
+        raise PermissionError("preflight denied")
+
+    monkeypatch.setattr(logging_config.DiagnosticFileHandler, "close", close)
+    monkeypatch.setattr(logging_config.DiagnosticFileHandler, operation, fail)
+    with pytest.raises(PermissionError, match="preflight denied"):
+        logging_config.configure_file_logging(str(tmp_path / "new.log"))
+    assert logging.getLogger().handlers == previous
+    assert len(closed) == 1
+    assert closed[0].stream is None
+    assert closed[0].stream_lock is None
+
+
+def write_rotating_worker(destination, worker, ready, start):
+    logging_config.configure_file_logging(destination, console_enabled=False)
+    ready.put(worker)
+    assert start.wait(timeout=30)
+    for index in range(30):
+        logging.getLogger("concurrent-rotation").info("unique-%s-%s π🙂", worker, index)
+    logging.shutdown()
+
+
+def test_spawned_writers_rotate_without_lost_or_duplicate_records(tmp_path):
+    path = tmp_path / "shared.log"
+    logging_config.configure_file_logging(str(path), console_enabled=False, max_bytes=2048, backup_count=20)
+    context = multiprocessing.get_context("spawn")
+    ready, start = context.Queue(), context.Event()
+    processes = [
+        context.Process(target=write_rotating_worker, args=(str(path), worker, ready, start))
+        for worker in range(2)
+    ]
+    try:
+        for process in processes:
+            process.start()
+        assert {ready.get(timeout=30) for _ in processes} == {0, 1}
+        start.set()
+        for index in range(30):
+            logging.getLogger("concurrent-rotation").info("unique-parent-%s π🙂", index)
+        for process in processes:
+            process.join(timeout=30)
+            assert process.exitcode == 0
+        archives = list(tmp_path.glob("shared.log.*"))
+        assert len(archives) >= 2
+        text = "\n".join(file.read_text() for file in [path, *archives])
+        records = [line.split("unique-", 1)[1] for line in text.splitlines() if "unique-" in line]
+        expected = {f"{worker}-{index} π🙂" for worker in (0, 1, "parent") for index in range(30)}
+        assert set(records) == expected
+        assert len(records) == len(expected)
+    finally:
+        start.set()
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+            process.close()
+        ready.close()
+        ready.join_thread()
+
+
+def test_unusable_lock_path_stops_configuration(tmp_path):
+    path = tmp_path / "blocked.log"
+    probe = logging_config.DiagnosticFileHandler(str(path))
+    lock_path = Path(probe.lockFilename)
+    probe.close()
+    lock_path.mkdir()
+    previous = logging.getLogger().handlers[:]
+    with pytest.raises(OSError):
+        logging_config.configure_file_logging(str(path))
+    assert logging.getLogger().handlers == previous
+    assert not logging_config.file_logging_enabled()

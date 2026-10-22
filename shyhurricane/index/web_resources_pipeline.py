@@ -103,7 +103,7 @@ def _deobfuscate_javascript(content: str) -> str:
 
     docker_command = ["docker", "run", "--rm", "-i", unix_command_image(), 'timeout', '--preserve-status',
                       '--kill-after=1m', '30m', '/usr/local/bin/jsdeobf.sh']
-    logger.info(f"Deobfuscating javascript with command {' '.join(docker_command)}")
+    logger.debug(f"Deobfuscating javascript with command {' '.join(docker_command)}")
     proc = subprocess.Popen(docker_command, universal_newlines=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL)
     result = ""
@@ -177,7 +177,7 @@ def build_splitters(embedders: Dict[str, Component]):
             target_token_length = min(token_length, max_model_length)
             split_len = int(floor(target_token_length * 0.93) / 2)
             overlap = int(floor(target_token_length * 0.06))
-            logger.info(
+            logger.debug(
                 f"Splitting document {doc_type_model.doc_type} by {split_len} words, overlap {overlap} (target {token_length} tokens, model has {max_model_length} tokens)")
             splitter = SuffixIdSplitter(
                 split_by="word",
@@ -369,7 +369,7 @@ class NormalizeDocuments:
                 {"field": "meta.normalized", "operator": "==", "value": True},
                 {"field": "meta.content_sha256", "operator": "==", "value": content_sha256},
             ]}
-        logger.info("Checking for existing normalized document: filters %s", filters)
+        logger.debug("Checking for existing normalized document: filters %s", filters)
         existing = self.store.filter_documents(filters=filters)
         if not existing:
             return None
@@ -386,7 +386,7 @@ class NormalizeDocuments:
                 continue
 
             if is_binary(doc.content, raw_mime):
-                logger.info(f"NormalizeDocuments: Skipping ({raw_mime}) binary content")
+                logger.debug(f"NormalizeDocuments: Skipping ({raw_mime}) binary content")
                 continue
 
             # Map MIME to a logical doc type
@@ -468,7 +468,7 @@ class FilterExistingDocumentsById:
             collection = doc.meta.get("type")
             # Content must reach downstream queueing again after a partial ingestion failure.
             if collection != "content" and doc.id in existing.get(collection, set()):
-                logger.info("Skipping existing document %s %s", collection, doc.id)
+                logger.debug("Skipping existing document %s %s", collection, doc.id)
             else:
                 new_documents.append(doc)
         return {"documents": new_documents}
@@ -531,11 +531,11 @@ class IndexDocTypeDocuments:
             timestamp_for_id = _quantize_timestamp(doc.meta.get("timestamp", ""))
             response_values_for_id = _cache_key_response_headers(json.loads(doc.meta.get("response_headers", "{}")))
             if not url or not raw_mime or not timestamp_for_id:
-                logger.info(f"Skipping {doc.id} for missing url, content_type, or timestamp")
+                logger.debug(f"Skipping {doc.id} for missing url, content_type, or timestamp")
                 continue
 
             if is_binary(doc.content, raw_mime):
-                logger.info(f"Skipping {url} ({raw_mime}) binary content")
+                logger.debug(f"Skipping {url} ({raw_mime}) binary content")
                 continue
 
             doc_type = map_mime_to_type(raw_mime)
@@ -632,7 +632,7 @@ class GenerateTitleAndDescription:
                 try:
                     result = self.generator.run(prompt=self.prompt % (doc.content[0:2048])).get("replies", ["{}"])[-1]
                     parsed = json.loads(result)
-                    logger.info(f"title_and_desc: {doc.meta.get('type', '')} {result}")
+                    logger.debug(f"title_and_desc: {doc.meta.get('type', '')} {result}")
                     if "title" in parsed and "title" not in doc.meta:
                         doc.meta["title"] = str(parsed["title"])
                         if url:

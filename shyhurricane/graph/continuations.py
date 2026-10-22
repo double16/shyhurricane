@@ -196,7 +196,7 @@ class Continuations:
             else:
                 raise ValueError("Unknown graph continuation stage")
             self.save(key, state)
-            logger.info("Graph continuation %s capture=%s stage=%s contexts=%s/%s", key,
+            logger.debug("Graph continuation %s capture=%s stage=%s contexts=%s/%s", key,
                         state["event"]["id"], state["stage"],
                         state.get("planner", {}).get("cursor", {}).get("context", 0), len(state["contexts"]))
         except Exception as error:

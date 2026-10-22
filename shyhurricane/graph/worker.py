@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def complete_capture(artifacts, scheduler, event, mode, item):
-    logger.info("Graph capture %s stage=reconcile starting", event["id"])
+    logger.debug("Graph capture %s stage=reconcile starting", event["id"])
     # A newly arrived target can resolve references regardless of ingest order.
     chain = set(event.get("reconcile_chain", [])) | {event["id"]}
     remaining = event.get("reconcile_remaining", max(0, MAX_RECONCILE_CAPTURES - len(chain)))
@@ -166,7 +166,7 @@ def graph_worker(db, location, health_state, stop_event, open_world):
                         receipts.settle(key, failed=state == "failed")
                     continue
                 started = time.monotonic()
-                logger.info("Graph capture %s stage=extract starting", event["id"])
+                logger.debug("Graph capture %s stage=extract starting", event["id"])
                 artifacts.status(event["id"], "processing")
                 projection = extract(event, artifacts, open_world=open_world and not policy)
                 logger.info(
@@ -180,7 +180,7 @@ def graph_worker(db, location, health_state, stop_event, open_world):
                 store.publish(projection)
                 complete_capture(artifacts, scheduler, event, projection.library_analysis, item)
                 queue.ack(receipt)
-                logger.info("Graph capture %s acknowledged seconds=%.3f", event["id"], time.monotonic() - started)
+                logger.debug("Graph capture %s acknowledged seconds=%.3f", event["id"], time.monotonic() - started)
             except PublicationConflict as error:
                 logger.warning(
                     "Graph publication changed while staging capture %s; retaining work: %s", item["id"], error

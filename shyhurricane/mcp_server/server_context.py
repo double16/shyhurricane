@@ -18,6 +18,7 @@ from shyhurricane.data_paths import configure_data_dir, state_path
 from shyhurricane.db import create_qdrant_client, create_qdrant_document_store, qdrant_host_port
 from shyhurricane.disk_space import DiskSpaceGuard
 from shyhurricane.doc_type_model_map import doc_type_to_model
+from shyhurricane.finding_semantic import FindingSemanticSearch
 from shyhurricane.graph.database import GraphStore, graph_location
 from shyhurricane.graph.maintenance import GraphMaintenance
 from shyhurricane.haystack_lifecycle import close_haystack_resources
@@ -73,6 +74,9 @@ class ServerContext:
     result_store: ResultPageStore | None = None
     graph_store: GraphStore | None = None
     graph_maintenance: GraphMaintenance | None = None
+    finding_semantic_search: FindingSemanticSearch = field(
+        default_factory=lambda: FindingSemanticSearch(get_generator_config),
+    )
     _closed: bool = field(default=False, init=False)
     _ingest_writer: AsyncIngestWriter | None = field(default=None, init=False)
 

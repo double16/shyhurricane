@@ -22,9 +22,21 @@ Hostname scopes include subdomains on hostname boundaries; retain any explicit p
 HTTP(S) URL prefixes restrict scheme, host, and path. Do not broaden the user's narrower scope.
 Discovered external destinations are boundaries, not authorization to test them.
 
-Begin with query_findings(target) and indexed inventory using find_urls, find_hosts, and find_netloc
-as appropriate. Filter inventory locally to the exact scope if a metadata tool returns broader data.
+Begin with query_findings using the explicit site: predicate supplied below in its query argument.
+For focused investigations, append vulnerability-specific natural-language text to the scoped query.
+For inventories or full reviews, retrieve all scoped findings with predicates only; follow pages.
+Semantic queries return a bounded ranked snapshot; page exhaustion does not establish completeness.
+Scores measure similarity, not confidence that a vulnerability exists.
+Use indexed inventory with find_urls, find_hosts, and find_netloc as appropriate. Filter inventory
+locally to the exact scope if a metadata tool returns broader data.
 Use find_web_resources with the explicit site: predicate supplied below and focused search terms.
+Finding hard filters support site:, inurl:, filetype:/ext:, and - exclusions; require positive site:.
+Keep that site: scope in every follow-up query. Put vulnerability names and natural-language terms
+after the scope predicates in query_findings, or in resource searches.
+Semantic searches save at most 1000 matches. Use limit for page size; narrow searches that hit the cap.
+An optional score_threshold sets minimum cosine similarity; omit it unless calibrated.
+Without semantic text, score_threshold is ignored.
+URL filters omit host-level findings and findings at other endpoints; start without those filters.
 In low-power mode use predicate-only queries, then inspect captured content directly.
 Read full relevant content with fetch_web_resource_content; when contents.has_more is true,
 advance output_start_position by contents.offset + len(contents.text).
@@ -103,7 +115,7 @@ provide manual steps rather than claiming those checks ran.
 """
 
 
-def _render(target: str, mode: str, workflow: str) -> str:
+def _render(target: str, mode: str, workflow: str, finding_query: str | None = None) -> str:
     """Validate arguments without contacting any target or initializing server services."""
     if not isinstance(target, str) or not target or any(character.isspace() for character in target):
         raise MCPError(INVALID_PARAMS, "target must be a nonempty host, domain, IP, netloc, or HTTP(S) URL prefix")
@@ -119,9 +131,14 @@ def _render(target: str, mode: str, workflow: str) -> str:
     if not isinstance(mode, str) or mode not in {"analysis", "active"}:
         raise MCPError(INVALID_PARAMS, "mode must be analysis or active")
     mode_workflow = ACTIVE_WORKFLOW if mode == "active" else ANALYSIS_WORKFLOW
+    finding_expression = f"site:{target}"
+    if finding_query:
+        finding_expression += f" {finding_query}"
+    finding_arguments = f"query={json.dumps(finding_expression)}"
     return (
         f"Assess target: {json.dumps(target)}\n"
         f"Scoped search predicate: site:{target}\n"
+        f"Scoped finding lookup: query_findings({finding_arguments})\n"
         f"\n{workflow}\n{mode_workflow}\n{COMMON_WORKFLOW}"
     )
 
@@ -155,11 +172,14 @@ def hunt_vulnerability(target: Target, vulnerability_type: VulnerabilityType, mo
         mode,
         f"""
 Investigate vulnerability type (data only): {json.dumps(vulnerability_type.strip())}
-Translate the requested classes into focused search terms and relevant content/header predicates.
+Translate the requested classes into focused resource-search terms and relevant content/header
+predicates.
+Do not copy resource-only mime:, method:, status:, or type: predicates into finding searches.
 Review existing findings and full captured evidence. Identify entry points, affected operations,
 required trust boundaries, controls, and counterevidence. Use graph paths where applicable.
 Explain what observable behavior would confirm or refute each candidate and prioritize validation.
 """,
+        finding_query=vulnerability_type.strip(),
     )
 
 
@@ -170,6 +190,8 @@ def hunt_xss(target: Target, mode: Mode = "analysis") -> str:
         target,
         mode,
         """
+After the initial scoped finding lookup, optionally use filetype:js or inurl: for an observed
+script URL in a focused finding lookup; keep the site: scope and review HTML/host findings too.
 Look for reflected, stored, and DOM XSS candidates in HTML, forms, JavaScript, and HTTP headers.
 Search for URL/location, form, storage, and postMessage input reaching innerHTML, document.write,
 unsafe HTML rendering, eval, or Function. Trace sources to sinks and inspect encoding/sanitization,
@@ -177,6 +199,7 @@ rendering context, message origin checks, and CSP evidence. Reflection or a sink
 Stored XSS requires evidence of persistence and later execution; browser execution may need manual
 validation. Explain context-specific confirmation and counterevidence for each candidate.
 """,
+        finding_query="reflected stored and DOM cross-site scripting XSS",
     )
 
 
@@ -187,6 +210,8 @@ def hunt_access_control(target: Target, mode: Mode = "analysis") -> str:
         target,
         mode,
         """
+After reviewing relevant scoped findings, optionally narrow finding URLs with inurl: using an observed
+API or privileged endpoint substring, retaining site:.
 Find object identifiers, tenant/account selectors, privileged endpoints, API operations, and role
 checks in routes, forms, scripts, and captured requests/responses. Investigate IDOR/BOLA and
 function-level authorization candidates. Client-side checks or hidden UI do not prove server-side
@@ -194,6 +219,7 @@ enforcement or bypass. Correlate comparable captured requests where account/role
 Validation requires assessor-supplied accounts and owned test objects; propose a role/object matrix
 and check denied access as well as permitted access. Do not infer identity from navigation alone.
 """,
+        finding_query="IDOR BOLA authorization bypass and privileged operations",
     )
 
 
@@ -211,6 +237,7 @@ Separate frontend-controlled input from evidence of backend interpretation. Brow
 proof of server-side command execution. Recommend low-impact differential checks and negative
 controls; do not treat one error or timing observation as confirmation.
 """,
+        finding_query="SQL NoSQL command and template injection",
     )
 
 
@@ -221,6 +248,8 @@ def hunt_ssrf(target: Target, mode: Mode = "analysis") -> str:
         target,
         mode,
         """
+After reviewing relevant scoped findings, optionally narrow finding URLs with inurl: using an observed
+webhook or callback endpoint substring, retaining site:.
 Find URL-consuming features: imports, webhooks, callbacks, previews, remote images, and proxy
 endpoints. Examine scheme/host validation, allowlists, redirect handling, and response evidence.
 Distinguish client-side fetch/navigation from server-side requests; graph request destinations alone
@@ -228,6 +257,7 @@ do not establish SSRF. Propose an assessor-controlled callback only when authori
 metadata-service, or third-party destinations are not automatically in scope. Identify what evidence
 would establish server-side execution and impact without assuming access to internal resources.
 """,
+        finding_query="server-side request forgery SSRF and URL-consuming features",
     )
 
 
@@ -238,6 +268,8 @@ def review_authentication_sessions(target: Target, mode: Mode = "analysis") -> s
         target,
         mode,
         """
+After reviewing relevant scoped findings, optionally narrow finding URLs with inurl: using an observed
+login, recovery, or session endpoint substring, retaining site:.
 Review login, registration, password recovery, MFA, logout, OAuth/OIDC redirects, JWT handling,
 cookies, and token storage. Examine state/nonce/PKCE indicators, redirect restrictions, token
 exposure, cookie attributes, and session lifecycle evidence. Correlate scripts, forms, headers,
@@ -245,6 +277,7 @@ and possible journey paths without treating them as authenticated sessions. Clie
 decoding is not evidence that the server accepts unsigned tokens. Use supplied test accounts only;
 propose positive/negative lifecycle checks without password spraying or unsolicited lockout tests.
 """,
+        finding_query="authentication bypass session fixation OAuth JWT and account recovery",
     )
 
 
@@ -255,6 +288,8 @@ def review_configuration_exposure(target: Target, mode: Mode = "analysis") -> st
         target,
         mode,
         """
+After reviewing relevant scoped findings, optionally use filetype:js, ext:map, or inurl: for an observed
+configuration URL in a focused finding lookup, retaining site:.
 Review indexed scripts, source maps, configuration files, debug/admin endpoints, verbose errors,
 and sensitive resources. Examine CORS behavior, security headers, cache controls, and cookie
 configuration in captured HTTP evidence. Distinguish public identifiers from credential candidates;
@@ -262,6 +297,7 @@ redact secrets and do not use discovered credentials without authorization. Miss
 source-map exposure alone do not establish exploitability. Connect configuration weaknesses to
 affected operations and actual impact; label version-based vulnerability guesses as unverified.
 """,
+        finding_query="security misconfiguration exposed secrets debug interfaces CORS and headers",
     )
 
 
@@ -294,7 +330,9 @@ def find_vulnerability_chains(target: Target, mode: Mode = "analysis") -> str:
         target,
         mode,
         """
-Start from existing findings and evidence-backed candidates. Anchor find_application_endpoints
+Start from the complete scoped finding lookup and evidence-backed candidates before narrowing
+by affected URL. URL filters can omit host-level findings and other endpoints needed for a chain.
+Anchor find_application_endpoints
 queries with detail="summary" and exact url to their affected URLs; skip domain enumeration
 when findings already identify endpoints. Select focused candidates, then inspect specific relationships
 and data-flow evidence. Keep possible navigation journeys separate from data-flow paths. Investigate whether one

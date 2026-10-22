@@ -80,7 +80,7 @@ async def index_request_body(request: Request) -> Response:
     if not first and not second:
         return Response(status_code=400)
     if is_katana_jsonl(first):
-        logger.info("Indexing katana JSONL")
+        logger.debug("Indexing katana JSONL")
         # each line is a request/response
         await server_ctx.enqueue_ingest(first)
         if second:
@@ -88,7 +88,7 @@ async def index_request_body(request: Request) -> Response:
         async for line in line_generator:
             await server_ctx.enqueue_ingest(line)
     elif is_http_csv(first, second):
-        logger.info("Indexing CSV")
+        logger.debug("Indexing CSV")
         # each line is a request/response
         # the csv library doesn't support async, so we need to collect everything first
         lines = [first]
@@ -99,7 +99,7 @@ async def index_request_body(request: Request) -> Response:
         for rr in http_csv_generator(lines):
             await server_ctx.enqueue_ingest(rr.to_katana())
     else:
-        logger.info("Indexing entire body as single request")
+        logger.debug("Indexing entire body as single request")
         # send entire body
         lines = [first]
         if second:
@@ -208,7 +208,7 @@ async def index_http_url(
         if parsed_url.hostname in additional_hosts:
             the_headers['Host'] = parsed_url.hostname
             munged_url = url.replace(f"://{parsed_url.hostname}", f"://{additional_hosts[parsed_url.hostname]}", 1)
-            logger.info("Munged URL with additional hosts: %s", munged_url)
+            logger.debug("Munged URL with additional hosts: %s", munged_url)
         else:
             munged_url = url
         async with httpx.AsyncClient() as client:

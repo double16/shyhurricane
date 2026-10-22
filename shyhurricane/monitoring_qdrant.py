@@ -60,3 +60,11 @@ async def bounded_count(store) -> int:
     """Use the store's existing async client with a per-request deadline."""
     async with asyncio.timeout(5):
         return await store.count_documents_async()
+
+
+async def bounded_collection_count(client, collection: str) -> int:
+    """Count a primary collection independently of initialized retrieval stores."""
+    async with asyncio.timeout(5):
+        if not await client.collection_exists(collection_name=collection):
+            return 0
+        return (await client.count(collection_name=collection, exact=True, timeout=5)).count

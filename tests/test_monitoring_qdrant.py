@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from shyhurricane.monitoring_qdrant import MonitorQdrantCache, bounded_count
+from shyhurricane.monitoring_qdrant import MonitorQdrantCache, bounded_collection_count, bounded_count
 
 
 @pytest.mark.asyncio
@@ -106,3 +106,38 @@ async def test_bounded_count_preserves_exact_store_result_and_errors():
     store.count_documents_async.side_effect = ConnectionError("offline")
     with pytest.raises(ConnectionError, match="offline"):
         await bounded_count(store)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("exists", [False, True])
+async def test_primary_collection_count_handles_missing_and_populated_collections(exists):
+    client = SimpleNamespace(
+        collection_exists=AsyncMock(return_value=exists), count=AsyncMock(return_value=SimpleNamespace(count=193)),
+    )
+    assert await bounded_collection_count(client, "finding") == (193 if exists else 0)
+    client.collection_exists.assert_awaited_once_with(collection_name="finding")
+    if exists:
+        client.count.assert_awaited_once_with(collection_name="finding", exact=True, timeout=5)
+    else:
+        client.count.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["collection_exists", "count"])
+async def test_primary_collection_count_does_not_hide_failures(stage):
+    client = SimpleNamespace(collection_exists=AsyncMock(return_value=True), count=AsyncMock())
+    getattr(client, stage).side_effect = ConnectionError("offline")
+    with pytest.raises(ConnectionError, match="offline"):
+        await bounded_collection_count(client, "finding")
+
+
+@pytest.mark.asyncio
+async def test_primary_collection_count_has_deadline(monkeypatch):
+    timeout = asyncio.timeout
+    monkeypatch.setattr(asyncio, "timeout", lambda seconds: timeout(0.01))
+
+    async def blocked(**kwargs):
+        await asyncio.Event().wait()
+
+    with pytest.raises(TimeoutError):
+        await bounded_collection_count(SimpleNamespace(collection_exists=blocked), "finding")

@@ -145,7 +145,8 @@ async def test_failed_heartbeat_backs_off_without_holding_lock(monkeypatch, capl
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("outcome", ["success", "error", "cancel", "timeout"])
-async def test_idle_task_is_cleaned_up(monkeypatch, outcome):
+@pytest.mark.parametrize("tool", ["port_scan", "query_findings"])
+async def test_idle_task_is_cleaned_up(monkeypatch, outcome, tool):
     from shyhurricane.mcp_server import progress
 
     entered = asyncio.Event()
@@ -162,7 +163,7 @@ async def test_idle_task_is_cleaned_up(monkeypatch, outcome):
 
     @progress_scope(fresh=True)
     async def request():
-        async with progress.idle_progress(SimpleNamespace(), "port_scan"):
+        async with progress.idle_progress(SimpleNamespace(), tool):
             await entered.wait()
             if outcome == "error":
                 raise ValueError("tool failure")

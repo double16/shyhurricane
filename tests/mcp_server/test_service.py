@@ -86,6 +86,8 @@ async def service_runtime(monkeypatch, tmp_path):
     monkeypatch.delenv("MCP_TRANSPORT", raising=False)
     monkeypatch.delenv("LOW_POWER", raising=False)
     monkeypatch.delenv("LOG_FILE", raising=False)
+    monkeypatch.delenv("LOG_MAX_BYTES", raising=False)
+    monkeypatch.delenv("LOG_BACKUP_COUNT", raising=False)
     monkeypatch.setattr(service, "configure_file_logging", Mock())
     monkeypatch.setattr(service, "file_logging_enabled", lambda: False)
     monkeypatch.delenv("SHYHURRICANE_MONITOR", raising=False)
@@ -308,7 +310,8 @@ async def test_log_file_option_and_environment_precedence(service_runtime, monke
     monkeypatch.setattr(service, "file_logging_enabled", lambda: True)
     await service.main()
     service.configure_file_logging.assert_called_once_with(
-        "/tmp/command-line.log" if cli else "/tmp/environment.log", console_enabled=True,
+        "/tmp/command-line.log" if cli else "/tmp/environment.log",
+        console_enabled=True, max_bytes=10485760, backup_count=5,
     )
     config = service_runtime.configs[0]
     assert config["log_level"] == "debug"
@@ -329,7 +332,7 @@ async def test_default_log_file_uses_resolved_data_directory(service_runtime, mo
         monkeypatch.setattr(service.sys, "argv", ["mcp_service.py", "--data-dir", str(selected)])
     await service.main()
     service.configure_file_logging.assert_called_once_with(
-        str(selected / "logs" / "shyhurricane.log"), console_enabled=True,
+        str(selected / "logs" / "shyhurricane.log"), console_enabled=True, max_bytes=10485760, backup_count=5,
     )
 
 
@@ -434,4 +437,41 @@ async def test_main_rejects_invalid_disk_config(service_runtime, monkeypatch):
     with pytest.raises(SystemExit) as error:
         await service.main()
     assert error.value.code == 2
+    service.get_server_context.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cli", [False, True])
+async def test_rotation_settings_precedence(service_runtime, monkeypatch, cli):
+    monkeypatch.setenv("LOG_MAX_BYTES", "2048")
+    monkeypatch.setenv("LOG_BACKUP_COUNT", "3")
+    if cli:
+        monkeypatch.setattr(service.sys, "argv", [
+            "mcp_service.py", "--log-max-bytes", "0", "--log-backup-count", "1",
+        ])
+    await service.main()
+    options = service.configure_file_logging.call_args.kwargs
+    assert options["max_bytes"] == (0 if cli else 2048)
+    assert options["backup_count"] == (1 if cli else 3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("option,variable,value", [
+    ("--log-max-bytes", "LOG_MAX_BYTES", "-1"),
+    ("--log-max-bytes", "LOG_MAX_BYTES", "bad"),
+    ("--log-backup-count", "LOG_BACKUP_COUNT", "0"),
+    ("--log-backup-count", "LOG_BACKUP_COUNT", "1.5"),
+])
+@pytest.mark.parametrize("source", ["cli", "environment"])
+async def test_invalid_rotation_settings_stop_startup(
+    service_runtime, monkeypatch, option, variable, value, source,
+):
+    if source == "cli":
+        monkeypatch.setattr(service.sys, "argv", ["mcp_service.py", option, value])
+    else:
+        monkeypatch.setenv(variable, value)
+    with pytest.raises(SystemExit) as error:
+        await service.main()
+    assert error.value.code == 2
+    service.configure_file_logging.assert_not_called()
     service.get_server_context.assert_not_awaited()

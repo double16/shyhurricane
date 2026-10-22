@@ -391,7 +391,7 @@ def extract(
             graph.gaps.append("Malformed structured response")
     for filename, source in scripts:
         started = time.monotonic()
-        logger.info("Graph capture %s JavaScript analysis starting", event["id"])
+        logger.debug("Graph capture %s JavaScript analysis starting", event["id"])
         try:
             result = (
                 artifacts.cached(

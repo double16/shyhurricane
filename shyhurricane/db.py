@@ -16,6 +16,7 @@ from qdrant_client.conversions import common_types as types
 from qdrant_client.http import models as qm
 from qdrant_client.http.exceptions import UnexpectedResponse
 
+from shyhurricane.finding_search import FINDING_SEARCH_FIELDS
 from shyhurricane.haystack_lifecycle import managed_resource
 from shyhurricane.qdrant_indexes import IndexedQdrantDocumentStore
 from shyhurricane.search_metadata import SEARCH_FIELDS
@@ -332,6 +333,11 @@ def create_qdrant_document_store(db: str, **kwargs) -> QdrantDocumentStore:
     if kwargs.get("index", "").split("_", 1)[0] in HTTP_TYPES:
         payload_fields_to_index.extend(
             {"field_name": f"meta.{field}", "field_schema": "keyword"} for field in (*SEARCH_FIELDS, "type")
+        )
+    if kwargs.get("index") == "finding":
+        payload_fields_to_index.extend(
+            {"field_name": f"meta.{field}", "field_schema": "keyword"}
+            for field in (*FINDING_SEARCH_FIELDS, "finding_fingerprint")
         )
     host, port = qdrant_host_port(db)
     return IndexedQdrantDocumentStore(
