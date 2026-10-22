@@ -4,6 +4,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# Disable telemetry before importing Haystack or any integration that imports it.
+# Changing the environment after import leaves its initialized background client active.
+os.environ["HAYSTACK_TELEMETRY_ENABLED"] = "False"
+
 import pytest
 import requests
 from tldextract import tldextract as tldextract_module
@@ -40,3 +44,10 @@ def pytest_runtest_setup(item):
                 pytest.skip(f"Skipping tests: Ollama is not available at http://{ollama_host}", allow_module_level=True)
         else:
             pytest.skip("Test requires --ollama option to run.")
+
+
+@pytest.fixture(autouse=True)
+def isolated_application_data(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATA_DIR", str(tmp_path / "application_data"))
+    for name in ("TOOL_CACHE", "MCP_SESSION_VOLUME", "QDRANT", "NEO4J"):
+        monkeypatch.delenv(name, raising=False)

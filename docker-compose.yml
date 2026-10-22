@@ -5,7 +5,28 @@ volumes:
   mcp_cache:
   ollama:
 
+  neo4j-data:
+  neo4j-logs:
+
 services:
+  graph:
+    image: neo4j:2026.09.0-community
+    environment:
+      NEO4J_AUTH: none
+      NEO4J_server_memory_heap_initial__size: ${NEO4J_HEAP_SIZE:-1g}
+      NEO4J_server_memory_heap_max__size: ${NEO4J_HEAP_SIZE:-1g}
+      NEO4J_server_memory_pagecache_size: ${NEO4J_PAGECACHE_SIZE:-1g}
+      NEO4J_dbms_memory_transaction_total_max: ${NEO4J_TRANSACTION_MEMORY_LIMIT:-}
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+    healthcheck:
+      test: ["CMD", "cypher-shell", "-a", "bolt://localhost:7687", "RETURN 1"]
+      interval: 30s
+      retries: 3
+      start_period: 30s
+      timeout: 10s
+
   db:
     image: qdrant/qdrant:latest
     volumes:
@@ -43,13 +64,32 @@ services:
     depends_on:
       - dind
       - db
+      - graph
       - ollama
       - ollama_pull
     environment:
       DOCKER_HOST: "tcp://dind:2375"
       QDRANT: "db:6333"
+      QDRANT_DOCUMENT_STORE_TIMEOUT_SECONDS: "${QDRANT_DOCUMENT_STORE_TIMEOUT_SECONDS:-120}"
+      QDRANT_ASYNC_TIMEOUT_SECONDS: "${QDRANT_ASYNC_TIMEOUT_SECONDS:-30}"
+      NEO4J: "bolt://graph:7687"
+      NEO4J_READ_TIMEOUT_SECONDS: "${NEO4J_READ_TIMEOUT_SECONDS:-30}"
+      NEO4J_CONTROL_TIMEOUT_SECONDS: "${NEO4J_CONTROL_TIMEOUT_SECONDS:-30}"
+      NEO4J_WRITE_TIMEOUT_SECONDS: "${NEO4J_WRITE_TIMEOUT_SECONDS:-180}"
+      NEO4J_HEALTH_TIMEOUT_SECONDS: "${NEO4J_HEALTH_TIMEOUT_SECONDS:-15}"
+      NEO4J_SCHEMA_TIMEOUT_SECONDS: "${NEO4J_SCHEMA_TIMEOUT_SECONDS:-120}"
+      GRAPH_LIBRARY_ANALYSIS: "${GRAPH_LIBRARY_ANALYSIS:-summary}"
       TOOL_CACHE: "/tool_cache"
+      MCP_SESSION_VOLUME: "mcp_session"
       LOG_FILE: "${LOG_FILE:-}"
+      LOG_MAX_BYTES: "${LOG_MAX_BYTES:-10485760}"
+      LOG_BACKUP_COUNT: "${LOG_BACKUP_COUNT:-5}"
+      ENABLE_HEAP_PROFILING: "${ENABLE_HEAP_PROFILING:-false}"
+      INDEXING_WAIT_TIMEOUT_SECONDS: "${INDEXING_WAIT_TIMEOUT_SECONDS:-60}"
+      DISK_MIN_FREE_PERCENT: "${DISK_MIN_FREE_PERCENT:-3}"
+      DISK_MIN_FREE_BYTES: "${DISK_MIN_FREE_BYTES:-2147483648}"
+      DISK_RESUME_MARGIN_PERCENT: "${DISK_RESUME_MARGIN_PERCENT:-1}"
+      DISK_RESUME_MARGIN_BYTES: "${DISK_RESUME_MARGIN_BYTES:-536870912}"
       TOOL_RESULT_TTL_SECONDS: "${TOOL_RESULT_TTL_SECONDS:-86400}"
       MCP_TRANSPORT: "${MCP_TRANSPORT:-streamable-http}"
       DISABLE_ELICITATION: "${DISABLE_ELICITATION:-True}"

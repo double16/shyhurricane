@@ -3,3 +3,7 @@
 .venv/
 docs/
 tests/
+**/node_modules/
+**/coverage/
+.uv-cache/
+shyhurricane*db/

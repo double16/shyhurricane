@@ -130,6 +130,7 @@ class FakeResponse:
 class FakeAsyncClient:
     def __init__(self):
         self.requests = []
+        self.cookies = httpx.Cookies()
 
     async def __aenter__(self):
         return self
@@ -174,6 +175,8 @@ async def test_index_http_url_fetches_indexes_and_deobfuscates(monkeypatch):
     assert result.response_headers["X-Test"] == "yes"
     assert client.requests[0]["url"] == "https://127.0.0.1/app.js"
     assert client.requests[0]["headers"]["Host"] == "example.com"
+    assert client.cookies["sid"] == "abc"
+    assert "cookies" not in client.requests[0]
     queued = json.loads(ctx.ingest_queue.items[0])
     assert queued["request"]["endpoint"] == "https://example.com/app.js"
     assert queued["response"]["body"] == "console.log('x')"
@@ -479,6 +482,28 @@ async def test_http_client_input_errors(monkeypatch, http_tool_context, error, m
 
 
 @pytest.mark.asyncio
+@pytest.mark.filterwarnings("error:Setting per-request cookies:DeprecationWarning")
+@pytest.mark.parametrize("cookies, expected_header", [(None, None), ({"sid": "abc"}, "sid=abc")])
+async def test_real_httpx_sends_client_cookies(monkeypatch, http_tool_context, cookies, expected_header):
+    requests = []
+
+    def respond(request):
+        requests.append(request)
+        return httpx.Response(200, text="response body")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    monkeypatch.setattr(indexers.httpx, "AsyncClient", lambda: client)
+
+    result = await indexers.index_http_url(None, "https://example.com/", cookies=cookies)
+
+    assert result.contents.text == "response body"
+    assert requests[0].headers.get("cookie") == expected_header
+    assert len(http_tool_context.ingest_queue.items) == 1
+    assert client.is_closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.filterwarnings("error:Setting per-request cookies:DeprecationWarning")
 async def test_real_httpx_rejects_non_ascii_header(http_tool_context):
     with pytest.raises(ToolError, match="Invalid HTTP request inputs"):
         await indexers.index_http_url(None, "https://example.com/", request_headers={"X-Test": "é"})
@@ -569,3 +594,95 @@ async def test_preview_storage_error_reports_already_queued(monkeypatch, http_to
     with pytest.raises(ToolError, match="Response queued for ingestion.*may enqueue the response again"):
         await indexers.index_http_url(None, "https://example.com/")
     assert len(http_tool_context.ingest_queue.items) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("headers, body, expected, expected_type", [
+    ({}, {"name": "a b", "symbols": "&=+", "tag": ["one", "two"]},
+     "name=a+b&symbols=%26%3D%2B&tag=one&tag=two", "application/x-www-form-urlencoded"),
+    ({"content-type": ""}, {}, "", "application/x-www-form-urlencoded"),
+    ({"CONTENT-TYPE": "application/x-www-form-urlencoded; charset=utf-8"}, {"q": "café"},
+     "q=caf%C3%A9", "application/x-www-form-urlencoded; charset=utf-8"),
+    ({"Content-Type": "text/plain"}, {"value": "a b"}, "value=a+b", "text/plain"),
+    ({}, "raw=a%20b", "raw=a%20b", None),
+    ({"Content-Type": "application/json"}, '{"raw":true}', '{"raw":true}', "application/json"),
+    ({}, None, "", None),
+])
+async def test_dictionary_and_raw_bodies_on_wire_and_in_index(
+    monkeypatch, http_tool_context, headers, body, expected, expected_type,
+):
+    sent = []
+
+    def respond(request):
+        sent.append(request)
+        return httpx.Response(200, text="ok")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    monkeypatch.setattr(indexers.httpx, "AsyncClient", lambda: client)
+    result = await indexers.index_http_url(
+        None, "https://example.com/submit", method="POST", request_headers=headers, request_body=body,
+    )
+    assert result.status_code == 200
+    assert sent[0].content.decode() == expected
+    assert sent[0].headers.get("content-type") == expected_type
+    queued = json.loads(http_tool_context.ingest_queue.items[0])["request"]
+    assert queued["body"] == (None if body is None else expected)
+    assert httpx.Headers(queued["headers"]).get("content-type") == expected_type
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content_type", [
+    "application/json", "text/json", "application/problem+json",
+    "APPLICATION/VND.API+JSON; charset=UTF-8", " application/merge-patch+json ; charset=utf-8",
+])
+async def test_dictionary_json_bodies_preserve_nested_values(monkeypatch, http_tool_context, content_type):
+    sent = []
+    body = {"name": "café", "nested": {"active": True, "empty": None}, "values": [1, 2]}
+
+    def respond(request):
+        sent.append(request)
+        return httpx.Response(200, text="ok")
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    monkeypatch.setattr(indexers.httpx, "AsyncClient", lambda: client)
+    await indexers.index_http_url(
+        None, "https://example.com/submit", method="POST",
+        request_headers={"cOnTeNt-TyPe": content_type}, request_body=body,
+    )
+    assert json.loads(sent[0].content) == body
+    assert sent[0].headers["content-type"] == content_type
+    queued = json.loads(http_tool_context.ingest_queue.items[0])["request"]
+    assert queued["body"] == sent[0].content.decode()
+    assert json.loads(queued["body"]) == body
+
+
+@pytest.mark.asyncio
+async def test_registered_json_content_type_controls_body_encoding(monkeypatch, http_tool_context):
+    monkeypatch.setattr(indexers, "get_additional_http_headers", lambda ctx, headers: {"content-type": "text/json"})
+    client = FakeAsyncClient()
+    monkeypatch.setattr(indexers.httpx, "AsyncClient", lambda: client)
+    monkeypatch.setattr(indexers, "deobfuscate_javascript_full", noop)
+    await indexers.index_http_url(None, "https://example.com/", request_body={"enabled": False})
+    assert json.loads(client.requests[0]["content"]) == {"enabled": False}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("body, headers", [
+    ({"invalid": object()}, {"Content-Type": "application/json"}),
+    ({"invalid": float("nan")}, {"Content-Type": "application/problem+json"}),
+    ({"invalid": "\ud800"}, {}),
+])
+async def test_body_serialization_failure_is_a_tool_error_before_fetch(monkeypatch, http_tool_context, body, headers):
+    def unexpected_client():
+        pytest.fail("Invalid body must not issue a request")
+
+    monkeypatch.setattr(indexers.httpx, "AsyncClient", unexpected_client)
+    with pytest.raises(ToolError, match="request_body cannot be serialized"):
+        await indexers.index_http_url(None, "https://example.com/", request_headers=headers, request_body=body)
+    assert http_tool_context.ingest_queue.items == []
+
+
+async def test_index_http_url_schema_accepts_dictionary_request_body():
+    tool = next(tool for tool in await indexers.mcp_instance.list_tools() if tool.name == "index_http_url")
+    alternatives = tool.input_schema["properties"]["request_body"]["anyOf"]
+    assert {alternative["type"] for alternative in alternatives} == {"string", "object", "null"}

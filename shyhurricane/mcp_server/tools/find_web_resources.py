@@ -16,11 +16,16 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from mcp.types.version import MODERN_PROTOCOL_VERSIONS
 from pydantic import BaseModel, Field
-from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models as qm
 
-from shyhurricane.db import scroll_qdrant_collection
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
+from shyhurricane.indexing_wait import (
+    IndexingStatus,
+    attach_indexing,
+    indexing_scope,
+    url_matcher,
+    wait_for_indexing,
+)
 from shyhurricane.mcp_server import (
     AdditionalHostsField,
     CookiesField,
@@ -37,8 +42,10 @@ from shyhurricane.mcp_server import (
 from shyhurricane.mcp_server.progress import progress_scope, report_progress
 from shyhurricane.mcp_server.tools.find_indexed_metadata import find_netloc_all as find_netloc
 from shyhurricane.predicate_search import candidate_filters, load_candidates, select_candidates
+from shyhurricane.qdrant_reads import retrieve_records, scroll_records, to_document
 from shyhurricane.rate_limit import get_rate_limit_requests_per_second
 from shyhurricane.result_pages import Pagination, paged_results, paginate_result, start_query
+from shyhurricane.search_metadata import trigram_conditions
 from shyhurricane.search_predicates import Predicate, parse_predicates
 from shyhurricane.server_config import get_server_config
 from shyhurricane.target_info import TargetInfo, filter_targets_query, parse_target_info
@@ -90,110 +97,69 @@ def _documents_to_http_resources(documents: List[Document]) -> List[HttpResource
     return https_resources
 
 
+async def _direct_resources(server_ctx, branches, limit):
+    fields = [f"meta.{key}" for key in ("url", "http_method", "status_code", "timestamp_float")]
+    candidates = []
+    for filters, matches in branches:
+        async for point in scroll_records(server_ctx.qdrant_client, "content", filters, fields):
+            meta = (point.payload or {}).get("meta", {})
+            if matches(meta):
+                candidates.append((point.id, meta))
+    candidates.sort(key=lambda item: item[1].get("timestamp_float", 0), reverse=True)
+    ids = []
+    seen = set()
+    for point_id, meta in candidates:
+        key = (meta["url"], meta.get("http_method", "GET"), meta.get("status_code", 200))
+        if key not in seen:
+            seen.add(key)
+            ids.append(point_id)
+            if len(ids) >= limit:
+                break
+    points = await retrieve_records(server_ctx.qdrant_client, "content", ids)
+    return _documents_to_http_resources([to_document(point) for point in points]) if points else None
+
+
+def _direct_scope(field, match):
+    return qm.Filter(must=[
+        qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION)),
+        qm.FieldCondition(key=field, match=match),
+    ])
+
+
 async def _find_web_resources_by_url(ctx: Context, query: str, limit: int = 100) -> Optional[List[HttpResource]]:
-    server_ctx = await get_server_context()
     try:
-        url_parsed = urlparse_ext(query)
-        url_prefix, urls_munged = munge_urls(query)
-
-        store = server_ctx.stores["content"]
-        docs = []
-
-        # Make sure the requested URL is returned
-        filters = {
-            "operator": "AND",
-            "conditions": [
-                {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
-                {"field": "meta.url", "operator": "in", "value": urls_munged}
-            ]}
-        logger.info("Searching for web resources at or below %s using filters %s", url_prefix, filters)
-        docs.extend(await store.filter_documents_async(filters=filters))
-
-        # Find resources below the URL
-        filters = {
-            "operator": "AND",
-            "conditions": [
-                {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
-                {"field": "meta.netloc", "operator": "==", "value": url_parsed.netloc}
-            ]}
-        logger.info("Searching for web resources at or below %s using filters %s", url_prefix, filters)
-        for doc in await store.filter_documents_async(filters=filters):
-            if doc.meta.get("url", "").startswith(url_prefix) and doc.meta.get("url") not in urls_munged:
-                docs.append(doc)
-
-        logger.info("Found %d documents", len(docs))
-        docs = documents_sort_unique(docs, limit)
-
-        if docs:
-            return _documents_to_http_resources(docs)
-    except Exception:
-        pass
-
-    return None
+        parsed = urlparse_ext(query)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return None
+        prefix, variants = munge_urls(query)
+    except ValueError:
+        return None
+    server_ctx = await get_server_context()
+    exact = _direct_scope("meta.url", qm.MatchAny(any=variants))
+    descendants = _direct_scope("meta.netloc", qm.MatchValue(value=parsed.netloc))
+    descendants.must.extend(trigram_conditions("meta.search_url_trigrams", prefix))
+    return await _direct_resources(server_ctx, [
+        (exact, lambda meta: True),
+        (descendants, lambda meta: meta.get("url", "").startswith(prefix) and meta.get("url") not in variants),
+    ], limit)
 
 
 async def _find_web_resources_by_netloc(ctx: Context, query: str, limit: int = 100) -> Optional[List[HttpResource]]:
+    hostname, port = query_to_netloc(query)
+    if hostname is None or port is None or not filter_hosts_and_addresses([hostname]):
+        return None
     server_ctx = await get_server_context()
-    try:
-        hostname, port = query_to_netloc(query)
-        if hostname is None or port is None:
-            return None
-        if not filter_hosts_and_addresses([hostname]):
-            return None
-        store = server_ctx.stores["content"]
-        docs = []
-
-        # Make sure the requested URL is returned
-        filters = {
-            "operator": "AND",
-            "conditions": [
-                {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
-                {"field": "meta.netloc", "operator": "==", "value": query}
-            ]}
-        logger.info("Searching for web resources for %s using filters %s", query, filters)
-        docs.extend(await store.filter_documents_async(filters=filters))
-
-        logger.info("Found %d documents", len(docs))
-        docs = documents_sort_unique(docs, limit)
-
-        if docs:
-            return _documents_to_http_resources(docs)
-    except Exception:
-        pass
-
-    return None
+    filters = _direct_scope("meta.netloc", qm.MatchValue(value=query))
+    return await _direct_resources(server_ctx, [(filters, lambda meta: True)], limit)
 
 
 async def _find_web_resources_by_hostname(ctx: Context, query: str, limit: int = 100) -> Optional[List[HttpResource]]:
+    hostname, port = query_to_netloc(query)
+    if hostname is None or port is not None or not filter_hosts_and_addresses([hostname]):
+        return None
     server_ctx = await get_server_context()
-    try:
-        hostname, port = query_to_netloc(query)
-        if hostname is None or port is not None:
-            return None
-        if not filter_hosts_and_addresses([hostname]):
-            return None
-        store = server_ctx.stores["content"]
-        docs = []
-
-        # Make sure the requested URL is returned
-        filters = {
-            "operator": "AND",
-            "conditions": [
-                {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
-                {"field": "meta.host", "operator": "==", "value": hostname}
-            ]}
-        logger.info("Searching for web resources for %s using filters %s", query, filters)
-        docs.extend(await store.filter_documents_async(filters=filters))
-
-        logger.info("Found %d documents", len(docs))
-        docs = documents_sort_unique(docs, limit)
-
-        if docs:
-            return _documents_to_http_resources(docs)
-    except Exception:
-        pass
-
-    return None
+    filters = _direct_scope("meta.host", qm.MatchValue(value=hostname))
+    return await _direct_resources(server_ctx, [(filters, lambda meta: True)], limit)
 
 
 async def _find_recommended_urls(ctx: Context) -> Optional[List[str]]:
@@ -219,6 +185,7 @@ async def _find_recommended_urls(ctx: Context) -> Optional[List[str]]:
 
 
 class FindWebResourcesResult(BaseModel):
+    indexing: IndexingStatus | None = None
     pagination: Pagination | None = None
     instructions: str = Field(description="Instructions for using the results")
     query: str = Field(description="Search query used to find web resources")
@@ -286,6 +253,7 @@ class SearchPreparation:
     predicates: list[Predicate] = field(default_factory=list)
     semantic_query: Optional[str] = None
     has_indexed_targets: bool = False
+    indexing: IndexingStatus | None = None
 
 
 async def _determine_targets(ctx: Context, search: SearchPreparation, target_query: str):
@@ -302,6 +270,7 @@ async def _determine_targets(ctx: Context, search: SearchPreparation, target_que
             pass
 
 
+@attach_indexing
 async def _prepare_search(
     ctx: Context,
     query: str,
@@ -344,6 +313,12 @@ async def _prepare_search(
             search.targets.extend(await _find_recommended_urls(ctx) or [])
         return search
 
+    direct_host, _ = query_to_netloc(query)
+    if direct_host and filter_hosts_and_addresses([direct_host]):
+        parsed_query = urlsplit(query if "://" in query else f"//{query}")
+        await wait_for_indexing(
+            ctx, server_ctx, url_matcher([query], exact=bool(parsed_query.query or parsed_query.fragment)),
+        )
     if resources_by_url := await _find_web_resources_by_url(ctx, query, limit):
         return find_web_resources_result(results=resources_by_url, query=query, http_methods=http_methods, limit=limit)
     if resources_by_netloc := await _find_web_resources_by_netloc(ctx, query, limit):
@@ -448,6 +423,11 @@ async def _prepare_targets(
         )
     targets = search.targets
     sites = [predicate for predicate in search.predicates if predicate.operator == "site" and not predicate.exclude]
+    if targets:
+        search.indexing = await wait_for_indexing(
+            ctx, search.server_ctx, _search_indexing_matcher(search),
+            semantic=_needs_type_indexing(search),
+        )
     if sites:
         # Resolve host scope independently of the legacy parent-domain fallback.
         known = (await find_netloc(ctx, "")).network_locations
@@ -515,18 +495,41 @@ async def _prepare_targets(
     return search
 
 
+def _indexing_outstanding(search):
+    return search.indexing is not None and any(
+        stage["pending"] + stage["processing"] for stage in search.indexing.stages.values()
+    )
+
+
+def _needs_type_indexing(search):
+    return bool(search.semantic_query or not search.predicates) or any(
+        predicate.operator == "type" and not predicate.exclude
+        and predicate.value not in {"content", "network", "forms"}
+        for predicate in search.predicates
+    )
+
+
+def _search_indexing_matcher(search):
+    sites = [predicate for predicate in search.predicates if predicate.operator == "site"]
+    if any(not predicate.exclude for predicate in sites):
+        return lambda url: all(predicate.matches({"url": url}) for predicate in sites)
+    matches = url_matcher(search.targets)
+    return lambda url: matches(url) and all(predicate.matches({"url": url}) for predicate in sites)
+
+
 async def _request_scan(
     ctx: Context,
     search: Annotated[Union[SearchPreparation, FindWebResourcesResult], Resolve(_prepare_targets)],
 ) -> Union[SpiderConfirmation, Elicit[SpiderConfirmation]]:
     if isinstance(search, FindWebResourcesResult) or not search.missing_targets or not search.server_ctx.open_world:
         return SpiderConfirmation(confirm=False)
-    if not _can_elicit(ctx, search.server_ctx):
+    if _indexing_outstanding(search) or not _can_elicit(ctx, search.server_ctx):
         return SpiderConfirmation(confirm=False)
     targets = ", ".join(map(str, search.missing_targets))
     return Elicit(f"There is no data for {targets}. Would you like to start a scan?", SpiderConfirmation)
 
 
+@attach_indexing
 async def _execute_search(
     ctx: Context,
     search: Union[SearchPreparation, FindWebResourcesResult],
@@ -548,6 +551,10 @@ async def _execute_search(
             for target in search.missing_targets:
                 await spider_website(ctx, target.to_url())
             # A completed scan may have queued documents that are not searchable yet.
+            search.indexing = await wait_for_indexing(
+                ctx, search.server_ctx, _search_indexing_matcher(search),
+                semantic=_needs_type_indexing(search),
+            )
             search.has_indexed_targets = True
             if search.predicates:
                 search.filter_netloc.clear()
@@ -667,6 +674,7 @@ async def _execute_predicate_search(ctx: Context, search: SearchPreparation) -> 
 
 
 @progress_scope()
+@indexing_scope()
 async def find_web_resources(
     ctx: Context,
     query: str,
@@ -686,7 +694,10 @@ async def find_web_resources(
             answer = DeclinedElicitation()
     search = await _prepare_targets(ctx, search, answer)
     scan_answer = DeclinedElicitation()
-    if isinstance(search, SearchPreparation) and search.missing_targets and search.server_ctx.open_world:
+    if (
+        isinstance(search, SearchPreparation) and search.missing_targets and search.server_ctx.open_world
+        and not _indexing_outstanding(search)
+    ):
         try:
             assert_elicitation(search.server_ctx)
             targets = ", ".join(map(str, search.missing_targets))
@@ -806,51 +817,33 @@ class SpiderResults(BaseModel):
     resources: List[HttpResource] = Field(description="The resources found by the spider")
 
 
-async def is_spider_time_recent(server_ctx: ServerContext, url: str) -> Optional[float]:
-    # TODO: consider the user_agent and headers, they may make a difference in the result
-    max_age_seconds = 24 * 3600
-    count_limit = 10
+async def is_spider_time_recent(server_ctx: ServerContext, url: str) -> bool:
     try:
-        qdrant_client: AsyncQdrantClient = server_ctx.qdrant_client
-        now = time.time()
-        url_parsed = urlparse_ext(url)
-        filters = qm.Filter(
-            must=[
-                qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION)),
-                qm.FieldCondition(key="meta.netloc", match=qm.MatchValue(value=url_parsed.netloc)),
-            ]
-        )
-        logger.info("is_spider_time_recent using filters %s", repr(filters))
-        latest_time: float = 0.0
-        # count the number of urls to make sure it's not a one-off
-        count = 0
-        async for record in scroll_qdrant_collection(qdrant_client=qdrant_client, index="network", fields=["meta"],
-                                                     scroll_filter=filters):
-            metadata = record.payload["meta"]
-            try:
-                ts = metadata.get("timestamp_float", 0.0)
-                if now - ts > max_age_seconds:
-                    continue
-
-                if metadata.get("url", "").startswith(url):
-                    if ts > latest_time:
-                        latest_time = ts
-                    count += 1
-                    if count > count_limit:
-                        # seems to be the results of a spider or busting
-                        break
-            except (ValueError, TypeError):
-                pass
-        logger.info(f"Spider check {url} found latest time {latest_time} and count {count}")
-        seconds_since_spider = now - latest_time
-        if seconds_since_spider < max_age_seconds and count > count_limit:
-            logger.info(
-                f"Spider for {url} was done {seconds_since_spider} seconds ago and found >= {count_limit} results")
-            return True
+        parsed = urlparse_ext(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            return False
+    except ValueError:
         return False
-    except Exception as e:
-        logger.error("Failed checking for last spider time", exc_info=e)
-        return False
+    now = time.time()
+    filters = _direct_scope("meta.netloc", qm.MatchValue(value=parsed.netloc))
+    filters.must.append(qm.FieldCondition(key="meta.timestamp_float", range=qm.Range(gte=now - 24 * 3600)))
+    filters.must.extend(trigram_conditions("meta.search_url_trigrams", url))
+    count = 0
+    latest = float("-inf")
+    async for record in scroll_records(
+        server_ctx.qdrant_client, "network", filters, ["meta.url", "meta.timestamp_float"],
+        limit=1000, newest=True,
+    ):
+        metadata = (record.payload or {}).get("meta", {})
+        timestamp = metadata.get("timestamp_float")
+        if not isinstance(timestamp, (int, float)) or not now - timestamp <= 24 * 3600:
+            continue
+        if metadata.get("url", "").startswith(url):
+            count += 1
+            latest = max(latest, timestamp)
+            if count > 10 and now - latest < 24 * 3600:
+                return True
+    return False
 
 
 @mcp_instance.tool(

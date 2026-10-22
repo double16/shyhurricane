@@ -2,11 +2,14 @@ import asyncio
 import os
 import signal
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
+from mcp.types import CallToolResult
 
 import shyhurricane.mcp_server as mcp_server
 import shyhurricane.mcp_server.server_context as server_context
+from shyhurricane.disk_space import DISK_DEFAULTS
 from shyhurricane.task_queue.types import TaskPool, run_worker
 
 
@@ -136,27 +139,43 @@ async def test_same_tool_stays_visible_until_all_calls_finish_or_cancel(monkeypa
     with pytest.raises(asyncio.CancelledError):
         await second
     assert server.running_tools == set()
+    assert list(server.recent_tools) == [("probe", "failed"), ("probe", "complete")]
     assert server._running_tool_counts == {}
     assert contexts == [context, context]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("pipeline_error", [None, RuntimeError, asyncio.CancelledError])
-async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path, pipeline_error):
+@pytest.mark.parametrize("compose", [False, True])
+async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path, pipeline_error, compose):
     monkeypatch.setattr(server_context, "_server_context", None)
-    monkeypatch.setenv("TOOL_CACHE", str(tmp_path))
+    monkeypatch.setattr(
+        "shyhurricane.disk_space.shutil.disk_usage",
+        lambda path: SimpleNamespace(total=100 * 1024**3, free=10 * 1024**3),
+    )
+    if compose:
+        monkeypatch.setenv("TOOL_CACHE", str(tmp_path))
+        monkeypatch.setenv("MCP_SESSION_VOLUME", "mcp_session")
     monkeypatch.setenv("DISABLE_ELICITATION", "")
     stores = {"content": object()}
     doc_stores = []
+    qdrant_available = [False]
+    monkeypatch.setattr(server_context, "qdrant_probe", lambda host, port: qdrant_available[0])
+    monkeypatch.setattr(server_context.HealthMonitor, "start", lambda self: None)
+    monkeypatch.setattr(server_context.HealthMonitor, "close", lambda self: None)
     pool_closes = []
     stop_events = []
 
     class Config:
         database = "db"
+        data_dir = str(tmp_path)
         low_power = True
         ingest_pool_size = 2
         task_pool_size = 3
         open_world = False
+
+    for name, default in DISK_DEFAULTS.items():
+        setattr(Config, name, default)
 
     class Store:
         def __init__(self):
@@ -169,10 +188,16 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
         def count_documents(self):
             self.counted = True
 
+        def close(self):
+            self.closed = True
+
     class Queue:
         path = "/queue"
 
     class Pool:
+        def __init__(self):
+            self.processes = []
+
         def close(self, deadline=None):
             pool_closes.append(deadline)
 
@@ -223,6 +248,7 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
         startup_events.append(("ingest", "db"))
         log_timestamps.append(kwargs["log_timestamp"])
         stop_events.append(kwargs["stop_event"])
+        assert kwargs["health_state"] is not None
         return Queue(), Pool()
 
     def start_task_worker(*args, stop_event=None):
@@ -258,6 +284,10 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
     monkeypatch.setattr(server_context.asyncio, "create_subprocess_exec", create_subprocess_exec)
     monkeypatch.setattr(web_resources, "start_ingest_worker", start_ingest_worker)
     monkeypatch.setattr(task_queue, "start_task_worker", start_task_worker)
+    monkeypatch.setattr("shyhurricane.graph.worker.start_graph_worker", lambda *args: object())
+    monkeypatch.setattr(server_context, "GraphStore", lambda location: SimpleNamespace(
+        location=location, ready=lambda: True, close=lambda: None, schema_ready=True))
+    monkeypatch.setattr(server_context, "GraphMaintenance", MagicMock())
 
     if pipeline_error is not None:
         with pytest.raises(pipeline_error, match="pipeline interrupted"):
@@ -270,6 +300,7 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
 
     ctx = await server_context.get_server_context()
 
+    assert ctx.health_monitor.disk_guard.snapshot()["path"] == str(tmp_path)
     assert ctx.db == "db"
     assert ctx.document_pipeline is not None
     assert ctx.website_context_pipeline is not None
@@ -280,8 +311,17 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
     assert ctx.open_world is False
     assert ctx.disable_elicitation is False
     assert ctx.cache_path == os.path.join(str(tmp_path), "tool_cache")
+    assert ctx.mcp_session_volume == ("mcp_session" if compose else str(tmp_path / "sessions"))
     assert page_cleanups == [ctx.result_store]
-    assert doc_stores and all(store.initialized for store in doc_stores)
+    assert not doc_stores
+    assert not ctx.health_monitor.check()
+    assert not ctx.health_monitor.ready.is_set()
+    qdrant_available[0] = True
+    assert ctx.health_monitor.check()
+    assert ctx.health_monitor.ready.is_set()
+    assert ctx.health_monitor.disk_guard.snapshot()["state"] == "healthy"
+    assert doc_stores and all(store.initialized and store.closed for store in doc_stores)
+    ctx.graph_maintenance.start.assert_called_once()
     ctx.close()
     assert page_cleanups == [ctx.result_store, ctx.result_store]
 
@@ -295,3 +335,82 @@ async def test_invalid_result_ttl_fails_before_services_start(monkeypatch, tmp_p
     monkeypatch.setattr(server_context, "doc_type_to_model", lambda: pytest.fail("Services must not initialize"))
     with pytest.raises(ValueError):
         await server_context.get_server_context()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["complete", "error_result", "exception"])
+async def test_tool_history_records_outcomes_and_evicts_oldest(monkeypatch, outcome):
+    result = CallToolResult(content=[], is_error=outcome == "error_result")
+
+    async def call_tool(self, name, arguments, context):
+        if outcome == "exception":
+            raise RuntimeError("failure")
+        return result
+
+    monkeypatch.setattr(mcp_server.MCPServer, "call_tool", call_tool)
+    server = mcp_server.ShyHurricaneMCPServer("test")
+    assert list(server.recent_tools) == []
+    for index in range(7):
+        if outcome == "exception":
+            with pytest.raises(RuntimeError, match="failure"):
+                await server.call_tool(f"tool_{index}", {})
+        else:
+            assert await server.call_tool(f"tool_{index}", {}) is result
+    status = "complete" if outcome == "complete" else "failed"
+    assert list(server.recent_tools) == [(f"tool_{index}", status) for index in range(6, 1, -1)]
+    assert server.running_tools == set()
+
+
+@pytest.mark.parametrize("ensure_initialized", [False, True])
+def test_qdrant_readiness_retries_partial_initialization_and_recovers(monkeypatch, ensure_initialized):
+    models = {"test": SimpleNamespace(get_qdrant_collections=lambda: ["first", "second"])}
+    monkeypatch.setattr(server_context, "doc_type_to_model", lambda: models)
+    probes = iter([ConnectionError("starting"), False, True, True, True, ConnectionError("down"), True])
+    stores = []
+
+    def probe(host, port):
+        assert (host, port) == ("host", 6333)
+        result = next(probes)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def create_store(db, index):
+        assert db == "remote:6333"
+        store = SimpleNamespace(index=index, closed=False)
+
+        def initialize():
+            if len(stores) == 2:
+                raise ConnectionError("collection setup failed")
+
+        def close():
+            store.closed = True
+
+        store.close = close
+        if ensure_initialized:
+            store._ensure_initialized = initialize
+        else:
+            store.count_documents = initialize
+        stores.append(store)
+        return store
+
+    monkeypatch.setattr(server_context, "qdrant_probe", probe)
+    monkeypatch.setattr(server_context, "create_qdrant_document_store", create_store)
+    monitor = server_context.HealthMonitor(
+        server_context._qdrant_readiness_probe("remote:6333", "host", 6333), lambda: True,
+    )
+    for _ in range(3):
+        assert not monitor.check()
+        assert not monitor.ready.is_set()
+    assert [store.index for store in stores] == ["first", "second"]
+    assert all(store.closed for store in stores)
+    assert monitor.check()
+    assert monitor.ready.is_set()
+    assert [store.index for store in stores] == ["first", "second", "first", "second"]
+    assert all(store.closed for store in stores)
+    assert monitor.check()
+    assert not monitor.check()
+    assert not monitor.ready.is_set()
+    assert monitor.check()
+    assert monitor.ready.is_set()
+    assert len(stores) == 4

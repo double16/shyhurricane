@@ -133,6 +133,7 @@ async def test_content_store_recommend_urls_uses_specific_cache_and_domain_fallb
     assert cached == specific
     assert "https://example.com:443" in fallback
     assert len(calls) == 2
+    assert [call["newest_limit"] for call in calls] == [1000, 10000]
 
 
 @pytest.mark.asyncio

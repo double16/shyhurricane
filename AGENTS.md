@@ -12,12 +12,15 @@
 ## Explicit prohibitions what agents must NOT do
 - Do not bump major versions of core dependencies without a dedicated PR and discussion.
 - Do not rename files without a valid technical reason.
+- Never include target information (domain, urls, ...) from deployments in tests, documentation
+  or MCP instructions and prompts. Use "target.local" or "example.com" as example domains.
 
 ## Documentation
 - Keep documentation up-to-date and accurate.
 - Use clear language.
 - Follow a consistent style and format for documentation.
 - Use examples and diagrams to illustrate concepts.
+- Keep general user documentation in README.md. In-depth documentation in docs/.
 - Environment variables used for configuration must be documented in a table along-side similar variables.
 
 ## Python Best Practices

@@ -456,3 +456,174 @@ async def test_saved_search_pages_cross_calls_without_retrieval(workflow_server,
         assert previous.structured_content["result"] == first
     execute.assert_awaited_once()
     prepare.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("http_endpoint", mcp_service.TRANSPORTS, indirect=True)
+@pytest.mark.parametrize("with_progress", [True, False])
+async def test_indexing_wait_progress_on_http_transports(
+    workflow_server, http_endpoint, monkeypatch, request, with_progress, tmp_path,
+):
+    import json
+
+    from shyhurricane import indexing_wait
+    from shyhurricane.mcp_server.tools import find_indexed_metadata as metadata
+    from shyhurricane.persistent_queue import open_persistent_queue
+    from shyhurricane.server_config import ServerConfig
+
+    server, context = workflow_server
+    context.db = "test"
+    queue = open_persistent_queue(str(tmp_path / "ingest_queue"))
+    queue.put(json.dumps({"request": {"endpoint": "https://example.com/app"}}))
+    monkeypatch.setattr(indexing_wait, "persistent_queue_path", lambda db, name: tmp_path / name)
+    monkeypatch.setattr(indexing_wait, "get_server_config", lambda: ServerConfig(indexing_wait_timeout_seconds=1))
+    monkeypatch.setattr(indexing_wait, "POLL_SECONDS", 0.005)
+    monkeypatch.setattr(indexing_wait, "PROGRESS_SECONDS", 0.01)
+    monkeypatch.setattr(metadata, "get_server_context", AsyncMock(return_value=context))
+    monkeypatch.setattr(metadata, "log_tool_history", AsyncMock())
+    context.qdrant_client = object()
+
+    async def facets(client, key, filters):
+        assert queue.size == 0
+        value = "example.com" if key == "meta.host" else "https://example.com/app"
+        return [SimpleNamespace(value=value, count=1)]
+
+    monkeypatch.setattr(metadata, "facet_qdrant_values", facets)
+    server.add_tool(metadata.find_urls)
+    updates = []
+    finish = None
+
+    pending_observed = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    read_status = indexing_wait.read_indexing_status
+
+    def observe_pending(*args, **kwargs):
+        counts, unresolved = read_status(*args, **kwargs)
+        if any(stage["pending"] + stage["processing"] for stage in counts.values()):
+            # Status reads run in a worker thread. Preserve the pending snapshot before
+            # allowing indexing to finish, regardless of transport or runner speed.
+            loop.call_soon_threadsafe(pending_observed.set)
+        return counts, unresolved
+
+    monkeypatch.setattr(indexing_wait, "read_indexing_status", observe_pending)
+
+    async def finish_indexing():
+        async with asyncio.timeout(5):
+            await pending_observed.wait()
+        queue.ack(queue.get())
+
+    async def receive(value, total, message):
+        updates.append((value, total, message))
+
+    transport = request.node.callspec.params["http_endpoint"]
+    target = sse_client(f"{http_endpoint}/sse") if transport == "sse" else f"{http_endpoint}/mcp"
+    mode = "2026-07-28" if transport == "streamable-http-modern" else "legacy"
+    try:
+        async with Client(target, mode=mode) as client:
+            finish = asyncio.create_task(finish_indexing())
+            result = await client.call_tool(
+                "find_urls", {"host_query": "example.com"},
+                progress_callback=receive if with_progress else None,
+            )
+            await finish
+            assert not result.is_error
+            assert result.structured_content["urls"] == ["https://example.com/app"]
+            assert result.structured_content["indexing"]["status"] == "complete"
+            if with_progress:
+                assert len(updates) >= 2
+                assert [value for value, _, _ in updates] == list(range(1, len(updates) + 1))
+                assert all(total is None for _, total, _ in updates)
+                assert "Waiting for indexing" in updates[0][2]
+                assert "querying available data" in updates[-1][2]
+            else:
+                assert updates == []
+    finally:
+        if finish is not None:
+            await finish
+        queue.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["legacy", "2026-07-28"])
+async def test_content_indexing_status_union_validates_for_real_clients(workflow_server, monkeypatch, mode):
+    from haystack import Document
+
+    from shyhurricane.indexing_wait import IndexingStatus
+    from shyhurricane.mcp_server.tools import fetch_web_resource_content as fetch
+
+    server, context = workflow_server
+    documents = [Document(id="doc", content="saved content", meta={"url": "https://example.com/app"})]
+    context.stores = {"content": SimpleNamespace(filter_documents=lambda **kwargs: list(documents))}
+
+    async def scroll(**kwargs):
+        from qdrant_client.http import models as qm
+
+        assert kwargs["limit"] == 1
+        assert kwargs["with_vectors"] is False
+        return [qm.Record(id=1, payload=document.to_dict(flatten=False)) for document in documents], None
+
+    context.qdrant_client = SimpleNamespace(scroll=scroll)
+    monkeypatch.setattr(fetch, "get_server_context", AsyncMock(return_value=context))
+    monkeypatch.setattr(fetch, "log_tool_history", AsyncMock())
+    wait = AsyncMock(return_value=IndexingStatus(status="complete"))
+    monkeypatch.setattr(fetch, "wait_for_indexing", wait)
+    server.add_tool(fetch.fetch_web_resource_content)
+    async with Client(server, mode=mode) as client:
+        content = await client.call_tool("fetch_web_resource_content", {"url": "https://example.com/app"})
+        assert not content.is_error
+        assert content.structured_content["result"]["contents"]["text"] == "saved content"
+        assert content.structured_content["result"]["indexing"]["status"] == "complete"
+        documents.clear()
+        wait.return_value = IndexingStatus(status="timed_out", potentially_incomplete=True)
+        pending = await client.call_tool("fetch_web_resource_content", {"url": "https://example.com/app"})
+        assert not pending.is_error
+        assert set(pending.structured_content["result"]) == {"indexing"}
+        wait.return_value = IndexingStatus(status="complete")
+        missing = await client.call_tool("fetch_web_resource_content", {"url": "https://example.com/app"})
+        assert not missing.is_error
+        assert missing.structured_content["result"] is None
+
+
+@pytest.mark.parametrize("http_endpoint", ["streamable-http", "streamable-http-modern"], indirect=True)
+@pytest.mark.parametrize("with_progress", [True, False])
+async def test_graph_progress_over_http(http_endpoint, workflow_server, monkeypatch, request, with_progress):
+    import os
+    import time
+
+    from shyhurricane.mcp_server import graph_execution
+
+    server, _ = workflow_server
+    duration = float(os.environ.get("GRAPH_PROGRESS_TEST_SECONDS", "0.08"))
+    updates = []
+
+    class Service:
+        def __init__(self, store, *, budget):
+            self.budget = budget
+
+        def endpoints(self, scope):
+            self.budget.progress("Selecting endpoint resources")
+            time.sleep(duration)
+            return {"results": [], "instructions": "complete"}
+
+    monkeypatch.setattr(graph_execution, "GraphQuery", Service)
+
+    async def endpoints(ctx: Context, scope: str) -> dict[str, Any]:
+        return await graph_execution.execute_graph(ctx, object(), "endpoints", scope)
+
+    server.add_tool(endpoints, name="find_application_endpoints")
+
+    async def progress(value, total, message):
+        updates.append((value, message))
+
+    mode = "legacy" if request.node.callspec.params["http_endpoint"] == "streamable-http" else "2026-07-28"
+    async with Client(f"{http_endpoint}/mcp", mode=mode) as client:
+        result = await client.call_tool("find_application_endpoints", {"scope": "example.com"},
+                                        progress_callback=progress if with_progress else None)
+    assert not result.is_error
+    if with_progress:
+        assert updates and updates[-1][1].startswith("Graph query: completed")
+        assert [value for value, _ in updates] == list(range(1, len(updates) + 1))
+        if duration > 5:
+            assert any(message.endswith("is still running") for _, message in updates)
+    else:
+        assert not updates

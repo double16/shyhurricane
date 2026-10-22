@@ -8,6 +8,7 @@ from haystack import Document
 
 from shyhurricane.index import web_resources_pipeline as wrp
 from shyhurricane.index.input_documents import IngestableRequestResponse
+from shyhurricane.search_metadata import derive_search_metadata
 
 
 class Embedder:
@@ -31,12 +32,18 @@ class Store:
     def __init__(self, existing=None, exc=None):
         self.existing = existing or []
         self.exc = exc
+        self.timeout = 5
         self.written = []
         self.filters = []
 
     def filter_documents(self, filters):
         self.filters.append(filters)
         return self.existing
+
+    def get_documents_by_id(self, ids):
+        if self.exc:
+            raise self.exc
+        return [doc for doc in self.existing if doc.id in ids]
 
     def write_documents(self, documents, policy=None):
         if self.exc:
@@ -101,6 +108,10 @@ def test_request_response_to_document_creates_content_network_and_form_docs():
     assert {doc.meta["type"] for doc in docs} == {"content", "network", "forms"}
     content = next(doc for doc in docs if doc.meta["type"] == "content")
     network = next(doc for doc in docs if doc.meta["type"] == "network")
+    expected = derive_search_metadata("https://example.com:443/index.html", "GET", {"Content-Type": "text/html"},
+                                      host="example.com", domain="example.com")
+    for doc in docs:
+        assert {key: doc.meta[key] for key in expected} == expected
     assert content.meta["host"] == "example.com"
     assert content.meta["domain"] == "example.com"
     assert content.meta["title"] == "Home"
@@ -184,7 +195,7 @@ def test_filter_existing_documents_by_id_and_doc_type():
     new = Document(content="x", id="new", meta={"type": "content"})
 
     by_id = wrp.FilterExistingDocumentsById({"content": Store([existing])})
-    assert by_id.run([missing_type, no_id, existing, new])["documents"] == [missing_type]
+    assert by_id.run([missing_type, no_id, existing, new])["documents"] == [missing_type, no_id, existing, new]
 
     doc = Document(content="x", id="doc", meta={
         "url": "https://example.com/",
@@ -194,7 +205,7 @@ def test_filter_existing_documents_by_id_and_doc_type():
     })
     missing = Document(content="x", id="missing", meta={"url": "", "content_type": "", "timestamp": ""})
     assert wrp.FilterExistingDocumentsByDocType({"html": Store()}).run([doc, missing])["documents"] == [doc]
-    assert wrp.FilterExistingDocumentsByDocType({"html": Store([doc])}).run([doc])["documents"] == []
+    assert wrp.FilterExistingDocumentsByDocType({"html": Store([doc])}).run([doc])["documents"] == [doc]
 
 
 def test_ingest_multi_store_writes_by_collection_and_keeps_documents():
@@ -206,9 +217,12 @@ def test_ingest_multi_store_writes_by_collection_and_keeps_documents():
         Document(content="unknown", id="u", meta={"type": "unknown", "token_length": sys.maxsize}),
     ]
 
-    result = wrp.IngestMultiStore({"html": html_store, "network": network_store}).run(docs)
-
-    assert result["documents"] == docs
+    writer = wrp.IngestMultiStore({"html": html_store, "network": network_store})
+    assert writer.run(docs[:1])["documents"] == docs[:1]
+    with pytest.raises(RuntimeError, match="fail"):
+        writer.run(docs[1:])
+    with pytest.raises(ValueError, match="No store"):
+        writer.run(docs[2:])
     assert html_store.written == [docs[0]]
 
 
@@ -331,7 +345,9 @@ def test_suffix_id_splitter_sets_child_ids_and_serializes_overlap(monkeypatch):
 ])
 def test_suffix_id_splitter_uses_native_chunk_boundaries(content, config):
     splitter = wrp.SuffixIdSplitter(**config)
-    documents = splitter.run(documents=[Document(content=content, id="parent")])["documents"]
+    search = derive_search_metadata("https://example.com/a", "GET", {})
+    documents = splitter.run(documents=[Document(content=content, id="parent", meta=search)])["documents"]
+    assert all({key: doc.meta[key] for key in search} == search for doc in documents)
     assert [doc.content for doc in documents] == [content]
     assert [doc.id for doc in documents] == ["parent_0"]
     assert documents[0].meta["_split_overlap"] == "[]"
@@ -359,6 +375,9 @@ def test_index_doc_type_documents_splits_embeds_and_stores(monkeypatch):
         def __init__(self):
             self.batches = []
 
+        def missing_documents(self, collection, documents):
+            return documents
+
         def run(self, documents):
             self.batches.append(list(documents))
 
@@ -372,6 +391,8 @@ def test_index_doc_type_documents_splits_embeds_and_stores(monkeypatch):
         "response_headers": "{}",
         "type": "content",
     })
+    search = derive_search_metadata(doc.meta["url"], "GET", {"Content-Type": "text/html"})
+    doc.meta.update(search)
     object.__setattr__(doc, "content", b"<html></html>")
 
     assert component.run([doc]) == {}
@@ -381,7 +402,52 @@ def test_index_doc_type_documents_splits_embeds_and_stores(monkeypatch):
     assert len(sparse.documents) == len(html_embedder.documents)
     assert len(multi_store.batches) >= 1
     assert {d.meta["type"] for d in multi_store.batches[0]} == {"html"}
+    for batch in multi_store.batches:
+        for stored in batch:
+            assert {key: stored.meta[key] for key in search} == search
 
+
+
+def test_partial_indexing_recovery_across_chunk_sizes(monkeypatch):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(wrp, "get_qdrant_collection_name_by_doc_type_token_length",
+                        lambda doc_type, length: f"{doc_type}_{length}")
+    first, second = Store(), Store()
+    stores = {"html_2": first, "html_4": second}
+    writer = wrp.IngestMultiStore(stores)
+    embedder = Embedder()
+    component = wrp.IndexDocTypeDocuments({"default": embedder}, Embedder(), writer)
+    component._doc_type_to_model = {"html": SimpleNamespace(token_lengths=[2, 4])}
+
+    class Splitter:
+        def run(self, documents):
+            parent = documents[0]
+            return {"documents": [replace(parent, id=f"{parent.id}_{i}") for i in range(3)]}
+
+    component.splitters = {name: Splitter() for name in stores}
+    original_write = second.write_documents
+
+    def partial_write(documents, policy=None):
+        if second.written:
+            raise TimeoutError("partial write")
+        original_write(documents, policy)
+
+    second.write_documents = partial_write
+    doc = Document(content="html body", meta={
+        "url": "https://example.com/", "content_type": "text/html",
+        "timestamp": "2026-10-20T11:00:00", "response_headers": "{}",
+    })
+    with pytest.raises(TimeoutError):
+        component.run([doc])
+    assert len(first.written) == 3 and len(second.written) == 1
+    first.existing = first.written.copy()
+    second.existing = second.written.copy()
+    second.write_documents = original_write
+    accepted = wrp.FilterExistingDocumentsByDocType(stores).run([doc])["documents"]
+    assert component.run(accepted) == {}
+    assert len(first.written) == 3 and len(second.written) == 3
+    assert len({item.id for item in second.written}) == 3
 
 def test_index_doc_type_documents_warm_up_and_skip_branches(monkeypatch):
     sparse = Embedder()
@@ -468,3 +534,53 @@ def test_generate_title_and_description_ignores_invalid_generator_json():
     result = wrp.GenerateTitleAndDescription(Config()).run([doc])["documents"][0]
 
     assert "title" not in result.meta
+
+
+@pytest.mark.parametrize("count", [0, 1, 100, 101, 205])
+def test_native_id_filter_batches_collections_and_preserves_order(count):
+    from unittest.mock import Mock
+
+    docs = [Document(id=f"doc-{i}", content="x", meta={"type": "content"}) for i in range(count)]
+    network = Document(id="network", content="x", meta={"type": "network"})
+    unknown = Document(id="unknown", content="x", meta={"type": "absent"})
+    no_id = Document(content="x", meta={"type": "content"})
+    object.__setattr__(no_id, "id", "")
+    content_store = Mock()
+    content_store.get_documents_by_id.side_effect = lambda ids: [doc for doc in docs if doc.id in ids and
+                                                               int(doc.id.split("-")[1]) % 2 == 0]
+    network_store = Mock()
+    network_store.get_documents_by_id.return_value = [network]
+    supplied = [unknown, *docs, network, no_id, *(docs[:1])]
+    result = wrp.FilterExistingDocumentsById({"content": content_store, "network": network_store}).run(supplied)
+    assert result["documents"] == [unknown, *docs, no_id, *docs[:1]]
+    assert content_store.get_documents_by_id.call_count == (count + 99) // 100
+    assert all(len(call.args[0]) <= 100 for call in content_store.get_documents_by_id.call_args_list)
+    content_store.filter_documents.assert_not_called()
+    network_store.filter_documents.assert_not_called()
+
+
+def test_native_id_filter_propagates_failures():
+    doc = Document(id="doc", content="x", meta={"type": "content"})
+    with pytest.raises(RuntimeError, match="lookup failed"):
+        wrp.FilterExistingDocumentsById({"content": Store(exc=RuntimeError("lookup failed"))}).run([doc])
+
+
+
+def test_native_id_filter_with_real_local_qdrant(monkeypatch):
+    from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
+
+    store = QdrantDocumentStore(":memory:", embedding_dim=2)
+    existing = Document(id="arbitrary-document-id", content="stored", embedding=[1.0, 0.0], meta={"type": "content"})
+    new = Document(id="new-id", content="new", meta={"type": "content"})
+    try:
+        store.write_documents([existing])
+        monkeypatch.setattr(store, "filter_documents", lambda *args, **kwargs: pytest.fail("payload scan"))
+        assert wrp.FilterExistingDocumentsById({"content": store}).run([existing, new])["documents"] == [existing, new]
+    finally:
+        store.close()
+
+
+
+def test_native_id_filter_missing_store_preserves_documents():
+    doc = Document(id="doc", content="x", meta={"type": "content"})
+    assert wrp.FilterExistingDocumentsById({"content": None}).run([doc])["documents"] == [doc]

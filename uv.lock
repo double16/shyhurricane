@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.15' and platform_machine != 's390x' and sys_platform == 'win32'",
@@ -625,6 +625,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d8/53/6f443c9a4a8358a93a6792e2acffb9d9d5cb0a5cfd8802644b7b1c9a02e4/colorama-0.4.6.tar.gz", hash = "sha256:08695f5cb7ed6e0531a20572697297273c47b8cae5a63ffc6d6ed5c201be6e44", size = 27697, upload-time = "2022-10-25T02:36:22.414Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/d1/d6/3965ed04c63042e047cb6a3e6ed1a63a35087b6a609aa3a15ed8ac56c221/colorama-0.4.6-py2.py3-none-any.whl", hash = "sha256:4f1d9991f5acc0ca119f9d443620b77f9d6b33703e51011c16baf57afb285fc6", size = 25335, upload-time = "2022-10-25T02:36:20.889Z" },
+]
+
+[[package]]
+name = "concurrent-log-handler"
+version = "0.9.31"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "portalocker" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/51/e8/1f74620f511493a3e89b5dbfe9fccd55e6fa1de45ecc91bb1d6f5058acb0/concurrent_log_handler-0.9.31.tar.gz", hash = "sha256:2f973d574f083e5692dfef471931f416daf274bbde8b430ed5d9796c532b97cd", size = 47161, upload-time = "2026-10-21T20:09:58.755Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/85/ea/f5593cecb8c0092ce8b5a28f0837c1b14b66dc463add1da6082031cefa24/concurrent_log_handler-0.9.31-py3-none-any.whl", hash = "sha256:b8c39896862e11bef707051af96bbe381b2e5deec662361076d696b4896dee95", size = 36337, upload-time = "2026-10-21T20:09:57.738Z" },
 ]
 
 [[package]]
@@ -1357,6 +1369,9 @@ wheels = [
 [package.optional-dependencies]
 http2 = [
     { name = "h2" },
+]
+socks = [
+    { name = "socksio" },
 ]
 
 [[package]]
@@ -2292,6 +2307,18 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/62/3c/c4ef2164a71c1a63d7f1ae411c4082c5fa872405106db60a4b7114989ad7/narwhals-2.22.1.tar.gz", hash = "sha256:d62920805a0a43b7ff8b54b0c0d3142d796f8a9301836ada37e573d6a33cbcd9", size = 647493, upload-time = "2026-06-05T12:34:34.051Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/48/ca/36339329c4604adbcc99c899b7eb1ce1a555c499b6a6860757dc9bfed36d/narwhals-2.22.1-py3-none-any.whl", hash = "sha256:60567d774edf77db53906f89d9fbd164e66e56d66d388e1e6990f17ac33cfb53", size = 454815, upload-time = "2026-06-05T12:34:32.289Z" },
+]
+
+[[package]]
+name = "neo4j"
+version = "6.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pytz" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/80/db/024bd576bde5d97436d0acb71b41cf928c036ed8fec95ea1122eb05e47d1/neo4j-6.4.0.tar.gz", hash = "sha256:056676698f080b5af5b24b0fc5abb485b8db1b95edf366d01dcfd63bcff9b71d", size = 287786, upload-time = "2026-10-05T15:37:45.216Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c9/5d/519aefe3b38a490924641e980a16ea6c70f6c96c08d84cf661d32c4a08c2/neo4j-6.4.0-py3-none-any.whl", hash = "sha256:fdd048ba827be138063b045cf59e40056fbf0405ac02dadc24f64e369fbd9d3d", size = 390611, upload-time = "2026-10-05T15:37:43.491Z" },
 ]
 
 [[package]]
@@ -3354,6 +3381,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pytz"
+version = "2026.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/14/21/d83d6ef28c4c912c4bb4d1dcf591f7b8c6bde87b9c66f9f454677314e16d/pytz-2026.5.tar.gz", hash = "sha256:fa23724b9c486543b9ff54a327ee7569ac83ade54bb9afd0fc18676620401c86", size = 318572, upload-time = "2026-10-04T02:37:58.719Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4f/ef/c66110d46fb800dda0bf33164182dfadabe26a90e4476844d502a23dca8e/pytz-2026.5-py2.py3-none-any.whl", hash = "sha256:e658af3757f9e26a9d25dd2aff38335acd92bc9104f890a894b2c1ba28311b03", size = 506342, upload-time = "2026-10-04T02:37:56.814Z" },
+]
+
+[[package]]
 name = "pywin32"
 version = "312"
 source = { registry = "https://pypi.org/simple" }
@@ -3929,7 +3965,7 @@ wheels = [
 
 [[package]]
 name = "shyhurricane"
-version = "0.2.0"
+version = "0.3.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiofiles" },
@@ -3937,18 +3973,20 @@ dependencies = [
     { name = "beautifulsoup4" },
     { name = "bitarray" },
     { name = "cachetools" },
+    { name = "concurrent-log-handler" },
     { name = "einops" },
     { name = "fastembed-haystack" },
     { name = "google-genai-haystack" },
     { name = "guppy3" },
     { name = "haystack-ai" },
     { name = "html5lib" },
-    { name = "httpx" },
+    { name = "httpx", extra = ["socks"] },
     { name = "json5" },
     { name = "litellm-haystack" },
     { name = "lxml" },
     { name = "mcp", extra = ["cli"] },
     { name = "more-itertools" },
+    { name = "neo4j" },
     { name = "numpy" },
     { name = "ollama-haystack" },
     { name = "onnxruntime" },
@@ -3991,6 +4029,7 @@ requires-dist = [
     { name = "bitarray", specifier = ">=3.10.1,<3.12.0" },
     { name = "black", marker = "extra == 'dev'" },
     { name = "cachetools", specifier = ">=7.1.7,<7.3.0" },
+    { name = "concurrent-log-handler", specifier = ">=0.9.31,<1" },
     { name = "einops", specifier = "~=0.8.1" },
     { name = "fastembed-haystack", specifier = "~=2.7.0" },
     { name = "flake8", marker = "extra == 'dev'" },
@@ -3998,7 +4037,7 @@ requires-dist = [
     { name = "guppy3", specifier = "~=3.1.6" },
     { name = "haystack-ai", specifier = "~=3.3.0" },
     { name = "html5lib", specifier = "~=1.1" },
-    { name = "httpx", specifier = "~=0.28.1" },
+    { name = "httpx", extras = ["socks"], specifier = "~=0.28.1" },
     { name = "isort", marker = "extra == 'dev'" },
     { name = "json5", specifier = "~=0.15.0" },
     { name = "litellm-haystack", specifier = ">=1.2.0" },
@@ -4006,6 +4045,7 @@ requires-dist = [
     { name = "mcp", extras = ["cli"], specifier = "~=2.2.0" },
     { name = "more-itertools", specifier = "~=11.1.0" },
     { name = "mypy", marker = "extra == 'dev'" },
+    { name = "neo4j", specifier = ">=6.4,<7" },
     { name = "numpy", specifier = ">=2.3.0" },
     { name = "ollama-haystack", specifier = "~=6.8.0" },
     { name = "onnxruntime", specifier = ">=1.24.2,<1.31.0" },
@@ -4049,6 +4089,15 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/a2/87/a6771e1546d97e7e041b6ae58d80074f81b7d5121207425c964ddf5cfdbd/sniffio-1.3.1.tar.gz", hash = "sha256:f4324edc670a0f49750a81b895f35c3adb843cca46f0530f79fc1babb23789dc", size = 20372, upload-time = "2024-02-25T23:20:04.057Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e9/44/75a9c9421471a6c4805dbf2356f7c181a29c1879239abab1ea2cc8f38b40/sniffio-1.3.1-py3-none-any.whl", hash = "sha256:2f6da418d1f1e0fddd844478f41680e794e6051915791a034ff65e5f100525a2", size = 10235, upload-time = "2024-02-25T23:20:01.196Z" },
+]
+
+[[package]]
+name = "socksio"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/f8/5c/48a7d9495be3d1c651198fd99dbb6ce190e2274d0f28b9051307bdec6b85/socksio-1.0.0.tar.gz", hash = "sha256:f88beb3da5b5c38b9890469de67d0cb0f9d494b78b106ca1845f96c10b91c4ac", size = 19055, upload-time = "2020-04-17T15:50:34.664Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/37/c3/6eeb6034408dac0fa653d126c9204ade96b819c936e136c5e8a6897eee9c/socksio-1.0.0-py3-none-any.whl", hash = "sha256:95dc1f15f9b34e8d7b16f06d74b8ccf48f609af32ab33c608d08761c5dcbb1f3", size = 12763, upload-time = "2020-04-17T15:50:31.878Z" },
 ]
 
 [[package]]

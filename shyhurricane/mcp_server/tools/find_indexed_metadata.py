@@ -1,4 +1,5 @@
 import logging
+from inspect import unwrap
 from typing import Annotated, Any, List, Optional, TypeAlias
 
 from mcp.server.mcpserver import Context
@@ -8,10 +9,12 @@ from pydantic import Field
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.http import models as qm
 
-from shyhurricane.db import scroll_qdrant_collection
+from shyhurricane.db import facet_qdrant_values, scroll_qdrant_collection
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
+from shyhurricane.indexing_wait import IndexingStatus, indexed_inventory
 from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
 from shyhurricane.result_pages import Pagination, paged_results
+from shyhurricane.search_metadata import trigram_conditions
 from shyhurricane.utils import query_to_netloc
 
 logger = logging.getLogger(__name__)
@@ -36,7 +39,53 @@ def _finder_instructions(subject: str, results: Any) -> str:
         return finder_instructions_not_found.format(subject)
 
 
+def _inventory_filter(port=None, hosts=None):
+    must = [qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION))]
+    if port is not None and port > 0:
+        must.append(qm.FieldCondition(key="meta.port", match=qm.MatchValue(value=port)))
+    if hosts is not None:
+        must.append(qm.FieldCondition(key="meta.host", match=qm.MatchAny(any=hosts)))
+    return qm.Filter(must=must)
+
+
+async def _facet_strings(client, key, filters):
+    return {
+        hit.value for hit in await facet_qdrant_values(client, key, filters)
+        if isinstance(hit.value, str)
+    }
+
+
+async def _matching_hosts(client, query, port):
+    filters = _inventory_filter(port)
+    filters.must.extend(trigram_conditions("meta.search_host_trigrams", query or ""))
+    hosts = await _facet_strings(client, "meta.host", filters)
+    return sorted(host for host in hosts if not query or host.lower().endswith(query))
+
+
+async def _host_inventory(client, query, port, key, path_query=None):
+    hosts = await _matching_hosts(client, query, port)
+    result = set()
+    for offset in range(0, len(hosts), 256):
+        filters = _inventory_filter(port, hosts[offset:offset + 256])
+        filters.must.extend(trigram_conditions("meta.search_url_trigrams", path_query or ""))
+        result.update(await _facet_strings(client, key, filters))
+        if key == "meta.netloc":
+            # Older records can omit netloc; retain the original hostname fallback.
+            # Exclude explicit nulls; the absent-key check below also rejects empty arrays.
+            filters.must.append(qm.IsEmptyCondition(is_empty=qm.PayloadField(key="meta.netloc")))
+            filters.must_not = [qm.IsNullCondition(is_null=qm.PayloadField(key="meta.netloc"))]
+            async for record in scroll_qdrant_collection(
+                qdrant_client=client, index="network", fields=["meta.host", "meta.netloc"],
+                scroll_filter=filters,
+            ):
+                metadata = record.payload["meta"]
+                if "netloc" not in metadata:
+                    result.add(metadata["host"])
+    return result
+
+
 class FindDomainsResult(BaseModel):
+    indexing: IndexingStatus | None = None
     pagination: Pagination | None = None
     instructions: str = Field(description="Instructions for interpreting the results")
     query: Optional[str] = Field(description="The query used to these find domains")
@@ -53,6 +102,7 @@ DomainQueryField: TypeAlias = Annotated[str,
         open_world_hint=False),
 )
 @paged_results("domains")
+@indexed_inventory(domains=True)
 async def find_domains(
         ctx: Context,
         query: Annotated[
@@ -73,21 +123,12 @@ async def find_domains(
     await log_tool_history(ctx, "find_domains", query=query)
     server_ctx = await get_server_context()
     qdrant_client: AsyncQdrantClient = server_ctx.qdrant_client
-    result = set()
     original_query = query
     query, port = query_to_netloc(query)
-    filters = qm.Filter(
-        must=[
-            qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION)),
-        ]
-    )
-    async for record in scroll_qdrant_collection(qdrant_client=qdrant_client, index="network", fields=["meta"],
-                                                 scroll_filter=filters):
-        metadata = record.payload["meta"]
-        if "domain" in metadata:
-            domain = metadata["domain"].lower()
-            if domain and (not query or query.lower() in domain):
-                result.add(domain)
+    filters = _inventory_filter()
+    filters.must.extend(trigram_conditions("meta.search_domain_trigrams", query or ""))
+    domains = await _facet_strings(qdrant_client, "meta.domain", filters)
+    result = {domain.lower() for domain in domains if domain and (not query or query.lower() in domain.lower())}
     return FindDomainsResult(
         instructions=_finder_instructions("domains", result),
         query=original_query,
@@ -96,6 +137,7 @@ async def find_domains(
 
 
 class FindHostsResult(BaseModel):
+    indexing: IndexingStatus | None = None
     pagination: Pagination | None = None
     instructions: str = Field(description="Instructions for interpreting the results")
     domain_query: str = Field(description="The query used to these find hosts")
@@ -109,6 +151,7 @@ class FindHostsResult(BaseModel):
         open_world_hint=False),
 )
 @paged_results("hosts")
+@indexed_inventory(domains=False)
 async def find_hosts(
         ctx: Context,
         domain_query: DomainQueryField,
@@ -127,22 +170,9 @@ async def find_hosts(
     server_ctx = await get_server_context()
     try:
         qdrant_client: AsyncQdrantClient = server_ctx.qdrant_client
-        result = set()
         original_query = domain_query
         domain_query, port = query_to_netloc(domain_query)
-        filters = qm.Filter(
-            must=[
-                qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION)),
-            ]
-        )
-        async for record in scroll_qdrant_collection(qdrant_client=qdrant_client, index="network", fields=["meta"],
-                                                     scroll_filter=filters):
-            metadata = record.payload["meta"]
-            if "host" in metadata:
-                hostname = metadata["host"].lower()
-                if not domain_query or hostname.endswith(domain_query):
-                    if port is None or port <= 0 or (metadata.get('port', None) == port):
-                        result.add(hostname)
+        result = {host.lower() for host in await _matching_hosts(qdrant_client, domain_query, port)}
         return FindHostsResult(
             instructions=_finder_instructions("hosts", result),
             domain_query=original_query,
@@ -154,6 +184,7 @@ async def find_hosts(
 
 
 class FindNetworkLocationResult(BaseModel):
+    indexing: IndexingStatus | None = None
     pagination: Pagination | None = None
     instructions: str = Field(description="Instructions for interpreting the results")
     domain_query: str = Field(description="The query used to these find network locations (host:port)")
@@ -167,6 +198,7 @@ class FindNetworkLocationResult(BaseModel):
         open_world_hint=False),
 )
 @paged_results("network_locations")
+@indexed_inventory(domains=False)
 async def find_netloc(
         ctx: Context,
         domain_query: DomainQueryField,
@@ -184,22 +216,11 @@ async def find_netloc(
     await log_tool_history(ctx, "find_netloc", domain_query=domain_query)
     server_ctx = await get_server_context()
     qdrant_client: AsyncQdrantClient = server_ctx.qdrant_client
-    result = set()
     original_query = domain_query
     domain_query, port = query_to_netloc(domain_query)
-    filters = qm.Filter(
-        must=[
-            qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION)),
-        ]
-    )
-    async for record in scroll_qdrant_collection(qdrant_client=qdrant_client, index="network", fields=["meta"],
-                                                 scroll_filter=filters):
-        metadata = record.payload["meta"]
-        if "host" in metadata:
-            hostname = metadata['host'].lower()
-            if not domain_query or hostname.endswith(domain_query):
-                if port is None or port <= 0 or (metadata.get('port', -1) == port):
-                    result.add(metadata.get('netloc', hostname).lower())
+    result = {
+        value.lower() for value in await _host_inventory(qdrant_client, domain_query, port, "meta.netloc")
+    }
     return FindNetworkLocationResult(
         instructions=_finder_instructions("network locations (host:port)", result),
         domain_query=original_query,
@@ -208,6 +229,7 @@ async def find_netloc(
 
 
 class FindURLsResult(BaseModel):
+    indexing: IndexingStatus | None = None
     pagination: Pagination | None = None
     instructions: str = Field(description="Instructions for interpreting the results")
     host_query: str = Field(description="The query used to these find URLs by host")
@@ -224,6 +246,7 @@ class FindURLsResult(BaseModel):
         open_world_hint=False),
 )
 @paged_results("urls")
+@indexed_inventory(domains=False)
 async def find_urls(
         ctx: Context,
         host_query: Annotated[str, Field(description="Limit the results using the \"ends with\" operator")],
@@ -244,24 +267,10 @@ async def find_urls(
     await log_tool_history(ctx, "find_urls", host_query=host_query, limit=limit)
     server_ctx = await get_server_context()
     qdrant_client: AsyncQdrantClient = server_ctx.qdrant_client
-    result = set()
     original_host_query = host_query
     host_query, port = query_to_netloc(host_query)
-    filters = qm.Filter(
-        must=[
-            qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION)),
-        ]
-    )
-    async for record in scroll_qdrant_collection(qdrant_client=qdrant_client, index="network", fields=["meta"],
-                                                 scroll_filter=filters):
-        metadata = record.payload["meta"]
-        if "host" in metadata and "url" in metadata:
-            hostname = metadata['host'].lower()
-            if not host_query or hostname.endswith(host_query):
-                if port is None or port <= 0 or (metadata.get('port', None) == port):
-                    url = metadata['url']
-                    if not path_query or path_query in url:
-                        result.add(url)
+    urls = await _host_inventory(qdrant_client, host_query, port, "meta.url", path_query)
+    result = {url for url in urls if not path_query or path_query in url}
     return FindURLsResult(
         instructions=_finder_instructions("URLs", result),
         host_query=original_host_query,
@@ -273,4 +282,4 @@ async def find_urls(
 
 async def find_netloc_all(ctx: Context, domain_query: str) -> FindNetworkLocationResult:
     """Load the complete inventory for internal target selection without creating pages."""
-    return await find_netloc.__wrapped__(ctx, domain_query)
+    return await unwrap(find_netloc)(ctx, domain_query)

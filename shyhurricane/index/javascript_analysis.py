@@ -137,7 +137,7 @@ def _finding(url: str, match: dict, map_used: bool) -> SaveFindingQueueItem | No
     return SaveFindingQueueItem(target=url, markdown=markdown, title=title, finding_id=key)
 
 
-def analyze_document(doc: Document, open_world: bool, content_store, finding_queue) -> int:
+def analyze_document(doc: Document, open_world: bool, content_store, finding_queue, artifacts=None) -> int:
     """Analyze one indexed JS or JS source map document and queue matching findings."""
     url = doc.meta.get("url", "")
     source = doc.content or ""
@@ -151,9 +151,14 @@ def analyze_document(doc: Document, open_world: bool, content_store, finding_que
     elif map_mime_to_type(doc.meta.get("content_type", "")) == "javascript" or source_map_url(url):
         target_url = url
         map_url = source_map_url(url)
-        source_map = _cached_map(content_store, map_url) if map_url else None
-        if source_map is None and map_url and open_world:
-            source_map = _fetch_map(map_url, json.loads(doc.meta.get("request_headers", "{}")))
+        if artifacts is not None:
+            source_map = artifacts.source_map(url, source, json.loads(doc.meta.get("request_headers", "{}")),
+                                              open_world, content_store, doc.meta.get("content_sha256"),
+                                              json.loads(doc.meta.get("response_headers", "{}")))
+        else:
+            source_map = _cached_map(content_store, map_url) if map_url else None
+            if source_map is None and map_url and open_world:
+                source_map = _fetch_map(map_url, json.loads(doc.meta.get("request_headers", "{}")))
     else:
         return 0
 

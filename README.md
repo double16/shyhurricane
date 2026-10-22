@@ -6,10 +6,80 @@ ShyHurricane is an MCP server to assist AI in offensive security testing of web 
 LLMs:
 
 1. Spidering and directory busting commands can be quite noisy and long-running. LLMs will go through a few iterations to pick a suitable command and options. The server provides spidering and busting tools to consistently provide the LLM with usable results.
-2. Models will also enumerate websites with many curl commands. The server saves and indexes responses to return data without contacting the website repeatedly. Large sites, common with bug bounty programs, are not efficiently enumerated with individual curl commands. 
+2. LLMs will also enumerate websites with many curl commands. The server saves and indexes responses to return data without contacting the website repeatedly. Large sites, common with bug bounty programs, are not efficiently enumerated with individual curl commands. 
 3. Port scans may take a long time causing the LLM to assume the scan has failed and issue a repeated scan. The port_scan tool provided by the server addresses this.
 
 An important feature of the server is the indexing of website content using embedding models. The `find_web_resources` tool uses LLM prompts to find vulnerabilities specific to content type: html, javascript, css, xml, HTTP headers. The content is indexed when found by the tools. Content may also be indexed by feeding external data into the `/index` endpoint. Formats supported are `katana jsonl`, `hal json` and Burp Suite Logger++ CSV. The `ingest.py` script also converts Burp Suite request/response XML exports for indexing. Extensions exist for Burp Suite, ZAP, Firefox and Chrome to send requests to the server as the site is browsed.
+
+## Documentation
+
+See the [documentation index](docs/README.md) for detailed guides and architecture, and
+[CONTRIBUTING.md](CONTRIBUTING.md) for development setup.
+
+## Runtime forensics skill
+
+The repository-local `$forensics` skill investigates ShyHurricane tracebacks, incorrect or incomplete
+results, and runtime efficiency using logs, persistent queues, graph artifacts, Qdrant, and Neo4j.
+For example: “Use $forensics to investigate why graph indexing stopped progressing after the
+latest ingestion.” It starts with bounded, read-only evidence collection and reports supported
+findings, uncertainties, and next steps. See [the skill](.agents/skills/forensics/SKILL.md) for the
+workflow and artifact inspection guide.
+
+## Assessment prompts
+
+MCP clients can discover these reusable workflows with `prompts/list` and render them with
+`prompts/get`. Rendering produces assessment instructions without running tools or contacting targets.
+
+| Prompt | Purpose |
+|--------|---------|
+| `map_attack_surface` | Inventory captured endpoints, forms, scripts, services, and assessment opportunities |
+| `hunt_vulnerability` | Investigate the supplied `vulnerability_type` using captured content and graph evidence |
+| `hunt_xss` | Review reflected, stored, and DOM XSS candidates and source-to-sink paths |
+| `hunt_access_control` | Investigate IDOR/BOLA, privileged operations, and authorization boundaries |
+| `hunt_injection` | Review SQL, NoSQL, command, and template injection indicators |
+| `hunt_ssrf` | Investigate URL-consuming features and possible server-side request boundaries |
+| `review_authentication_sessions` | Review login, recovery, OAuth, JWTs, cookies, and session lifecycle |
+| `review_configuration_exposure` | Review secrets, sensitive resources, debug interfaces, CORS, and headers |
+| `trace_input_to_sink` | Trace graph sources and sinks and inspect supporting evidence |
+| `find_vulnerability_chains` | Correlate findings, graph flows, and possible journeys into evidence-supported chains |
+
+| Argument | Required | Meaning |
+|----------|----------|---------|
+| `target` | Yes, all prompts | Host, domain, IP, netloc such as `app.example.com:8443`, or HTTP(S) URL prefix |
+| `mode` | No | `analysis` (default) uses captured evidence; `active` also guides scoped live reconnaissance and validation |
+| `vulnerability_type` | Yes, `hunt_vulnerability` only | Free-text vulnerability class or classes to investigate |
+
+Use bracketed IPv6 targets, such as `[2001:db8::1]:8443`. Hostname scopes include subdomains;
+explicit ports are retained, and URL prefixes restrict scheme, host, and path. User-supplied narrower
+scope still applies. Query strings, fragments, credentials in target URLs, and malformed targets
+are rejected.
+
+For example, send `prompts/get` with these parameters:
+
+```json
+{"name":"hunt_vulnerability","arguments":{"target":"app.example.com:8443","vulnerability_type":"IDOR"}}
+```
+
+For graph-assisted chain analysis with scoped live testing guidance:
+
+```json
+{"name":"find_vulnerability_chains","arguments":{"target":"example.com","mode":"active"}}
+```
+
+Workflows begin with existing findings and indexed evidence. Analysis mode declines scan confirmations
+and makes no target requests. Active mode respects existing confirmations and authorization, uses
+available open-world tools, and describes manual checks where those tools cannot perform validation.
+Prompts remain available with `OPEN_WORLD=false`; active workflows then continue indexed analysis
+and report the limitation. Low-power workflows use predicate-only retrieval and captured content.
+
+All assessment prompts use an endpoint-first graph workflow: overview, focused candidates,
+traces, then step evidence. They request full graph details only when needed, distinguish bounded
+examples from complete results, and keep navigation hypotheses separate from data-flow evidence.
+
+Graph paths are investigation candidates, not proof of exploitation. Reports distinguish verified
+steps, inferred links, missing prerequisites, and analysis gaps. Workflows direct the client to save
+new evidence-backed findings with verification status, avoid duplicates, and keep unsupported
+hypotheses in the report. Rendering a prompt alone never saves findings.
 
 ## Tools
 
@@ -35,154 +105,58 @@ The following tools are provided:
 | deobfuscate_javascript      | De-obfuscate JavaScript content (automatically done during indexing)                                | No          |
 | get_result_page             | Retrieve a saved page using an opaque navigation token.                                             | No          |
 
-### Result limits and saved pages
+### Search and results
 
-List tools return a first page and optional `pagination` metadata. Use
-`get_result_page(page_token)` with `pagination.next_page_token` or
-`pagination.previous_page_token` to navigate the same saved result without repeating a query or scan.
-The paging tool returns `{ "source_tool": "...", "result": { ... } }`; `result` uses the producing
-tool's response schema. Tokens are opaque bearer capabilities: anyone holding a token can read its
-saved page through this server. Keep tokens private.
+Use natural-language queries with `find_web_resources`, or narrow captured content with filters such as
+`site:example.com filetype:js -inurl:vendor`. Predicate-only queries also work in low-power mode.
 
-| Tool                                        | Default page size   | Saved result                                               |
-|---------------------------------------------|---------------------|------------------------------------------------------------|
-| `find_web_resources`                        | 20 resources        | Up to `retrieval_limit` matches (default 1,000)            |
-| `query_findings`                            | 10 full findings    | All matching findings                                      |
-| `find_urls`                                 | 100 URLs            | All matching unique URLs                                   |
-| `find_wordlists`                            | 20 paths            | All matching ranked paths                                  |
-| `find_domains`, `find_hosts`, `find_netloc` | 100 records         | All matching unique records                                |
-| `spider_website`                            | 50 resources        | Results collected before this call returns                 |
-| `directory_buster`                          | 100 URLs            | Results collected before this call returns                 |
-| `port_scan`                                 | 100 service records | Available structured scan results                          |
-| `index_http_url`                            | 16,384 characters   | Complete textual response, after JavaScript transformation |
-| `deobfuscate_javascript`                    | 8,192 characters    | Complete transformed script, or original script on failure |
-| `fetch_web_resource_content`                | 4,096 characters    | Existing offset-based retrieval                            |
+`query_findings` accepts scoped predicates too: `site:example.com inurl:admin -ext:js`.
+Start with `site:example.com` to include host-level findings before narrowing by URL.
+Plain root URLs search hostname scope, retaining explicit ports; explicit `site:` URLs retain
+scheme and path restrictions. Finding searches support `site:`, `inurl:`, and `filetype:`/`ext:`;
+the required `query` combines scope predicates and optional natural-language search text, like
+`find_web_resources`. For example, use
+`query_findings(query="site:example.com session fixation")` for semantic matches.
+The former `target` argument has been removed; update clients to use `query`.
+Semantic search ranks existing embeddings and saves at most 1,000 matches, with an optional
+minimum cosine `score_threshold`. `limit` remains the page size. Results that reach the cap
+instruct the caller to narrow the search.
+Without semantic text (for example, `query="site:example.com"`), `score_threshold` is ignored
+and all scoped findings remain available, including in low-power mode. Semantic search requires normal power mode.
+Searches report progress and idle updates; semantic scores indicate similarity, not confidence.
+Follow saved pages and check `pagination.retrieval_truncated`: semantic results are bounded,
+so page exhaustion does not mean every finding was reviewed.
+The finding collection must be rebuilt and findings replayed through the updated saver for this
+metadata version; existing records are not migrated. See the tool reference for details.
 
-List `limit` arguments control page size and accept 1–1,000. `find_web_resources` separately accepts
-`retrieval_limit` from 1–1,000; `pagination.retrieval_truncated` reports when additional matches were
-excluded by that cap. Narrow the query to retrieve other matches. Cached spider responses similarly
-save at most 1,000 resources. Results preserve their original ordering throughout navigation.
-Counts limit records, not total serialized bytes; full findings and headers can still be large.
+HTTP `/findings` and MCP `save_finding` submissions are committed to the persistent
+`scan_finding_queue` before success is returned. Pending submissions survive restarts; processing
+failures remain available for retry using the dashboard. Searchability follows asynchronously.
 
-`pagination` includes one-based `page_number`, `page_size`, `total_items`, `total_pages`, `expires_at`,
-`next_page_token`, `previous_page_token`, and `retrieval_truncated`. Text totals and limits count
-Unicode characters. First pages have no previous token and last pages have no next token. Empty
-results have no snapshot and `pagination` is null. Nonempty single-page results are saved with both
-navigation tokens null.
+Finding submissions are deduplicated asynchronously before saving, across MCP, HTTP, and JavaScript
+scanner inputs. Repeated Markdown for the same target keeps the first saved finding, including its
+title and timestamp. Titles do not affect matching. Line endings, surrounding Markdown whitespace,
+hostname case, and HTTP(S) default ports are normalized; URL paths, queries, fragments, and changed
+evidence remain distinct. Host-level findings remain distinct from URL findings. This applies to
+newly processed submissions; older records are not backfilled or cleaned up.
 
-For example, call `find_urls` with:
+List tools return saved pages. Follow `pagination.next_page_token` with `get_result_page` to continue
+without repeating a scan or query. Keep page tokens private. Retrieval waits briefly for relevant
+indexing and reports when results may still be incomplete; avoid starting duplicate scans.
 
-```json
-{"host_query": "example.com", "limit": 10}
-```
+See the [tool reference](docs/tool-reference.md) for search predicates, result limits, pagination,
+content retrieval, and indexing-status fields.
 
-Then pass the returned `pagination.next_page_token` to:
+## Application Relationship Graph
 
-```json
-{"page_token": "<opaque token from the response>"}
-```
+Explore captured resources, forms, fields, scripts, routes, and possible data flows using the
+read-only application graph tools. Start with `find_application_endpoints`, inspect focused elements
+and relationships, then trace data flow or possible user journeys and review the supporting evidence.
+The tools work in low-power mode and do not contact targets. Graph paths are investigation candidates;
+inspect their evidence before treating them as confirmed vulnerabilities.
 
-`scan_complete` describes scan completion, independently of saved-page navigation.
-A page token accesses only results available when that snapshot was created. Scanning and indexing
-continue after a tool's wait timeout; later scan calls create separate snapshots. Use indexed search
-for discoveries made after the original call returned.
-
-`port_scan` returns structured `results` instead of embedding XML (`nmap_xml` is null).
-Its `nmap_xml_page_token` retrieves the first saved XML fragment through `get_result_page`.
-Follow navigation tokens and concatenate the `result.text` fragments in order to reconstruct the
-complete XML; individual fragments need not be valid XML documents. XML fragments are 8,192 characters.
-
-`deobfuscate_javascript` returns an object with `text`, `mime_type`, `offset`, `total_length`,
-`pagination`, and `transformation_status`. `find_wordlists` returns `paths` and `pagination`.
-`index_http_url.content_length_limit` controls preview characters, default 16,384, and no longer
-omits large bodies or limits indexing. All textual response bodies are submitted for indexing,
-including responses without `Content-Length`. Preview limits apply after JavaScript transformation.
-Binary responses return metadata only. `deobfuscate_javascript.output_length_limit` defaults to 8,192.
-Both preview overrides accept 1–4,194,304 characters. `fetch_web_resource_content` retains
-`output_start_position`, `output_length_limit`, and its offset-based partial-content fields, including `contents.has_more`.
-
-`index_http_url` treats a missing or empty `Content-Type` as unknown and includes the decoded body.
-It accepts HTTP and HTTPS URLs; invalid URLs and request inputs raise explicit tool errors, as does
-disabled open-world access. Connection failures, timeouts, protocol failures, and excessive redirects
-return null. HTTP 4xx/5xx responses are still indexed. Redirects are not followed by default; enable
-`follow_redirects` only when destinations are in scope.
-If JavaScript transformation encounters a filesystem or subprocess failure, the preview retains the
-original response text. Queue failures report that fetching succeeded but queueing failed.
-Preview storage failures report that ingestion was already queued; repeating the call may enqueue
-the same response again. These stages do not automatically retry.
-
-`deobfuscate_javascript.transformation_status` is `empty` for blank input, `succeeded` when
-the transformation command succeeds, and `failed` when it fails and returns the original input.
-Success does not guarantee complete source recovery. The status is preserved on saved pages.
-Older saved results without a status report `unknown`.
-Indexed JavaScript has already undergone automatic transformation; repeat it only when warranted.
-
-For `fetch_web_resource_content`, when `contents.has_more` is true, request the next chunk with
-`output_start_position = contents.offset + len(contents.text)`. This tool uses character offsets
-rather than saved-page tokens. It reads indexed content without contacting the target.
-
-Pending scans can return no resources while `scan_complete=false`; this does not establish that
-the target is unreachable. Avoid starting duplicate scans. `port_scan.retry` is deprecated and
-ignored; repeated calls with the same parameters retrieve cached or pending results, without a
-forced rescan. Indexing is asynchronous, so new discoveries may not be searchable immediately.
-
-Findings returned by `query_findings` may be unverified or outdated. Review their evidence before
-treating them as confirmed vulnerabilities. New findings should include
-evidence and verification status, with unavailable details marked explicitly. `save_finding`
-acknowledges queuing for asynchronous persistence; immediate queries may not include the finding.
-
-Saved pages live in `<server cache_path>/result_pages`, outside per-client working directories, and
-survive session closure and server restarts. Expiration is fixed at creation; reading pages does not
-extend it. Expired, missing, or corrupt results require repeating the original operation. Cleanup
-runs before serving requests, at shutdown after workers drain, and before each new paginated query,
-scan, or content operation. Unexpired snapshots remain on shutdown. No periodic background cleanup
-runs while the server is idle. This store follows the server's single-process deployment model.
-
-| Environment variable      | Default                        | Description                                                                                                                                   |
-|---------------------------|--------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
-| `TOOL_CACHE`              | `TMPDIR`, or `/tmp` when unset | Parent directory for the server's `tool_cache` directory and saved pages; use persistent storage to retain pages across container replacement |
-| `TOOL_RESULT_TTL_SECONDS` | `86400`                        | Positive integer retention in seconds for newly created snapshots; existing expiration times remain unchanged                                 |
-
-For Docker Compose, set `TOOL_RESULT_TTL_SECONDS` in `.env` and restart the service. Both Compose
-configurations retain saved pages in the existing `tool_cache` volume.
-
-### Search predicates
-
-`find_web_resources` accepts hard filters alongside natural-language queries. Predicates apply before semantic
-ranking and are combined with AND, including repeated predicates. Prefix a predicate with `-` to exclude matches;
-quote values containing spaces. Content and title analysis remains part of the natural-language query.
-
-| Predicate           | Meaning                                                                                                      | Example                                                                      |
-|---------------------|--------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------|
-| `site:`             | Hostname and its subdomains, or an exact IP; optionally restrict port, scheme, and URL path prefix           | `site:example.com`, `site:example.com:8443`, `site:https://example.com/app/` |
-| `inurl:`            | Case-sensitive literal substring anywhere in the URL, including the query string                             | `inurl:admin`, `-inurl:"logout page"`                                        |
-| `filetype:`, `ext:` | Case-insensitive final path extension; ignores query strings and fragments                                   | `filetype:js`                                                                |
-| `mime:`             | Exact response MIME type, ignoring case and parameters                                                       | `mime:application/json`                                                      |
-| `method:`           | HTTP request method, ignoring case; intersects with the `http_methods` argument                              | `method:POST`                                                                |
-| `status:`           | Exact HTTP response status code from 100 to 599                                                              | `status:403`                                                                 |
-| `type:`             | Indexed representation: `html`, `javascript`, `css`, `xml`, `json`, `network`, `forms`, `content`, `default` | `type:network`                                                               |
-
-Examples:
-
-```text
-site:example.com filetype:js -inurl:vendor potential unsafe eval calls
-site:example.com status:403 method:GET
-site:example.com mime:application/json -inurl:logout
-site:[::1]:8080 type:network
-```
-
-Positive `site:` predicates supply the target and take precedence over target inference. A hostname scope includes
-all indexed ports unless a port is specified. A URL scope additionally restricts scheme and path prefix.
-Other explicit predicates override inferred constraints for the same attribute. Conflicting filters return no matches.
-Exclusions alone do not supply a target; existing target selection and confirmation behavior still applies.
-
-Queries containing only predicates retrieve indexed results without LLM calls and work in low-power mode.
-Queries with remaining natural-language text use semantic retrieval and require normal power mode.
-These are Google-style conveniences with the semantics above; Boolean expressions, date and technology predicates,
-`intitle:`, and `intext:` are not parsed as hard filters. Unrecognized syntax remains in the natural-language query.
-Filtering uses existing indexed metadata without a migration; broad URL filtering can require a metadata scan.
-When a target has indexed documents but nothing matches, the tool suggests broadening the query or relaxing filters.
-Index-population guidance is reserved for targets with no indexed documents.
+See the [application graph guide](docs/application-graph.md) for tool arguments and examples,
+analysis coverage, architecture, Neo4j configuration, and backfill/rebuild procedures.
 
 ## Install
 
@@ -237,51 +211,12 @@ Add the MCP server to your client of choice at http://127.0.0.1:8000/mcp.
 
 ### MCP transports and elicitation
 
-The server uses MCP Python SDK 2.2. Choose the transport with `--transport` or `MCP_TRANSPORT`.
-An explicit command-line argument overrides the environment setting.
+The default MCP endpoint is `/mcp`; legacy SSE clients can use `/sse` with `--transport sse`.
+Set `MCP_TRANSPORT` or `--transport` to choose a transport. Clients supporting elicitation can
+ask for missing targets and scan confirmations when enabled.
 
-| Setting               | Default                                              | Description                                                              |
-|-----------------------|------------------------------------------------------|--------------------------------------------------------------------------|
-| `MCP_TRANSPORT`       | `streamable-http`                                    | `streamable-http`, `sse`, or `streamable-http-modern`                    |
-| `DISABLE_ELICITATION` | `True` in Compose; enabled when unset in source runs | Set `False` to allow the client to ask for a target or scan confirmation |
-
-| Transport                | Endpoint | Client state                                                                                 |
-|--------------------------|----------|----------------------------------------------------------------------------------------------|
-| `streamable-http`        | `/mcp`   | Legacy client sessions retain registered headers, hostname mappings, and working directories |
-| `sse`                    | `/sse`   | Legacy SSE connections retain client state                                                   |
-| `streamable-http-modern` | `/mcp`   | Stateless preset; every tool call starts with fresh client state                             |
-
-Both HTTP presets accept legacy and modern protocol requests; the client's protocol version selects the workflow.
-Modern clients use the 2026-07-28 protocol and have request-local state under either HTTP preset. Persistent
-registration tools are unavailable to those clients. Supply `request_headers` and `additional_hosts` to each operation
-that needs them. Working files are removed when the modern call finishes; legacy files last until the session closes.
-
-Start the stateless preset from source:
-
-```shell
-UV_CACHE_DIR="$PWD/.uv-cache" uv run python mcp_service.py --transport streamable-http-modern
-```
-
-For Docker Compose, set `MCP_TRANSPORT=streamable-http-modern` in `.env` and restart the service. Use `.env.example`
-as an example of transport and model settings.
-
-Clients that support elicitation can supply missing target information and confirm scans. Legacy clients use a
-callback; modern clients answer the SDK's multi-round input requests. If elicitation is disabled, unsupported,
-declined, or cancelled, retrieval returns guidance without automatically starting a scan. Explicit scan tools
-remain available when open-world access is enabled.
-
-Search, spidering, and directory busting send status messages through MCP progress notifications.
-These tools, port scanning, JavaScript deobfuscation, and URL indexing also send a progress notification
-after 20 seconds without another progress update while a call is running. Informative updates reset
-the idle deadline, and nested operations share one timer. Quick tools such as `find_wordlists` do not
-send idle notifications. The interval depends on event-loop scheduling and transport availability.
-Clients must request progress updates to receive these messages; server logging remains available.
-Progress values count status events and do not estimate the total work.
-
-Modern continuation tokens expire after ten minutes between rounds and are protected with a process-local key.
-An interaction interrupted by a server restart must start again. Run one server process; legacy sessions require
-requests to reach the process that created them. Streamable HTTP MCP request bodies have the SDK's 4 MiB limit;
-the separate `/index` ingestion endpoint is unaffected.
+See [MCP transports and elicitation](docs/mcp-transports.md) for settings, client compatibility,
+request-local state, progress notifications, and deployment limits.
 
 ### Run From Source
 
@@ -293,35 +228,22 @@ source .venv/bin/activate
 uv sync
 ```
 
-#### File logging
+#### Storage and logging
 
-Set `LOG_FILE` or pass `--log-file` to append Python logger messages at DEBUG and higher to a UTF-8
-file. The command-line option overrides the environment variable. Parent directories are created;
-an unwritable destination stops startup with an error. Each record includes its timestamp, severity,
-logger name, process name, and PID. Exceptions logged with exception details include their tracebacks.
-The file remains active while the interactive dashboard suppresses console output, and worker
-processes inherit the destination. Uvicorn access messages also reach the file during dashboard use.
+Use `--data-dir` or `DATA_DIR` to select application storage. Relative names, such as `assessment`,
+create separate assessment directories beneath the platform default. Docker Compose retains its
+named volumes. Existing data is not migrated automatically.
 
-| Environment variable | Default                      | Description                                                                                                                                   |
-|----------------------|------------------------------|-----------------------------------------------------------------------------------------------------------------------------------------------|
-| `LOG_FILE`           | Unset; file logging disabled | Diagnostic log path, relative to the working directory or absolute; `~` is expanded. Includes all Python logger levels and logged tracebacks. |
+Use Qdrant 1.17 or newer and fresh collections for the tuned payload index settings. New indexes,
+including missing indexes repaired at startup, use the same tuning policy.
 
-```shell
-UV_CACHE_DIR="$PWD/.uv-cache" uv run python mcp_service.py --log-file ./logs/server.log
-# Or configure the destination through the environment:
-LOG_FILE=./logs/server.log UV_CACHE_DIR="$PWD/.uv-cache" uv run python mcp_service.py
-```
+Diagnostic logs default to `<data-dir>/logs/shyhurricane.log`. Override the destination with
+`--log-file` or `LOG_FILE`. Logs rotate at 10 MiB and retain five numbered backups by default.
+Use `--log-max-bytes`/`LOG_MAX_BYTES` and `--log-backup-count`/`LOG_BACKUP_COUNT` to configure
+rotation; a byte limit of `0` disables it.
 
-For Docker Compose, set `LOG_FILE=/tool_cache/logs/server.log` in `.env` and restart the service.
-Both Compose configurations preserve that location in the existing `tool_cache` volume. Read it with:
-
-```shell
-docker compose exec mcp tail -n 200 /tool_cache/logs/server.log
-```
-
-The file uses append mode and has no automatic rotation. It records Python logging output;
-raw subprocess stdout/stderr and exceptions handled without logging are not redirected into it.
-The cache's `history.jsonl` remains a separate record of tool calls.
+See [storage, database tuning, and logging](docs/configuration.md) for platform defaults,
+environment variables, Qdrant requirements, and migration guidance.
 
 #### Ollama
 
@@ -351,9 +273,25 @@ docker build -t ghcr.io/double16/shyhurricane_unix_command:main src/docker/unix_
 #### MCP Server
 
 When started from an interactive terminal, the server displays a `shyhurricane` monitoring dashboard with
-configuration, queue, database, indexing, and running MCP tool information. It refreshes immediately
+configuration, queue, database, indexing, and MCP tool information. It refreshes immediately
 on startup and every 30 seconds afterward. Press `r` to refresh immediately. Press `q` to stop the
-dashboard and shut down the server. After the dashboard closes, a log message reports that shutdown
+dashboard and shut down the server. Press `f` to mark failed items pending across the ingest,
+type-specific indexing, scan-finding, and graph queues. The notification reports counts and any
+per-queue errors; successful queues are committed even if another queue fails. Retrying preserves
+payloads and leaves processing items untouched. Workers pick up pending work asynchronously and
+may fail again if the original problem remains. Repeated key presses do not overlap retry operations.
+
+The **MCP tools** panel lists running tools followed by the last five completed calls, newest first.
+Yellow dots indicate running tools, green dots indicate completed calls, and red dots indicate
+failures (including cancelled calls). History is kept in memory until the server restarts.
+
+Queue status counts include pending and processing items. Each persistent queue row appends
+`, N failed` only when its failed count is greater than zero. Scan findings have their own row.
+Missing queue databases count as empty; read failures display unavailable. Database statistics always
+shows `Findings: <count>` first,
+using the primary Qdrant `finding` collection count, followed by the top five other collections.
+The finding count is read directly even when retrieval stores have not been initialized.
+After the dashboard closes, a log message reports that shutdown
 is waiting up to five minutes for current operations to finish. Shutdown stops claiming new work and
 allows current operations up to five minutes to finish before terminating remaining workers. Pending
 persistent queue items remain available for the next startup. SIGINT and SIGTERM use the same shutdown behavior.
@@ -412,47 +350,12 @@ python3 mcp_service.py --open-world false
 
 The MCP tools will index data if appropriate. For example, spidering and directory busting. Data can be indexed by external means using the `/index` endpoint. The endpoint is not part of an MCP tool or protocol.
 
-JavaScript responses are deobfuscated with webcrack and scanned with Opengrep during ingestion, including in low power
-mode. If a source map is indexed, shuji recovers its source files for scanning. When `OPEN_WORLD=true`, indexing a
-`.js` URL also attempts to fetch its `.js.map` URL. When `OPEN_WORLD=false`, only maps already supplied through
-indexing are used; Opengrep rule updates are still allowed. Scan matches are saved as findings and can be retrieved
-with `query_findings`. The command image includes a snapshot of the
-[Opengrep rules repository](https://github.com/amplify-security/opengrep-rules); it checks for updates at runtime and
-uses the cached snapshot if an update fails.
+Indexing runs asynchronously and pauses when dependencies are unhealthy or disk space is low.
+Incoming submissions remain queued, and indexing resumes when readiness recovers. JavaScript is
+transformed and scanned during ingestion; findings are available through `query_findings`.
 
-Indexing workers monitor Qdrant and LLM readiness. If either dependency is unhealthy, `/index` requests continue to be accepted into the persistent queue, but ingest and type-specific indexing pause before consuming new items. Workers resume automatically after both health checks recover; MCP tools retain their existing request and error behavior.
-
-Queue status counts use a covering SQLite index. Existing ingest, document-type, and scan-finding
-queues gain this index automatically during startup, before workers and HTTP serving begin. The first
-startup after upgrading scans each database to build the index and may take longer; logs report index
-creation and elapsed time. Queue records are preserved.
-New indexes include only `status`; SQLite implicitly includes the row ID, which aliases `_id`.
-Existing `ack_queue_status_id` indexes on `(status, _id)` remain unchanged.
-
-New and updated ingest, document-type, and scan-finding queue payloads use this storage format:
-`object → pickle bytes → zlib compression (level 1) → marker + compressed bytes → base64`.
-After base64 decoding, the versioned marker `b"SHQ\x01ZLIB\x00"` identifies compressed data;
-only marked payloads are decompressed before unpickling. Existing raw pickle and uncompressed
-base64 records remain readable and are compressed only when updated. Compression requires no
-additional dependencies or configuration. Older application versions cannot read compressed records.
-
-Dashboard and `/status` queue counts run in background threads using read-only connections. These reads
-do not resume items already being processed. HTTP ingestion uses a dedicated writer thread and awaits
-one durable commit per item, so queue reads and writes do not block the HTTP event loop. `/index`
-returns HTTP 201 after all submitted items commit. If a later item fails or the request is cancelled,
-items already committed remain queued; retrying the request can enqueue them again. Shutdown rejects
-new writes and drains submitted writes within the existing five-minute shutdown deadline.
-
-At server startup, ingest, document-type, and scan-finding queues discard all successfully acknowledged records
-without vacuuming. Runtime cleanup retains the latest 200 successful acknowledgements by queue insertion
-order and removes the entire older history without a fixed deletion limit. Cleanup runs after 1,000 processed
-items (100 for document-type indexing) or on a 10-minute maintenance interval while consumers are running.
-Failed acknowledgements, pending items, and items being processed are retained.
-Runtime maintenance vacuums when SQLite reports at least 64 MiB of free pages and those pages represent
-at least 25% of the database, or when free pages exceed 1 GiB regardless of the ratio.
-These thresholds exclude WAL file size and include space freed by earlier cleanup,
-including startup cleanup. Until vacuum runs, free pages remain available for new queue entries. Vacuum can run
-while work is pending and may pause processing; its logs report reclaimable space and completion time.
+See [ingestion architecture and operations](docs/ingestion.md) for dependency readiness, disk-space
+configuration, JavaScript scanning, queue durability, storage formats, and maintenance.
 
 ```shell
 curl -X POST -H "Content-Type: application/json" http://127.0.0.1:8000/index @katana.json
@@ -469,6 +372,12 @@ cat katana.jsonl | python3 ingest.py --mcp-url http://127.0.0.1:8000/ --katana
 # live ingestion:
 tail -f katana.jsonl | python3 ingest.py --mcp-url http://127.0.0.1:8000/ --katana
 ```
+
+### Recover deleted ingestion files
+
+Use the read-only recovery exporter to reconstruct replayable HTTP exchanges and findings from
+surviving graph captures and Qdrant. See [ingestion recovery](docs/ingestion-recovery.md) for commands,
+prerequisites, recovery limitations, and reingestion instructions.
 
 ### Burp Logger++ CSV
 
@@ -522,6 +431,9 @@ The `/status` endpoint is an HTTP POST endpoint and is not part of the MCP serve
 curl -X POST http://127.0.0.1:8000/status
 ```
 
+Use `/status` to inspect queue counts, indexing readiness, graph details, and proxy configuration.
+See the [status response reference](docs/ingestion.md#status-endpoint) for fields and an example.
+
 ## Proxy Serving Indexed Content
 
 The MCP server exposes a proxy port, `8010` by default, that serves the indexed content. The intent is to use tools on
@@ -531,7 +443,7 @@ The proxy supports HTTP and HTTPS with self-signed certs. Look for a log line li
 POST an empty body to `/status`. Either your tools can be configured to ignore certificate validation or trust this cert.
 
 ```
-replay proxy listening on ('127.0.0.1', 8010), CA cert is at /home/user/.local/state/shyhurricane/shyhurricane.db/certs/ca.pem (CONNECT→TLS ALPN: h2/http1.1)
+replay proxy listening on ('127.0.0.1', 8010), CA cert is at /home/user/.local/state/shyhurricane/certs/ca.pem (CONNECT→TLS ALPN: h2/http1.1)
 ```
 
 An example `curl` call:

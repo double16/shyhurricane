@@ -126,7 +126,7 @@ def _task_router(db: str,
                 if queued_scan:
                     scan_finding_queue.nack(item)
                 break
-            logger.info(f"Processing {item.__class__.__name__} in PID {os.getpid()}")
+            logger.debug(f"Processing {item.__class__.__name__} in PID {os.getpid()}")
             try:
                 if isinstance(item, SpiderQueueItem):
                     spider_worker(item, ingest_queue, spider_result_queue)

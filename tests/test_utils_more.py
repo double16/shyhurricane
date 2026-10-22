@@ -1,11 +1,42 @@
 import asyncio
 import datetime
 import logging
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from haystack import Document
 
 import shyhurricane.utils as utils
+
+
+@pytest.mark.parametrize("value", [None, "false", "0", "off", "no", "invalid", "", "1", "true", "TRUE", "yes", "on", " On "])
+def test_mps_memory_logging_requires_heap_profiling(monkeypatch, caplog, value):
+    if value is None:
+        monkeypatch.delenv("ENABLE_HEAP_PROFILING", raising=False)
+    else:
+        monkeypatch.setenv("ENABLE_HEAP_PROFILING", value)
+    memory = Mock(return_value=1024**2)
+    monkeypatch.setattr(utils, "torch", SimpleNamespace(
+        cuda=SimpleNamespace(is_available=lambda: False),
+        backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: True)),
+        mps=SimpleNamespace(
+            current_allocated_memory=memory,
+            driver_allocated_memory=memory,
+            recommended_max_memory=memory,
+        ),
+    ))
+    with caplog.at_level(logging.INFO, logger=utils.logger.name):
+        utils.log_gpu_memory_summary()
+    enabled = value is not None and value.strip().lower() in {"1", "true", "yes", "on"}
+    assert memory.call_count == (3 if enabled else 0)
+    assert ("--- MPS Device ---" in caplog.text) == enabled
+    if enabled:
+        assert "Allocated:        1.00 MB" in caplog.text
+        assert "Driver Allocated: 1.00 MB" in caplog.text
+        assert "Recommended Max:  1.00 MB" in caplog.text
+    else:
+        assert caplog.text == ""
 
 
 def test_url_domain_http_and_sort_helpers():
@@ -49,7 +80,7 @@ def test_soup_filter_path_and_encoding_helpers(monkeypatch, tmp_path):
     assert title == "OG title"
     assert description == "Twitter desc"
     assert utils.remove_unencodable("a\udcffb") == "ab"
-    assert str(state_path).endswith("db_name/state")
+    assert state_path == tmp_path / "application_data/state"
     assert utils.get_log_path("db:name", "log.txt").name == "log.txt"
     assert utils.b64(b"ok") == "b2s="
 
@@ -132,3 +163,48 @@ def test_log_timestamp_uses_utc_and_minute_precision(monkeypatch):
 
     monkeypatch.setattr(utils.datetime, "datetime", Clock)
     assert utils.get_log_timestamp() == "202601020304"
+
+
+@pytest.mark.parametrize("value", [None, "false", "0", "off", "no", "invalid", ""])
+def test_heap_profiling_disabled_never_imports_guppy(monkeypatch, value):
+    import builtins
+
+    if value is None:
+        monkeypatch.delenv("ENABLE_HEAP_PROFILING", raising=False)
+    else:
+        monkeypatch.setenv("ENABLE_HEAP_PROFILING", value)
+    original = builtins.__import__
+    def guarded(name, *args, **kwargs):
+        assert name != "guppy", "Disabled profiling imported guppy"
+        return original(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, "__import__", guarded)
+    monkeypatch.setattr(utils.logger, "isEnabledFor", lambda level: True)
+    utils.log_heap_stats()
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", " On "])
+@pytest.mark.parametrize("debug", [False, True])
+def test_heap_profiling_requires_opt_in_and_debug(monkeypatch, value, debug):
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+
+    heap = Mock()
+    heap.heap.return_value = list(range(20))
+    factory = Mock(return_value=heap)
+    monkeypatch.setenv("ENABLE_HEAP_PROFILING", value)
+    monkeypatch.setitem(sys.modules, "guppy", SimpleNamespace(hpy=factory))
+    monkeypatch.setattr(utils.logger, "isEnabledFor", lambda level: debug)
+    utils.log_heap_stats()
+    assert factory.call_count == int(debug)
+    assert heap.heap.call_count == int(debug)
+
+
+def test_heap_profiling_missing_optional_module(monkeypatch, caplog):
+    import sys
+
+    monkeypatch.setenv("ENABLE_HEAP_PROFILING", "true")
+    monkeypatch.setitem(sys.modules, "guppy", None)
+    with caplog.at_level(logging.DEBUG, logger=utils.logger.name):
+        utils.log_heap_stats()
+    assert "Install guppy3" in caplog.text

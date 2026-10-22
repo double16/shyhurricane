@@ -1,0 +1,4 @@
+coverage/
+coverage.tmp/
+test/
+node_modules/

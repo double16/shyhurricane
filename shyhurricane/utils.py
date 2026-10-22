@@ -540,11 +540,9 @@ def unix_command_image() -> str:
 
 
 def get_state_path(db: str, state_name: str) -> Path:
-    if os.path.exists("/data"):
-        # Running inside a container
-        path = Path("/data", state_name)
-    else:
-        path = Path(Path.home(), ".local", "state", "shyhurricane", re.sub(r'[^A-Za-z0-9_.-]', '_', db), state_name)
+    from shyhurricane.data_paths import state_path
+
+    path = state_path(state_name)
     os.makedirs(path, mode=0o755, exist_ok=True)
     return path
 
@@ -626,7 +624,8 @@ def validate_container_file_path(path: str, message: Optional[str] = None):
 
 
 def log_heap_stats():
-    if logger.isEnabledFor(logging.DEBUG):
+    enabled = os.environ.get("ENABLE_HEAP_PROFILING", "false").strip().lower() in {"1", "true", "yes", "on"}
+    if enabled and logger.isEnabledFor(logging.DEBUG):
         try:
             from guppy import hpy
             h = hpy()
@@ -652,6 +651,8 @@ def log_gpu_memory_summary():
 
     # MPS (Apple Silicon)
     elif getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
+        if os.environ.get("ENABLE_HEAP_PROFILING", "false").strip().lower() not in {"1", "true", "yes", "on"}:
+            return
         msg.append("--- MPS Device ---")
         try:
             stats = torch.mps.current_allocated_memory()

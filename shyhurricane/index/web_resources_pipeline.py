@@ -4,6 +4,7 @@ import json
 import logging
 import subprocess
 import sys
+from collections import defaultdict
 from dataclasses import replace
 from math import floor
 from typing import Dict, List, Optional, Set
@@ -15,7 +16,6 @@ from haystack.components.joiners import ListJoiner
 from haystack.components.preprocessors import DocumentCleaner, DocumentSplitter
 from haystack.components.routers import ConditionalRouter
 from haystack.core.component import Component
-from haystack.document_stores.types import DuplicatePolicy
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 
 from shyhurricane.clean_css import normalize_css
@@ -30,6 +30,8 @@ from shyhurricane.doc_type_model_map import (
 from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.index.input_documents import HarDocument, HttpRawDocument, IngestableRequestResponse, KatanaDocument
+from shyhurricane.index.write_diagnostics import write_document
+from shyhurricane.search_metadata import derive_search_metadata
 from shyhurricane.utils import (
     BeautifulSoupExtractor,
     batch_iterable,
@@ -101,7 +103,7 @@ def _deobfuscate_javascript(content: str) -> str:
 
     docker_command = ["docker", "run", "--rm", "-i", unix_command_image(), 'timeout', '--preserve-status',
                       '--kill-after=1m', '30m', '/usr/local/bin/jsdeobf.sh']
-    logger.info(f"Deobfuscating javascript with command {' '.join(docker_command)}")
+    logger.debug(f"Deobfuscating javascript with command {' '.join(docker_command)}")
     proc = subprocess.Popen(docker_command, universal_newlines=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL)
     result = ""
@@ -175,7 +177,7 @@ def build_splitters(embedders: Dict[str, Component]):
             target_token_length = min(token_length, max_model_length)
             split_len = int(floor(target_token_length * 0.93) / 2)
             overlap = int(floor(target_token_length * 0.06))
-            logger.info(
+            logger.debug(
                 f"Splitting document {doc_type_model.doc_type} by {split_len} words, overlap {overlap} (target {token_length} tokens, model has {max_model_length} tokens)")
             splitter = SuffixIdSplitter(
                 split_by="word",
@@ -242,7 +244,8 @@ class RequestResponseToDocument:
         request_headers = request_response.request_headers
         response_body = remove_unencodable(request_response.response_body)
         response_headers = request_response.response_headers
-        raw_mime = response_headers.get("Content-Type", "").lower().split(";")[0].strip()
+        search_meta = derive_search_metadata(url, request_response.method, response_headers, host=host, domain=domain)
+        raw_mime = search_meta["search_response_mime"]
         technologies_str = json.dumps(request_response.technologies or [], indent=None, separators=(',', ':'),
                                       sort_keys=True)
 
@@ -252,6 +255,7 @@ class RequestResponseToDocument:
             title, description = self._soup_extractor.extract(response_body)
 
         base_meta = {
+            **search_meta,
             "version": WEB_RESOURCE_VERSION,
             "url": url,
             "netloc": netloc,
@@ -349,9 +353,10 @@ class NormalizeDocuments:
     Normalize document content for better results from embedding and make it easier for LLMs to analyze the content.
     """
 
-    def __init__(self, doc_cleaner: DocumentCleaner, stores: Dict[str, QdrantDocumentStore]) -> None:
+    def __init__(self, doc_cleaner: DocumentCleaner, stores: Dict[str, QdrantDocumentStore], graph_db=None) -> None:
         self.doc_cleaner = doc_cleaner
         self.store = stores.get("content")
+        self.graph_db = graph_db
 
     def _query_normalized_content(self, doc: Document) -> Optional[str]:
         content_sha256 = doc.meta.get("content_sha256", "")
@@ -364,7 +369,7 @@ class NormalizeDocuments:
                 {"field": "meta.normalized", "operator": "==", "value": True},
                 {"field": "meta.content_sha256", "operator": "==", "value": content_sha256},
             ]}
-        logger.info("Checking for existing normalized document: filters %s", filters)
+        logger.debug("Checking for existing normalized document: filters %s", filters)
         existing = self.store.filter_documents(filters=filters)
         if not existing:
             return None
@@ -381,7 +386,7 @@ class NormalizeDocuments:
                 continue
 
             if is_binary(doc.content, raw_mime):
-                logger.info(f"NormalizeDocuments: Skipping ({raw_mime}) binary content")
+                logger.debug(f"NormalizeDocuments: Skipping ({raw_mime}) binary content")
                 continue
 
             # Map MIME to a logical doc type
@@ -395,7 +400,16 @@ class NormalizeDocuments:
                     if existing_normalized_content := self._query_normalized_content(doc):
                         normalized_content = existing_normalized_content
                     else:
-                        normalized_content = _deobfuscate_javascript(normalized_content)
+                        if self.graph_db is None:
+                            normalized_content = _deobfuscate_javascript(normalized_content)
+                        else:
+                            from shyhurricane.graph.artifacts import ArtifactStore
+
+                            artifacts = ArtifactStore(self.graph_db)
+                            try:
+                                normalized_content = artifacts.deobfuscate(normalized_content, _deobfuscate_javascript)
+                            finally:
+                                artifacts.close()
                 elif doc_type == "html":
                     normalized_content = normalize_html(normalized_content)
                 elif doc_type == "xml":
@@ -434,84 +448,49 @@ class FilterExistingDocumentsById:
 
     @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]):
+        by_collection = defaultdict(list)
+        for doc in documents:
+            collection = doc.meta.get("type")
+            if doc.id and self.stores.get(collection) is not None:
+                by_collection[collection].append(doc.id)
+
+        existing = {}
+        for collection, ids in by_collection.items():
+            store = self.stores[collection]
+            found = set()
+            unique_ids = list(dict.fromkeys(ids))
+            for offset in range(0, len(unique_ids), 100):
+                found.update(doc.id for doc in store.get_documents_by_id(unique_ids[offset:offset + 100]))
+            existing[collection] = found
+
         new_documents = []
         for doc in documents:
-            if not doc.id:
-                new_documents.append(doc)
-                continue
-            collection_name: Optional[str] = doc.meta.get("type", None)
-            if not collection_name:
-                logger.warning(f"No collection found for {doc}")
-                new_documents.append(doc)
-                continue
-            store = self.stores.get(collection_name)
-            if store is None:
-                # This can happen if the only collection has the token length as a suffix
-                logger.debug(f"No collection '{collection_name}' found for {doc}")
-                new_documents.append(doc)
-                continue
-
-            if store.filter_documents({"field": "id", "operator": "==", "value": doc.id}):
-                logger.info(f"Skipping existing document {collection_name} {doc.id}")
+            collection = doc.meta.get("type")
+            # Content must reach downstream queueing again after a partial ingestion failure.
+            if collection != "content" and doc.id in existing.get(collection, set()):
+                logger.debug("Skipping existing document %s %s", collection, doc.id)
             else:
                 new_documents.append(doc)
-
         return {"documents": new_documents}
 
 
 @component
 class FilterExistingDocumentsByDocType:
+    """Validate indexing metadata; defer completeness checks until chunks are known."""
+
     def __init__(self, stores: Dict[str, QdrantDocumentStore]):
         self.stores = stores
 
     @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]):
-        new_documents = []
+        # Chunk completeness is checked after splitting, across every destination collection.
+        accepted = []
         for doc in documents:
-            url = doc.meta.get("url", "")
-            raw_mime = doc.meta.get("content_type", "")
-            timestamp = doc.meta.get("timestamp", "")
-            if not url or not raw_mime or not timestamp:
-                logger.warning(f"No url or raw_mime or timestamp found for {doc}")
+            if not all(doc.meta.get(field) for field in ("url", "content_type", "timestamp")):
+                logger.warning("Skipping document %s: missing url, content_type, or timestamp", doc.id)
                 continue
-
-            doc_type = map_mime_to_type(raw_mime)
-            token_length = doc.meta.get("token_length", sys.maxsize)
-            collection_name = get_qdrant_collection_name_by_doc_type_token_length(doc_type, token_length)
-            store = self.stores.get(collection_name)
-            if store is None:
-                # This can happen if the only collection has the token length as a suffix
-                logger.debug(f"No collection '{collection_name}' found for {doc}")
-                continue
-
-            existing_docs = []
-            content_sha256 = doc.meta.get("content_sha256", "")
-            if content_sha256:
-                filters = {
-                    "operator": "AND",
-                    "conditions": [
-                        {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
-                        {"field": "meta.url", "operator": "==", "value": url},
-                        {"field": "meta.content_sha256", "operator": "==", "value": content_sha256}
-                    ]}
-                logger.debug("Checking for existing document: doc_type %s, filters %s", doc_type, filters)
-                existing_docs.extend(store.filter_documents(filters=filters))
-            if not existing_docs:
-                filters = {
-                    "operator": "AND",
-                    "conditions": [
-                        {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
-                        {"field": "meta.url", "operator": "==", "value": url},
-                        {"field": "meta.timestamp", "operator": "==", "value": timestamp}
-                    ]}
-                logger.debug("Checking for existing document: doc_type %s, filters %s", doc_type, filters)
-                existing_docs.extend(store.filter_documents(filters=filters))
-            if len(existing_docs) == 0:
-                new_documents.append(doc)
-            else:
-                logger.info("Skipping existing document %s", doc.id)
-
-        return {"documents": new_documents}
+            accepted.append(doc)
+        return {"documents": accepted}
 
 
 @component
@@ -552,11 +531,11 @@ class IndexDocTypeDocuments:
             timestamp_for_id = _quantize_timestamp(doc.meta.get("timestamp", ""))
             response_values_for_id = _cache_key_response_headers(json.loads(doc.meta.get("response_headers", "{}")))
             if not url or not raw_mime or not timestamp_for_id:
-                logger.info(f"Skipping {doc.id} for missing url, content_type, or timestamp")
+                logger.debug(f"Skipping {doc.id} for missing url, content_type, or timestamp")
                 continue
 
             if is_binary(doc.content, raw_mime):
-                logger.info(f"Skipping {url} ({raw_mime}) binary content")
+                logger.debug(f"Skipping {url} ({raw_mime}) binary content")
                 continue
 
             doc_type = map_mime_to_type(raw_mime)
@@ -571,6 +550,7 @@ class IndexDocTypeDocuments:
                 )
                 collection_name = get_qdrant_collection_name_by_doc_type_token_length(doc_type, token_length)
                 split_docs = self.splitters[collection_name].run(documents=[new_doc])["documents"]
+                split_docs = self.multi_store.missing_documents(collection_name, split_docs)
                 if hasattr(embedder, "to_dict"):
                     batch_size = embedder.to_dict().get("batch_size", 1)
                 else:
@@ -589,22 +569,23 @@ class IngestMultiStore:
         self.stores = stores
         self.should_update = should_update
 
+    def missing_documents(self, collection_name, documents):
+        """Check every deterministic chunk ID so partial writes remain recoverable."""
+        store = self.stores[collection_name]
+        found = set()
+        for batch in batch_iterable(documents, 100):
+            found.update(doc.id for doc in store.get_documents_by_id([doc.id for doc in batch]))
+        return [doc for doc in documents if doc.id not in found]
+
     @component.output_types(documents=List[Document])
     def run(self, documents: List[Document]):
         for doc in documents:
-            doc_type = "???"
-            try:
-                doc_type = doc.meta.get("type")
-                token_length = doc.meta.get("token_length", sys.maxsize)
-                collection_name = get_qdrant_collection_name_by_doc_type_token_length(doc_type, token_length)
-                store = self.stores.get(collection_name)
-                if store is None:
-                    logger.error(f"No store for collection {collection_name}")
-                else:
-                    store.write_documents([doc], policy=DuplicatePolicy.OVERWRITE)
-            except Exception as e:
-                logger.warning(f"Document {doc_type} {doc.id} not written to the store: {e}", exc_info=e)
-
+            doc_type = doc.meta.get("type")
+            token_length = doc.meta.get("token_length", sys.maxsize)
+            collection_name = get_qdrant_collection_name_by_doc_type_token_length(doc_type, token_length)
+            if collection_name not in self.stores:
+                raise ValueError(f"No store for collection {collection_name}")
+            write_document(self.stores[collection_name], collection_name, doc)
         return {"documents": documents}
 
 
@@ -651,7 +632,7 @@ class GenerateTitleAndDescription:
                 try:
                     result = self.generator.run(prompt=self.prompt % (doc.content[0:2048])).get("replies", ["{}"])[-1]
                     parsed = json.loads(result)
-                    logger.info(f"title_and_desc: {doc.meta.get('type', '')} {result}")
+                    logger.debug(f"title_and_desc: {doc.meta.get('type', '')} {result}")
                     if "title" in parsed and "title" not in doc.meta:
                         doc.meta["title"] = str(parsed["title"])
                         if url:
@@ -696,6 +677,8 @@ def build_embedders(
 
 
 def build_ingest_pipeline(db: str, generator_config: GeneratorConfig) -> Pipeline:
+    from shyhurricane.graph.ingest import CaptureGraphEvents
+
     stores = build_stores(db)
     embedders = build_embedders(embedder_cache=EmbedderCache(generator_config))
     sparse_embedder = generator_config.create_sparse_document_embedder(SPARSE_EMBEDDING_MODEL)
@@ -742,9 +725,10 @@ def build_ingest_pipeline(db: str, generator_config: GeneratorConfig) -> Pipelin
     pipe.add_component("har_document", HarDocument())
 
     pipe.add_component("rr_joiner", ListJoiner(List[IngestableRequestResponse]))
+    pipe.add_component("capture_graph", CaptureGraphEvents(db))
     pipe.add_component("request_response_to_document",
                        RequestResponseToDocument(embedders=embedders, sparse_embedder=sparse_embedder))
-    pipe.add_component("normalize_document", NormalizeDocuments(doc_cleaner=doc_cleaner, stores=stores))
+    pipe.add_component("normalize_document", NormalizeDocuments(doc_cleaner=doc_cleaner, stores=stores, graph_db=db))
     pipe.add_component("filter_doc_by_id", FilterExistingDocumentsById(stores=stores))
 
     pipe.add_component("output", IngestMultiStore(stores))
@@ -757,7 +741,8 @@ def build_ingest_pipeline(db: str, generator_config: GeneratorConfig) -> Pipelin
     pipe.connect("raw_document", "rr_joiner")
     pipe.connect("har_document", "rr_joiner")
 
-    pipe.connect("rr_joiner", "request_response_to_document")
+    pipe.connect("rr_joiner", "capture_graph")
+    pipe.connect("capture_graph", "request_response_to_document")
     pipe.connect("request_response_to_document", "filter_doc_by_id")
     pipe.connect("filter_doc_by_id", "normalize_document")
     pipe.connect("normalize_document", "output")

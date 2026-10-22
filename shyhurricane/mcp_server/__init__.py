@@ -2,6 +2,7 @@ import ipaddress
 import json
 import logging
 import os
+from collections import deque
 from datetime import datetime
 from typing import Annotated, Any, Dict, Optional, TypeAlias, Union
 
@@ -10,7 +11,7 @@ import validators
 from mcp import MCPError
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
-from mcp.types import INVALID_REQUEST, Tool
+from mcp.types import INVALID_REQUEST, CallToolResult, Tool
 from pydantic import Field, ValidationError
 
 from shyhurricane.mcp_server.server_context import ServerContext
@@ -71,6 +72,7 @@ class ShyHurricaneMCPServer(MCPServer):
         self.open_world = True
         self.running_tools: set[str] = set()
         self._running_tool_counts: dict[str, int] = {}
+        self.recent_tools: deque[tuple[str, str]] = deque(maxlen=5)
 
     async def list_tools(self) -> list[Tool]:
         logger.info("Listing tools")
@@ -92,9 +94,13 @@ class ShyHurricaneMCPServer(MCPServer):
     async def call_tool(self, name: str, arguments: dict[str, Any], context: Context | None = None):
         self.running_tools.add(name)
         self._running_tool_counts[name] = self._running_tool_counts.get(name, 0) + 1
+        status = "failed"
         try:
-            return await super().call_tool(name, arguments, context)
+            result = await super().call_tool(name, arguments, context)
+            status = "failed" if isinstance(result, CallToolResult) and result.is_error else "complete"
+            return result
         finally:
+            self.recent_tools.appendleft((name, status))
             remaining = self._running_tool_counts[name] - 1
             if remaining:
                 self._running_tool_counts[name] = remaining
@@ -132,7 +138,11 @@ This server assists penetration testers, red team operators and security auditor
   Query indexed resources for later discoveries.
 - Registration persists only within a legacy session. Modern clients must supply request_headers
   and additional_hosts on every operation that needs them. Per-call headers override registered keys.
-- Indexing and finding persistence are asynchronous; queued data may not be searchable immediately.
+- Indexed web-resource and graph discovery/traversal tools wait briefly for relevant queued indexing, then return
+  available data. Inspect indexing.status and indexing.potentially_incomplete before treating
+  missing results as complete. A timeout does not stop indexing or justify a duplicate scan.
+- Graph evidence retrieval accepts only evidence_id and reads published evidence without an indexing wait.
+- Finding persistence remains asynchronous; queued findings may not be searchable immediately.
 """
 
 

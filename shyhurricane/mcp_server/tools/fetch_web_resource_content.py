@@ -5,28 +5,36 @@ from haystack import Document
 from mcp.server.mcpserver import Context
 from mcp.types import TextResourceContents, ToolAnnotations
 from pydantic import Field
+from qdrant_client.http import models as qm
 
 from shyhurricane.index.web_resources_pipeline import WEB_RESOURCE_VERSION
+from shyhurricane.indexing_wait import (
+    IndexingOnlyResult,
+    IndexingStatus,
+    indexing_scope,
+    url_matcher,
+    wait_for_indexing,
+)
 from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
+from shyhurricane.qdrant_reads import read_documents, retrieve_records, to_document
 from shyhurricane.utils import HttpResourceOffset, TextResourcePartialContents
 
 logger = logging.getLogger(__name__)
 
 
-async def _find_document_by_type_and_id(doc_type: str, doc_id: str) -> Optional[Document]:
+class IndexedResourceContent(HttpResourceOffset):
+    indexing: IndexingStatus | None = None
+
+
+async def _find_document_by_type_and_id(doc_type: str, doc_id: str, *, metadata_only=False) -> Optional[Document]:
     server_ctx = await get_server_context()
-    store = server_ctx.stores.get(doc_type, None)
-    if not store:
-        logger.info("Not Found document type %s", doc_type)
+    if doc_type not in server_ctx.stores:
         return None
-    filters = {"field": "id", "operator": "==", "value": doc_id}
-    result = await store.filter_documents_async(filters=filters)
-    if not result:
-        logger.info("Not Found document %s/%s", doc_type, doc_id)
-        return None
-    doc: Document = result[0]
-    logger.info("Found document %s", doc.id)
-    return doc
+    points = await retrieve_records(
+        server_ctx.qdrant_client, doc_type, [doc_id], opaque_ids=True,
+        fields=["id", "meta.url"] if metadata_only else True,
+    )
+    return to_document(points[0]) if points else None
 
 
 @mcp_instance.tool(
@@ -35,6 +43,7 @@ async def _find_document_by_type_and_id(doc_type: str, doc_id: str) -> Optional[
         read_only_hint=True,
         open_world_hint=False),
 )
+@indexing_scope()
 async def fetch_web_resource_content(
         ctx: Context,
         url: Annotated[str, Field(description="""The URL may be a http:// or https:// URL of a website that has been indexed, spidered or scanned.
@@ -48,7 +57,7 @@ async def fetch_web_resource_content(
         output_length_limit: Annotated[
             int, Field(4096, description="Output length limit, truncates output if over this length.", ge=1,
                        le=4 * 1024 * 1024)] = 4096,
-) -> Optional[HttpResourceOffset]:
+) -> IndexedResourceContent | IndexingOnlyResult | None:
     """Fetch the content of a web resource that has already been indexed.
 
     Invoke this tool when:
@@ -57,7 +66,9 @@ async def fetch_web_resource_content(
 
     Indexed JavaScript has undergone automatic transformation, which may fail or be partial.
     Avoid repeating transformation unless the content warrants it.
-    This reads the index and does not fetch the live URL. Null means no content was found.
+    This waits briefly for relevant indexing, then reads the index without fetching the live URL.
+    Null is a confirmed miss; a status-only indexing result means content may still be pending.
+    Inspect indexing.potentially_incomplete before interpreting missing or partial results.
     When contents.has_more is true, request the next chunk with
     output_start_position=contents.offset + len(contents.text). Offsets count Unicode characters.
     This tool uses offsets rather than saved-page tokens.
@@ -76,24 +87,32 @@ async def fetch_web_resource_content(
             url = doc_id
             try_http_url = True
         else:
-            doc = await _find_document_by_type_and_id(doc_type, doc_id)
+            doc = await _find_document_by_type_and_id(doc_type, doc_id, metadata_only=True)
     else:
         try_http_url = True
 
+    wait_url = doc.meta.get("url") if doc is not None else url
+    opaque_id = doc_id if not try_http_url and doc is None else None
+    indexing = await wait_for_indexing(
+        ctx, server_ctx, url_matcher([wait_url], exact=True), doc_id=opaque_id,
+        semantic=doc_type not in {None, "content", "network", "forms"},
+    )
+    if not try_http_url:
+        doc = await _find_document_by_type_and_id(doc_type, doc_id)
     if try_http_url:
-        filters = {"operator": "AND",
-                   "conditions": [
-                       {"field": "meta.version", "operator": "==", "value": WEB_RESOURCE_VERSION},
-                       {"field": "meta.url", "operator": "==", "value": url},
-                   ]}
-        store = server_ctx.stores["content"]
-        docs = store.filter_documents(filters=filters)
+        filters = qm.Filter(must=[
+            qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=WEB_RESOURCE_VERSION)),
+            qm.FieldCondition(key="meta.url", match=qm.MatchValue(value=url)),
+        ])
+        docs = await read_documents(server_ctx.qdrant_client, "content", filters, limit=1)
         if docs:
             logger.info("Found indexed web resource %s", url)
             doc = docs[0]
             doc_type = "content"
             doc_id = doc.id
     if not doc or not doc.content:
+        if indexing.potentially_incomplete and indexing.status != "disabled":
+            return IndexingOnlyResult(indexing=indexing)
         return None
 
     if output_start_position >= len(doc.content):
@@ -112,7 +131,9 @@ async def fetch_web_resource_content(
         offset=output_start_position,
         has_more=(output_start_position + output_length_limit < len(doc.content)),
     )
-    return HttpResourceOffset.from_doc(doc, contents=contents)
+    result = IndexedResourceContent.from_doc(doc, contents=contents)
+    result.indexing = indexing
+    return result
 
 
 @mcp_instance.resource("web://{doc_type}/{doc_id}", title="Web Resource")

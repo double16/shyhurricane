@@ -2,11 +2,74 @@
 
 import logging
 import os
+import re
+import threading
 from pathlib import Path
 
+from concurrent_log_handler import ConcurrentRotatingFileHandler
+from haystack_integrations.document_stores.qdrant.document_store import QdrantStoreError
+from qdrant_client.http.exceptions import ResponseHandlingException
 
-class DiagnosticFileHandler(logging.FileHandler):
-    """Identify the application's file handler when logging is configured again."""
+
+class QdrantExceptionFilter(logging.Filter):
+    """Keep Qdrant client and document store failures concise across logging paths."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.exc_info and isinstance(record.exc_info[1], (ResponseHandlingException, QdrantStoreError)):
+            error = record.exc_info[1]
+            record.msg = " ".join(f"{record.getMessage()} ({type(error).__name__}): {error}".split())
+            record.args = ()
+            record.exc_info = None
+            record.exc_text = None
+            record.stack_info = None
+        return True
+
+
+def limit_qdrant_tracebacks() -> None:
+    """Apply the transport exception policy to existing output handlers."""
+    root = logging.getLogger()
+    loggers = [root, *[value for value in root.manager.loggerDict.values() if isinstance(value, logging.Logger)]]
+    for logger in loggers:
+        for handler in logger.handlers:
+            if not any(isinstance(item, QdrantExceptionFilter) for item in handler.filters):
+                handler.addFilter(QdrantExceptionFilter())
+
+
+DEFAULT_LOG_MAX_BYTES = 10 * 1024 * 1024
+DEFAULT_LOG_BACKUP_COUNT = 5
+
+
+def log_max_bytes(value: str | int) -> int:
+    """Validate the rotation threshold; zero disables rotation."""
+    result = int(value)
+    if result < 0:
+        raise ValueError("log max bytes must be nonnegative")
+    return result
+
+
+def log_backup_count(value: str | int) -> int:
+    """Require at least one retained archive."""
+    result = int(value)
+    if result < 1:
+        raise ValueError("log backup count must be at least one")
+    return result
+
+
+class DiagnosticFileHandler(ConcurrentRotatingFileHandler):
+    """Coordinate process writes and eagerly verify both log and lock access."""
+
+    def verify_destination(self) -> None:
+        # CLH defers opening files. Verify them before changing application logging state.
+        try:
+            self._do_lock()
+            try:
+                with self.do_open():
+                    pass
+            finally:
+                self._do_unlock()
+        except Exception:
+            self.close()
+            raise
 
 
 class ConsoleFilter(logging.Filter):
@@ -21,6 +84,31 @@ class ConsoleFilter(logging.Filter):
 _console_filter = ConsoleFilter()
 
 
+class Neo4jPropertyWarningFilter(logging.Filter):
+    """Report each unknown property once per process, preserving other diagnostics."""
+
+    def __init__(self):
+        super().__init__()
+        self.seen: set[str] = set()
+        self.lock = threading.Lock()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno != logging.WARNING:
+            return True
+        message = record.getMessage()
+        if "gql_status='01N52'" not in message:
+            return True
+        match = re.search(r"The property `([^`]+)` does not exist in database", message)
+        if match is None:
+            return True
+        property_name = match[1]
+        with self.lock:
+            if property_name in self.seen:
+                return False
+            self.seen.add(property_name)
+        return True
+
+
 def file_logging_enabled() -> bool:
     return any(isinstance(handler, DiagnosticFileHandler) for handler in logging.getLogger().handlers)
 
@@ -29,17 +117,51 @@ def set_console_logging_enabled(enabled: bool) -> None:
     _console_filter.enabled = enabled
 
 
-def configure_file_logging(filename: str | None, console_enabled: bool = True) -> None:
-    """Append all Python logger levels to a UTF-8 file, including exception details.
+def limit_neo4j_logging() -> None:
+    """Avoid formatting full Bolt parameter payloads, including on existing child loggers."""
+    logging.getLogger("neo4j").setLevel(logging.WARNING)
+    notifications = logging.getLogger("neo4j.notifications")
+    if not any(isinstance(item, Neo4jPropertyWarningFilter) for item in notifications.filters):
+        notifications.addFilter(Neo4jPropertyWarningFilter())
+    for name, logger in logging.getLogger().manager.loggerDict.copy().items():
+        if name.startswith("neo4j.") and isinstance(logger, logging.Logger):
+            logger.setLevel(logging.WARNING)
 
-    Worker processes inherit LOG_FILE and configure their own append handler. The file is
-    opened before changing logging state so an invalid destination fails startup cleanly.
+
+def limit_http_client_logging() -> None:
+    """Keep third-party HTTP request/response traces out of diagnostic logs."""
+    http_loggers = ("httpx", "httpcore", "urllib3", "posthog")
+    for name in http_loggers:
+        logging.getLogger(name).setLevel(logging.WARNING)
+    for name, logger in logging.getLogger().manager.loggerDict.copy().items():
+        if name.startswith(http_loggers) and isinstance(logger, logging.Logger):
+            logger.setLevel(logging.WARNING)
+
+
+def configure_file_logging(
+    filename: str | None, console_enabled: bool = True, *,
+    max_bytes: int | None = None, backup_count: int | None = None,
+) -> None:
+    """Append diagnostics while limiting noisy driver and HTTP client logs to warnings.
+
+    Workers inherit the destination and rotation settings and create their own handlers.
+    Files are opened before changing logging state so invalid destinations fail cleanly.
     """
     if not filename:
+        limit_http_client_logging()
+        limit_neo4j_logging()
+        limit_qdrant_tracebacks()
         return
+    max_bytes = log_max_bytes(os.environ.get("LOG_MAX_BYTES", DEFAULT_LOG_MAX_BYTES) if max_bytes is None else max_bytes)
+    backup_count = log_backup_count(
+        os.environ.get("LOG_BACKUP_COUNT", DEFAULT_LOG_BACKUP_COUNT) if backup_count is None else backup_count
+    )
     path = Path(filename).expanduser().resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
-    handler = DiagnosticFileHandler(path, mode="a", encoding="utf-8")
+    handler = DiagnosticFileHandler(
+        str(path), mode="a", encoding="utf-8", maxBytes=max_bytes, backupCount=backup_count, use_gzip=False,
+    )
+    handler.verify_destination()
     handler.setLevel(logging.DEBUG)
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)s %(name)s [%(processName)s:%(process)d] %(message)s")
@@ -68,5 +190,10 @@ def configure_file_logging(filename: str | None, console_enabled: bool = True) -
         for existing in logger.handlers:
             if isinstance(existing, logging.StreamHandler) and not isinstance(existing, logging.FileHandler):
                 existing.addFilter(_console_filter)
+    limit_neo4j_logging()
+    limit_http_client_logging()
+    limit_qdrant_tracebacks()
     set_console_logging_enabled(console_enabled)
     os.environ["LOG_FILE"] = str(path)
+    os.environ["LOG_MAX_BYTES"] = str(max_bytes)
+    os.environ["LOG_BACKUP_COUNT"] = str(backup_count)

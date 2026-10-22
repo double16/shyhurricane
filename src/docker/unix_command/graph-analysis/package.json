@@ -1,0 +1,15 @@
+{
+  "name": "shyhurricane-graph-analysis",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "c8 --check-coverage --per-file --lines 80 --branches 80 node --test test/*.cjs"
+  },
+  "dependencies": {
+    "@babel/parser": "^7.28.0",
+    "@babel/traverse": "^7.28.0"
+  },
+  "devDependencies": {
+    "c8": "^10.1.3"
+  }
+}

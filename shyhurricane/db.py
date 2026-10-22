@@ -1,21 +1,26 @@
+import asyncio
+import hashlib
 import json
 import logging
 import os
 import re
 import socket
 import subprocess
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncGenerator, List, Optional, Sequence, Tuple
 
-import requests
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 from qdrant_client import AsyncQdrantClient
 from qdrant_client.conversions import common_types as types
 from qdrant_client.http import models as qm
+from qdrant_client.http.exceptions import UnexpectedResponse
 
+from shyhurricane.finding_search import FINDING_SEARCH_FIELDS
 from shyhurricane.haystack_lifecycle import managed_resource
+from shyhurricane.qdrant_indexes import IndexedQdrantDocumentStore
+from shyhurricane.search_metadata import SEARCH_FIELDS
+from shyhurricane.search_predicates import HTTP_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +149,10 @@ def _start_qdrant_docker(
     if not container_id:
         raise RuntimeError("docker inspect did not return container Id")
 
+    if not any(mount.get("Destination") == "/qdrant/storage" and mount.get("Source") == str(storage)
+               for mount in inspect.get("Mounts", [])):
+        raise RuntimeError("Managed Qdrant storage mount does not match configured directory")
+
     http_ip, http_port = _get_published_port(inspect, f"{http_container_port}/tcp")
     grpc_ip, grpc_port = _get_published_port(inspect, f"{grpc_container_port}/tcp")
 
@@ -157,50 +166,35 @@ def _start_qdrant_docker(
     )
 
 
-def _wait_ready(url: str = "http://127.0.0.1:6333", timeout_s: int = 30) -> None:
-    deadline = time.time() + timeout_s
-    while time.time() < deadline:
-        try:
-            r = requests.get(f"{url}/readyz", timeout=1)
-            if r.status_code == 200:
-                return
-        except requests.RequestException:
-            pass
-        time.sleep(0.2)
-    raise TimeoutError(f"Qdrant not ready after {timeout_s}s")
-
-
-_QDRANT_HOST: Optional[str] = None
-_QDRANT_HOST_PORT: Optional[int] = None
-_QDRANT_GRPC_PORT: Optional[int] = None
+_QDRANT_ENDPOINTS: dict[str, Tuple[str, int]] = {}
 
 
 def qdrant_host_port(db: str) -> Tuple[str, int]:
-    global _QDRANT_HOST, _QDRANT_HOST_PORT, _QDRANT_GRPC_PORT
-
-    if _QDRANT_HOST and _QDRANT_HOST_PORT:
-        return _QDRANT_HOST, _QDRANT_HOST_PORT
-
-    if re.match(r'\S+:\d+$', db):
-        host, _, port = db.rpartition(':')
-        _QDRANT_HOST = host
-        _QDRANT_HOST_PORT = int(port)
-        return _QDRANT_HOST, _QDRANT_HOST_PORT
-
-    container_name = "qdrant-" + re.sub(r'[^A-Za-z0-9]+', '-', os.path.basename(db)).lower()
-    container_info = _start_qdrant_docker(name=container_name, storage_dir=os.path.abspath(db))
-    logger.info(f"Qdrant database at {container_info.http_url}")
-    _wait_ready(container_info.http_url)
-    _QDRANT_HOST = container_info.http_host
-    _QDRANT_HOST_PORT = container_info.http_port
-    return _QDRANT_HOST, _QDRANT_HOST_PORT
+    remote = re.fullmatch(r"([^/\\\s]+):(\d+)", db)
+    location = db if remote else str(Path(db).expanduser().resolve())
+    if location in _QDRANT_ENDPOINTS:
+        return _QDRANT_ENDPOINTS[location]
+    if remote:
+        host, port = remote.groups()
+        endpoint = (host, int(port))
+    else:
+        container_name = "qdrant-shyhurricane-" + hashlib.sha256(location.encode()).hexdigest()[:12]
+        container_info = _start_qdrant_docker(name=container_name, storage_dir=location)
+        logger.info("Qdrant database at %s", container_info.http_url)
+        endpoint = (container_info.http_host, container_info.http_port)
+    _QDRANT_ENDPOINTS[location] = endpoint
+    return endpoint
 
 
 async def create_qdrant_client(db: str) -> AsyncQdrantClient:
+    timeout = int(os.environ.get("QDRANT_ASYNC_TIMEOUT_SECONDS", "30"))
+    if timeout <= 0:
+        raise ValueError("QDRANT_ASYNC_TIMEOUT_SECONDS must be a positive integer")
     host, port = qdrant_host_port(db)
     return AsyncQdrantClient(
         host=host,
         port=port,
+        timeout=timeout,
     )
 
 
@@ -209,28 +203,78 @@ async def scroll_qdrant_collection(
         index: str,
         fields: Sequence[str] = None,
         scroll_filter: types.Filter | None = None,
+        newest_limit: int | None = None,
+        page_size: int = 1000,
 ) -> AsyncGenerator[types.Record, None]:
+    """Read all matching points by ID, or one explicitly bounded newest-first sample."""
     next_offset = None
     stop_scrolling = False
+    page = 0
     while not stop_scrolling:
+        started = asyncio.get_running_loop().time()
+        page += 1
         records, next_offset = await qdrant_client.scroll(
             collection_name=index,
             scroll_filter=scroll_filter,
-            limit=1000,
+            limit=newest_limit if newest_limit is not None else page_size,
             offset=next_offset,
             with_payload=fields or False,
             with_vectors=False,
-            order_by=qm.OrderBy(key="meta.timestamp_float", direction=qm.Direction.DESC),
+            order_by=(qm.OrderBy(key="meta.timestamp_float", direction=qm.Direction.DESC)
+                      if newest_limit is not None else None),
         )
-        stop_scrolling = next_offset is None or (
+        stop_scrolling = newest_limit is not None or next_offset is None or (
                 hasattr(next_offset, "num")
                 and hasattr(next_offset, "uuid")
                 and next_offset.num == 0
                 and next_offset.uuid == ""
         )  # PointId always has num and uuid
+        logger.debug(
+            "Qdrant scroll collection=%s page=%d records=%d has_more=%s seconds=%.3f",
+            index, page, len(records), not stop_scrolling, asyncio.get_running_loop().time() - started,
+        )
 
         for record in records:
             yield record
+
+
+async def facet_qdrant_values(
+        qdrant_client, key: str, filters: qm.Filter, *, timeout: int = 10, repair_index: bool = False,
+):
+    """Enumerate complete exact facets, preserving raw values for subsequent indexed filters."""
+    started = asyncio.get_running_loop().time()
+    requests = 0
+    limit = 256
+    repaired = False
+    while True:
+        try:
+            async with asyncio.timeout(timeout):
+                requests += 1
+                response = await qdrant_client.facet(
+                    collection_name="network", key=key, facet_filter=filters,
+                    limit=limit, exact=True, timeout=timeout,
+                )
+        except UnexpectedResponse as error:
+            missing_index = f"No appropriate index for faceting: `{key}`".encode()
+            if not repair_index or repaired or error.status_code != 400 or missing_index not in error.content:
+                raise
+            # Haystack only creates configured payload indexes for new collections.
+            # Upgrade an existing collection without recreating it or scanning its points.
+            logger.info("Creating missing Qdrant facet index network.%s", key)
+            async with asyncio.timeout(timeout):
+                await qdrant_client.create_payload_index(
+                    collection_name="network", field_name=key,
+                    field_schema=qm.PayloadSchemaType.KEYWORD, wait=True, timeout=timeout,
+                )
+            repaired = True
+            continue
+        if len(response.hits) < limit:
+            logger.debug(
+                "Qdrant facet key=%s requests=%d values=%d elapsed=%.3fs",
+                key, requests, len(response.hits), asyncio.get_running_loop().time() - started,
+            )
+            return response.hits
+        limit *= 2
 
 
 async def get_domain_and_host_counts(
@@ -239,23 +283,34 @@ async def get_domain_and_host_counts(
     filters = qm.Filter(
         must=[qm.FieldCondition(key="meta.version", match=qm.MatchValue(value=version))]
     )
-    domain_counts: dict[str, int] = {}
-    host_counts: dict[str, int] = {}
-    async for record in scroll_qdrant_collection(
-        qdrant_client=qdrant_client, index="network", fields=["meta"], scroll_filter=filters
-    ):
-        metadata = record.payload.get("meta", {})
-        if domain := metadata.get("domain"):
-            domain = domain.lower()
-            domain_counts[domain] = domain_counts.get(domain, 0) + 1
-        if host := metadata.get("host"):
-            host = host.lower()
-            host_counts[host] = host_counts.get(host, 0) + 1
-    return domain_counts, host_counts
+    async def counts(key: str) -> dict[str, int]:
+        hits = await facet_qdrant_values(qdrant_client, key, filters, timeout=5, repair_index=True)
+        result: dict[str, int] = {}
+        for hit in hits:
+            if isinstance(hit.value, str) and hit.value:
+                value = hit.value.lower()
+                result[value] = result.get(value, 0) + hit.count
+        return result
+
+    # A deadline also bounds expansion for high-cardinality fields and callers outside the UI.
+    tasks = [asyncio.create_task(counts(key)) for key in ("meta.domain", "meta.host")]
+    try:
+        async with asyncio.timeout(10):
+            domains, hosts = await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+    return domains, hosts
 
 
 @managed_resource
 def create_qdrant_document_store(db: str, **kwargs) -> QdrantDocumentStore:
+    if "timeout" not in kwargs:
+        timeout = int(os.environ.get("QDRANT_DOCUMENT_STORE_TIMEOUT_SECONDS", "120"))
+        if timeout <= 0:
+            raise ValueError("QDRANT_DOCUMENT_STORE_TIMEOUT_SECONDS must be a positive integer")
+        kwargs["timeout"] = timeout
     payload_fields_to_index = [
         {"field_name": "meta.version", "field_schema": "integer"},
         {"field_name": "meta.timestamp", "field_schema": "datetime"},
@@ -263,6 +318,7 @@ def create_qdrant_document_store(db: str, **kwargs) -> QdrantDocumentStore:
         {"field_name": "meta.url", "field_schema": "keyword"},
         {"field_name": "meta.netloc", "field_schema": "keyword"},
         {"field_name": "meta.host", "field_schema": "keyword"},
+        {"field_name": "meta.port", "field_schema": "integer"},
         {"field_name": "meta.domain", "field_schema": "keyword"},
         {"field_name": "meta.content_type", "field_schema": "keyword"},
         {"field_name": "meta.status_code", "field_schema": "integer"},
@@ -270,9 +326,21 @@ def create_qdrant_document_store(db: str, **kwargs) -> QdrantDocumentStore:
         {"field_name": "meta.title", "field_schema": "text"},
         {"field_name": "meta.description", "field_schema": "text"},
         {"field_name": "meta.content_sha256", "field_schema": "keyword"},
+        {"field_name": "meta.normalized", "field_schema": "bool"},
+        {"field_name": "meta.targets", "field_schema": "keyword"},
+        {"field_name": "meta.runtime_ts", "field_schema": "float"},
     ]
+    if kwargs.get("index", "").split("_", 1)[0] in HTTP_TYPES:
+        payload_fields_to_index.extend(
+            {"field_name": f"meta.{field}", "field_schema": "keyword"} for field in (*SEARCH_FIELDS, "type")
+        )
+    if kwargs.get("index") == "finding":
+        payload_fields_to_index.extend(
+            {"field_name": f"meta.{field}", "field_schema": "keyword"}
+            for field in (*FINDING_SEARCH_FIELDS, "finding_fingerprint")
+        )
     host, port = qdrant_host_port(db)
-    return QdrantDocumentStore(
+    return IndexedQdrantDocumentStore(
         host=host,
         port=int(port),
         use_sparse_embeddings=True,
