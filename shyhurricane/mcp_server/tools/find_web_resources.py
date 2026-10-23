@@ -43,7 +43,7 @@ from shyhurricane.mcp_server.progress import progress_scope, report_progress
 from shyhurricane.mcp_server.tools.find_indexed_metadata import find_netloc_all as find_netloc
 from shyhurricane.predicate_search import candidate_filters, load_candidates, select_candidates
 from shyhurricane.qdrant_reads import retrieve_records, scroll_records, to_document
-from shyhurricane.rate_limit import get_rate_limit_requests_per_second
+from shyhurricane.rate_limit import RateLimitRequestsPerSecondField, get_rate_limit_requests_per_second
 from shyhurricane.result_pages import Pagination, paged_results, paginate_result, start_query
 from shyhurricane.search_metadata import trigram_conditions
 from shyhurricane.search_predicates import Predicate, parse_predicates
@@ -871,6 +871,7 @@ async def spider_website(
             )
         ] = None,
         limit: Annotated[int, Field(50, ge=1, le=1000, description="Resources per page")] = 50,
+        rate_limit_requests_per_second: RateLimitRequestsPerSecondField = None,
 ) -> SpiderResults:
     """Spider a website and index discovered resources for further analysis.
 
@@ -893,7 +894,8 @@ async def spider_website(
     cookies = coerce_to_dict(cookies, '=', ';')
     request_headers = coerce_to_dict(request_headers, ':', '\n')
 
-    rate_limit_requests_per_second = get_rate_limit_requests_per_second(url)
+    url = url.strip()
+    rate_limit_requests_per_second = get_rate_limit_requests_per_second(url, rate_limit_requests_per_second)
     request_headers = get_additional_http_headers(ctx, request_headers)
 
     await log_tool_history(ctx, "spider_website", url=url, additional_hosts=additional_hosts, user_agent=user_agent,

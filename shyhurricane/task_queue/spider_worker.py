@@ -15,6 +15,9 @@ from shyhurricane.utils import BeautifulSoupExtractor, HttpResource, extract_dom
 
 logger = logging.getLogger(__name__)
 
+# Katana 1.5.0 crashes with a zero rate; use a high ceiling for explicit zero.
+KATANA_ZERO_RATE_LIMIT_REQUESTS_PER_SECOND = 3000
+
 
 def spider_worker(
         item: SpiderQueueItem,
@@ -37,8 +40,9 @@ def _katana_ingest(
                       "-jsonl", "-omit-raw", "-depth", str(item.depth), "-retry", "3", "-no-color",
                       "-silent"]
 
-    if item.rate_limit_requests_per_second:
-        katana_command.extend(["-rate-limit", str(item.rate_limit_requests_per_second)])
+    if item.rate_limit_requests_per_second is not None:
+        rate_limit = item.rate_limit_requests_per_second or KATANA_ZERO_RATE_LIMIT_REQUESTS_PER_SECOND
+        katana_command.extend(["-rate-limit", str(rate_limit)])
     katana_command.extend(["-H", f"User-Agent: {item.user_agent or DEFAULT_USER_AGENT}"])
     if item.request_headers:
         for k, v in item.request_headers.items():

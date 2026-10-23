@@ -1,11 +1,21 @@
 import ipaddress
-from typing import Optional
+from typing import Annotated, Optional, TypeAlias
 
 import tldextract
-import validators
-from pydantic import ValidationError
+from pydantic import Field
 
 from shyhurricane.utils import urlparse_ext
+
+RateLimitRequestsPerSecondField: TypeAlias = Optional[Annotated[int, Field(
+    strict=True,
+    ge=0,
+    description=(
+        "Maximum requests/second for this scan. A positive integer sets the limit; 0 disables "
+        "the explicit limit (Katana uses a high ceiling of 3000 requests/second). Omitted or null uses 5 "
+        "requests/second for public targets and preserves scanner defaults for non-public targets. "
+        "Concurrent scans have separate budgets."
+    ),
+)]]
 
 
 def _is_public_registrable_domain(s: str) -> bool:
@@ -18,22 +28,13 @@ def _is_public_target(target: str) -> bool:
     try:
         return ipaddress.ip_address(target).is_global
     except ValueError:
-        try:
-            validators.url(target, skip_ipv4_addr=False, skip_ipv6_addr=False, simple_host=True, strict_query=False,
-                           consider_tld=False)
-            if "://" in target:
-                url_parsed = urlparse_ext(target)
-            else:
-                url_parsed = urlparse_ext("http://" + target)
-            if url_parsed.hostname:
-                target = url_parsed.hostname
-        except ValidationError:
-            try:
-                validators.hostname(target, skip_ipv4_addr=False, skip_ipv6_addr=False, may_have_port=True,
-                                    simple_host=True, consider_tld=False)
-                target = urlparse_ext("http://" + target).hostname
-            except ValidationError:
-                return False
+        pass
+    try:
+        target = urlparse_ext(target if "://" in target else f"http://{target}").hostname
+    except ValueError:
+        return False
+    if not target:
+        return False
     try:
         return ipaddress.ip_address(target).is_global
     except ValueError:
@@ -41,7 +42,12 @@ def _is_public_target(target: str) -> bool:
     return _is_public_registrable_domain(target)
 
 
-def get_rate_limit_requests_per_second(target: str) -> Optional[int]:
-    if not _is_public_target(target):
+def get_rate_limit_requests_per_second(target: str, override: Optional[int] = None) -> Optional[int]:
+    """Resolve a per-scan limit without conflating explicit zero with an omitted limit."""
+    if override is not None:
+        if type(override) is not int or override < 0:
+            raise ValueError("rate_limit_requests_per_second must be a non-negative integer or null")
+        return override
+    if not _is_public_target(target.strip()):
         return None
     return 5

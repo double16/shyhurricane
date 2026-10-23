@@ -1,5 +1,25 @@
+import pytest
+
 from shyhurricane.task_queue import DirBustingQueueItem
 from shyhurricane.task_queue.dir_busting_worker import _build_feroxbuster_command, _build_ffuf_command
+
+
+@pytest.mark.parametrize("rate", [None, 0, 1, 5])
+@pytest.mark.parametrize("builder,flag", [
+    (_build_feroxbuster_command, "--rate-limit"), (_build_ffuf_command, "-rate"),
+])
+def test_buster_rate_limit_arguments(builder, flag, rate):
+    item = DirBustingQueueItem("ctx", "http://target.local/FUZZ", rate_limit_requests_per_second=rate)
+    command = builder(item)
+    if rate is None:
+        assert flag not in command
+    else:
+        assert command[command.index(flag) + 1] == str(rate)
+    if builder is _build_feroxbuster_command:
+        assert ("--auto-tune" in command) is (rate is None)
+        assert ("--scan-limit" in command) is (rate is not None and rate > 0)
+        if rate is not None and rate > 0:
+            assert command[command.index("--scan-limit") + 1] == "1"
 
 
 def test_build_feroxbuster_command_includes_options_for_get_request():

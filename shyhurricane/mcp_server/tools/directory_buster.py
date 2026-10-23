@@ -24,7 +24,7 @@ from shyhurricane.mcp_server import (
 from shyhurricane.mcp_server.progress import progress_scope, report_progress
 from shyhurricane.mcp_server.session_state import ensure_work_path
 from shyhurricane.mcp_server.tools.find_wordlists import find_wordlists_all as find_wordlists
-from shyhurricane.rate_limit import get_rate_limit_requests_per_second
+from shyhurricane.rate_limit import RateLimitRequestsPerSecondField, get_rate_limit_requests_per_second
 from shyhurricane.result_pages import Pagination, paged_results
 from shyhurricane.task_queue import DirBustingQueueItem, DirBustingResultItem
 from shyhurricane.utils import coerce_to_dict, coerce_to_list
@@ -129,6 +129,7 @@ async def directory_buster(
             )
         ] = None,
         limit: Annotated[int, Field(100, ge=1, le=1000, description="URLs per page")] = 100,
+        rate_limit_requests_per_second: RateLimitRequestsPerSecondField = None,
 ) -> DirBusterResults:
     """Search a website for hidden directories and files using a wordlist.
 
@@ -154,7 +155,8 @@ async def directory_buster(
     params = coerce_to_dict(params, '=', '&')
     request_headers = coerce_to_dict(request_headers, ':', '\n')
 
-    rate_limit_requests_per_second = get_rate_limit_requests_per_second(url)
+    url = url.strip()
+    rate_limit_requests_per_second = get_rate_limit_requests_per_second(url, rate_limit_requests_per_second)
     request_headers = get_additional_http_headers(ctx, request_headers)
 
     await log_tool_history(ctx, "directory_buster", url=url, depth=depth, method=method, wordlist=wordlist,

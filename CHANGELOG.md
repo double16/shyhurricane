@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Features
+
+- Expose per-scan `rate_limit_requests_per_second` on spidering and directory busting:
+  positive integers set requests/second, zero means unlimited, and omitted public-target limits default to 5 requests/second.
 - Analyze standalone and inline SVG links, resources, scripts, and event handlers in the
   application graph, including SVG document context for external scripts.
 - Add indexed `site:`, `inurl:`, and `filetype:`/`ext:` predicates to `query_findings`, with

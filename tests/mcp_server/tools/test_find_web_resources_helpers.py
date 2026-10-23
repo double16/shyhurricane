@@ -376,6 +376,25 @@ class SpiderServerContext:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("target,rate,expected", [
+    (" https://example.com/ ", None, 5), ("http://target.local/", None, None),
+    ("https://example.com/", 0, 0), ("http://target.local/", 0, 0),
+    ("https://example.com/", 12, 12), ("http://target.local/", 12, 12),
+])
+async def test_spider_resolves_and_logs_rate(monkeypatch, target, rate, expected):
+    server = SpiderServerContext([SpiderResultItem("ctx-1", None)])
+    patch_server_context(monkeypatch, server)
+    history = AsyncMock()
+    monkeypatch.setattr(resources, "log_tool_history", history)
+    monkeypatch.setattr(resources, "is_spider_time_recent", AsyncMock(return_value=False))
+    monkeypatch.setattr(resources, "get_additional_hosts", lambda ctx, additional=None: additional or {})
+    await resources.spider_website(ToolCtx(), target, rate_limit_requests_per_second=rate)
+    assert server.task_queue.put_items[0].rate_limit_requests_per_second == expected
+    assert history.call_args.kwargs["rate_limit_requests_per_second"] == expected
+    assert server.task_queue.put_items[0].uri == target.strip()
+
+
+@pytest.mark.asyncio
 async def test_spider_read_failure_does_not_start_another_scan(monkeypatch):
     server = SpiderServerContext()
     server.qdrant_client = SimpleNamespace(scroll=AsyncMock(side_effect=TimeoutError("read failed")))
@@ -459,7 +478,7 @@ async def test_spider_website_queues_work_requeues_other_context_and_collects_re
     monkeypatch.setattr(resources, "log_tool_history", noop)
     monkeypatch.setattr(resources, "get_server_context", get_server_context)
     monkeypatch.setattr(resources, "is_spider_time_recent", is_recent)
-    monkeypatch.setattr(resources, "get_rate_limit_requests_per_second", lambda url: 9)
+    monkeypatch.setattr(resources, "get_rate_limit_requests_per_second", lambda url, override=None: 9)
     monkeypatch.setattr(resources, "get_additional_hosts", lambda ctx, additional=None: additional or {})
 
     ctx = ToolCtx()
