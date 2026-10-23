@@ -2,28 +2,22 @@
 
 <img src="shyhurricane/assets/shyhurricane.png" alt="Hurricane picking padlock logo" width="150" style="float: left; margin-right:10px;" />
 
-ShyHurricane is an MCP server to assist AI in offensive security testing of web applications. It aims to solve a few problems observed with
-LLMs:
+ShyHurricane is an MCP server to assist AI in offensive security testing of web applications.
 
-1. Spidering and directory busting commands can be quite noisy and long-running. LLMs will go through a few iterations to pick a suitable command and options. The server provides spidering and busting tools to consistently provide the LLM with usable results.
-2. LLMs will also enumerate websites with many curl commands. The server saves and indexes responses to return data without contacting the website repeatedly. Large sites, common with bug bounty programs, are not efficiently enumerated with individual curl commands. 
-3. Port scans may take a long time causing the LLM to assume the scan has failed and issue a repeated scan. The port_scan tool provided by the server addresses this.
+Web application resources are stored in a vector database. Raw content may be retrieved by filters or embeddings. Relationships
+are mapped in a graph database for flow analysis. JavaScript is deobfuscated, reversed from source maps, graphed and
+SAST is run (opengrep). There is a simple finding database where SAST results are kept, and results from other tools
+such as Burp Suite and ZAP. LLMs are provided with several querying tools to help reason about the security of the
+application semantically.
 
-An important feature of the server is the indexing of website content using embedding models. The `find_web_resources` tool uses LLM prompts to find vulnerabilities specific to content type: html, javascript, css, xml, HTTP headers. The content is indexed when found by the tools. Content may also be indexed by feeding external data into the `/index` endpoint. Formats supported are `katana jsonl`, `hal json` and Burp Suite Logger++ CSV. The `ingest.py` script also converts Burp Suite request/response XML exports for indexing. Extensions exist for Burp Suite, ZAP, Firefox and Chrome to send requests to the server as the site is browsed.
+Resources are ingested using provided spider and busting tools, Burp Suite, ZAP, Chrome or Firefox extensions. REST
+`/index` and `/finding` endpoints are available for ingesting data too. Formats supported are `katana jsonl`, `hal json` and Burp Suite Logger++ CSV.
+The `ingest.py` script converts Burp Suite request/response XML exports for indexing.
 
 ## Documentation
 
 See the [documentation index](docs/README.md) for detailed guides and architecture, and
 [CONTRIBUTING.md](CONTRIBUTING.md) for development setup.
-
-## Runtime forensics skill
-
-The repository-local `$forensics` skill investigates ShyHurricane tracebacks, incorrect or incomplete
-results, and runtime efficiency using logs, persistent queues, graph artifacts, Qdrant, and Neo4j.
-For example: “Use $forensics to investigate why graph indexing stopped progressing after the
-latest ingestion.” It starts with bounded, read-only evidence collection and reports supported
-findings, uncertainties, and next steps. See [the skill](.agents/skills/forensics/SKILL.md) for the
-workflow and artifact inspection guide.
 
 ## Assessment prompts
 
