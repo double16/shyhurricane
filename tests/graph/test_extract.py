@@ -441,3 +441,131 @@ def test_summary_reports_existing_capture_limits_and_prioritizes_flows(event, bu
     if budget == "edges":
         assert any(edge["kind"] == "FLOWS_TO" for edge in graph.edges.values())
     assert all(edge["source"] in graph.nodes and edge["target"] in graph.nodes for edge in graph.edges.values())
+
+
+def test_svg_links_bases_scripts_and_css(event):
+    from unittest.mock import MagicMock
+
+    runner = MagicMock(return_value={"nodes": [], "edges": []})
+    graph = extract(event(url="https://example.com/art/icon.svg", mime="image/svg+xml", body="""
+    <s:svg xmlns:s="http://www.w3.org/2000/svg" xmlns:x="http://www.w3.org/1999/xlink"
+           xml:base="/assets/" onload="fetch('/ready')">
+      <s:g xml:base="nested/"><s:image href="new.png" x:href="old.png"/>
+      <s:use x:href="sprite.svg#icon"/><s:use href="#local"/>
+      <s:a href="/next#route"/><s:pattern href="pattern.svg"/>
+      <s:script href="app.js"/><s:script><![CDATA[fetch('/inline')]]></s:script>
+      <s:a href="javascript:fetch('/clicked')" onclick="fetch('/handler')"/>
+      <s:style>.icon {fill: url(texture.png)}</s:style><s:path fill="url(#paint)"
+          style="filter:url(filter.svg#blur)"/>
+      <s:script type="application/json">{"ignored":true}</s:script></s:g>
+    </s:svg>"""), javascript_runner=runner)
+    urls = {node.get("url") for node in graph.nodes.values() if node["kind"] == "resource"}
+    assert {
+        "https://example.com/assets/nested/new.png", "https://example.com/assets/nested/sprite.svg",
+        "https://example.com/next#route", "https://example.com/assets/nested/app.js",
+        "https://example.com/assets/nested/pattern.svg", "https://example.com/assets/nested/texture.png",
+        "https://example.com/assets/nested/filter.svg",
+    } <= urls
+    assert not any(url.endswith("old.png") for url in urls)
+    assert runner.call_count == 4
+    assert {call.args[0] for call in runner.call_args_list} == {
+        "fetch('/ready')", "fetch('/inline')", "fetch('/clicked')", "fetch('/handler')",
+    }
+    assert graph.contexts == [{"url": graph.url, "base": graph.url, "id": graph.event["id"]}]
+    assert {"NAVIGATES_TO", "LOADS", "RESOURCE_LINK"} <= kinds(graph)
+
+
+def test_inline_svg_uses_html_base_and_analyzes_scripts_once(event):
+    from unittest.mock import MagicMock
+
+    runner = MagicMock(return_value={"nodes": [], "edges": []})
+    graph = extract(event(body="""<html><base href="/assets/">
+      <svg xml:base="icons/" onload="fetch('/ready')"><g>
+        <a xlink:href="next"><text>Next</text></a><image href="icon.png"/>
+        <script>fetch('/inline')</script><svg><path onclick="fetch('/nested')"/></svg>
+      </g></svg></html>"""), javascript_runner=runner)
+    assert runner.call_count == 3
+    urls = {node.get("url") for node in graph.nodes.values()}
+    assert "https://example.com/assets/icons/icon.png" in urls
+    assert "https://example.com/assets/icons/next" in urls
+    assert graph.contexts[0]["base"] == "https://example.com/assets/"
+
+
+@pytest.mark.parametrize("body", ["<svg>", "", "<!DOCTYPE svg SYSTEM 'https://example.com/evil.dtd'><svg/>"])
+def test_svg_malformed_or_external_dtd_is_passive(event, body):
+    graph = extract(event(body=body, mime="image/svg"))
+    assert "HOSTED_AT" in kinds(graph)
+    assert not graph.analysis
+    if body in {"", "<svg>"}:
+        assert "Malformed SVG response" in graph.gaps
+
+
+def test_svg_does_not_resolve_entities_and_rejects_non_web_links(event, tmp_path):
+    secret = tmp_path / "entity.txt"
+    secret.write_text("fetch('/must-not-appear')")
+    sources = []
+    graph = extract(event(mime="image/svg+xml", body=f"""
+    <!DOCTYPE svg [<!ENTITY local SYSTEM "{secret.as_uri()}">]>
+    <svg><!-- comment --><script>&local;</script><image href="data:image/png,abc"/>
+    <a href="mailto:user@example.com"/><script type="module">fetch('/ok')</script></svg>
+    """), javascript_runner=lambda source, filename: sources.append(source) or {"nodes": [], "edges": []})
+    assert not any("must-not-appear" in source for source in sources)
+    assert "fetch('/ok')" in sources
+    assert not any(node.get("url", "").startswith(("data:", "mailto:")) for node in graph.nodes.values())
+
+
+def test_svg_element_and_response_budgets(event, monkeypatch):
+    graph = extract(event(mime="image/svg+xml", body="<svg>" + "<g/>" * 10001 + "</svg>"))
+    assert "SVG element budget reached" in graph.gaps
+    monkeypatch.setattr("shyhurricane.graph.extract.MAX_BYTES", 5)
+    graph = extract(event(mime="image/svg+xml", body="<svg><image href='/skip'/></svg>"))
+    assert "Response exceeds 40 MiB analysis limit" in graph.gaps
+    assert not any(node.get("url", "").endswith("/skip") for node in graph.nodes.values())
+
+
+def test_svg_analyzer_failure_preserves_links(event):
+    def fail(*args):
+        raise ValueError("bad script")
+
+    graph = extract(event(mime="image/svg+xml", body="<svg onload='bad()'><image href='/image'/></svg>"),
+                    javascript_runner=fail)
+    assert "LOADS" in kinds(graph)
+    assert "JavaScript analysis unavailable: ValueError" in graph.gaps
+
+
+def test_external_script_uses_svg_document_context(graph_paths, event):
+    from shyhurricane.graph.artifacts import ArtifactStore
+
+    artifacts = ArtifactStore("db")
+    svg = event(url="https://example.com/drawing.svg", mime="image/svg+xml", body="<svg><script href='/app.js'/></svg>")
+    script = event(url="https://example.com/app.js", mime="text/javascript", body="fetch('/api')")
+    artifacts.register(svg)
+    artifacts.register(script)
+    extract(svg, artifacts)
+    consumers, truncated = artifacts.consuming_documents(script["data"]["url"])
+    assert [item["id"] for item in consumers] == [svg["id"]]
+    assert not truncated
+    graph = extract(script, artifacts, javascript_runner=lambda *args: {"nodes": [], "edges": []})
+    assert graph.contexts == [{"url": svg["data"]["url"], "base": svg["data"]["url"], "id": svg["id"]}]
+    artifacts.close()
+
+
+@pytest.mark.parametrize("inline", [False, True])
+def test_svg_javascript_real_analyzer_emits_request_edges(event, javascript_runner, inline):
+    body = """<svg xmlns="http://www.w3.org/2000/svg" onload="fetch('/ready')">
+    <script>fetch('/script')</script><a href="javascript:fetch('/clicked')">go</a></svg>"""
+    graph = extract(event(body=f"<html>{body}</html>" if inline else body,
+                          mime="text/html" if inline else "image/svg+xml"),
+                    javascript_runner=javascript_runner)
+    requests = [edge for edge in graph.edges.values() if edge["kind"] == "REQUESTS"]
+    assert {graph.nodes[edge["target"]]["url"] for edge in requests} >= {
+        "https://example.com/ready", "https://example.com/script", "https://example.com/clicked",
+    }
+
+
+def test_inline_svg_css_and_non_javascript_scripts(event):
+    graph = extract(event(body="""<svg><style>.x {fill:url('/paint.svg')}</style>
+    <script type="application/json">{}</script><script></script><use href="#local"/></svg>"""))
+    assert "LOADS" in kinds(graph)
+    assert not graph.analysis
+    assert any(node.get("url") == "https://example.com/paint.svg" for node in graph.nodes.values())

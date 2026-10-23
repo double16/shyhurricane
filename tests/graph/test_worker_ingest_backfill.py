@@ -259,3 +259,24 @@ def test_explicit_zero_budget_stops_even_when_merged_chain_is_empty(graph_paths,
     worker.graph_worker("db", "graph", MagicMock(), MagicMock(), False)
     store.publish.assert_called_once()
     queue.put.assert_not_called()
+
+
+@pytest.mark.parametrize("svg_first", [True, False])
+def test_svg_external_script_reconciliation_in_both_arrival_orders(graph_paths, event, svg_first):
+    from shyhurricane.graph.extract import extract
+
+    artifacts = ArtifactStore("db")
+    svg = event(url="https://example.com/drawing.svg", mime="image/svg+xml",
+                body="<svg><script href='/app.js'/></svg>")
+    script = event(url="https://example.com/app.js", mime="text/javascript", body="fetch('/api')")
+    first, second = (svg, script) if svg_first else (script, svg)
+    scheduler = MagicMock()
+    artifacts.register(first)
+    extract(first, artifacts, javascript_runner=lambda *args: {"nodes": [], "edges": []})
+    worker.complete_capture(artifacts, scheduler, first, "full", first)
+    scheduler.reset_mock()
+    artifacts.register(second)
+    extract(second, artifacts, javascript_runner=lambda *args: {"nodes": [], "edges": []})
+    worker.complete_capture(artifacts, scheduler, second, "full", second)
+    assert first["id"] in {call.args[0] for call in scheduler.request.call_args_list}
+    artifacts.close()

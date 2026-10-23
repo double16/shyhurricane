@@ -28,6 +28,12 @@ recovery margins are met: 4% and 2.5 GiB by default. Dependency readiness and lo
 still apply. The guard measures only the data-directory filesystem, not separately mounted
 caches or remote database storage.
 
+On macOS, free space includes purgeable capacity that macOS expects to reclaim for writing,
+using its available-capacity-for-important-usage estimate. The same combined value appears as
+free space in the terminal monitor and `/status`, and controls indexing pause and recovery.
+The monitor does not force reclamation. If the macOS query is unavailable or fails, it falls
+back to ordinary filesystem free space. Other platforms use ordinary free space.
+
 | Environment variable | Default | Description |
 |----------------------|---------|-------------|
 | `DISK_MIN_FREE_PERCENT` | `3` | Pause below this free percentage; `0` disables this limit |

@@ -10,11 +10,13 @@ from http.cookies import CookieError, SimpleCookie
 from urllib.parse import parse_qsl, urlsplit
 
 from bs4 import BeautifulSoup
+from lxml import etree
 
 from shyhurricane.graph.analyzer_diagnostics import stderr_summary
 from shyhurricane.graph.artifacts import recovered_sources
 from shyhurricane.graph.model import MAX_BYTES, Projection, identity, web_url
 from shyhurricane.graph.policy import ANALYZER_VERSION, library_analysis
+from shyhurricane.graph.svg import extract_svg, is_svg, svg_root
 from shyhurricane.index.javascript_analysis import javascript_url_from_map, source_map_url
 from shyhurricane.utils import unix_command_image
 
@@ -235,6 +237,10 @@ def extract(
             if index >= 10000:
                 graph.gaps.append("HTML element budget reached")
                 break
+            if tag.name == "svg" and tag.find_parent("svg") is None:
+                extract_svg(tag, graph, page, reference, scripts, base, inline=True, prefix=f"html:{index}:svg")
+            if tag.name == "svg" or tag.find_parent("svg") is not None:
+                continue
             locator = f"html:{index}:{tag.name}"
             owner = (
                 (soup.find("form", id=tag["form"]) if tag.get("form") else None)
@@ -322,6 +328,12 @@ def extract(
             for name, value in tag.attrs.items():
                 if name.startswith("on") and isinstance(value, str):
                     scripts.append((f"{locator}:{name}", value))
+    elif is_svg(mime):
+        base = graph.url
+        try:
+            extract_svg(svg_root(body), graph, page, reference, scripts, base)
+        except etree.XMLSyntaxError:
+            graph.gaps.append("Malformed SVG response")
     elif "javascript" in mime or urlsplit(graph.url).path.lower().endswith((".js", ".mjs", ".jsx", ".ts", ".tsx")):
         source_map = (
             artifacts.source_map(
@@ -401,7 +413,7 @@ def extract(
                 else runner(source, filename)
             )
             contexts = []
-            if "html" in mime:
+            if "html" in mime or is_svg(mime):
                 contexts.append({"url": graph.url, "base": base, "id": event["id"]})
             elif document_contexts is not None:
                 contexts.extend(document_contexts)
@@ -412,7 +424,9 @@ def extract(
                 for dependent in documents:
                     captured = dependent["data"]
                     headers = {key.lower(): value for key, value in captured.get("response_headers", {}).items()}
-                    if "html" in headers.get("content-type", ""):
+                    if is_svg(headers.get("content-type", "")):
+                        contexts.append({"url": captured["url"], "id": dependent["id"], "base": captured["url"]})
+                    elif "html" in headers.get("content-type", ""):
                         soup = BeautifulSoup(captured.get("response_body") or "", "html.parser")
                         base_tag = soup.find("base", href=True)
                         contexts.append(

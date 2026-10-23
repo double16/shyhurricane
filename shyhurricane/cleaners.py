@@ -1,12 +1,12 @@
+import html
 import json
 import logging
 import re
-
-from lxml import etree
-import html
-from bs4 import BeautifulSoup, Doctype
 from collections import OrderedDict
+
 import json5
+from bs4 import BeautifulSoup, Doctype
+from lxml import etree
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 def normalize_xml(xml: str) -> str:
     parser = etree.XMLParser(remove_blank_text=True, resolve_entities=False, recover=True)
     tree = etree.fromstring(xml, parser)
-    return etree.tostring(tree, pretty_print=True, encoding="utf-8", xml_declaration=True)
+    return etree.tostring(tree, pretty_print=True, encoding="utf-8", xml_declaration=True).decode("utf-8")
 
 
 DYNAMIC_ATTRS = {"nonce", "data-reactroot", "data-hydration-id"}

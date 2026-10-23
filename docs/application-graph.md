@@ -258,6 +258,19 @@ path count, loaded memberships, elapsed time, and limiting reasons.
 
 ## Inference coverage and limits
 
+Standalone SVG responses (`image/svg+xml` and `image/svg`) and inline SVG in HTML contribute
+navigation links, resource references, CSS URL dependencies, embedded scripts, and JavaScript
+handlers. Both `href` and `xlink:href` are supported; `href` takes precedence. Relative markup
+references honor inherited `xml:base` and the HTML document base where applicable. External
+scripts use the containing SVG document as their JavaScript context.
+
+SVG XML parsing disables external entities, DTD loading, and network access. Malformed SVG
+retains HTTP evidence and reports an analysis gap. SVG traversal stops at 10,000 elements and
+uses the existing response-size limit. Analysis is static: rendering, SMIL simulation, and
+embedded `data:` resource decoding are not supported, and script evidence does not prove
+execution in a browser. This applies to subsequently processed captures; completed captures
+are not automatically replayed.
+
 HTML analysis extracts links, forms, submission overrides, fields, base URLs, frames, inline scripts,
 event handlers, import maps, resource dependencies, and refresh navigation. HTTP analysis uses
 redirects, Referer, Origin, Fetch Metadata, request parameter names, and typed Link headers.

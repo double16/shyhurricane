@@ -582,3 +582,19 @@ def test_relocated_legacy_checkpoints_resume_and_cleanup(jobs, event, monkeypatc
     jobs.finish(key, loaded)
     assert not (moved / projection.name).exists()
     assert jobs.load(key)["stage"] == "complete"
+
+
+def test_discovery_includes_standalone_svg_document(jobs, event):
+    capture = script(event)
+    svg = event(url="https://example.com/drawing.svg", mime="image/svg+xml; charset=utf-8",
+                body="<svg><script href='/app.js'/></svg>")
+    for item in [capture, svg]:
+        jobs.artifacts.register(item)
+    extract(svg, jobs.artifacts)
+    key = jobs.enqueue(capture, capture, False)
+    state = jobs.load(key)
+    jobs.discover(state)
+    assert state["stage"] == "extract"
+    assert state["contexts"] == {
+        svg["id"]: {"id": svg["id"], "url": svg["data"]["url"], "base": svg["data"]["url"]},
+    }

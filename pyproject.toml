@@ -14,6 +14,7 @@ license = { text = "GPL-3.0-or-later" }
 requires-python = ">=3.12"
 # see requirements.txt
 dependencies = [
+    "pyobjc-framework-Cocoa>=12.2.2,<13; sys_platform == 'darwin'",
     "neo4j>=6.4,<7",
     "haystack-ai>=3.3,<3.5",
     "sentence-transformers-haystack~=0.2.0",

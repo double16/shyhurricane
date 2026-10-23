@@ -188,6 +188,32 @@ def test_normalize_documents_handles_html_json_css_and_cleaner(monkeypatch):
     assert all(doc.meta.get("normalized") for doc in result[:4])
 
 
+def test_normalize_documents_handles_real_svg():
+    doc = Document(
+        content='<svg xmlns="http://www.w3.org/2000/svg"><title>Café</title></svg>',
+        meta={"type": "content", "content_type": "image/svg+xml", "response_headers": "{}"},
+    )
+
+    result = wrp.NormalizeDocuments(object(), {"content": Store()}).run([doc])["documents"][0]
+
+    assert isinstance(result.content, str)
+    assert "Café" in result.content
+    assert result.content.startswith("<?xml")
+    assert result.meta["normalized"] is True
+    assert json.loads(result.meta["response_headers"])["Content-Length"] == str(len(result.content))
+
+
+def test_normalize_documents_preserves_unrecoverable_xml(caplog):
+    doc = Document(content="", meta={"type": "content", "content_type": "application/xml"})
+
+    result = wrp.NormalizeDocuments(object(), {"content": Store()}).run([doc])["documents"][0]
+
+    assert result is doc
+    assert result.content == ""
+    assert "normalized" not in result.meta
+    assert "Normalizing content failed, continuing with original content" in caplog.text
+
+
 def test_filter_existing_documents_by_id_and_doc_type():
     missing_type = Document(content="x", id="missing", meta={})
     no_id = Document(content="x", meta={"type": "content"})
@@ -358,6 +384,31 @@ def test_suffix_id_splitter_rejects_missing_content_and_invalid_parameters():
         wrp.SuffixIdSplitter().run(documents=[Document(id="empty")])
     with pytest.raises(ValueError):
         wrp.SuffixIdSplitter(split_length=0)
+
+
+@pytest.mark.parametrize("doc_type,mime,expected_collections", [
+    ("finding", "text/x-finding", {"finding_256"}),
+    ("html", "text/html", {"html", "html_256"}),
+])
+def test_index_doc_type_documents_keeps_finding_primary_for_originals(doc_type, mime, expected_collections):
+    embedder = Embedder()
+    sparse = Embedder()
+    stores = {name: Store() for name in ("finding", "finding_256", "html", "html_256")}
+    component = wrp.IndexDocTypeDocuments(
+        {"default": embedder, doc_type: embedder}, sparse, wrp.IngestMultiStore(stores),
+    )
+    component.warm_up()
+    doc = Document(id="original", content="Finding evidence", meta={
+        "url": "https://example.com/", "content_type": mime,
+        "timestamp": "2026-10-23T12:41:00", "finding_fingerprint": "example-fingerprint",
+    })
+
+    component.run([doc])
+
+    assert {name for name, store in stores.items() if store.written} == expected_collections
+    assert stores["finding"].written == []
+    assert embedder.documents
+    assert all(document.meta["type"] == doc_type for document in embedder.documents)
 
 
 def test_index_doc_type_documents_splits_embeds_and_stores(monkeypatch):

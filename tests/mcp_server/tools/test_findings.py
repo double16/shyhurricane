@@ -149,18 +149,20 @@ class FakeRequest:
 
 
 @pytest.mark.asyncio
-async def test_save_finding_api_accepts_jsonl_and_form(monkeypatch):
+@pytest.mark.parametrize("parameters", ["", "; charset=utf-8", '; charset="UTF-8"'])
+@pytest.mark.parametrize("json_type", ["application/json", "text/json", "Application/JSON "])
+async def test_save_finding_api_accepts_jsonl_and_form(monkeypatch, parameters, json_type):
     ctx = ServerContext()
     patch_context(monkeypatch, ctx)
     json_request = FakeRequest(
-        "application/json",
+        f"{json_type}{parameters}",
         [
             (json.dumps({"target": "https://example.com/a", "title": "A", "markdown": "# A"}) + "\n").encode(),
             (json.dumps({"targets": ["example.com"], "title": "B", "markdown": "# B"}) + "\n").encode(),
         ],
     )
     form_request = FakeRequest(
-        "application/x-www-form-urlencoded",
+        f"application/x-www-form-urlencoded{parameters}",
         form_data={"targets": ["example.com"], "title": "C", "markdown": "# C"},
     )
 
@@ -173,14 +175,38 @@ async def test_save_finding_api_accepts_jsonl_and_form(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_save_finding_api_rejects_bad_input(monkeypatch):
-    patch_context(monkeypatch, ServerContext())
+async def test_save_finding_api_accepts_json_with_charset(monkeypatch):
+    ctx = ServerContext()
+    patch_context(monkeypatch, ctx)
+    request = FakeRequest(
+        "application/json; charset=utf-8",
+        [json.dumps({"target": "example.com", "title": "Finding", "markdown": "# Café"},
+                    ensure_ascii=False).encode("utf-8")],
+    )
 
-    assert (await findings.save_finding_api(FakeRequest("text/plain"))).status_code == 400
-    assert (await findings.save_finding_api(FakeRequest("application/json", [b"{bad"]))).status_code == 400
+    response = await findings.save_finding_api(request)
+
+    assert response.status_code == 201
+    assert len(ctx.finding_queue.items) == 1
+    assert ctx.finding_queue.items[0].markdown == "# Café"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content_type", [
+    "", "text/plain", "text/plain; charset=utf-8", "application/json-invalid; charset=utf-8",
+])
+async def test_save_finding_api_rejects_bad_input(monkeypatch, content_type):
+    ctx = ServerContext()
+    patch_context(monkeypatch, ctx)
+
+    assert (await findings.save_finding_api(FakeRequest(content_type))).status_code == 400
+    assert (await findings.save_finding_api(
+        FakeRequest("application/json; charset=utf-8", [b"{bad"])
+    )).status_code == 400
     assert (await findings.save_finding_api(
         FakeRequest("application/json", [json.dumps({"target": "", "markdown": ""}).encode()])
     )).status_code == 400
+    assert not ctx.finding_queue.items
 
 
 @pytest.mark.asyncio

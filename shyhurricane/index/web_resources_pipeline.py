@@ -542,6 +542,9 @@ class IndexDocTypeDocuments:
 
             embedder = self.embedders.get(doc_type, self.embedders["default"])
             for token_length in (self._doc_type_to_model.get(doc_type).token_lengths or [sys.maxsize]):
+                # The finding worker already saves the complete document in the primary collection.
+                if doc_type == "finding" and token_length == sys.maxsize:
+                    continue
                 # create docs per token_length
                 new_doc = Document(
                     content=doc.content.decode("utf-8", errors="ignore") if isinstance(doc.content, bytes) else str(doc.content),

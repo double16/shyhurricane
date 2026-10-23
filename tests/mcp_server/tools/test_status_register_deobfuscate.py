@@ -230,11 +230,16 @@ async def test_status_includes_cached_disk_snapshot(monkeypatch):
     from shyhurricane.server_config import ServerConfig
 
     guard = DiskSpaceGuard("/data", ServerConfig())
+    monkeypatch.setattr("shyhurricane.disk_space._disk_capacity", lambda path: (100 * 1024**3, 8 * 1024**3))
+    assert guard.check()
     context = StatusServerContext()
     context.health_monitor = SimpleNamespace(disk_guard=guard)
     monkeypatch.setattr(status_tool, "get_server_context", AsyncMock(return_value=context))
     monkeypatch.setattr(status_tool, "persistent_queue_counts", AsyncMock(return_value=queue_counts(4, 0)))
     monkeypatch.setattr(status_tool, "get_domain_and_host_counts", AsyncMock(return_value=({}, {})))
-    monkeypatch.setattr("shyhurricane.disk_space.shutil.disk_usage", lambda path: pytest.fail("status probed disk"))
+    monkeypatch.setattr("shyhurricane.disk_space._disk_capacity", lambda path: pytest.fail("status probed disk"))
     response = await status_tool.status(None)
-    assert json.loads(response.body)["disk"] == guard.snapshot()
+    snapshot = json.loads(response.body)["disk"]
+    assert snapshot == guard.snapshot()
+    assert snapshot["free_bytes"] == 8 * 1024**3
+    assert snapshot["free_percent"] == 8
