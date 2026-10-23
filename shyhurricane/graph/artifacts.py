@@ -15,6 +15,7 @@ from urllib.parse import unquote
 
 from shyhurricane.graph.artifact_paths import artifact_reference, resolve_artifact_path
 from shyhurricane.graph.model import MAX_BYTES, identity
+from shyhurricane.graph.svg import is_svg
 from shyhurricane.persistent_queue import persistent_queue_path
 
 logger = logging.getLogger(__name__)
@@ -136,7 +137,7 @@ class ArtifactStore:
                 data = event["data"]
                 headers = {key.lower(): value for key, value in data.get("response_headers", {}).items()}
                 mime = headers.get("content-type", "")
-                if "html" in mime:
+                if "html" in mime or is_svg(mime):
                     documents[event["id"]] = event
                 elif "javascript" in mime or data["url"].split("?", 1)[0].endswith((".js", ".mjs")):
                     pending.append(data["url"])

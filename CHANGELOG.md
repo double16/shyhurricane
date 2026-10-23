@@ -3,7 +3,8 @@
 ## Unreleased
 
 ### Features
-
+- Analyze standalone and inline SVG links, resources, scripts, and event handlers in the
+  application graph, including SVG document context for external scripts.
 - Add indexed `site:`, `inurl:`, and `filetype:`/`ext:` predicates to `query_findings`, with
   tuned hostname-suffix, extension, scheme, and URL-trigram indexes. Replaced `target` with `query`
   and consider any non-predicate text as search for embedding vectors.
@@ -43,7 +44,10 @@
   Accept scoped targets and optional analysis/active modes; render workflows without executing tools.
 
 ### Fixes
-
+- Include macOS purgeable capacity in reported free space and indexing disk readiness, using
+  PyObjC with an ordinary-free-space fallback when the native estimate is unavailable.
+- Return normalized XML and SVG content as text so ingestion accepts it instead of failing
+  Haystack document validation.
 - Support Google GenAI Haystack 7.0 client warm-up and cleanup, using upstream retry
   configuration with ten total attempts and the SDK default backoff multiplier of 2.0.
 - Start the server while Qdrant is unavailable and retry collection initialization in background

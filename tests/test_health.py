@@ -77,7 +77,7 @@ def test_disk_gate_combines_dependencies_without_resetting_hysteresis(monkeypatc
     from shyhurricane.server_config import ServerConfig
 
     capacity = SimpleNamespace(total=100 * 1024**3, free=1024**3)
-    monkeypatch.setattr("shyhurricane.disk_space.shutil.disk_usage", lambda path: capacity)
+    monkeypatch.setattr("shyhurricane.disk_space._disk_capacity", lambda path: (capacity.total, capacity.free))
     dependencies = [True]
     guard = DiskSpaceGuard("/data", ServerConfig())
     monitor = health.HealthMonitor(lambda: dependencies[0], lambda: True, disk_guard=guard)

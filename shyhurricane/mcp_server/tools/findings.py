@@ -284,7 +284,8 @@ async def save_finding_api(request: Request) -> Response:
     """
     findings: List[FindingInput] = []
 
-    if request.headers.get("Content-Type") in ["application/json", "text/json"]:
+    content_type = request.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+    if content_type in ["application/json", "text/json"]:
         jsonl: List[Dict[str, Any]] = []
 
         # try to parse jsonl first
@@ -316,7 +317,7 @@ async def save_finding_api(request: Request) -> Response:
                 title = parsed_json.get("title", "")
             findings.append(FindingInput(title=title.strip(), markdown=markdown.strip(), targets=targets))
 
-    elif request.headers.get("Content-Type") == "application/x-www-form-urlencoded":
+    elif content_type == "application/x-www-form-urlencoded":
         try:
             form = await request.form()
             targets = form.get("targets", form.get("target", ""))

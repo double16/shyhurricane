@@ -13,6 +13,7 @@ from shyhurricane.graph.publication import PublicationConflict
 from shyhurricane.graph.queue_receipts import QueueReceipts
 from shyhurricane.graph.retry_policy import transient_neo4j_error
 from shyhurricane.graph.scheduling import MAX_RECONCILE_CAPTURES, ReanalysisScheduler
+from shyhurricane.graph.svg import is_svg
 from shyhurricane.index.javascript_analysis import javascript_url_from_map
 from shyhurricane.persistent_queue import get_persistent_queue, persistent_queue_get
 from shyhurricane.task_queue.types import prepare_worker_process
@@ -38,7 +39,7 @@ def complete_capture(artifacts, scheduler, event, mode, item):
                     seen.add(dependent["id"])
     headers = {key.lower(): value for key, value in event["data"].get("response_headers", {}).items()}
     mime = headers.get("content-type", "")
-    if remaining > 0 and ("html" in mime or "javascript" in mime):
+    if remaining > 0 and ("html" in mime or "javascript" in mime or is_svg(mime)):
         for target in artifacts.targets(event["id"]):
             if target["id"] not in seen:
                 scheduler.request(target["id"], chain, remaining - 1)

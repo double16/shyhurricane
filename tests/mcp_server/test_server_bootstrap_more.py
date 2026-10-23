@@ -150,8 +150,8 @@ async def test_same_tool_stays_visible_until_all_calls_finish_or_cancel(monkeypa
 async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path, pipeline_error, compose):
     monkeypatch.setattr(server_context, "_server_context", None)
     monkeypatch.setattr(
-        "shyhurricane.disk_space.shutil.disk_usage",
-        lambda path: SimpleNamespace(total=100 * 1024**3, free=10 * 1024**3),
+        "shyhurricane.disk_space._disk_capacity",
+        lambda path: (100 * 1024**3, 10 * 1024**3),
     )
     if compose:
         monkeypatch.setenv("TOOL_CACHE", str(tmp_path))

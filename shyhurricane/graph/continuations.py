@@ -12,6 +12,7 @@ from shyhurricane.graph.links import LinkPlanner
 from shyhurricane.graph.model import identity, projection_snapshot, restore_projection, web_url
 from shyhurricane.graph.publication import PublicationConflict
 from shyhurricane.graph.retry_policy import transient_neo4j_error
+from shyhurricane.graph.svg import is_svg
 from shyhurricane.index.javascript_analysis import javascript_url_from_map
 
 logger = logging.getLogger(__name__)
@@ -129,7 +130,11 @@ class Continuations:
                 data = event["data"]
                 headers = {key.lower(): value for key, value in data.get("response_headers", {}).items()}
                 mime = headers.get("content-type", "").lower()
-                if "html" in mime:
+                if is_svg(mime):
+                    state["contexts"][capture_id] = {
+                        "id": capture_id, "url": data["url"], "base": data["url"],
+                    }
+                elif "html" in mime:
                     base = BeautifulSoup(
                         data.get("response_body") or "", "html.parser", parse_only=SoupStrainer("base")
                     ).find("base", href=True)

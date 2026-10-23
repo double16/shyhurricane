@@ -4,6 +4,7 @@ import logging
 import math
 import os
 import shutil
+import sys
 import threading
 import time
 
@@ -15,6 +16,36 @@ DISK_DEFAULTS = {
     "disk_resume_margin_percent": 1.0,
     "disk_resume_margin_bytes": 512 * 1024**2,
 }
+
+
+def _macos_available_capacity(path):
+    """Read writable capacity, including purgeable resources, on this path's volume."""
+    from Foundation import NSURL, NSURLVolumeAvailableCapacityForImportantUsageKey
+    from objc import autorelease_pool
+
+    with autorelease_pool():
+        url = NSURL.fileURLWithPath_(os.path.abspath(path))
+        values, error = url.resourceValuesForKeys_error_(
+            [NSURLVolumeAvailableCapacityForImportantUsageKey], None,
+        )
+        if error is not None or values is None:
+            return None
+        return values.get(NSURLVolumeAvailableCapacityForImportantUsageKey)
+
+
+def _disk_capacity(path):
+    """Return total and available bytes, falling back to ordinary free space."""
+    usage = shutil.disk_usage(path)
+    free = usage.free
+    if sys.platform == "darwin":
+        try:
+            available = _macos_available_capacity(path)
+            if isinstance(available, int) and not isinstance(available, bool) and 0 <= available <= usage.total:
+                free = available
+        except Exception:
+            # A bridge or unsupported-volume failure must not disable the ordinary disk guard.
+            logger.debug("macOS writable-capacity query failed; using ordinary free space", exc_info=True)
+    return usage.total, free
 
 
 def validate_disk_config(config):
@@ -63,18 +94,18 @@ class DiskSpaceGuard:
         snapshot = self.snapshot()
         snapshot.update(checked_at=time.time(), error=None)
         try:
-            usage = shutil.disk_usage(self.path)
-            if usage.total <= 0:
+            total, free = _disk_capacity(self.path)
+            if total <= 0:
                 raise OSError("Filesystem reports zero total capacity")
-            percent = usage.free * 100 / usage.total
+            percent = free * 100 / total
             percent_limit = self._limits["min_free_percent"]
             byte_limit = self._limits["min_free_bytes"]
             margin = self._paused
             sufficient = (
                 (not percent_limit or percent >= percent_limit + margin * self._limits["resume_margin_percent"])
-                and (not byte_limit or usage.free >= byte_limit + margin * self._limits["resume_margin_bytes"])
+                and (not byte_limit or free >= byte_limit + margin * self._limits["resume_margin_bytes"])
             )
-            snapshot.update(total_bytes=usage.total, free_bytes=usage.free, free_percent=percent)
+            snapshot.update(total_bytes=total, free_bytes=free, free_percent=percent)
             self._paused = not sufficient
         except OSError as error:
             self._paused = True

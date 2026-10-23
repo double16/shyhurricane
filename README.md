@@ -126,6 +126,8 @@ metadata version; existing records are not migrated. See the tool reference for 
 HTTP `/findings` and MCP `save_finding` submissions are committed to the persistent
 `scan_finding_queue` before success is returned. Pending submissions survive restarts; processing
 failures remain available for retry using the dashboard. Searchability follows asynchronously.
+The `/findings` endpoint accepts `application/json`, `text/json`, and
+`application/x-www-form-urlencoded`, including parameters such as `charset=utf-8`.
 
 Finding submissions are deduplicated asynchronously before saving, across MCP, HTTP, and JavaScript
 scanner inputs. Repeated Markdown for the same target keeps the first saved finding, including its
@@ -146,6 +148,7 @@ content retrieval, and indexing-status fields.
 Explore captured resources, forms, fields, scripts, routes, and possible data flows using the
 read-only application graph tools. Start with `find_application_endpoints`, inspect focused elements
 and relationships, then trace data flow or possible user journeys and review the supporting evidence.
+Standalone and inline SVG analysis extracts links, resource dependencies, scripts, and event handlers.
 The tools work in low-power mode and do not contact targets. Graph paths are investigation candidates;
 inspect their evidence before treating them as confirmed vulnerabilities.
 
@@ -347,6 +350,8 @@ The MCP tools will index data if appropriate. For example, spidering and directo
 Indexing runs asynchronously and pauses when dependencies are unhealthy or disk space is low.
 Incoming submissions remain queued, and indexing resumes when readiness recovers. JavaScript is
 transformed and scanned during ingestion; findings are available through `query_findings`.
+On macOS, reported free space and disk readiness include capacity macOS expects to reclaim from
+purgeable resources, falling back to ordinary free space if that estimate is unavailable.
 
 See [ingestion architecture and operations](docs/ingestion.md) for dependency readiness, disk-space
 configuration, JavaScript scanning, queue durability, storage formats, and maintenance.
