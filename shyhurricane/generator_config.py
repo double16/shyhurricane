@@ -5,8 +5,6 @@ from math import ceil
 from typing import Any, Dict, List, Optional
 
 import requests
-from google.genai import Client
-from google.genai.types import HttpOptions, HttpRetryOptions
 from haystack import Document, component
 from haystack.components.generators.chat import OpenAIChatGenerator
 from haystack.core.component import Component
@@ -66,29 +64,6 @@ TEMPERATURE_DEFAULT: float = 0.2
 OLLAMA_HOST_DEFAULT = "localhost:11434"
 
 
-class GoogleGenAIChatGeneratorWithRetry(GoogleGenAIChatGenerator):
-    def __init__(self,
-                 api_key: Secret = Secret.from_env_var(["GOOGLE_API_KEY", "GEMINI_API_KEY"], strict=True),
-                 **kwargs):
-        super().__init__(api_key=api_key, **kwargs)
-        original_client = self._client
-        try:
-            self._client = Client(
-                api_key=api_key.resolve_value(),
-                http_options=HttpOptions(
-                    retry_options=HttpRetryOptions(
-                        attempts=10,
-                        exp_base=4.0,
-                    )
-                ),
-            )
-        finally:
-            original_client.close()
-
-    def close(self):
-        self._client.close()
-
-
 @component
 class ChatGeneratorCompatibilityWrapper(GeneratorLifecycle):
     def __init__(self, chat_generator):
@@ -121,7 +96,8 @@ class ChatGeneratorCompatibilityWrapper(GeneratorLifecycle):
 @component
 class GoogleGenAIGeneratorWithRetry(GeneratorLifecycle):
     def __init__(self, *args, **kwargs):
-        self._initialize_lifecycle(GoogleGenAIChatGeneratorWithRetry(*args, **kwargs))
+        kwargs.setdefault("max_retries", 10)
+        self._initialize_lifecycle(GoogleGenAIChatGenerator(*args, **kwargs))
 
     @component.output_types(replies=List[str])
     def run(

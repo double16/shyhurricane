@@ -44,6 +44,8 @@
 
 ### Fixes
 
+- Support Google GenAI Haystack 7.0 client warm-up and cleanup, using upstream retry
+  configuration with ten total attempts and the SDK default backoff multiplier of 2.0.
 - Start the server while Qdrant is unavailable and retry collection initialization in background
   health checks. Keep indexing workers paused until database readiness recovers.
 - Close the ingestion exporter's Qdrant client explicitly; installed client versions do not
