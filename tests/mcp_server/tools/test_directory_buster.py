@@ -1,9 +1,11 @@
 import queue
+from unittest.mock import AsyncMock
 
 import pytest
 
 import shyhurricane.mcp_server.tools.directory_buster as directory
 from shyhurricane.mcp_server.tools.find_wordlists import FindWordlistsResult
+from shyhurricane.rate_limit import get_rate_limit_requests_per_second
 from shyhurricane.task_queue import DirBustingResultItem
 
 
@@ -63,7 +65,7 @@ def patch_context(monkeypatch, server_context):
     monkeypatch.setattr(directory, "log_tool_history", noop)
     monkeypatch.setattr(directory, "get_additional_hosts", lambda ctx, additional=None: additional or {})
     monkeypatch.setattr(directory, "get_additional_http_headers", lambda ctx, headers=None: headers or {})
-    monkeypatch.setattr(directory, "get_rate_limit_requests_per_second", lambda url: 7)
+    monkeypatch.setattr(directory, "get_rate_limit_requests_per_second", lambda url, override=None: 7)
 
 
 def test_dirbuster_instructions():
@@ -75,6 +77,24 @@ def test_dirbuster_instructions():
     assert directory.dirbuster_instructions(["https://example.com/admin"], True).endswith(
         directory.dirbuster_results_instructions_has_more
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("target,rate,expected", [
+    (" https://example.com/ ", None, 5), ("http://target.local/", None, None),
+    ("https://example.com/", 0, 0), ("http://target.local/", 0, 0),
+    ("https://example.com/", 12, 12), ("http://target.local/", 12, 12),
+])
+async def test_directory_buster_resolves_and_logs_rate(monkeypatch, target, rate, expected):
+    server = ServerContext([DirBustingResultItem("ctx-1", None)])
+    patch_context(monkeypatch, server)
+    history = AsyncMock()
+    monkeypatch.setattr(directory, "log_tool_history", history)
+    monkeypatch.setattr(directory, "get_rate_limit_requests_per_second", get_rate_limit_requests_per_second)
+    await directory.directory_buster(Ctx(), target, rate_limit_requests_per_second=rate)
+    assert server.task_queue.put_items[0].rate_limit_requests_per_second == expected
+    assert history.call_args.kwargs["rate_limit_requests_per_second"] == expected
+    assert server.task_queue.put_items[0].uri == target.strip()
 
 
 @pytest.mark.asyncio

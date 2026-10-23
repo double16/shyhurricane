@@ -2,6 +2,35 @@
 
 [README](../README.md) · [Documentation index](README.md)
 
+## Scan rate limits
+
+`spider_website` and `directory_buster` accept optional `rate_limit_requests_per_second`.
+Only non-negative integers or `null` are accepted; booleans, strings, fractions, and negative
+values are rejected before work is queued.
+
+| Input | Public target | Non-public target |
+|-------|---------------|-------------------|
+| Omitted or `null` | 5 requests/second | Preserve scanner defaults |
+| Positive integer | Use supplied requests/second | Use supplied requests/second |
+| `0` | Katana 3000 requests/second; directory busting unlimited | Katana 3000 requests/second; directory busting unlimited |
+
+The budget applies independently to each scan. Public targets are registrable public domains
+or globally routable IP literals, including IPv6. Detection uses the URL hostname/IP without
+DNS resolution and does not consider registered hostname address overrides.
+
+Katana receives no rate flag when the resolved limit is absent, preserving its built-in default.
+Explicit zero maps to 3000 requests/second because Katana 1.5.0 crashes with a literal zero.
+This is a high finite ceiling, rather than truly unlimited crawling, and requires no Katana patch.
+Positive limits use Katana's requests/second flag. Directory busting
+uses feroxbuster's rate limit with one active directory scan for positive limits, or ffuf's
+requests/second flag for FUZZ scans. Explicit zero also disables feroxbuster auto-tuning;
+omitted non-public limits retain its existing auto-tuning behavior.
+
+Rate limiting uses each scanner's native scheduling, rather than guaranteeing evenly spaced
+requests. Concurrency, server latency, retries, and scanner behavior affect observed traffic.
+Existing spider cache reuse still applies: requesting a different limit does not force a new
+crawl when recent indexed results are reused. Pagination does not start another scan.
+
 ## Result limits and saved pages
 
 List tools return a first page and optional `pagination` metadata. Use

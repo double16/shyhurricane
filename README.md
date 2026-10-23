@@ -99,6 +99,21 @@ The following tools are provided:
 | deobfuscate_javascript      | De-obfuscate JavaScript content (automatically done during indexing)                                | No          |
 | get_result_page             | Retrieve a saved page using an opaque navigation token.                                             | No          |
 
+### Scan rate limits
+
+`spider_website` and `directory_buster` accept `rate_limit_requests_per_second` as a
+non-negative integer. A positive value limits requests/second for that scan; `0` disables
+the explicit limit. For spidering, `0` uses a high ceiling of 3000 requests/second because
+Katana 1.5.0 crashes with a literal zero. For directory busting, `0` means unlimited.
+If omitted or `null`, public targets default to 5 requests/second and non-public targets
+retain scanner defaults, including Katana's built-in default with no rate flag supplied.
+Concurrent scans have separate budgets. Public-target detection uses the URL hostname or IP,
+without DNS lookups or registered address overrides.
+
+For example, use `spider_website(url="https://example.com/", rate_limit_requests_per_second=2)`
+to crawl at 2 requests/second, or supply `rate_limit_requests_per_second=0` to use the high ceiling.
+See the [tool reference](docs/tool-reference.md#scan-rate-limits) for backend behavior.
+
 ### Search and results
 
 Use natural-language queries with `find_web_resources`, or narrow captured content with filters such as

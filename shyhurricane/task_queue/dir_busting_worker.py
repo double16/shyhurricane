@@ -184,8 +184,10 @@ def _build_feroxbuster_command(
 ) -> List[str]:
     command = ["feroxbuster", "-u", item.uri, "--insecure", "--extract-links", "--threads", "5"]
 
-    if item.rate_limit_requests_per_second:
-        command.extend(["--scan-limit", "1", "--rate-limit", str(item.rate_limit_requests_per_second)])
+    if item.rate_limit_requests_per_second is not None:
+        command.extend(["--rate-limit", str(item.rate_limit_requests_per_second)])
+        if item.rate_limit_requests_per_second > 0:
+            command.extend(["--scan-limit", "1"])
     else:
         command.extend(["--auto-tune"])
 
@@ -242,7 +244,7 @@ def _build_ffuf_command(
 ) -> List[str]:
     command = ["ffuf", "-u", item.uri, "-ac", "-s", "-sf"]
 
-    if item.rate_limit_requests_per_second:
+    if item.rate_limit_requests_per_second is not None:
         command.extend(["-rate", str(item.rate_limit_requests_per_second)])
 
     if item.uri.endswith("FUZZ") and item.depth > 1:
