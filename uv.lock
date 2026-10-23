@@ -2603,7 +2603,7 @@ wheels = [
 
 [[package]]
 name = "ollama-haystack"
-version = "6.8.0"
+version = "7.0.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "haystack-ai" },
@@ -2611,9 +2611,9 @@ dependencies = [
     { name = "pydantic" },
     { name = "tenacity" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/93/3e/0e17dd3423d2abf5cf99bb70972dc00a544732e1b63cd90c9f2cd14aab46/ollama_haystack-6.8.0.tar.gz", hash = "sha256:d13e80bbd4fb38a50294295c63892eccf7690aa6788ab93168c032534d6733cc", size = 103336, upload-time = "2026-07-17T06:54:07.97Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/e1/b0/af7773c47a8598e29c10dc35e668c873c8d7056f4215a8940c653c697c61/ollama_haystack-7.0.2.tar.gz", hash = "sha256:fe57615c3536401fc14b0e8fccb09746c0c5f1c93dd607fddd60cba22c9f57b7", size = 103053, upload-time = "2026-10-16T07:54:07.824Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/0f/cd/ad0fffdb9d6065b60f81cbb0e10a73ba61d1499bab9031f7ae9e350e95b9/ollama_haystack-6.8.0-py3-none-any.whl", hash = "sha256:b451b617db6abdd26d1a7b4850e96fdfc25306a24720ade07b0534f4ee4c1ef5", size = 21679, upload-time = "2026-07-17T06:54:06.579Z" },
+    { url = "https://files.pythonhosted.org/packages/cd/f3/b63cbbb5873abcf43cba0cf73822531e8ea021edd32e1ac00218b5e9163c/ollama_haystack-7.0.2-py3-none-any.whl", hash = "sha256:a797424e38aef6a6654464534b84e14519b7589e15a4c08aa3b39062a8fb82c3", size = 19138, upload-time = "2026-10-16T07:54:06.482Z" },
 ]
 
 [[package]]
@@ -3538,15 +3538,15 @@ wheels = [
 
 [[package]]
 name = "qdrant-haystack"
-version = "11.1.0"
+version = "13.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "haystack-ai" },
     { name = "qdrant-client" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/22/14/7ac14458cccac0a46aa809e560bb9563d20fe3ca0521ed313ec32820779e/qdrant_haystack-11.1.0.tar.gz", hash = "sha256:ee18e08fc3d4546ebff71c05634cb8117ea3ddb89ffc1a110ffd6f51695429ec", size = 47452, upload-time = "2026-10-01T14:19:45.477Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ce/02/30c414aa655be37895b954b20e76c4f368eabf2ed0b23e7f4d31cc0062de/qdrant_haystack-13.0.0.tar.gz", hash = "sha256:d236ff1ff17a5e2900f52e2dd0d36aaebaca4ac54edb45b3ee3808510231ce87", size = 47771, upload-time = "2026-10-19T07:36:45.493Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/48/ee/878131383aea8dc1f86ae41f771751abb999ec148b71c83490263f8eb50c/qdrant_haystack-11.1.0-py3-none-any.whl", hash = "sha256:e4b30d59c912d033aab18d30698d948baea2e0c4384ca7ca1370ab063da6982f", size = 31132, upload-time = "2026-10-01T14:19:44.077Z" },
+    { url = "https://files.pythonhosted.org/packages/57/60/82ae66660f923416dd6bd81f57333f205776f43859b3fe739b461017daec/qdrant_haystack-13.0.0-py3-none-any.whl", hash = "sha256:114be31a470baed7c559b7736375190dda0651a49673785b428ba14b0fb41243", size = 31094, upload-time = "2026-10-19T07:36:44.086Z" },
 ]
 
 [[package]]
@@ -4111,7 +4111,7 @@ requires-dist = [
     { name = "mypy", marker = "extra == 'dev'" },
     { name = "neo4j", specifier = ">=6.4,<7" },
     { name = "numpy", specifier = ">=2.3.0" },
-    { name = "ollama-haystack", specifier = "~=6.8.0" },
+    { name = "ollama-haystack", specifier = ">=6.8,<7.1" },
     { name = "onnxruntime", specifier = ">=1.24.2,<1.32.0" },
     { name = "openai", specifier = "~=2.53.0" },
     { name = "optimum", extras = ["onnxruntime"], specifier = "~=2.1.0" },
@@ -4124,7 +4124,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "pytest-cov", marker = "extra == 'dev'" },
     { name = "pytest-mock", marker = "extra == 'dev'" },
-    { name = "qdrant-haystack", specifier = ">=10.6,<11.2" },
+    { name = "qdrant-haystack", specifier = ">=10.6,<13.1" },
     { name = "requests", specifier = "~=2.34.2" },
     { name = "respx", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
