@@ -16,41 +16,102 @@ from shyhurricane.doc_type_model_map import ModelConfig
 from shyhurricane.generator_config import ChatGeneratorCompatibilityWrapper, GeneratorConfig, safe_embedder
 
 
-def test_google_retry_client_preserves_credentials_backoff_and_releases_original(monkeypatch):
-    original = Mock()
-    replacement = Mock()
-    captured = {}
+@pytest.mark.parametrize("key_name", ["GOOGLE_API_KEY", "GEMINI_API_KEY"])
+@pytest.mark.parametrize("max_retries", [None, 3])
+def test_google_client_is_lazy_and_preserves_credentials_retries_and_cleanup(monkeypatch, key_name, max_retries):
+    module = importlib.import_module("haystack_integrations.common.google_genai.utils")
+    client = Mock()
+    factory = Mock(return_value=client)
+    monkeypatch.setattr(module, "Client", factory)
+    for name in ["GOOGLE_API_KEY", "GEMINI_API_KEY"]:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(key_name, "test-key")
+    kwargs = {} if max_retries is None else {"max_retries": max_retries}
+    wrapper = generator_config.GoogleGenAIGeneratorWithRetry(model="gemini-test", **kwargs)
+    factory.assert_not_called()
+    try:
+        wrapper.warm_up()
+        wrapper.warm_up()
+        factory.assert_called_once()
+        assert factory.call_args.kwargs["api_key"] == "test-key"
+        retry = factory.call_args.kwargs["http_options"].retry_options
+        assert retry.attempts == (10 if max_retries is None else max_retries)
+        assert retry.exp_base is None  # Use the SDK default backoff.
+    finally:
+        wrapper.close()
+    wrapper.close()
+    client.close.assert_called_once_with()
+    assert wrapper.chat_generator._client is None
+    with pytest.raises(RuntimeError, match="Generator is closed"):
+        wrapper.warm_up()
 
-    def initialize(self, **kwargs):
-        captured.update(kwargs)
-        self._client = original
 
-    client_factory = Mock(return_value=replacement)
-    monkeypatch.setattr(generator_config.GoogleGenAIChatGenerator, "__init__", initialize)
-    monkeypatch.setattr(generator_config, "Client", client_factory)
-    key = generator_config.Secret.from_token("test-key")
-    generator = generator_config.GoogleGenAIChatGeneratorWithRetry(api_key=key, model="gemini-test")
-    assert captured == {"api_key": key, "model": "gemini-test"}
-    assert client_factory.call_args.kwargs["api_key"] == "test-key"
-    retry = client_factory.call_args.kwargs["http_options"].retry_options
-    assert retry.attempts == 10
-    assert retry.exp_base == 4.0
-    original.close.assert_called_once_with()
-    generator.close()
-    replacement.close.assert_called_once_with()
+def test_google_client_can_close_before_warmup(monkeypatch):
+    module = importlib.import_module("haystack_integrations.common.google_genai.utils")
+    factory = Mock()
+    monkeypatch.setattr(module, "Client", factory)
+    wrapper = generator_config.GoogleGenAIGeneratorWithRetry(model="gemini-test")
+    wrapper.close()
+    wrapper.close()
+    factory.assert_not_called()
 
 
-def test_google_retry_client_releases_original_when_replacement_fails(monkeypatch):
-    original = Mock()
+def test_google_factory_reports_missing_credentials_during_warmup(monkeypatch):
+    for name in ["GOOGLE_API_KEY", "GEMINI_API_KEY"]:
+        monkeypatch.delenv(name, raising=False)
+    with pytest.raises(ValueError, match="Gemini API"):
+        GeneratorConfig(gemini_model="gemini-test").create_generator()
 
-    def initialize(self, **kwargs):
-        self._client = original
 
-    monkeypatch.setattr(generator_config.GoogleGenAIChatGenerator, "__init__", initialize)
-    monkeypatch.setattr(generator_config, "Client", Mock(side_effect=RuntimeError("client failed")))
+def test_google_factory_preserves_client_initialization_error(monkeypatch):
+    module = importlib.import_module("haystack_integrations.common.google_genai.utils")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.setattr(module, "Client", Mock(side_effect=RuntimeError("client failed")))
     with pytest.raises(RuntimeError, match="client failed"):
-        generator_config.GoogleGenAIChatGeneratorWithRetry(api_key=generator_config.Secret.from_token("test-key"))
-    original.close.assert_called_once_with()
+        GeneratorConfig(gemini_model="gemini-test").create_generator()
+
+
+@pytest.mark.parametrize("kind", ["document", "text"])
+def test_google_embedders_preserve_requests_results_errors_and_cleanup(monkeypatch, kind):
+    from google.genai import types
+
+    module = importlib.import_module("haystack_integrations.common.google_genai.utils")
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    client = Mock()
+    factory = Mock(return_value=client)
+    monkeypatch.setattr(module, "Client", factory)
+    client.models.embed_content.return_value = types.EmbedContentResponse(
+        embeddings=[types.ContentEmbedding(values=[0.1, 0.2])],
+    )
+    config = GeneratorConfig(gemini_model="gemini-test")
+    model = ModelConfig("nomic-embed-code", 256)
+    if kind == "document":
+        embedder = config.create_document_embedder(model)
+        inputs = {"documents": [Document(content="query")]}
+    else:
+        embedder = config.create_text_embedder(model)
+        inputs = {"text": "query"}
+    factory.assert_not_called()
+    try:
+        result = embedder.run(**inputs)
+        embedder.warm_up()
+        factory.assert_called_once()
+        assert factory.call_args.kwargs["api_key"] == "test-key"
+        request = client.models.embed_content.call_args.kwargs
+        assert request["model"] == "gemini-embedding-001"
+        if kind == "document":
+            assert request["contents"][0].parts[0].text == "query"
+            assert result["documents"][0].embedding == [0.1, 0.2]
+        else:
+            assert request["contents"] == "query"
+            assert result["embedding"] == [0.1, 0.2]
+        client.models.embed_content.side_effect = RuntimeError("embedding failed")
+        with pytest.raises(RuntimeError, match="embedding failed"):
+            embedder.run(**inputs)
+    finally:
+        embedder.close()
+    embedder.close()
+    client.close.assert_called_once_with()
 
 
 def test_openai_generator_preserves_requests_and_reply_contract_with_mock_transport():
@@ -160,10 +221,9 @@ def test_real_provider_adapters_preserve_requests_replies_and_errors(monkeypatch
     elif provider == "google":
         from google.genai import types
 
-        module = importlib.import_module(generator_config.GoogleGenAIChatGenerator.__module__)
+        module = importlib.import_module("haystack_integrations.common.google_genai.utils")
         monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
-        monkeypatch.setattr(module, "_get_client", Mock(return_value=Mock()))
-        monkeypatch.setattr(generator_config, "Client", Mock(return_value=client))
+        monkeypatch.setattr(module, "Client", Mock(return_value=client))
         client.models.generate_content.return_value = types.GenerateContentResponse(
             candidates=[types.Candidate(content=types.Content(role="model", parts=[types.Part(text="answer")]),
                                         finish_reason="STOP")],

@@ -4097,7 +4097,7 @@ requires-dist = [
     { name = "einops", specifier = "~=0.8.1" },
     { name = "fastembed-haystack", specifier = "~=2.7.0" },
     { name = "flake8", marker = "extra == 'dev'" },
-    { name = "google-genai-haystack", specifier = ">=4.5,<7.1" },
+    { name = "google-genai-haystack", specifier = ">=7.0,<7.1" },
     { name = "guppy3", specifier = "~=3.1.6" },
     { name = "haystack-ai", specifier = ">=3.3,<3.5" },
     { name = "html5lib", specifier = "~=1.1" },

@@ -11,7 +11,6 @@ from shyhurricane.generator_config import (
     add_generator_args,
 )
 
-
 pytestmark = pytest.mark.ollama
 
 
@@ -175,7 +174,7 @@ def test_google_generator_wrapper_converts_chat_replies(monkeypatch):
             self.calls.append(kwargs)
             return {"replies": [ChatMessage.from_assistant("one"), ChatMessage.from_assistant("two")]}
 
-    monkeypatch.setattr(generator_config, "GoogleGenAIChatGeneratorWithRetry", ChatGenerator)
+    monkeypatch.setattr(generator_config, "GoogleGenAIChatGenerator", ChatGenerator)
 
     wrapper = GoogleGenAIGeneratorWithRetry(model="gemini-test", generation_kwargs={"temperature": 0.2})
     result = wrapper.run(
