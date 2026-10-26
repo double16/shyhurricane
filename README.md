@@ -178,6 +178,12 @@ Graph tools continue sending client progress at the established five-second inte
 Blank optional URL, context URL, and method filters behave like omitted filters. Coverage describes
 retained analysis units, independently of queued work; proven stale capture-unit statuses are
 reconciled automatically in bounded background maintenance.
+Graph discovery and traversal tools infer omitted, null, or blank `scope` from a supplied HTTP(S)
+URL's hostname and explicit port. Endpoints use `url`; elements use `context_url` before `url`;
+relationships use URL-valued `element_id`; flow traces and journeys use URL-valued `start`.
+Explicit scope takes precedence. Opaque IDs require explicit scope, and `end` never supplies scope.
+For example, `find_application_endpoints(url="https://app.example.com:8443/api/items")` uses
+`app.example.com:8443` scope while retaining the exact URL filter.
 Discovery inventories and full IR are retained separately from bounded Neo4j summaries. Results report
 discovery/flow coverage and deferred analysis units. Use `continue_application_graph_query` for
 exploration continuations and `expand_application_graph_analysis` for offline detail expansion.

@@ -87,9 +87,20 @@ large after cleanup because Neo4j reuses freed storage.
 ## Graph tools
 
 All graph tools are read-only, work in low-power mode, and never make target requests.
-Discovery and traversal tools require an explicit scope; evidence retrieval requires only an evidence ID.
+Discovery and traversal tools accept an explicit scope or infer it from a supplied HTTP(S) URL;
+evidence retrieval requires only an evidence ID.
 Scope accepts a hostname, `host:port`, or HTTP(S) URL prefix. Hostname scopes include
 subdomains on hostname boundaries; URL scopes restrict scheme, host, and path prefix.
+
+Explicit nonblank scope takes precedence. Omitted, null, or blank scope is inferred from `url`
+for endpoints, `context_url` before `url` for elements, URL-valued `element_id` for relationships,
+and URL-valued `start` for flow traces and journeys. Opaque IDs require explicit scope; `end`
+never supplies scope. An invalid selected URL produces an error rather than falling back to
+another argument. Inferred scope uses the hostname and explicit port, including IPv6 brackets;
+paths, queries, and fragments stay in the original selector but are excluded from scope.
+URLs must be absolute HTTP(S) URLs with valid hosts and ports and no credentials.
+For example, `find_application_endpoints(url="https://app.example.com:8443/api/items?id=1")`
+uses scope `app.example.com:8443`. Existing hostname scope semantics include subdomains.
 
 | Tool | Purpose |
 |------|---------|
@@ -156,7 +167,8 @@ IDs on saved pages have the same meaning as IDs on the first page (`get_result_p
 | `method` | `find_application_endpoints` | string or null; default null | Exact HTTP method filter, ignoring case; e.g. `GET` or `POST` |
 | `detail` | Elements, relationships, data flow, journeys | string; default `compact` | `compact` keeps essential identity and evidence fields; `full` returns all public properties |
 | `context_url` | `find_application_elements` | string or null; default null | Exact page URL matched against an element’s own URL or its consuming-document contexts, including external scripts |
-| `scope` | All except evidence retrieval | string, required | Hostname, `host:port`, or HTTP(S) URL prefix; restricts the application evidence queried |
+| `scope` | Discovery and traversal | string or null; default null | Hostname, `host:port`, or HTTP(S) URL prefix; inferred from the primary URL when missing; required for opaque-ID-only calls |
+| `scope` | `expand_application_graph_analysis` | string, required | Explicit application scope for offline expansion |
 | `kinds` | `find_application_elements` | array of strings or null; default null | Match any case-sensitive element kind, e.g. `resource`, `element`, `field`, `cookie`, `origin`; discover other values in `results[].kind`. Omitted, null, or `[]` applies no kind filter |
 | `kinds` | `find_application_relationships` | array of strings or null; default null | Match any case-sensitive relationship kind, e.g. `CONTAINS`, `LOADS`, `NAVIGATES_TO`, `SUBMITS_TO`, `FLOWS_TO`; discover values in `results[].steps[].kind`. Omitted, null, or `[]` applies no kind filter |
 | `role` | `find_application_elements` | string or null; default null | `source` reads input; `sink` consumes data. Null includes all roles. These static classifications are investigation candidates |

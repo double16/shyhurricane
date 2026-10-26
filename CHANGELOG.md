@@ -4,6 +4,8 @@
 
 ### Features
 
+- Infer omitted graph discovery and traversal scope from supplied HTTP(S) URLs, retaining hostname
+  and explicit port. Explicit scope takes precedence.
 - Expose per-scan `rate_limit_requests_per_second` on spidering and directory busting:
   positive integers set requests/second, zero means unlimited, and omitted public-target limits default to 5 requests/second.
 - Analyze standalone and inline SVG links, resources, scripts, and event handlers in the

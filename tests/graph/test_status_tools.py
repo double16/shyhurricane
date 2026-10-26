@@ -6,8 +6,118 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from shyhurricane.graph.artifacts import ArtifactStore
 from shyhurricane.graph.status import graph_status
+from shyhurricane.indexing_wait import IndexingStatus
 from shyhurricane.mcp_server import graph_execution
 from shyhurricane.mcp_server.tools import application_graph as tools
+
+
+@pytest.mark.parametrize(
+    "name,arguments,expected",
+    [
+        ("find_application_endpoints", {"url": " https://APP.example.com:8443/a?x=1#part "}, "app.example.com:8443"),
+        ("find_application_endpoints", {"url": "https://example.com:443/a"}, "example.com:443"),
+        ("find_application_endpoints", {"url": "http://example.com:80/a"}, "example.com:80"),
+        ("find_application_endpoints", {"url": "https://example.com:08443/a"}, "example.com:8443"),
+        ("find_application_endpoints", {"url": "https://[2001:db8::1]:8443/a"}, "[2001:db8::1]:8443"),
+        ("find_application_endpoints", {"url": "https://[2001:db8::1]/a"}, "[2001:db8::1]"),
+        ("find_application_elements", {"url": "https://example.com/script.js"}, "example.com"),
+        ("find_application_elements", {"context_url": "https://example.com/page"}, "example.com"),
+        (
+            "find_application_elements",
+            {"context_url": "https://app.example.com/page", "url": "https://cdn.example.com/script.js"},
+            "app.example.com",
+        ),
+        (
+            "find_application_elements",
+            {"context_url": " \t", "url": "https://example.com/script.js"},
+            "example.com",
+        ),
+        ("find_application_relationships", {"element_id": "https://example.com/a"}, "example.com"),
+        ("trace_application_data_flow", {"start": "https://example.com/a", "end": "opaque"}, "example.com"),
+        (
+            "find_user_journey_paths",
+            {"start": "https://example.com/a", "end": "https://other.example.com/b"},
+            "example.com",
+        ),
+    ],
+)
+@pytest.mark.parametrize("scope", ["omitted", None, "", " \t ", "explicit"])
+async def test_graph_scope_inference_and_dispatch(monkeypatch, name, arguments, expected, scope):
+    from mcp.server.mcpserver.utilities.func_metadata import func_metadata
+
+    server = SimpleNamespace(db=None, graph_store=object())
+    history = AsyncMock()
+    wait = AsyncMock(return_value=IndexingStatus(status="unavailable"))
+    execute = AsyncMock(return_value={"results": [], "instructions": "complete"})
+    monkeypatch.setattr(tools, "get_server_context", AsyncMock(return_value=server))
+    monkeypatch.setattr(tools, "log_tool_history", history)
+    monkeypatch.setattr(tools, "wait_for_indexing", wait)
+    monkeypatch.setattr(tools, "execute_graph", execute)
+    function = getattr(tools, name)
+    model = func_metadata(function, skip_names=["ctx"]).arg_model
+    fields = dict(arguments)
+    if scope != "omitted":
+        fields["scope"] = " explicit.example.com " if scope == "explicit" else scope
+    validated = model.model_validate(fields).model_dump()
+    expected = "explicit.example.com" if scope == "explicit" else expected
+    target = function.__wrapped__
+    # Exercise both SDK validation/defaults and direct calls that bypass Pydantic.
+    for inputs in (validated, fields):
+        result = await target(None, **inputs)
+        assert result.results == []
+        assert history.await_args.kwargs["scope"] == expected
+        assert execute.await_args.args[3] == expected
+        matcher = wait.await_args.args[2]
+        assert matcher(f"https://{expected}/other/path")
+        assert not matcher("https://unrelated.target.local/a")
+        if expected == "app.example.com:8443":
+            assert not matcher("https://app.example.com/a")
+        if expected == "example.com":
+            assert matcher("http://sub.example.com/elsewhere")
+        for key, value in arguments.items():
+            mapped = "start" if key == "element_id" else key
+            normalized = tools.trim_input(value)
+            if key in {"url", "context_url"}:
+                normalized = normalized or None
+            assert execute.await_args.kwargs[mapped] == normalized
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        None, "", "opaque-id", "/relative/path", "//example.com/path", "ftp://example.com/a",
+        "https:///missing-host", "https://example.com:bad/a", "https://example.com:65536/a",
+        "https://example.com:/a", "https://[invalid]/a", "https://user@example.com/a",
+        "https://[2001:db8::1]junk/a",
+        "https://:password@example.com/a", "https://@example.com/a", "https://bad host.example.com/a",
+        "https://example.com/line\nbreak", "https://example.com/\x00", "https://example.com\\other/a",
+    ],
+)
+async def test_graph_scope_inference_rejects_invalid_urls_before_work(monkeypatch, source):
+    server = AsyncMock()
+    wait = AsyncMock()
+    execute = AsyncMock()
+    monkeypatch.setattr(tools, "get_server_context", server)
+    monkeypatch.setattr(tools, "wait_for_indexing", wait)
+    monkeypatch.setattr(tools, "execute_graph", execute)
+    with pytest.raises(ToolError, match="Supply scope or an absolute HTTP"):
+        await tools.find_application_endpoints.__wrapped__(None, url=source)
+    server.assert_not_awaited()
+    wait.assert_not_awaited()
+    execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize("name", ["trace_application_data_flow", "find_user_journey_paths"])
+async def test_destination_url_never_supplies_scope(name):
+    with pytest.raises(ToolError, match="Supply scope"):
+        await getattr(tools, name).__wrapped__(None, start="opaque-id", end="https://example.com/a")
+
+
+async def test_invalid_context_does_not_fall_back_to_resource_url():
+    with pytest.raises(ToolError, match="Supply scope"):
+        await tools.find_application_elements.__wrapped__(
+            None, context_url="invalid", url="https://example.com/script.js"
+        )
 
 
 async def test_graph_status_handles_outage_and_reports_backlog(graph_paths, event):
@@ -59,9 +169,9 @@ async def test_all_tools_dispatch_read_only_queries(monkeypatch):
 
     monkeypatch.setattr(tools, "query", query)
     assert not (await tools.find_application_elements.__wrapped__(None, "example.com")).results
-    await tools.find_application_relationships.__wrapped__(None, "example.com", "id")
-    await tools.trace_application_data_flow.__wrapped__(None, "example.com", "id")
-    await tools.find_user_journey_paths.__wrapped__(None, "example.com", "/start", "/end")
+    await tools.find_application_relationships.__wrapped__(None, "id", scope="example.com")
+    await tools.trace_application_data_flow.__wrapped__(None, "id", scope="example.com")
+    await tools.find_user_journey_paths.__wrapped__(None, "/start", "/end", scope="example.com")
     await tools.find_application_endpoints.__wrapped__(
         None, "example.com", url="https://example.com/blog", method="POST"
     )
@@ -202,23 +312,23 @@ async def test_graph_tools_publish_complete_argument_schemas():
     registered = {tool.name: tool for tool in await tools.mcp_instance.list_tools() if tool.name in names}
     assert registered.keys() == names
     required = {
-        "find_application_endpoints": {"scope"},
-        "find_application_elements": {"scope"},
-        "find_application_relationships": {"scope", "element_id"},
-        "trace_application_data_flow": {"scope", "start"},
-        "find_user_journey_paths": {"scope", "start", "end"},
+        "find_application_endpoints": set(),
+        "find_application_elements": set(),
+        "find_application_relationships": {"element_id"},
+        "trace_application_data_flow": {"start"},
+        "find_user_journey_paths": {"start", "end"},
         "fetch_application_graph_evidence": {"evidence_id"},
     }
     for tool in registered.values():
-        assert set(tool.input_schema["required"]) == required[tool.name]
+        assert set(tool.input_schema.get("required", [])) == required[tool.name]
         properties = tool.input_schema["properties"]
         assert "ctx" not in properties
         assert all(field.get("description", "").strip() for field in properties.values())
         if tool.name == "fetch_application_graph_evidence":
             assert set(properties) == {"evidence_id"}
         else:
-            assert properties["scope"]["type"] == "string"
-            assert "scope" in tool.input_schema["required"]
+            assert properties["scope"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
+            assert properties["scope"]["default"] is None
         if "limit" in properties:
             assert properties["limit"]["default"] == (5 if tool.name == "find_application_endpoints" else 20)
             assert properties["limit"]["minimum"] == 1
