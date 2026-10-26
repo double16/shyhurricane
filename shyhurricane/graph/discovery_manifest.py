@@ -27,7 +27,7 @@ def markup_emitter(artifacts, event, url):
                 filename,
                 discovery="pending",
                 flow="pending",
-                artifact=path.name,
+                artifact=path,
                 error="Inline script analysis deferred by markup budget",
             )
             return
@@ -41,7 +41,7 @@ def markup_emitter(artifacts, event, url):
                 },
             )
             name = f"{url}#markup-shard={seen // 1000}"
-            artifacts.manifest.unit(event["id"], name, artifact=path.name)
+            artifacts.manifest.unit(event["id"], name, artifact=path)
             chunks.append((name, path))
         seen += 1
         if tag == "base" and attrs.get("href"):
@@ -86,7 +86,7 @@ def markup_emitter(artifacts, event, url):
 
     def finish():
         for name, path in chunks:
-            artifacts.manifest.unit(event["id"], name, discovery="complete", flow="complete", artifact=path.name)
+            artifacts.manifest.unit(event["id"], name, discovery="complete", flow="complete", artifact=path)
 
     emit.finish = finish
     return emit
@@ -109,7 +109,7 @@ def _archive_ir(artifacts, event, url, filename, result, *, contexts=()):
         filename,
         discovery="pending",
         flow="pending",
-        artifact=path.name,
+        artifact=path,
         error="; ".join(gaps),
     )
     artifacts.manifest.contexts(unit, contexts)
@@ -186,7 +186,7 @@ def _archive_ir(artifacts, event, url, filename, result, *, contexts=()):
             source_path,
             discovery="complete",
             flow="partial" if partial else "complete",
-            artifact=shard_path.name,
+            artifact=shard_path,
         )
         artifacts.manifest.parent(child, unit)
         context_shards(artifacts, event, source_path, shard_path, contexts)
@@ -210,7 +210,7 @@ def _archive_ir(artifacts, event, url, filename, result, *, contexts=()):
             source_path,
             discovery="complete",
             flow="partial" if partial else "complete",
-            artifact=shard_path.name,
+            artifact=shard_path,
         )
         artifacts.manifest.parent(child, unit)
         context_shards(artifacts, event, source_path, shard_path, contexts)
@@ -219,7 +219,7 @@ def _archive_ir(artifacts, event, url, filename, result, *, contexts=()):
         filename,
         discovery="partial" if parse_failed else "complete",
         flow="partial" if parse_failed or partial else "complete",
-        artifact=path.name,
+        artifact=path,
         error="; ".join(gaps),
     )
     return unit
@@ -229,13 +229,13 @@ def context_shards(artifacts, event, source_path, shard_path, contexts):
     if len(contexts) <= 100:
         return
     for offset in range(0, len(contexts), 100):
-        value = {"ir_artifact": shard_path.name, "contexts": list(contexts[offset : offset + 100])}
-        path = artifacts.write(identity("detail-context-shard", shard_path.name, value), value)
+        value = {"ir_artifact": shard_path, "contexts": list(contexts[offset : offset + 100])}
+        path = artifacts.write(identity("detail-context-shard", shard_path, value), value)
         child = artifacts.manifest.unit(
             event["id"],
             f"{source_path}#context-shard={offset // 100}",
             discovery="complete",
             flow="complete",
-            artifact=path.name,
+            artifact=path,
         )
         artifacts.manifest.contexts(child, contexts[offset : offset + 100])

@@ -398,7 +398,7 @@ def extract(
             graph.candidate_sources.append({
                 "source_digest": identity(body), "map_digest": identity(source_map),
                 "association": "unverified_external",
-                "artifact": artifacts.write(identity("candidate-map", source_map), {"source_map": source_map}).name,
+                "artifact": artifacts.write(identity("candidate-map", source_map), {"source_map": source_map}),
             })
             graph.gaps.append("External source map is unverified; delivered JavaScript remains authoritative")
         if not sources and artifacts:
@@ -414,7 +414,7 @@ def extract(
             graph.candidate_sources.append({
                 "map_digest": identity(body), "map_capture_id": event["id"],
                 "association": "unverified_standalone",
-                "artifact": artifacts.write(identity("candidate-map", body), {"source_map": body}).name
+                "artifact": artifacts.write(identity("candidate-map", body), {"source_map": body})
                 if artifacts else "",
             })
             graph.gaps.append("Standalone source map is unverified candidate evidence")

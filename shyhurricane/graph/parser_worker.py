@@ -36,7 +36,9 @@ def parse(event, artifacts, *, document_contexts=None, open_world=False, **extra
                 "policies": [],
             },
         )
-    output = artifacts.root / f"{name}.json"
+    temporary_root = artifacts.root / "parser-tmp"
+    temporary_root.mkdir(mode=0o700, exist_ok=True)
+    output = temporary_root / f"{name}.json"
     request = {
         "event": event,
         "root": str(artifacts.root),
@@ -44,7 +46,7 @@ def parse(event, artifacts, *, document_contexts=None, open_world=False, **extra
         "document_contexts": document_contexts,
         "open_world": open_world,
         "output": str(output),
-        "snapshot_path": marker.name if marker else None,
+        "snapshot_path": str(marker) if marker else artifacts.snapshot_reference,
         "extract_options": extract_options,
     }
     environment = {**os.environ, "_SHYHURRICANE_PARSE_CONTAINER": name}
@@ -64,7 +66,7 @@ def parse(event, artifacts, *, document_contexts=None, open_world=False, **extra
             )
         except OSError:
             if marker:
-                marker.unlink(missing_ok=True)
+                artifacts.delete(marker)
             logger.warning("Graph parser launch failed capture=%s epoch=%s", event["id"], artifacts.reference_epoch)
             raise
         try:
@@ -119,7 +121,7 @@ def parse(event, artifacts, *, document_contexts=None, open_world=False, **extra
             output.unlink(missing_ok=True)
             output.with_suffix(".tmp").unlink(missing_ok=True)
             if marker:
-                marker.unlink(missing_ok=True)
+                artifacts.delete(marker)
 
 
 def main():
@@ -130,10 +132,10 @@ def main():
     try:
         from shyhurricane.graph.epoch_catalog import SnapshotArtifacts
         from shyhurricane.graph.extract import extract
-        from shyhurricane.graph.model import identity, projection_snapshot
+        from shyhurricane.graph.model import projection_snapshot
 
         root = Path(request["root"])
-        marker = root / (request.get("snapshot_path") or f"{identity(f'epoch-{request["epoch"]}')}.json")
+        marker = request["snapshot_path"]
         artifacts = SnapshotArtifacts(root, marker)
         artifacts.map_owner = request["event"]["id"]
         stage = "extraction"

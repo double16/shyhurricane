@@ -36,7 +36,7 @@ def test_discovery_pages_all_12538_consumers_without_loading_them_at_once(jobs, 
     capture = script(event)
     page = event(body='<base href="/base/"><script src="/app.js"></script>')
     path = jobs.artifacts.write("shared-fixture-body", page)
-    jobs.connection.executemany("INSERT INTO captures VALUES (?,?,?,?)", [
+    jobs.connection.executemany("INSERT INTO captures(id,url,stamp,path) VALUES (?,?,?,?)", [
         (f"page-{index:05}", page["data"]["url"], index, str(path)) for index in range(12538)
     ])
     jobs.connection.executemany("INSERT INTO refs VALUES (?,?)", [
@@ -507,29 +507,21 @@ def test_candidate_page_resume_and_timeout_reduction(event):
     assert len(LinkPlanner(store, planner.graph).candidates("selector", "#search")) == 3
 
 
-def test_relocated_legacy_checkpoints_resume_and_cleanup(jobs, event, monkeypatch):
+def test_relocated_checkpoints_resume_and_cleanup(jobs, event, monkeypatch):
     capture = script(event)
     page = event(body='<script src="/app.js"></script>')
     jobs.artifacts.register(page)
     jobs.artifacts.references(page["id"], [capture["data"]["url"]])
     key = jobs.enqueue(capture, capture, False)
     checkpoint = jobs.connection.execute("SELECT checkpoint FROM graph_continuations").fetchone()[0]
-    assert checkpoint == jobs.artifacts.resolve(checkpoint).name
+    assert checkpoint.startswith("a:")
     state = jobs.load(key)
     projection = jobs.artifacts.write("base", Projection(capture).__dict__)
     state["base_projection"] = str(projection)
     jobs.save(key, state)
-    assert jobs.load(key)["base_projection"] == projection.name
-    # Emulate legacy absolute references in both SQLite and the checkpoint JSON.
+    assert jobs.load(key)["base_projection"] == projection
     old_root = jobs.artifacts.root
     checkpoint = jobs.connection.execute("SELECT checkpoint FROM graph_continuations").fetchone()[0]
-    state["base_projection"] = str(projection)
-    jobs.artifacts.resolve(checkpoint).write_text(json.dumps(state))
-    jobs.connection.execute("UPDATE graph_continuations SET checkpoint=?", (str(old_root / checkpoint),))
-    jobs.connection.execute("UPDATE captures SET path=?", (str(old_root / jobs.connection.execute(
-        "SELECT path FROM captures"
-    ).fetchone()[0]),))
-    jobs.connection.commit()
     jobs.artifacts.close()
     moved = old_root.with_name("moved")
     old_root.rename(moved)
@@ -541,10 +533,12 @@ def test_relocated_legacy_checkpoints_resume_and_cleanup(jobs, event, monkeypatc
     jobs.discover(loaded)
     assert page["id"] in loaded["contexts"]
     jobs.save(key, loaded)
-    assert not (moved / checkpoint).exists()
-    assert jobs.load(key)["base_projection"] == projection.name
+    assert not jobs.artifacts.blobs.exists(checkpoint)
+    assert jobs.load(key)["base_projection"] == projection
     jobs.finish(key, loaded)
-    assert not (moved / projection.name).exists()
+    with jobs.connection:
+        jobs.artifacts.blobs.maintain()
+    assert not jobs.artifacts.blobs.exists(projection)
     assert jobs.load(key)["stage"] == "complete"
 
 

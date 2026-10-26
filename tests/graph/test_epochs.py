@@ -215,7 +215,9 @@ def test_empty_status_legacy_delivery_and_corrupt_checkpoint(runtime, event):
     engine.accept(capture, 2)
     engine.step()
     reference = engine.connection.execute("SELECT checkpoint FROM graph_epoch_jobs").fetchone()[0]
-    artifacts.resolve(reference).write_text("not json")
+    artifacts.connection.execute("UPDATE graph_blobs SET payload=? WHERE digest IN "
+                                 "(SELECT digest FROM graph_objects WHERE ref=?)", (b"bad", reference))
+    artifacts.connection.commit()
     assert drain(engine)["stages"]["failed"] == 1
     empty = sqlite3.connect(":memory:")
     assert epoch_status(empty) is None
@@ -343,6 +345,7 @@ def test_site_sized_capture_history_drains_and_stays_idle(runtime, event):
 def test_worker_health_race_rejects_legacy_and_preserves_unclaimed_work(graph_paths, event, monkeypatch):
     queue = MagicMock()
     healthy, stopped = MagicMock(), MagicMock()
+    stopped.is_set.return_value = False
     healthy.is_set.side_effect = [False, True, True, False]
     store = MagicMock()
     bad = {"pqid": 2, "data": {**event(), "reanalysis_ticket": "legacy"}}
@@ -548,3 +551,52 @@ def test_root_unit_materialization_uses_original_url(runtime, event):
         "SELECT discovery,flow,materialization FROM graph_manifest_units WHERE source_path=?",
         ("capture:https://example.com",),
     ).fetchone() == ("complete", "complete", "complete")
+
+
+@pytest.mark.parametrize("phase,due,expansion,expected", [
+    ("references", False, False, False),
+    ("references", False, True, False),
+    ("references", True, False, True),
+    ("references", True, True, True),
+    ("failed", False, False, False),
+    ("failed", False, True, True),
+    ("done", False, False, True),
+])
+def test_available_matches_runnable_work_with_waiting_inputs(runtime, event, monkeypatch, phase, due, expansion, expected):
+    engine, artifacts, _, _ = runtime
+    engine.accept(artifacts.register(event(url="https://example.com/first")), 1)
+    engine.start()
+    engine.accept(artifacts.register(event(url="https://example.com/later")), 2)
+    monkeypatch.setattr(epochs.time, "time", lambda: 100)
+    monkeypatch.setattr(engine.expansions, "available", lambda: expansion)
+    with engine.connection:
+        engine.connection.execute(
+            "UPDATE graph_epochs SET phase=?,next_attempt=?", (phase, 99 if due else 101),
+        )
+    assert bool(engine.available()) is expected
+
+
+@pytest.mark.parametrize("receipt", [{"graph_epoch": True}, {"pqid": 1, "data": {"id": "capture"}}])
+def test_worker_shutdown_after_delivery_skips_epoch_step(graph_paths, monkeypatch, receipt):
+    queue, engine, stop = MagicMock(), MagicMock(), MagicMock()
+    stop.is_set.return_value = False
+    monkeypatch.setattr(worker, "prepare_worker_process", lambda: None)
+    monkeypatch.setattr(worker, "get_persistent_queue", lambda *a, **k: queue)
+    monkeypatch.setattr(worker, "GraphStore", MagicMock())
+    monkeypatch.setattr(worker, "Epochs", lambda *a, **k: engine)
+    monkeypatch.setattr("shyhurricane.index.web_resources._wait_for_health", lambda *a: True)
+
+    def deliveries(*args, **kwargs):
+        assert kwargs["prefer_ready_work"] is True
+        stop.is_set.return_value = True
+        yield receipt
+
+    monkeypatch.setattr(worker, "persistent_queue_get", deliveries)
+    worker.graph_worker("db", "graph", MagicMock(), stop, False)
+    if "graph_epoch" not in receipt:
+        queue.nack.assert_called_once_with(receipt)
+    else:
+        queue.nack.assert_not_called()
+    engine.accept.assert_not_called()
+    engine.step.assert_not_called()
+    engine.close.assert_called_once()

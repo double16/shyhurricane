@@ -24,7 +24,7 @@ def legacy(artifacts, event, *, flow="complete", artifact=True):
     projection = Projection(capture)
     path = artifacts.write("projection", {"fixture": True}) if artifact else None
     key = artifacts.manifest.unit(capture["id"], "capture:" + projection.url,
-                                  discovery="complete", flow=flow, artifact=path.name if path else None)
+                                  discovery="complete", flow=flow, artifact=path if path else None)
     return capture, key
 
 
@@ -64,7 +64,7 @@ def test_repair_requires_matching_completed_archive(repair, event, case):
             reference = artifacts.connection.execute(
                 "SELECT artifact FROM graph_manifest_units WHERE id=?", (key,)
             ).fetchone()[0]
-            artifacts.resolve(reference).unlink()
+            artifacts.connection.execute("DELETE FROM graph_nodes WHERE id=?", (reference,))
         elif case in {"failed", "blocked"}:
             artifacts.connection.execute("UPDATE graph_manifest_units SET flow=? WHERE id=?", (case, key))
         elif case == "version":

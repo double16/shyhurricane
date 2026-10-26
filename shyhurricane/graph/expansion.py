@@ -1,8 +1,8 @@
 """Durable offline expansion of archived IR shards; independent of ordinary capture work."""
 
-import json
 import time
 
+from shyhurricane.graph.blob_store import owner_triggers
 from shyhurricane.graph.extract import apply_javascript
 from shyhurricane.graph.links import LinkPlanner
 from shyhurricane.graph.model import Projection, identity, projection_snapshot, restore_projection
@@ -19,6 +19,8 @@ class Expansions:
             "state TEXT,error TEXT DEFAULT '',next_attempt REAL DEFAULT 0,checkpoint TEXT DEFAULT '');"
             "CREATE TABLE IF NOT EXISTS graph_expansion_receipts (queue_id INTEGER PRIMARY KEY,job_id TEXT);"
         )
+
+        owner_triggers(self.connection, "graph_expansions", "checkpoint", "id")
 
     def accept(self, item, queue_id):
         key = identity("expand", item["id"], item["analysis_unit_id"])
@@ -58,14 +60,14 @@ class Expansions:
             ).fetchone()
             if record is None or not record[0]:
                 raise ValueError("Analysis unit has no retained IR; inspect discovery coverage")
-            state = json.loads(self.artifacts.resolve(checkpoint).read_text()) if checkpoint else None
-            raw = state["projection"] if state else json.loads(self.artifacts.resolve(record[0]).read_text())
+            state = self.artifacts.read(checkpoint) if checkpoint else None
+            raw = state["projection"] if state else self.artifacts.read(record[0])
             markup_projection = None
             if "markup_capture" in raw:
                 from shyhurricane.graph.parser_worker import parse
 
                 reference = self.connection.execute("SELECT path FROM captures WHERE id=?", (capture,)).fetchone()[0]
-                event = json.loads(self.artifacts.resolve(reference).read_text())
+                event = self.artifacts.read(reference)
                 markup_projection = parse(
                     event,
                     self.artifacts,
@@ -76,7 +78,7 @@ class Expansions:
                 )
             if "ir_artifact" in raw:
                 raw = {
-                    **json.loads(self.artifacts.resolve(raw["ir_artifact"]).read_text()),
+                    **self.artifacts.read(raw["ir_artifact"]),
                     "contexts": raw["contexts"],
                     "requires_context_shards": False,
                 }
@@ -84,7 +86,7 @@ class Expansions:
                 raise ValueError("Select an archived context-shard to bound consuming-document work")
             if "contexts" not in raw and "event" not in raw:
                 raw["contexts"] = [
-                    json.loads(row[0])
+                    self.artifacts.read(row[0])
                     for row in self.connection.execute(
                         "SELECT data FROM graph_unit_contexts WHERE unit_id=? ORDER BY context_id LIMIT 101", (unit,)
                     )
@@ -98,7 +100,7 @@ class Expansions:
                 source = raw
                 raw = run_javascript(source["source"], source["filename"], "summary")
                 reference = self.connection.execute("SELECT path FROM captures WHERE id=?", (capture,)).fetchone()[0]
-                event = json.loads(self.artifacts.resolve(reference).read_text())
+                event = self.artifacts.read(reference)
                 analyzed = archive_ir(
                     self.artifacts, event, event["data"]["url"], source["filename"], raw, contexts=source["contexts"]
                 )
@@ -118,7 +120,7 @@ class Expansions:
                 projection = restore_projection(raw)
             else:
                 reference = self.connection.execute("SELECT path FROM captures WHERE id=?", (capture,)).fetchone()[0]
-                event = json.loads(self.artifacts.resolve(reference).read_text())
+                event = self.artifacts.read(reference)
                 projection = Projection({**event, "library_analysis": "full"})
                 projection.library_analysis = "full"
                 root = projection.resource(projection.url)
@@ -149,7 +151,7 @@ class Expansions:
             snapshot = {"projection": projection_snapshot(projection), "planner": planner.checkpoint()}
             path = self.artifacts.write(identity("expansion-checkpoint", key), snapshot)
             with self.connection:
-                self.connection.execute("UPDATE graph_expansions SET checkpoint=? WHERE id=?", (path.name, key))
+                self.connection.execute("UPDATE graph_expansions SET checkpoint=? WHERE id=?", (path, key))
             if not completed:
                 return True
             projection.planned_links = planner.links
@@ -161,7 +163,7 @@ class Expansions:
                 self.connection.execute(
                     "UPDATE graph_manifest_units SET materialization='complete',error='' WHERE id=?", (unit,)
                 )
-            path.unlink(missing_ok=True)
+            self.artifacts.delete(path)
         except Exception as error:
             transient = transient_neo4j_error(error)
             with self.connection:

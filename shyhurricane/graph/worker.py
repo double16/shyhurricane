@@ -19,6 +19,11 @@ def graph_worker(db, location, health_state, stop_event, open_world):
     artifacts = ArtifactStore(db)
     store = GraphStore(location)
     epochs = None
+    temporary_root = artifacts.root / "parser-tmp"
+    if temporary_root.exists():
+        for temporary in temporary_root.iterdir():
+            if temporary.is_file():
+                temporary.unlink()
     from shyhurricane.index.web_resources import _wait_for_health
 
     try:
@@ -31,11 +36,17 @@ def graph_worker(db, location, health_state, stop_event, open_world):
         def available():
             return {"graph_epoch": True} if epochs.available() else None
 
-        items = persistent_queue_get(queue, stop_event=stop_event, idle_callback=available, raw=True)
+        items = persistent_queue_get(
+            queue, stop_event=stop_event, idle_callback=available, raw=True, prefer_ready_work=True,
+        )
         while _wait_for_health(health_state, stop_event):
             try:
                 receipt = next(items)
             except StopIteration:
+                break
+            if stop_event.is_set():
+                if "graph_epoch" not in receipt:
+                    queue.nack(receipt)
                 break
             if "graph_epoch" not in receipt:
                 if not health_state.is_set():
@@ -48,7 +59,7 @@ def graph_worker(db, location, health_state, stop_event, open_world):
                 except Exception:
                     queue.ack_failed(receipt)
                     logger.exception("Graph epoch input rejected; delivery retained for explicit retry")
-            if health_state.is_set():
+            if not stop_event.is_set() and health_state.is_set():
                 epochs.step()
                 epochs.settle(queue)
     except Exception:

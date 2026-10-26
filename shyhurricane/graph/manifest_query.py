@@ -132,8 +132,6 @@ def manifest_query(
 
 
 def expand_analysis(artifacts, queue, scope, capture_id, unit_id):
-    import json
-
     from shyhurricane.graph.query import scope_predicate
 
     row = artifacts.connection.execute(
@@ -151,17 +149,7 @@ def expand_analysis(artifacts, queue, scope, capture_id, unit_id):
     if row is None or not (matches(row[2]) or in_context):
         raise ValueError("Analysis unit is unavailable in the requested scope")
     budget = artifacts.budget
-    chunks = []
-    size = 0
-    with artifacts.resolve(row[3]).open("rb") as stream:
-        while chunk := stream.read(64 * 1024):
-            if budget is not None:
-                budget.check()
-            size += len(chunk)
-            if size > 64 * 1024 * 1024:
-                raise ValueError("Retained capture exceeds the expansion submission size limit")
-            chunks.append(chunk)
-    event = json.loads(b"".join(chunks))
+    event = artifacts.read(row[3], limit=64 * 1024 * 1024)
     if budget is not None:
         budget.check()
     work_id = identity("expand", capture_id, unit_id)

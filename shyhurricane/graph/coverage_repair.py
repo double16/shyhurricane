@@ -6,7 +6,7 @@ import time
 from contextlib import closing
 
 from shyhurricane.data_paths import persistent_queue_path
-from shyhurricane.graph.artifact_paths import resolve_artifact_path
+from shyhurricane.graph.blob_store import BlobStore
 from shyhurricane.graph.model import identity, web_url
 from shyhurricane.graph.policy import ANALYZER_VERSION
 
@@ -23,8 +23,10 @@ class CoverageRepair:
     def archive_exists(self, reference):
         """A corrupt or inaccessible reference must not starve later candidates."""
         try:
-            return resolve_artifact_path(self.root, reference).is_file()
-        except (OSError, ValueError):
+            with closing(sqlite3.connect((self.root / "artifacts.sqlite").as_uri() + "?mode=ro",
+                                        uri=True, timeout=0.05)) as connection:
+                return BlobStore(connection).exists(reference)
+        except (OSError, ValueError, sqlite3.Error):
             return False
 
     def tick(self, stop_event):

@@ -78,7 +78,7 @@ def test_archived_ir_shards_are_addressable_and_expansion_is_offline(graph_paths
         "SELECT id,artifact FROM graph_manifest_units WHERE source_path LIKE '%#flow-shard=%'"
     ).fetchall()
     assert len(shards) == 1
-    assert json.loads(artifacts.resolve(shards[0][1]).read_text())["edges"] == raw["edges"]
+    assert artifacts.read(shards[0][1])["edges"] == raw["edges"]
     queue = MagicMock()
     result = expand_analysis(artifacts, queue, "example.com", capture["id"], shards[0][0])
     assert result["status"] == "pending" and queue.put.call_args.args[0]["offline_analysis"]
@@ -143,7 +143,10 @@ def test_fact_payload_limit_keeps_blob_and_reference(graph_paths, event, monkeyp
     key = artifacts.manifest.fact(unit, capture["id"], "field", {
         "url": "https://example.com/", "name": "x" * 200,
     })
-    assert json.loads((artifacts.root / f"manifest-blob-{key}.json").read_text())["name"] == "x" * 200
+    payload = artifacts.read(artifacts.connection.execute(
+        "SELECT data FROM graph_manifest_facts WHERE id=?", (key,)
+    ).fetchone()[0])
+    assert artifacts.read(payload["artifact"])["name"] == "x" * 200
     records, _ = artifacts.manifest.page("example.com", kind="field")
     assert records[0]["oversized"]
     artifacts.close()
@@ -250,7 +253,7 @@ def test_deferred_inline_script_is_retained_in_html_and_svg(graph_paths, event):
         "SELECT artifact,discovery FROM graph_manifest_units WHERE source_path LIKE '%#deferred-script=%'"
     ).fetchall()
     assert len(rows) == 2 and all(row[1] == "pending" for row in rows)
-    assert all("source" in json.loads(artifacts.resolve(row[0]).read_text()) for row in rows)
+    assert all("source" in artifacts.read(row[0]) for row in rows)
     artifacts.close()
 
 
@@ -382,11 +385,11 @@ def test_deferred_markup_shard_keeps_ancestry_and_reuses_discovered_node_ids(gra
     body += '<input id="tail" name="important"></fieldset></form>'
     capture = artifacts.register(event(body=body))
     extract(capture, artifacts)
-    row = artifacts.connection.execute(
-        "SELECT data FROM graph_manifest_facts WHERE kind='field' "
-        "AND json_extract(data,'$.attributes.id')='tail'"
-    ).fetchone()
-    discovered = json.loads(row[0])
+    discovered = next(
+        payload for (reference,) in artifacts.connection.execute(
+            "SELECT data FROM graph_manifest_facts WHERE kind='field'"
+        ) if (payload := artifacts.read(reference)).get("attributes", {}).get("id") == "tail"
+    )
     detail = extract(capture, markup_offset=10000, markup_limit=1000, record_discovery=False)
     assert discovered["id"] in detail.nodes
     assert not detail.nodes[discovered["id"]]["form_successful"]

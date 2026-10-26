@@ -67,6 +67,9 @@ have their own publication pointer and never replace structural entity or eviden
 planner therefore sees stable dependencies even when more captures arrive. Completion does not
 schedule another reconciliation traversal. Duplicate input deliveries create no additional epoch.
 Queue receipts remain processing until their epoch completes or fails, including across restarts.
+The worker checks for new inputs before each epoch step and advances runnable work without an
+input-queue timeout. When no work can run, it waits up to one second before checking again;
+future retries and inputs waiting behind a failed epoch do not cause busy polling.
 
 `/status` includes `graph.epoch` with the epoch ID, phase, affected/completed capture counts,
 outstanding jobs, waiting inputs, unchanged-publication count, activation counts, conflicts, and
@@ -76,13 +79,90 @@ publication conflicts and permanent capture failures quarantine that capture and
 Independent captures continue. Retry failed inputs explicitly through the dashboard. A catalog-wide
 failure stops the epoch visibly; newer inputs remain durable.
 
-Unfinished legacy reconciliation or continuation state is rejected with a fresh-graph-state error;
-it is never silently dropped or replayed through the old traversal scheduler. Start a fresh data
-directory for this manifest/IR layout upgrade. The rebuild command below applies to captures
-already retained in the new layout. Source captures and
-existing databases are not deleted automatically. Epoch snapshots are removed on successful
-completion; graph evidence retains its existing history guarantees. Disk allocation can remain
-large after cleanup because Neo4j reuses freed storage.
+### Graph-state storage
+
+Use a fresh assessment directory for storage version 2. Version 1 compact directories and older
+layouts are not supported. Existing storage versions are
+rejected before schema initialization; there is no migration or legacy file reader. Preserve old
+assessment directories and rebuild deployments into new directories.
+
+`graph_state/artifacts.sqlite` holds captures, shared response/source text, complete IR, detail
+shards, manifest facts, and restart checkpoints. Artifacts use compact JSON encoded as Zstandard
+level 1 BLOBs, or raw bytes when compression would enlarge them. SHA-256 content addresses share
+identical payloads and large text across captures and projections. Readers validate encoding version,
+decoded size, and checksum. Opaque references identify immutable content, not file paths. Replacing a
+checkpoint creates a new reference; parser workers receive the epoch snapshot reference explicitly.
+Nested artifact dependencies resolve to existing immutable objects, forming an acyclic graph.
+
+The manifest interns repeated identifiers and URLs as integer keys. Context documents are stored
+once per distinct version, with separate compact membership tables. Indexed metadata selects bounded
+candidates before payload decompression; public IDs, pagination order, snapshot watermarks, temporal
+selection, and coverage semantics remain independent of storage keys.
+
+Captured evidence, successful external source-map responses, complete analysis, and expansion shards
+remain retained. External source-map evidence remains unverified; retaining it does not establish
+that it matches delivered JavaScript. Recomputable extraction
+caches use least-recently-used eviction, with a default 256 MiB compressed-content budget per
+assessment. Shared text is counted once and evidence-owned content is excluded from the cache budget.
+`0` disables new cache retention. Maintenance evicts in bounded batches, so an over-budget cache may
+need multiple passes. Cache eviction never removes content referenced by retained evidence or active
+checkpoints. Nested artifact references are tracked explicitly.
+
+Completed jobs retain completion metadata rather than checkpoint artifacts. Successful epochs release
+snapshots and pinned source-map records; unused content is reclaimed asynchronously. Newly staged
+objects have a one-hour grace period before orphan reclamation. A cache hit renews this grace before
+returning nested references, allowing the caller to save its next checkpoint safely. Eviction drops
+the cache key while preserving this read/staging grace, so physical disk usage may remain above the
+cache budget temporarily; `staged_bytes` reports this allocation. Complete reads use SQLite snapshots.
+Parser output is temporary and is
+removed after parsing; a worker restart removes abandoned parser output before starting new parsers.
+There are at most 64 artifact lock files, independent of artifact count. A small
+`cache-leases.sqlite` coordinates exact cache keys without holding bucket locks across nested parser
+processes; expired leases or leases from exited processes can be reclaimed.
+
+Ownership, cache roots, and dependency edges update reference counts transactionally. Blob usage
+metadata is separate from compressed payloads, so accounting changes do not rewrite large bodies.
+Unique logical/stored byte totals update at insertion and deletion; retained/cache classification
+changes propagate through a durable work queue. Each edge records its applied contribution, making
+retries and overlapping changes idempotent without a whole-catalog reachability scan.
+
+Independent maintenance processes at most 500 items per pass in committed sub-batches of at most 64
+items, cooperatively bounded by two seconds. Each item updates one dependency, cache key, or garbage
+candidate using indexed lookups. A deadline yields normally and preserves earlier commits; pending
+work is retried after one second, idle maintenance after 60 seconds. Deletions recheck physical reference counts transactionally and release
+children incrementally. Newly unreferenced content becomes an indexed reclamation candidate.
+
+SQLite `BUSY`/`LOCKED` contention during graph storage maintenance is a normal deferral.
+Maintenance retains committed batches, rolls back the active batch, and retries after one second
+without failure backoff. Deferrals are logged at INFO with the stage, SQLite code, and committed
+item count. Other database failures retain warning logs and exponential retry backoff.
+
+Incremental vacuum and passive WAL checkpointing get a separate short budget even when accounting
+yields. Readers can delay physical reclamation. Normal operation never runs a full vacuum. Neo4j has
+its own retired-generation cleanup and may reuse allocation rather than return it to the filesystem.
+
+`graph.storage` in `/status` reads aggregate counters and allocation metadata. It reports
+`logical_payload_bytes`, `stored_payload_bytes`, `retained_bytes`, `cache_bytes`, `staged_bytes`, cache
+budget, database/WAL allocation, and reclaimable SQLite bytes. Classification totals can temporarily
+lag while `accounting_pending` is true. `pending_work_count` counts queued classification jobs and
+retiring nodes; `last_maintenance_progress_at` is the Unix timestamp of the last committed work.
+Maintenance continues enforcing the cache budget as classification converges.
+
+Refreshes run in the background; `storage_stale`, refresh time, and errors indicate when samples are
+unavailable or old. Counters are consistent within a SQLite read transaction; measurements are not an
+atomic snapshot across SQLite, filesystem allocation, and Neo4j.
+
+For an isolated artifact-format comparison, install development dependencies and run:
+
+```shell
+UV_CACHE_DIR="$PWD/.uv-cache" uv run python .github/scripts/benchmark-graph-storage.py \
+  --corpus /path/to/artifacts-or-index.jsonl --output /tmp/graph-storage-benchmark.json
+```
+
+The benchmark reads a bounded sample without changing the source, and compares JSON files, raw SQLite,
+LZ4, Zstandard level 1, and the production deduplicating artifact store in temporary databases. It
+reports allocation, file counts, write time, warm-cache read latency, and peak Python allocations;
+native codec/SQLite allocations are excluded. This comparison does not measure catalog normalization.
 
 ## Graph tools
 
@@ -598,6 +678,7 @@ unauthenticated connection model as Qdrant; external servers can use credentials
 | Environment variable | Default | Description |
 |----------------------|---------|-------------|
 | `GRAPH_LIBRARY_ANALYSIS` | `summary` | `summary` compresses scripts exceeding 2,000 generated nodes or 4,000 edges; `full` materializes more detail. Both preserve the same discovery inventory and archive complete IR on successful parsing |
+| `GRAPH_ARTIFACT_CACHE_MAX_BYTES` | `268435456` | Non-negative compressed-content budget for recomputable graph caches per assessment; `0` disables cache retention. Evidence and active work are excluded; bounded maintenance reclaims excess asynchronously |
 | `NEO4J` | Unset; `bolt://graph:7687` in Compose | External Bolt/Neo4j server URI; managed local storage uses `<data-dir>/graph` |
 | `NEO4J_USERNAME` | `neo4j` | Username when `NEO4J_PASSWORD` is supplied |
 | `NEO4J_PASSWORD` | Unset | Password for authenticated connections; also initializes authentication on a newly created managed container |

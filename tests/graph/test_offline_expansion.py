@@ -1,6 +1,5 @@
 """Offline shard publication and terminal failures preserve durable queue receipts."""
 
-import json
 from unittest.mock import MagicMock
 
 import pytest
@@ -25,7 +24,7 @@ def test_expansion_publishes_retained_artifact_once_and_settles(graph_paths, eve
     }, contexts=[{"id": "document", "url": "https://example.com/", "base": "https://example.com/"}])
     if snapshot:
         path = artifacts.write("projection", projection_snapshot(Projection(capture)))
-        artifacts.connection.execute("UPDATE graph_manifest_units SET artifact=? WHERE id=?", (path.name, unit))
+        artifacts.connection.execute("UPDATE graph_manifest_units SET artifact=? WHERE id=?", (path, unit))
         artifacts.connection.commit()
     publish = MagicMock()
     monkeypatch.setattr(expansion.UnitPublisher, "publish", publish)
@@ -51,7 +50,7 @@ def test_expansion_failure_is_durable_and_retryable(graph_paths, event, monkeypa
     artifacts = ArtifactStore("db")
     capture = artifacts.register(event())
     path = artifacts.write("retained", projection_snapshot(Projection(capture)))
-    unit = artifacts.manifest.unit(capture["id"], "fixture", artifact=path.name)
+    unit = artifacts.manifest.unit(capture["id"], "fixture", artifact=path)
     monkeypatch.setattr(expansion.UnitPublisher, "publish", MagicMock(side_effect=failure))
     jobs = Expansions(artifacts, MagicMock())
     item = {**capture, "analysis_unit_id": unit}
@@ -92,7 +91,7 @@ def test_deferred_source_is_parsed_offline_and_oversized_raw_units_require_shard
         "source": "eval(location.hash)", "filename": "fixture.js", "contexts": [],
     }
     path = artifacts.write("raw", raw)
-    unit = artifacts.manifest.unit(capture["id"], "fixture.js", artifact=path.name)
+    unit = artifacts.manifest.unit(capture["id"], "fixture.js", artifact=path)
     runner = MagicMock(return_value={"nodes": [], "edges": [], "references": [], "gaps": []})
     monkeypatch.setattr("shyhurricane.graph.extract.run_javascript", runner)
     monkeypatch.setattr(expansion.UnitPublisher, "publish", MagicMock())
@@ -156,7 +155,7 @@ def test_expansion_planning_yields_and_resumes_a_durable_checkpoint(graph_paths,
     artifacts = ArtifactStore("db")
     capture = artifacts.register(event())
     path = artifacts.write("projection", projection_snapshot(Projection(capture)))
-    unit = artifacts.manifest.unit(capture["id"], "fixture", artifact=path.name)
+    unit = artifacts.manifest.unit(capture["id"], "fixture", artifact=path)
     planner = MagicMock(links={})
     planner.plan_slice.side_effect = [False, True]
     planner.checkpoint.return_value = {}
@@ -168,11 +167,11 @@ def test_expansion_planning_yields_and_resumes_a_durable_checkpoint(graph_paths,
     assert jobs.step() and jobs.available()
     publish.assert_not_called()
     checkpoint = artifacts.connection.execute("SELECT checkpoint FROM graph_expansions").fetchone()[0]
-    assert artifacts.resolve(checkpoint).exists()
+    assert artifacts.blobs.exists(checkpoint)
     assert jobs.step() and not jobs.available()
     planner.restore.assert_called_once_with({})
     publish.assert_called_once()
-    assert not artifacts.resolve(checkpoint).exists()
+    assert not artifacts.blobs.exists(checkpoint)
     artifacts.close()
 
 
@@ -184,12 +183,12 @@ def test_large_context_sets_have_bounded_addressable_shards(graph_paths, event, 
     raw = {"nodes": [{"id": str(index), "kind": "symbol"} for index in range(2050)], "edges": [], "gaps": []}
     unit = archive_ir(artifacts, capture, capture["data"]["url"], "fixture.js", raw, contexts=contexts)
     original = artifacts.connection.execute("SELECT artifact FROM graph_manifest_units WHERE id=?", (unit,)).fetchone()[0]
-    assert len(json.loads(artifacts.resolve(original).read_text())["nodes"]) == 2050
+    assert len(artifacts.read(original)["nodes"]) == 2050
     shards = artifacts.connection.execute(
         "SELECT id,artifact FROM graph_manifest_units WHERE source_path LIKE '%#context-shard=%' ORDER BY source_path"
     ).fetchall()
     assert len(shards) == 6
-    assert all(len(json.loads(artifacts.resolve(row[1]).read_text())["contexts"]) <= 100 for row in shards)
+    assert all(len(artifacts.read(row[1])["contexts"]) <= 100 for row in shards)
     monkeypatch.setattr(expansion.UnitPublisher, "publish", MagicMock())
     planner = MagicMock(links={})
     planner.plan_slice.return_value = True

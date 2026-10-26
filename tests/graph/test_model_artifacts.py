@@ -184,71 +184,18 @@ def test_reference_index_upgrades_existing_database_and_avoids_scan(graph_paths,
     assert "Created graph reference index" in caplog.text
 
 
-def test_relative_artifacts_survive_relocation(graph_paths, event, monkeypatch):
-    from shyhurricane.graph.artifact_paths import artifact_reference, resolve_artifact_path
-
+def test_artifacts_survive_relocation(graph_paths, event, monkeypatch):
     store = ArtifactStore("db")
     capture = event(body="original")
     store.register(capture)
-    store.references(capture["id"], [capture["data"]["url"]])
-    for table in ("captures", "bodies"):
-        reference = store.connection.execute(f"SELECT path FROM {table}").fetchone()[0]
-        assert reference == store.resolve(reference).name
-        # Simulate records written before relative storage was introduced.
-        store.connection.execute(f"UPDATE {table} SET path=?", (str(store.resolve(reference)),))
-    store.connection.commit()
+    reference = store.connection.execute("SELECT path FROM captures").fetchone()[0]
+    assert reference.startswith("a:")
     old_root = store.root
     store.close()
     moved = graph_paths / "moved"
     old_root.rename(moved)
-    monkeypatch.chdir(graph_paths)
     monkeypatch.setattr("shyhurricane.graph.artifacts.persistent_queue_path", lambda *args: moved)
     store = ArtifactStore("db")
     assert store.register(capture) == capture
-    assert store.latest(capture["data"]["url"]) == capture
-    assert store.dependents(capture["data"]["url"]) == [capture]
-    assert store.targets(capture["id"]) == [capture]
-    digest = hashlib.sha256(b"original").hexdigest()
-    assert store.source_map(capture["data"]["url"], "other", {}, False, original_hash=digest) is None
-    assert resolve_artifact_path(moved, reference) == moved / reference
-    assert artifact_reference(moved, old_root / reference) == reference
+    assert store.read(reference) == capture
     store.close()
-
-
-def test_artifact_path_precedence_and_errors(tmp_path, monkeypatch):
-    from pathlib import Path
-
-    from shyhurricane.graph.artifact_paths import artifact_reference, resolve_artifact_path
-
-    root = tmp_path / "graph_state"
-    root.mkdir()
-    external = tmp_path / "capture.json"
-    external.write_text("invalid json")
-    local = root / external.name
-    local.write_text("{}")
-    assert resolve_artifact_path(root, external) == external
-    assert artifact_reference(root, external) == str(external)
-    with pytest.raises(json.JSONDecodeError):
-        json.loads(resolve_artifact_path(root, external).read_text())
-    external.unlink()
-    assert resolve_artifact_path(root, external) == local
-    local.unlink()
-    with pytest.raises(FileNotFoundError):
-        resolve_artifact_path(root, external).read_text()
-    with pytest.raises(FileNotFoundError):
-        resolve_artifact_path(root, "sub/capture.json").read_text()
-    with pytest.raises(ValueError, match="escapes"):
-        resolve_artifact_path(root, "../capture.json")
-    (root / "escape").symlink_to(tmp_path, target_is_directory=True)
-    with pytest.raises(ValueError, match="escapes"):
-        resolve_artifact_path(root, "escape/capture.json")
-    original_stat = Path.stat
-
-    def denied(path, *args, **kwargs):
-        if path == external:
-            raise PermissionError("denied")
-        return original_stat(path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "stat", denied)
-    with pytest.raises(PermissionError):
-        resolve_artifact_path(root, external)

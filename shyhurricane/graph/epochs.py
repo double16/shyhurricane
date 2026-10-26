@@ -1,11 +1,11 @@
 """Durable, finite graph epochs over frozen capture and policy snapshots."""
 
-import json
 import logging
 import re
 import time
 from uuid import uuid4
 
+from shyhurricane.graph.blob_store import owner_triggers
 from shyhurricane.graph.continuations import RETRY_DELAYS, SLICE_CONTEXTS, SLICE_SECONDS, Continuations
 from shyhurricane.graph.epoch_catalog import SnapshotArtifacts, affected_captures
 from shyhurricane.graph.expansion import Expansions
@@ -86,6 +86,8 @@ class Epochs:
             self.connection.execute(
                 "UPDATE graph_epoch_activity SET interrupted=1 WHERE capture_id IS NOT NULL"
             )
+        owner_triggers(self.connection, "graph_epochs", "snapshot", "id")
+        owner_triggers(self.connection, "graph_epoch_jobs", "checkpoint")
         self.last_progress_log = 0
         row = self.connection.execute(
             "SELECT version,analyzer_version FROM graph_epochs WHERE version<>? OR analyzer_version<>? LIMIT 1",
@@ -149,14 +151,16 @@ class Epochs:
                 self.connection.execute("DELETE FROM graph_epoch_receipts WHERE queue_id=?", (queue_id,))
 
     def available(self):
+        active = self.connection.execute(
+            "SELECT min(next_attempt) FROM graph_epochs WHERE phase NOT IN ('done','failed')"
+        ).fetchone()[0]
+        if active is not None:
+            return active <= time.time()
         if self.expansions.available():
             return True
         return (
-            self.connection.execute(
-                "SELECT 1 FROM graph_epochs WHERE phase NOT IN ('done','failed') AND next_attempt<=? "
-                "UNION ALL SELECT 1 FROM graph_epoch_inputs WHERE state='waiting' LIMIT 1",
-                (time.time(),),
-            ).fetchone()
+            not self.connection.execute("SELECT 1 FROM graph_epochs WHERE phase<>'done' LIMIT 1").fetchone()
+            and self.connection.execute("SELECT 1 FROM graph_epoch_inputs WHERE state='waiting' LIMIT 1").fetchone()
             is not None
         )
 
@@ -206,7 +210,7 @@ class Epochs:
                 },
             )
             self.connection.execute(
-                "UPDATE graph_epochs SET snapshot=? WHERE id=?", (self.artifacts.reference(path), epoch)
+                "UPDATE graph_epochs SET snapshot=? WHERE id=?", (path, epoch)
             )
             self.connection.executemany(
                 "UPDATE graph_epoch_inputs SET epoch_id=?,state='active' WHERE token=?",
@@ -217,7 +221,7 @@ class Epochs:
     def open_snapshot(self, epoch, path):
         if self.snapshot_id != epoch:
             self.close()
-            snapshot = SnapshotArtifacts(self.artifacts.root, self.artifacts.resolve(path))
+            snapshot = SnapshotArtifacts(self.artifacts.root, path)
             self.snapshot, self.snapshot_id = snapshot, epoch
         return self.snapshot
 
@@ -225,15 +229,15 @@ class Epochs:
         old = self.connection.execute(
             "SELECT checkpoint FROM graph_epoch_jobs WHERE epoch_id=? AND capture_id=?", (epoch, capture_id)
         ).fetchone()[0]
-        path = self.artifacts.write(f"epoch-job-{uuid4().hex}", state)
+        path = "" if stage == "done" else self.artifacts.write(f"epoch-job-{uuid4().hex}", state)
         with self.connection:
             self.connection.execute(
                 "UPDATE graph_epoch_jobs SET stage=?,checkpoint=? WHERE epoch_id=? AND capture_id=?",
-                (stage, self.artifacts.reference(path), epoch, capture_id),
+                (stage, path, epoch, capture_id),
             )
         if old:
             try:
-                self.artifacts.resolve(old).unlink(missing_ok=True)
+                self.artifacts.delete(old)
             except OSError:
                 logger.warning("Graph epoch checkpoint cleanup deferred: %s", old, exc_info=True)
 
@@ -316,7 +320,11 @@ class Epochs:
                 logger.info("Graph epoch %s phase=%s summary=%s", epoch, following, epoch_status(self.connection))
                 if following == "done":
                     self.close()
-                    self.artifacts.resolve(path).unlink(missing_ok=True)
+                    with self.connection:
+                        self.connection.execute("UPDATE graph_epochs SET snapshot='' WHERE id=?", (epoch,))
+                        self.connection.execute("DELETE FROM graph_pinned_source_maps WHERE epoch_id=?", (epoch,))
+                        self.connection.execute("DELETE FROM graph_source_map_reads WHERE epoch_id=?", (epoch,))
+                    self.artifacts.delete(path)
         except Exception as error:
             with self.connection:
                 self.connection.execute(
@@ -349,7 +357,7 @@ class Epochs:
 
     def expand_membership(self, epoch, artifacts):
         row = self.connection.execute("SELECT snapshot FROM graph_epochs WHERE id=?", (epoch,)).fetchone()
-        state = json.loads(self.artifacts.resolve(row[0]).read_text())
+        state = self.artifacts.read(row[0])
         existing = {
             capture
             for (capture,) in self.connection.execute(
@@ -381,7 +389,7 @@ class Epochs:
             self.connection.execute("UPDATE graph_epochs SET affected=affected+? WHERE id=?", (len(members), epoch))
             path = self.artifacts.write(f"epoch-{epoch}", state)
             self.connection.execute(
-                "UPDATE graph_epochs SET snapshot=? WHERE id=?", (self.artifacts.reference(path), epoch)
+                "UPDATE graph_epochs SET snapshot=? WHERE id=?", (path, epoch)
             )
         artifacts.connection.commit()
         return True
@@ -444,7 +452,7 @@ class Epochs:
     def run_job(self, epoch, artifacts, capture_id, stage, checkpoint):
         if stage == "references":
             path = artifacts.connection.execute("SELECT path FROM captures WHERE id=?", (capture_id,)).fetchone()[0]
-            event = json.loads(artifacts.resolve(path).read_text())
+            event = artifacts.read(path)
             mode = artifacts.connection.execute(
                 "SELECT mode FROM analysis_policies WHERE capture_id=?", (capture_id,)
             ).fetchone()[0]
@@ -508,7 +516,7 @@ class Epochs:
                 },
             )
         else:
-            state = json.loads(self.artifacts.resolve(checkpoint).read_text())
+            state = self.artifacts.read(checkpoint)
             if stage == "contexts":
                 # Reuse the bounded, resumable discovery cursor without creating legacy work.
                 discovery = object.__new__(Continuations)
@@ -538,13 +546,9 @@ class Epochs:
                     lambda: projection_snapshot(
                         self.parse(
                             {
-                                **json.loads(
-                                    artifacts.resolve(
-                                        artifacts.connection.execute(
-                                            "SELECT path FROM captures WHERE id=?", (capture_id,)
-                                        ).fetchone()[0]
-                                    ).read_text()
-                                ),
+                                **artifacts.read(artifacts.connection.execute(
+                                    "SELECT path FROM captures WHERE id=?", (capture_id,)
+                                ).fetchone()[0]),
                                 "library_analysis": state["event"]["library_analysis"],
                             },
                             artifacts,
@@ -610,7 +614,7 @@ class Epochs:
             "SELECT capture_id,checkpoint FROM graph_epoch_jobs WHERE epoch_id=? AND stage='extract'", (epoch,)
         ).fetchall()
         for capture_id, checkpoint in rows:
-            state = json.loads(self.artifacts.resolve(checkpoint).read_text())
+            state = self.artifacts.read(checkpoint)
             url = javascript_url_from_map(state["event"]["data"]["url"]) or state["event"]["data"]["url"]
             state.update(pending=[url], seen=[url], after="", contexts={})
             self.save_job(epoch, capture_id, "contexts", state)

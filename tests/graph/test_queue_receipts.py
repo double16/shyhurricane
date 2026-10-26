@@ -1,6 +1,7 @@
 """Queue rows reflect publication outcomes, including durable continuation handoffs."""
 
 import sqlite3
+from threading import Event
 from unittest.mock import MagicMock
 
 import pytest
@@ -105,7 +106,7 @@ def test_worker_marks_real_queue_rows_only_after_epoch_outcome(
     monkeypatch.setattr(worker, "GraphStore", lambda *a: store)
     monkeypatch.setattr(epochs, "extract", projection)
     monkeypatch.setattr("shyhurricane.index.web_resources._wait_for_health", lambda *a: True)
-    worker.graph_worker("db", "graph", MagicMock(), MagicMock(), False)
+    worker.graph_worker("db", "graph", MagicMock(), Event(), False)
     queue = SQLiteAckQueue(queue_path, auto_commit=True, auto_resume=False)
     transient = isinstance(failure, ServiceUnavailable)
     assert queue.acked_count() == int(failure is None)
@@ -126,7 +127,7 @@ def test_worker_marks_real_queue_rows_only_after_epoch_outcome(
         # Restart recovery redelivers the processing row or the explicitly retried failure.
         queue.resume_unack_tasks()
         failure = None
-        worker.graph_worker("db", "graph", MagicMock(), MagicMock(), False)
+        worker.graph_worker("db", "graph", MagicMock(), Event(), False)
         queue = SQLiteAckQueue(queue_path, auto_commit=True, auto_resume=False)
         assert queue.acked_count() == 1 and queue.ack_failed_count() == queue.unack_count() == 0
     queue.close()

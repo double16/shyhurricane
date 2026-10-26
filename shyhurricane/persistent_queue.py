@@ -301,17 +301,32 @@ class QueueMaintenance:
 
 
 def persistent_queue_get(queue: persistqueue.SQLiteAckQueue, shrink_count: int = 1000,
-                         shrink_idle_timeout: float = 600.0, stop_event=None, idle_callback=None, raw=False):
+                         shrink_idle_timeout: float = 600.0, stop_event=None, idle_callback=None, raw=False, *,
+                         prefer_ready_work=False):
     maintenance = QueueMaintenance(queue, shrink_count, shrink_idle_timeout)
     while stop_event is None or not stop_event.is_set():
         maintenance.check()
         try:
             options = {"raw": True} if raw else {}
-            item = queue.get(block=True, timeout=1 if stop_event is not None else 60, **options)
+            if prefer_ready_work:
+                try:
+                    item = queue.get(block=False, **options)
+                except Empty:
+                    available = idle_callback() if idle_callback is not None else None
+                    if stop_event is not None and stop_event.is_set():
+                        return
+                    if available is not None:
+                        yield available
+                        continue
+                    item = queue.get(block=True, timeout=1 if stop_event is not None else 60, **options)
+            else:
+                item = queue.get(block=True, timeout=1 if stop_event is not None else 60, **options)
         except Empty:
             maintenance.check()
             if idle_callback is not None:
                 available = idle_callback()
+                if stop_event is not None and stop_event.is_set():
+                    return
                 if available is not None:
                     yield available
                     continue

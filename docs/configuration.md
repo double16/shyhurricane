@@ -32,7 +32,7 @@ uv run python mcp_service.py --data-dir /srv/shyhurricane
   qdrant/                  Managed Qdrant storage
   graph/                   Managed Neo4j storage, including graph/logs/
   queues/<queue-name>/     Persistent ingest, document, finding, and graph queues
-  graph_state/             Graph captures, artifacts, and maintenance checkpoints
+  graph_state/             Compressed SQLite captures, artifacts, discovery catalog, and checkpoints
   logs/                    Diagnostic, indexing, and finding logs
   certs/                   Replay proxy CA and certificates
   tool_cache/              Tool history, cached output, and result_pages/
@@ -156,3 +156,12 @@ Heap profiling is disabled by default even when diagnostic DEBUG logging is enab
 Compose accepts the same variable from `.env`. Profiling traverses the Python heap and can slow
 large ingests, especially at the type-specific worker's per-document checkpoints. MPS memory stats
 also require this setting; other GPU diagnostics are independent of it.
+
+### Graph artifact cache
+
+Graph storage settings complement the analyzer settings in the
+[application graph guide](application-graph.md#graph-state-storage).
+
+| Environment variable | Default | Description |
+|----------------------|---------|-------------|
+| `GRAPH_ARTIFACT_CACHE_MAX_BYTES` | `268435456` | Non-negative compressed-content budget per assessment for recomputable graph caches; `0` disables retention. Captured evidence, retained analysis, and active checkpoints are excluded. Reclamation runs asynchronously in bounded batches. |

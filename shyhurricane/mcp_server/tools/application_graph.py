@@ -509,7 +509,8 @@ async def expand_application_graph_analysis(
 ) -> dict:
     """Queue retained local source for detailed analysis.
 
-    Supply capture_id and analysis_unit_id from omitted_regions or discovery results.
+    Supply scope and capture_id; pass analysis_unit_id from omitted_regions or discovery results
+    as the unit_id argument.
     The graph worker reads archived IR locally; it does not make target requests.
     """
     import asyncio

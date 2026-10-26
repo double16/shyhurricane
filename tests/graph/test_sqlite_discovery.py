@@ -137,18 +137,22 @@ def test_sparse_physical_batches_resume_without_skipping_late_matches(populated)
     writer = ArtifactStore("db")
     unit = writer.manifest.unit(populated["id"], "sparse")
     # Stable IDs place all out-of-scope candidates before the one valid fact.
+    from shyhurricane.graph.compact_manifest import term
+
     with writer.connection:
-        writer.connection.executemany(
-            "INSERT INTO graph_manifest_facts VALUES (?,?,?,?,?,?,?,?)",
-            ((f"000{index:06}", unit, populated["id"], "symbol", "https://target.local/a",
-              "target.local", "source", '{"id":"outside","kind":"symbol","url":"https://target.local/a"}')
-             for index in range(5001)),
-        )
-        writer.connection.execute(
-            "INSERT INTO graph_manifest_facts VALUES (?,?,?,?,?,?,?,?)",
-            ("zzz", unit, populated["id"], "symbol", populated["data"]["url"], "example.com", "source",
-             '{"id":"last","kind":"symbol","url":"https://example.com/page"}'),
-        )
+        for index in range(5002):
+            inside = index == 5001
+            target = populated["data"]["url"] if inside else "https://target.local/a"
+            payload = {"id": "last" if inside else "outside", "kind": "symbol", "url": target}
+            ref = writer.write(f"sparse-{inside}", payload)
+            writer.connection.execute(
+                "INSERT INTO graph_facts(id,unit,capture,kind_key,url_key,host_key,role_key,data,method,captured) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                ("zzz" if inside else f"000{index:06}", term(writer.connection, unit),
+                 term(writer.connection, populated["id"]), term(writer.connection, "symbol"),
+                 term(writer.connection, target), term(writer.connection, "example.com" if inside else "target.local"),
+                 term(writer.connection, "source"), ref, "GET", 0),
+            )
     writer.close()
     reader = ArtifactStore("db", readonly=True, budget=QueryBudget())
     result = manifest_query(reader, "example.com", kind="symbol")

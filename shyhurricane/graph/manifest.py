@@ -2,11 +2,13 @@
 
 import json
 import logging
-import os
 import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from shyhurricane.graph.blob_store import BlobStore
+from shyhurricane.graph.compact_manifest import initialize as initialize_manifest
+from shyhurricane.graph.compact_manifest import term
 from shyhurricane.graph.model import capture_unit_path, identity, optional_filter, projection_snapshot
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,7 @@ class ManifestStore:
         self.root = Path(root)
         self.batching = False
         self.writes = 0
+        self.blobs = BlobStore(connection)
         if not initialize:
             return
         self.connection.executescript(
@@ -42,24 +45,12 @@ class ManifestStore:
             "CREATE INDEX IF NOT EXISTS graph_manifest_pending ON graph_manifest_units(id) "
             "WHERE discovery='pending' OR flow='pending';"
             "CREATE INDEX IF NOT EXISTS graph_manifest_capture ON graph_manifest_units(capture_id,id);"
-            "CREATE TABLE IF NOT EXISTS graph_manifest_facts ("
-            "id TEXT PRIMARY KEY,unit_id TEXT NOT NULL,capture_id TEXT NOT NULL,kind TEXT NOT NULL,"
-            "url TEXT NOT NULL,host TEXT NOT NULL,role TEXT NOT NULL,data TEXT NOT NULL);"
-            "CREATE INDEX IF NOT EXISTS graph_manifest_scope ON graph_manifest_facts(host,kind,id);"
-            "CREATE INDEX IF NOT EXISTS graph_manifest_url ON graph_manifest_facts(url,id);"
-            "CREATE INDEX IF NOT EXISTS graph_manifest_unit ON graph_manifest_facts(unit_id,id);"
-            "CREATE TABLE IF NOT EXISTS graph_manifest_contexts ("
-            "fact_id TEXT NOT NULL,context_id TEXT NOT NULL,PRIMARY KEY(fact_id,context_id));"
-            "CREATE TABLE IF NOT EXISTS graph_unit_contexts ("
-            "unit_id TEXT NOT NULL,context_id TEXT NOT NULL,url TEXT NOT NULL,host TEXT NOT NULL,data TEXT NOT NULL,"
-            "PRIMARY KEY(unit_id,context_id));"
-            "CREATE INDEX IF NOT EXISTS graph_unit_context_host ON graph_unit_contexts(host,unit_id);"
-            "CREATE TABLE IF NOT EXISTS graph_unit_parents (unit_id TEXT PRIMARY KEY,parent_id TEXT NOT NULL);"
-            "CREATE INDEX IF NOT EXISTS graph_unit_parent ON graph_unit_parents(parent_id);"
             "CREATE TABLE IF NOT EXISTS graph_manifest_dependencies ("
             "capture_id TEXT NOT NULL,url TEXT NOT NULL,kind TEXT NOT NULL,PRIMARY KEY(capture_id,url,kind));"
             "CREATE INDEX IF NOT EXISTS graph_dependency_url ON graph_manifest_dependencies(url,capture_id);"
         )
+
+        initialize_manifest(self.connection)
 
     @contextmanager
     def batch(self):
@@ -110,23 +101,25 @@ class ManifestStore:
         from urllib.parse import urlsplit
 
         with self.transaction():
-            self.connection.executemany(
-                "INSERT OR IGNORE INTO graph_unit_contexts VALUES (?,?,?,?,?)",
-                (
-                    (
-                        unit,
-                        context["id"],
-                        context["url"],
-                        urlsplit(context["url"]).hostname or "",
-                        json.dumps(context, sort_keys=True),
-                    )
-                    for context in contexts
-                ),
-            )
+            unit_key = term(self.connection, unit)
+            for context in contexts:
+                ref = "a:" + identity("context", context)
+                ref = self.blobs.put(ref, context)
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO graph_context_documents(context,url_key,host_key,data) VALUES (?,?,?,?)",
+                    (term(self.connection, context["id"]), term(self.connection, context["url"]),
+                     term(self.connection, urlsplit(context["url"]).hostname or ""), ref),
+                )
+                document = self.connection.execute(
+                    "SELECT key FROM graph_context_documents WHERE data=?", (ref,)
+                ).fetchone()[0]
+                self.connection.execute("INSERT OR IGNORE INTO graph_context_members(unit,document) VALUES (?,?)",
+                                        (unit_key, document))
 
     def parent(self, unit, parent):
         with self.transaction():
-            self.connection.execute("INSERT OR IGNORE INTO graph_unit_parents VALUES (?,?)", (unit, parent))
+            self.connection.execute("INSERT OR IGNORE INTO graph_parents(unit,parent) VALUES (?,?)",
+                                    (term(self.connection, unit), term(self.connection, parent)))
 
     def dependency(self, capture, url, kind):
         if kind in {"LOADS", "IMPORTS", "SOURCE_MAP"}:
@@ -143,27 +136,26 @@ class ManifestStore:
         contextual = payload.pop("context_capture_id", None)
         key = identity("manifest-fact-v1", unit, kind, payload)
         value = json.dumps(payload, sort_keys=True)
-        if len(value.encode()) > PAGE_BYTES:
-            path = self.root / f"manifest-blob-{key}.json"
-            temporary = path.with_suffix(f".{os.getpid()}.tmp")
-            with temporary.open("w") as stream:
-                os.chmod(temporary, 0o600)
-                stream.write(value)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, path)
-            payload = {"id": key, "artifact": path.name, "oversized": True}
-            value = json.dumps(payload)
         url = data.get("url") or data.get("owner_url") or ""
         with self.transaction():
+            if len(value.encode()) > PAGE_BYTES:
+                oversized = "a:" + identity("manifest-blob", key)
+                oversized = self.blobs.put(oversized, payload)
+                payload = {"id": key, "artifact": oversized, "oversized": True}
+            reference = "a:" + identity("manifest-payload", payload)
+            reference = self.blobs.put(reference, payload)
             self.connection.execute(
-                "INSERT OR IGNORE INTO graph_manifest_facts VALUES (?,?,?,?,?,?,?,?)",
-                (key, unit, capture, kind, url, urlsplit(url).hostname or "", data.get("role") or "", value),
+                "INSERT OR IGNORE INTO graph_facts(id,unit,capture,kind_key,url_key,host_key,role_key,data,method,captured) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (key, term(self.connection, unit), term(self.connection, capture), term(self.connection, kind),
+                 term(self.connection, url), term(self.connection, urlsplit(url).hostname or ""),
+                 term(self.connection, data.get("role") or ""), reference,
+                 str(data.get("method") or "GET").upper(), int(data.get("capture_status") == "captured")),
             )
-            self.connection.executemany(
-                "INSERT OR IGNORE INTO graph_manifest_contexts VALUES (?,?)",
-                ((key, context) for context in {*contexts, *([contextual] if contextual else [])}),
-            )
+            fact = self.connection.execute("SELECT seq FROM graph_facts WHERE id=?", (key,)).fetchone()[0]
+            for context in {*contexts, *([contextual] if contextual else [])}:
+                self.connection.execute("INSERT OR IGNORE INTO graph_fact_contexts(fact,context) VALUES (?,?)",
+                                        (fact, term(self.connection, context)))
         return key
 
     def archive(self, projection, writer):
@@ -184,7 +176,7 @@ class ManifestStore:
             capture_unit_path(projection.event),
             discovery="complete",
             flow="partial" if partial else "complete",
-            artifact=path.name,
+            artifact=path,
         )
         self.contexts(unit, projection.contexts)
         for node in projection.nodes.values():
@@ -197,13 +189,13 @@ class ManifestStore:
 
     def watermark(self):
         return {
-            name: self.connection.execute(f"SELECT coalesce(max(rowid),0) FROM {table}").fetchone()[0]
-            for name, table in (
-                ("facts", "graph_manifest_facts"),
-                ("captures", "captures"),
-                ("memberships", "graph_manifest_contexts"),
-                ("units", "graph_unit_contexts"),
-                ("parents", "graph_unit_parents"),
+            name: self.connection.execute(f"SELECT coalesce(max({sequence}),0) FROM {table}").fetchone()[0]
+            for name, table, sequence in (
+                ("facts", "graph_facts", "seq"),
+                ("captures", "captures", "seq"),
+                ("memberships", "graph_fact_contexts", "seq"),
+                ("units", "graph_context_members", "seq"),
+                ("parents", "graph_parents", "seq"),
             )
         }
 
@@ -255,7 +247,7 @@ class ManifestStore:
             filters.append("f.kind NOT IN (SELECT value FROM json_each(:excluded))")
             parameters["excluded"] = json.dumps(exclude_kinds)
         if method is not None:
-            filters.append("upper(coalesce(json_extract(f.data,'$.method'),'GET'))=:method")
+            filters.append("f.method=:method")
         # Kind predicates use the existing host/kind index when no exact URL is supplied.
         # Roles, methods, and capture IDs are checked after the finite physical batch.
         if kind is not None:
@@ -264,26 +256,26 @@ class ManifestStore:
             candidate_filters.append("f.kind IN (SELECT value FROM json_each(:kinds))")
         if exclude_kinds:
             candidate_filters.append("f.kind NOT IN (SELECT value FROM json_each(:excluded))")
-        index = " INDEXED BY graph_manifest_url" if url is not None else ""
-        if url is None and (kind is not None or kinds):
-            index = " INDEXED BY graph_manifest_scope"
-            candidate_filters.append(
-                "f.host IN (SELECT DISTINCT host FROM graph_manifest_facts INDEXED BY graph_manifest_scope)"
-            )
+        # Resolve interned keys before seeking compact indexes; no payload decoding here.
+        candidates_where = ["f.id>:after", "f.seq<=:facts"]
+        if kind is not None:
+            candidates_where.append("f.kind_key=(SELECT key FROM graph_terms WHERE value=:kind)")
+        if kinds:
+            candidates_where.append("f.kind_key IN (SELECT key FROM graph_terms "
+                                    "WHERE value IN (SELECT value FROM json_each(:kinds)))")
+        if exclude_kinds:
+            candidates_where.append("f.kind_key NOT IN (SELECT key FROM graph_terms "
+                                    "WHERE value IN (SELECT value FROM json_each(:excluded)))")
         if url is not None:
-            candidate_filters.append("f.url=:url")
+            candidates_where.append("f.url_key=(SELECT key FROM graph_terms WHERE value=:url)")
         if kind == "resource" and url is None:
-            # Enumerate host keys from the covering index, then seek only resource facts.
-            index = " INDEXED BY graph_manifest_scope"
-            candidate_filters.append(
-                "f.host IN (SELECT DISTINCT host FROM graph_manifest_facts "
-                "INDEXED BY graph_manifest_scope WHERE host=:host OR host LIKE :subdomains)"
-            )
+            candidates_where.append("f.host_key IN (SELECT key FROM graph_terms "
+                                    "WHERE value=:host OR value LIKE :subdomains)")
             parameters["subdomains"] = "%." + host
         started = time.monotonic()
         candidates = self.connection.execute(
-            "SELECT f.id FROM graph_manifest_facts f" + index + " WHERE "
-            + " AND ".join(candidate_filters) + " ORDER BY f.id LIMIT 1001", parameters,
+            "SELECT f.id FROM graph_facts f WHERE " + " AND ".join(candidates_where)
+            + " ORDER BY f.id LIMIT 1001", parameters,
         ).fetchall()
         logger.debug("Graph manifest stage=candidates count=%s seconds=%.3f", len(candidates),
                      time.monotonic() - started)
@@ -326,11 +318,12 @@ class ManifestStore:
         captured_status = {}
         try:
             for key, unit, capture, data, target, captured in rows[:limit]:
-                size = len(data.encode())
+                payload = self.blobs.read(data)
+                size = len(json.dumps(payload).encode())
                 if records and used + size > PAGE_BYTES:
                     break
                 used += size
-                record = {**json.loads(data), "manifest_id": key, "analysis_unit_id": unit, "capture_id": capture}
+                record = {**payload, "manifest_id": key, "analysis_unit_id": unit, "capture_id": capture}
                 if record.get("kind") == "analysis_unit":
                     state = self.connection.execute(
                         "SELECT discovery,flow,materialization,error,artifact IS NOT NULL "
@@ -346,9 +339,9 @@ class ManifestStore:
                             + CAPTURE_SELECTION + ") SELECT EXISTS (SELECT 1 FROM graph_manifest_facts f "
                             "JOIN documents d ON d.id=f.capture_id WHERE f.url=:target "
                             "AND f.rowid<=:facts AND f.kind='resource' "
-                            "AND json_extract(f.data,'$.capture_status')='captured' "
-                            "AND coalesce(json_extract(f.data,'$.method'),'GET')=:resource_method)",
-                            {**parameters, "target": target, "resource_method": resource[1]},
+                            "AND f.captured=1 "
+                            "AND f.method=:resource_method)",
+                            {**parameters, "target": target, "resource_method": str(resource[1]).upper()},
                         ).fetchone()[0]
                     record["capture_status"] = "captured" if captured_status[resource] else "referenced"
                     record["follow_up"] = {

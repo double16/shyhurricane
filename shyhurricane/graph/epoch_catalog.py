@@ -1,19 +1,27 @@
 """Revision-filtered artifact views and dependency-scoped epoch membership."""
 
-import json
 import sqlite3
 from collections import deque
 
 from shyhurricane.graph.artifacts import ArtifactStore
+from shyhurricane.graph.blob_store import BlobStore, owner_triggers, validate
 from shyhurricane.graph.manifest import ManifestStore
 from shyhurricane.graph.model import identity
 
 
 class SnapshotArtifacts(ArtifactStore):
     def __init__(self, root, path):
-        state = json.loads(path.read_text())
         self.root = root
         self.connection = sqlite3.connect(root / "artifacts.sqlite", timeout=30)
+        self.budget = None
+        self.snapshot_reference = path
+        try:
+            validate(self.connection)
+            self.blobs = BlobStore(self.connection)
+            state = self.read(path)
+        except BaseException:
+            self.connection.close()
+            raise
         self.reference_epoch = state["epoch"]
         self.map_reads = set()
         self.map_owner = None
@@ -26,8 +34,9 @@ class SnapshotArtifacts(ArtifactStore):
             "CREATE TABLE IF NOT EXISTS graph_source_map_reads (epoch_id INTEGER,capture_id TEXT,map_id TEXT,"
             "PRIMARY KEY(epoch_id,capture_id,map_id))"
         )
+        owner_triggers(self.connection, "graph_pinned_source_maps", "content")
         self.connection.execute(
-            f"CREATE TEMP VIEW captures AS SELECT id,url,stamp,path FROM main.captures "
+            f"CREATE TEMP VIEW captures AS SELECT seq AS rowid,seq,id,url,stamp,path FROM main.captures "
             f"WHERE rowid<={int(state['watermark'])}"
         )
         self.connection.execute(
@@ -61,11 +70,11 @@ class SnapshotArtifacts(ArtifactStore):
             "SELECT content FROM graph_pinned_source_maps WHERE epoch_id=? AND id=?", (self.reference_epoch, key)
         ).fetchone()
         if row:
-            return json.loads(row[0])
+            return self.read(row[0])
         content = super().source_map(url, source, headers, open_world, **kwargs)
         with self.connection:
             self.connection.execute(
-                "INSERT INTO graph_pinned_source_maps VALUES (?,?,?)", (self.reference_epoch, key, json.dumps(content))
+                "INSERT INTO graph_pinned_source_maps VALUES (?,?,?)", (self.reference_epoch, key, self.write(identity("pinned-map", content), content))
             )
         return content
 

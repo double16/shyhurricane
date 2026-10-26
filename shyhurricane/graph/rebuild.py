@@ -89,7 +89,7 @@ def flush_rebuild_requests(artifacts, queue):
         reference = artifacts.connection.execute(
             "SELECT path FROM captures WHERE id=?", (capture_id,)
         ).fetchone()[0]
-        event = json.loads(artifacts.resolve(reference).read_text())
+        event = artifacts.read(reference)
         queue.put({**event, "rebuild_token": token})
         with artifacts.connection:
             artifacts.connection.execute(

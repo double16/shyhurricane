@@ -172,3 +172,37 @@ def test_coverage_reconciliation_has_independent_schedule_and_retries(monkeypatc
     repair.tick.side_effect = None
     worker.tick()
     assert worker.failures["coverage"] == 0
+
+
+def test_pending_storage_work_retries_promptly_without_failure_backoff(monkeypatch):
+    monkeypatch.setattr(maintenance, "GraphStore", lambda location: MagicMock())
+    repair = MagicMock()
+    storage = MagicMock()
+    storage.tick.return_value = {"processed": 500, "pending": True}
+    monkeypatch.setattr(maintenance, "CoverageRepair", lambda db: repair)
+    monkeypatch.setattr(maintenance, "StorageMaintenance", lambda db: storage)
+    monkeypatch.setattr(maintenance.time, "monotonic", lambda: 0)
+    worker = GraphMaintenance("location", lambda: True, artifact_db="db")
+    assert worker.tick() == 1
+    assert worker.next_attempt["storage"] == 1
+    assert worker.failures["storage"] == 0
+
+
+def test_storage_deferral_resets_failure_streak_and_retries(monkeypatch):
+    monkeypatch.setattr(maintenance, "GraphStore", lambda location: MagicMock())
+    monkeypatch.setattr(maintenance, "CoverageRepair", lambda db: MagicMock())
+    storage = MagicMock()
+    storage.tick.return_value = {"processed": 64, "pending": False, "deferred": True}
+    monkeypatch.setattr(maintenance, "StorageMaintenance", lambda db: storage)
+    monkeypatch.setattr(maintenance.time, "monotonic", lambda: 0)
+    worker = GraphMaintenance("location", lambda: True, artifact_db="db")
+    worker.failures["storage"] = 3
+    assert worker.tick() == 1
+    assert worker.failures["storage"] == 0
+    worker.next_attempt["storage"] = 0
+    assert worker.tick() == 1
+    storage.tick.side_effect = RuntimeError("real failure")
+    worker.next_attempt["storage"] = 0
+    worker.tick()
+    assert worker.failures["storage"] == 1
+    assert worker.next_attempt["storage"] == 60

@@ -316,11 +316,10 @@ def test_restart_after_completion_before_acknowledgement(scheduling, newer):
         artifacts.close()
 
 
-def test_claim_uses_filename_fallback_for_legacy_capture(scheduling, tmp_path):
+def test_claim_uses_opaque_capture_reference(scheduling, tmp_path):
     scheduler, artifacts, queue, capture = scheduling
     reference = artifacts.connection.execute("SELECT path FROM captures").fetchone()[0]
-    artifacts.connection.execute("UPDATE captures SET path=?", (str(tmp_path / "old" / reference),))
-    artifacts.connection.commit()
+    assert reference.startswith("a:")
     scheduler.request(capture["id"], ["root"], 1)
     scheduler.flush()
     assert scheduler.claim(queue.get(block=False))["data"] == capture["data"]

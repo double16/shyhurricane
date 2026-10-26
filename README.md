@@ -70,6 +70,11 @@ All assessment prompts use an endpoint-first graph workflow: overview, focused c
 traces, then step evidence. They request full graph details only when needed, distinguish bounded
 examples from complete results, and keep navigation hypotheses separate from data-flow evidence.
 
+Prompt workflows name the tool arguments explicitly: continuation results map to `token`, deferred
+`analysis_unit_id` values map to `unit_id`, and saved-page tokens map to `page_token`.
+Graph discovery and traversal calls retain the assessment `scope`, including when using opaque IDs.
+`score_threshold` applies only to finding searches; resource searches use `retrieval_limit`.
+
 Graph paths are investigation candidates, not proof of exploitation. Reports distinguish verified
 steps, inferred links, missing prerequisites, and analysis gaps. Workflows direct the client to save
 new evidence-backed findings with verification status, avoid duplicates, and keep unsupported
@@ -187,7 +192,11 @@ For example, `find_application_endpoints(url="https://app.example.com:8443/api/i
 Discovery inventories and full IR are retained separately from bounded Neo4j summaries. Results report
 discovery/flow coverage and deferred analysis units. Use `continue_application_graph_query` for
 exploration continuations and `expand_application_graph_analysis` for offline detail expansion.
-This layout requires fresh graph state; preserve existing assessment directories.
+Graph state uses immutable, compressed SQLite artifacts, normalized discovery indexes, and
+incremental storage accounting. Cleanup commits bounded batches and resumes unfinished work.
+Recomputable analysis caches have a 256 MiB default budget; captured evidence and offline expansion
+artifacts are retained independently. This storage version requires a fresh assessment directory;
+existing layouts are rejected without migration. Preserve existing assessment directories.
 Graph paths are investigation candidates;
 inspect their evidence before treating them as confirmed vulnerabilities.
 

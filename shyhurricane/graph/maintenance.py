@@ -9,6 +9,7 @@ from neo4j.exceptions import Neo4jError
 from shyhurricane.graph.coverage_repair import CoverageRepair
 from shyhurricane.graph.database import GraphStore
 from shyhurricane.graph.lookup import migrate_lookup
+from shyhurricane.graph.storage_maintenance import StorageMaintenance
 
 logger = logging.getLogger(__name__)
 OPERATION_BUDGET_SECONDS = 30
@@ -28,6 +29,10 @@ class GraphMaintenance:
         if self.coverage_repair is not None:
             self.failures["coverage"] = 0
             self.next_attempt["coverage"] = 0.0
+        self.storage_maintenance = StorageMaintenance(artifact_db) if artifact_db is not None else None
+        if self.storage_maintenance is not None:
+            self.failures["storage"] = 0
+            self.next_attempt["storage"] = 0.0
         self.lookup_batch_size = 500
 
     def start(self):
@@ -59,6 +64,10 @@ class GraphMaintenance:
                         "next_attempt_seconds=60",
                         summary["selected"], summary["completed"], summary["deleted"], time.monotonic() - started,
                     )
+                elif operation == "storage":
+                    result = self.storage_maintenance.tick(self.stop_event)
+                    if result and (result["pending"] or result.get("deferred", False)):
+                        delay = 1
                 elif operation == "coverage":
                     self.coverage_repair.tick(self.stop_event)
                 else:
