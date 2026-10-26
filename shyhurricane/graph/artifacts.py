@@ -13,17 +13,26 @@ from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import unquote
 
+from shyhurricane.data_paths import persistent_queue_path
 from shyhurricane.graph.artifact_paths import artifact_reference, resolve_artifact_path
-from shyhurricane.graph.model import MAX_BYTES, identity
+from shyhurricane.graph.manifest import ManifestStore
+from shyhurricane.graph.model import MAX_BYTES, capture_unit_path, identity
 from shyhurricane.graph.svg import is_svg
-from shyhurricane.persistent_queue import persistent_queue_path
 
 logger = logging.getLogger(__name__)
 
 
 class ArtifactStore:
-    def __init__(self, db: str):
+    def __init__(self, db: str, *, readonly=False, budget=None):
         self.root = persistent_queue_path(db, "graph_state")
+        self.budget = budget
+        if readonly:
+            from shyhurricane.graph.sqlite_read import open_read_connection
+
+            self.connection = open_read_connection(self.root / "artifacts.sqlite", budget)
+            self.manifest = ManifestStore(self.connection, self.root, initialize=False)
+            self.reference_epoch = 0
+            return
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.connection = sqlite3.connect(self.root / "artifacts.sqlite", timeout=30)
         self.connection.execute("PRAGMA journal_mode=WAL")
@@ -31,11 +40,23 @@ class ArtifactStore:
             "CREATE TABLE IF NOT EXISTS captures (id TEXT PRIMARY KEY, url TEXT, stamp REAL, path TEXT);"
             "CREATE INDEX IF NOT EXISTS capture_url ON captures(url, stamp);"
             "CREATE TABLE IF NOT EXISTS refs (url TEXT, capture_id TEXT, PRIMARY KEY(url,capture_id));"
+            "CREATE TABLE IF NOT EXISTS graph_capture_metadata (capture_id TEXT PRIMARY KEY,method TEXT NOT NULL);"
             "CREATE TABLE IF NOT EXISTS analysis_policies (capture_id TEXT PRIMARY KEY, mode TEXT, "
             "completed_version INTEGER, completed_mode TEXT);"
+            "CREATE TABLE IF NOT EXISTS graph_policy_revisions (capture_id TEXT,mode TEXT);"
+            "CREATE INDEX IF NOT EXISTS graph_policy_capture ON graph_policy_revisions(capture_id);"
+            "CREATE TRIGGER IF NOT EXISTS graph_policy_insert AFTER INSERT ON analysis_policies BEGIN "
+            "INSERT INTO graph_policy_revisions VALUES (NEW.capture_id,NEW.mode); END;"
+            "CREATE TRIGGER IF NOT EXISTS graph_policy_update AFTER UPDATE OF mode ON analysis_policies "
+            "WHEN OLD.mode IS NOT NEW.mode BEGIN "
+            "INSERT INTO graph_policy_revisions VALUES (NEW.capture_id,NEW.mode); END;"
             "CREATE TABLE IF NOT EXISTS work (id TEXT PRIMARY KEY, status TEXT, error TEXT);"
             "CREATE TABLE IF NOT EXISTS bodies (url TEXT, digest TEXT, path TEXT, PRIMARY KEY(url,digest));"
+            "CREATE TABLE IF NOT EXISTS graph_reference_revisions (url TEXT,capture_id TEXT,epoch_id INTEGER,"
+            "PRIMARY KEY(url,capture_id));"
         )
+        self.reference_epoch = 0
+        self.manifest = ManifestStore(self.connection, self.root)
 
         if not self.connection.execute(
             "SELECT 1 FROM sqlite_master WHERE type='index' AND name='refs_capture_id'"
@@ -95,21 +116,36 @@ class ArtifactStore:
                     "INSERT OR IGNORE INTO captures VALUES (?,?,?,?)",
                     (event["id"], event["data"]["url"], event["observed_at"], self.reference(path)),
                 )
+                self.connection.execute("INSERT OR IGNORE INTO graph_capture_metadata VALUES (?,?)",
+                                        (event["id"], event["data"]["method"].upper()))
                 digest = hashlib.sha256((event["data"].get("response_body") or "").encode()).hexdigest()
                 self.connection.execute(
                     "INSERT OR IGNORE INTO bodies VALUES (?,?,?)", (event["data"]["url"], digest, self.reference(path))
                 )
+            unit = self.manifest.unit(event["id"], capture_unit_path(event))
+            self.manifest.fact(unit, event["id"], "resource", {
+                "id": identity("resource", f"{event['data']['method'].upper()} {event['data']['url']}"),
+                "url": event["data"]["url"], "method": event["data"]["method"].upper(),
+                "capture_status": "captured",
+            })
             return event
 
-    def latest(self, url: str) -> dict | None:
+    def latest(self, url: str, *, as_of=None) -> dict | None:
         row = self.connection.execute(
-            "SELECT path FROM captures WHERE url=? ORDER BY stamp DESC, id LIMIT 1", (url,)
+            "SELECT path FROM captures WHERE url=? AND (? IS NULL OR stamp<=?) ORDER BY stamp DESC, id LIMIT 1",
+            (url, as_of, as_of),
         ).fetchone()
         return json.loads(self.resolve(row[0]).read_text()) if row else None
 
     def references(self, capture_id: str, urls: list[str]):
-        with self.connection:
-            self.connection.executemany("INSERT OR IGNORE INTO refs VALUES (?,?)", ((url, capture_id) for url in urls))
+        with self.manifest.transaction():
+            self.connection.executemany(
+                "INSERT OR IGNORE INTO main.refs VALUES (?,?)", ((url, capture_id) for url in urls)
+            )
+            self.connection.executemany(
+                "INSERT OR IGNORE INTO main.graph_reference_revisions VALUES (?,?,?)",
+                ((url, capture_id, self.reference_epoch) for url in urls),
+            )
 
     def dependents(self, url: str) -> list[dict]:
         rows = self.connection.execute(
@@ -159,8 +195,9 @@ class ArtifactStore:
         content_store=None,
         original_hash=None,
         response_headers=None,
+        observed_at=None,
     ):
-        from shyhurricane.index.javascript_analysis import _cached_map, _fetch_map, _valid_map, source_map_url
+        from shyhurricane.source_maps import _cached_map, _fetch_map, _valid_map, source_map_url
 
         def valid(content):
             return isinstance(content, str) and len(content.encode()) <= MAX_BYTES and _valid_map(content)
@@ -188,14 +225,14 @@ class ArtifactStore:
             from shyhurricane.graph.model import web_url
 
             explicit_url = web_url(hint, url)
-            explicit = self.latest(explicit_url) if explicit_url else None
+            explicit = self.latest(explicit_url, as_of=observed_at) if explicit_url else None
             candidate = explicit["data"].get("response_body") if explicit else _cached_map(content_store, explicit_url)
             if valid(candidate):
                 return candidate
         map_url = source_map_url(url)
         if not map_url:
             return None
-        local = self.latest(map_url)
+        local = self.latest(map_url, as_of=observed_at)
         candidate = local["data"].get("response_body") if local else _cached_map(content_store, map_url)
         if valid(candidate):
             return candidate

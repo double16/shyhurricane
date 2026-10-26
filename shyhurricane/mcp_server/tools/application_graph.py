@@ -8,6 +8,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, BeforeValidator, Field
 
+from shyhurricane.graph.model import optional_filter
 from shyhurricane.graph.query import scope_predicate
 from shyhurricane.indexing_wait import IndexingStatus, indexing_scope, wait_for_indexing
 from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
@@ -91,13 +92,16 @@ Detail = Annotated[
 ]
 ExactUrl = Annotated[
     TrimmedString | None,
-    Field(description="Exact resource URL filter, not a prefix or text search. Null applies no URL filter."),
+    Field(description="Exact resource URL filter, not a prefix or text search. Null or blank applies no URL filter."),
 ]
 
 
 class GraphResult(BaseModel):
     indexing: IndexingStatus | None = None
     results: list[dict]
+    coverage: dict = Field(default_factory=dict)
+    omitted_regions: list[dict] = Field(default_factory=list)
+    continuation_token: str | None = None
     analysis_gaps: list[str] = Field(default_factory=list)
     analysis_summaries: list[dict] = Field(default_factory=list)
     instructions: str
@@ -118,6 +122,9 @@ async def query(ctx, tool, operation, scope, **arguments):
         key: [trim_input(item) for item in value] if isinstance(value, list) else trim_input(value)
         for key, value in arguments.items()
     }
+    for key in ("url", "context_url", "method"):
+        if key in arguments:
+            arguments[key] = optional_filter(arguments[key])
     await log_tool_history(ctx, tool, scope=scope, **arguments)
     server = await get_server_context()
     if server.graph_store is None:
@@ -125,7 +132,7 @@ async def query(ctx, tool, operation, scope, **arguments):
     try:
         matches = scope_predicate(scope)
         indexing = await wait_for_indexing(ctx, server, matches, graph=True)
-        result = await execute_graph(ctx, server.graph_store, operation, scope, **arguments)
+        result = await execute_graph(ctx, server.graph_store, operation, scope, artifact_db=server.db, **arguments)
         if result is not None:
             return {**result, "indexing": indexing.model_dump()}
         return {"indexing": indexing.model_dump()} if indexing.potentially_incomplete else None
@@ -174,6 +181,8 @@ async def find_application_endpoints(
     Avoid broad summaries during reconnaissance. Summary examples are bounded, not complete.
     Inspect truncation, indexing, analysis gaps and unknown capture status before drawing conclusions.
     External dependencies need focused relationship discovery; inventory does not enumerate them.
+    A referenced endpoint is known through a reference, without a capture in the selected snapshot.
+    Zero summary counts mean no associated inputs, scripts, sources or sinks were found.
     Script association is not flow evidence. Neither mode infers business operations.
 
     Examples: find_application_endpoints(scope="target.local", detail="inventory");
@@ -420,3 +429,54 @@ async def fetch_application_graph_evidence(
             evidence_id,
         )
         raise ToolError("Application graph query failed; inspect Neo4j health and ingest backlog") from error
+
+
+@mcp_instance.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
+@paged_results("results")
+async def continue_application_graph_query(
+    ctx: Context, token: Annotated[TrimmedString, Field(description="Opaque graph continuation token")],
+    limit: PageSize = 20,
+) -> GraphResult:
+    """Continue graph exploration at its pinned revision.
+
+    Pass continuation_token unchanged within ten minutes. Retries return the same result.
+    Use get_result_page with pagination.next_page_token to read records already saved in a result.
+    """
+    server = await get_server_context()
+    if server.graph_store is None:
+        raise ToolError("Application graph is unavailable")
+    try:
+        result = await execute_graph(ctx, server.graph_store, "continue_query", token,
+                                     artifact_db=server.db, limit=limit)
+        return GraphResult(**result)
+    except ValueError as error:
+        raise ToolError(str(error)) from error
+
+
+@mcp_instance.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
+async def expand_application_graph_analysis(
+    ctx: Context, scope: Scope,
+    capture_id: Annotated[TrimmedString, Field(description="Capture ID from graph coverage or manifest results")],
+    unit_id: Annotated[TrimmedString, Field(description="Analysis unit ID from omitted_regions or manifest results")],
+) -> dict:
+    """Queue retained local source for detailed analysis.
+
+    Supply capture_id and analysis_unit_id from omitted_regions or discovery results.
+    The graph worker reads archived IR locally; it does not make target requests.
+    """
+    import asyncio
+
+    from shyhurricane.graph.budget import QueryBudget
+
+    server = await get_server_context()
+    budget = QueryBudget()
+    try:
+        item, result = await execute_graph(ctx, server.graph_store, "expansion", scope,
+                                          capture_id, unit_id, artifact_db=server.db, budget=budget)
+        await server.enqueue_graph_expansion(item, budget)
+        return result
+    except ValueError as error:
+        raise ToolError(str(error)) from error
+    except asyncio.CancelledError:
+        budget.cancel()
+        raise

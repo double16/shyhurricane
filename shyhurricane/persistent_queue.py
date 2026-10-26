@@ -14,7 +14,7 @@ import persistqueue
 from persistqueue import Empty
 from persistqueue.serializers import pickle as pickle_serializer
 
-from shyhurricane.data_paths import state_path
+from shyhurricane.data_paths import persistent_queue_path
 from shyhurricane.queue_scopes import ScopedAckQueue
 from shyhurricane.utils import log_gpu_memory_summary, log_heap_stats
 
@@ -50,18 +50,15 @@ class Base64QueueSerializer:
         return pickle_serializer.loads(payload)
 
 
-def persistent_queue_path(db: str, queue_name: str) -> Path:
-    """Resolve a queue directory without opening or changing its database."""
-    if queue_name == "graph_state":
-        return state_path("graph_state")
-    return state_path("queues") / queue_name
-
-
-def open_persistent_queue(path: str, *, auto_resume: bool = True) -> persistqueue.SQLiteAckQueue:
+def open_persistent_queue(path: str, *, auto_resume: bool = True, budget=None) -> persistqueue.SQLiteAckQueue:
     """Open a queue and ensure status queries have a covering index."""
     queue = ScopedAckQueue(
-        path=path, auto_commit=True, auto_resume=auto_resume, serializer=Base64QueueSerializer)
+        path=path, auto_commit=True, auto_resume=auto_resume, serializer=Base64QueueSerializer,
+        **({"timeout": 0.05} if budget is not None else {}))
     try:
+        if budget is not None:
+            budget.check()
+            queue._putter.set_progress_handler(lambda: int(budget.remaining() <= 0), 1000)
         with queue.tran_lock, queue._putter as connection:
             exists = connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = 'ack_queue_status_id'"
@@ -74,6 +71,9 @@ def open_persistent_queue(path: str, *, auto_resume: bool = True) -> persistqueu
                 )
                 logger.info("Created queue status index in %s in %.2f seconds", path, time.monotonic() - started)
         queue.initialize_scopes()
+        if budget is not None:
+            budget.check()
+            queue._putter.set_progress_handler(None, 0)
         return queue
     except BaseException:
         queue.close()
@@ -176,23 +176,37 @@ class AsyncIngestWriter:
         self.lock = threading.Lock()
         self.closed = False
 
-    def _put(self, item: Any):
+    def _put(self, item: Any, budget=None):
+        if budget is not None:
+            budget.check()
         if self.queue is None:
-            self.queue = open_persistent_queue(self.path, auto_resume=False)
-        return self.queue.put(item)
+            self.queue = open_persistent_queue(
+                self.path, auto_resume=False, **({"budget": budget} if budget is not None else {}))
+        self.queue.request_budget = budget
+        try:
+            return self.queue.put(item)
+        finally:
+            self.queue.request_budget = None
 
-    async def put(self, item: Any):
+    async def put(self, item: Any, budget=None):
         async with self.slot:
             with self.lock:
                 if self.closed:
                     raise RuntimeError("Ingest writer is closed")
-                future = asyncio.wrap_future(self.executor.submit(self._put, item))
+                future = asyncio.wrap_future(self.executor.submit(
+                    self._put, item, *([budget] if budget is not None else [])))
             cancelled = False
             while not future.done():
                 try:
                     await asyncio.shield(future)
                 except asyncio.CancelledError:
                     cancelled = True
+                    if budget is not None:
+                        budget.cancel()
+                except Exception:
+                    if cancelled:
+                        raise asyncio.CancelledError from None
+                    raise
             result = future.result()
             if cancelled:
                 raise asyncio.CancelledError

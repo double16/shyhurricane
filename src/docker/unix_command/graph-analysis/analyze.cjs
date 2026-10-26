@@ -6,7 +6,7 @@ const { compress } = require("./library.cjs");
 
 function analyze(source, filename = "source.js", mode = "summary") {
   if (!["summary", "full"].includes(mode)) throw new Error("Invalid library analysis mode");
-  const LIMIT = mode === "summary" ? 50000 : 10000;
+  const LIMIT = 50000;
   const nodes = new Map();
   const edges = new Map();
   const references = [];
@@ -34,10 +34,6 @@ function analyze(source, filename = "source.js", mode = "summary") {
     // Chained calls share a start offset; include their end to keep distinct operations separate.
     const end = ["call", "result", "rejection"].includes(kind) && node?.end !== undefined ? `:${node.end}` : "";
     const id = `${kind}:${node?.start ?? 0}:${name}${end}`;
-    if (nodes.size >= LIMIT) {
-      gaps.add("JavaScript node budget reached");
-      return id;
-    }
     if (!nodes.has(id)) nodes.set(id, { id, name, kind, role, location: location(node),
       snippet: node?.end === undefined ? "" : source.slice(node.start, Math.min(node.end, node.start + 300)) });
     else if (role) nodes.get(id).role = role;
@@ -45,10 +41,6 @@ function analyze(source, filename = "source.js", mode = "summary") {
   };
   const edge = (from, to, node, kind = "FLOWS_TO", rule = "js.def-use") => {
     if (!from || !to || from === to) return;
-    if (edges.size >= LIMIT * 2) {
-      gaps.add("JavaScript edge budget reached");
-      return;
-    }
     const id = `${from}:${to}:${kind}`;
     edges.set(id, { source: from, target: to, kind, rule, location: location(node),
       snippet: source.slice(node?.start || 0, Math.min(node?.end || 0, (node?.start || 0) + 300)) });
@@ -151,7 +143,7 @@ function analyze(source, filename = "source.js", mode = "summary") {
   try { traverse(ast, {
     enter(path) {
       currentPath = path;
-      if (nodes.size >= LIMIT - 100) { gaps.add("JavaScript node budget reached"); path.stop(); }
+      // Discovery is independent of materialization quotas; the parser worker enforces resource limits.
     },
     Function(path) {
       const node = path.node;
@@ -650,7 +642,7 @@ function analyze(source, filename = "source.js", mode = "summary") {
   if (calls.some((item) => !item.callee || (!functions.has(item.callee) && !states.has(item.callee)))) {
     gaps.add("External/dynamic calls are conservative summaries; runtime dispatch is unproven");
   }
-  const result = { nodes: [...nodes.values()], edges: [...edges.values()], references: references.slice(0, LIMIT),
+  const result = { nodes: [...nodes.values()], edges: [...edges.values()], references,
     gaps: [...gaps], analysis: { mode: "full" } };
   return compress(result, mode);
 }

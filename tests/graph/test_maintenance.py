@@ -152,3 +152,23 @@ def test_thread_start_close_and_shutdown_deadline(monkeypatch, caplog):
     worker.thread.is_alive.return_value = True
     worker.close(0)
     assert "shutdown deadline" in caplog.text
+
+
+def test_coverage_reconciliation_has_independent_schedule_and_retries(monkeypatch):
+    monkeypatch.setattr(maintenance, "GraphStore", lambda location: MagicMock())
+    repair = MagicMock()
+    monkeypatch.setattr(maintenance, "CoverageRepair", lambda db: repair)
+    now = [0.0]
+    monkeypatch.setattr(maintenance.time, "monotonic", lambda: now[0])
+    worker = GraphMaintenance("location", lambda: True, artifact_db="db")
+    worker.tick()
+    repair.tick.assert_called_once_with(worker.stop_event)
+    assert worker.next_attempt["coverage"] == 60
+    now[0] = 60
+    repair.tick.side_effect = RuntimeError("locked")
+    worker.tick()
+    assert worker.failures["coverage"] == 1
+    now[0] = 120
+    repair.tick.side_effect = None
+    worker.tick()
+    assert worker.failures["coverage"] == 0

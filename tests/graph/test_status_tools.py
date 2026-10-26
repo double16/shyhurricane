@@ -76,7 +76,7 @@ async def test_all_tools_dispatch_read_only_queries(monkeypatch):
 async def test_evidence_reads_directly_without_scope_or_indexing(monkeypatch, result, indexing_status):
     from unittest.mock import Mock
 
-    server = SimpleNamespace(graph_store=object(), indexing_status=indexing_status)
+    server = SimpleNamespace(db=None, graph_store=object(), indexing_status=indexing_status)
     history = AsyncMock()
     wait = AsyncMock(side_effect=AssertionError("Evidence must not wait"))
     scoped_query = AsyncMock(side_effect=AssertionError("Evidence must not use scoped queries"))
@@ -96,7 +96,7 @@ async def test_evidence_reads_directly_without_scope_or_indexing(monkeypatch, re
 async def test_evidence_errors_preserve_logging_and_hide_database_details(monkeypatch, caplog):
     from unittest.mock import Mock
 
-    server = SimpleNamespace(graph_store=None)
+    server = SimpleNamespace(graph_store=None, db=None)
     monkeypatch.setattr(tools, "get_server_context", AsyncMock(return_value=server))
     monkeypatch.setattr(tools, "log_tool_history", AsyncMock())
     with pytest.raises(ToolError, match="Application graph is unavailable"):
@@ -126,7 +126,7 @@ def test_evidence_schema_trims_id_without_coercing_invalid_types():
 
 
 async def test_query_errors_are_explicit_and_no_fetch_occurs(monkeypatch):
-    server = SimpleNamespace(graph_store=None)
+    server = SimpleNamespace(graph_store=None, db=None)
     monkeypatch.setattr(tools, "get_server_context", AsyncMock(return_value=server))
     monkeypatch.setattr(tools, "log_tool_history", AsyncMock())
     with pytest.raises(ToolError, match="unavailable"):
@@ -144,6 +144,50 @@ async def test_query_errors_are_explicit_and_no_fetch_occurs(monkeypatch):
         monkeypatch.setattr(graph_execution, "GraphQuery", lambda store, **kwargs: SimpleNamespace(elements=fail))
         with pytest.raises(ToolError):
             await tools.query(None, "test", "elements", "example.com")
+
+
+async def test_continuation_and_offline_expansion_tools(graph_paths, event, monkeypatch):
+    import inspect
+
+    from shyhurricane.graph.artifacts import ArtifactStore
+
+    server = SimpleNamespace(graph_store=object(), db="db")
+    monkeypatch.setattr(tools, "get_server_context", AsyncMock(return_value=server))
+    execute = AsyncMock(return_value={"results": [], "instructions": "static evidence"})
+    monkeypatch.setattr(tools, "execute_graph", execute)
+    continuation = inspect.unwrap(tools.continue_application_graph_query)
+    assert (await continuation(None, "token", 5)).results == []
+    execute.assert_awaited_once()
+    execute.side_effect = ValueError("expired")
+    with pytest.raises(ToolError, match="expired"):
+        await continuation(None, "token", 5)
+    server.graph_store = None
+    with pytest.raises(ToolError, match="unavailable"):
+        await continuation(None, "token", 5)
+
+    artifacts = ArtifactStore("db")
+    capture = artifacts.register(event())
+    unit = artifacts.manifest.unit(capture["id"], "fixture")
+    artifacts.close()
+    monkeypatch.setattr(tools, "execute_graph", graph_execution.execute_graph)
+    server.enqueue_graph_expansion = AsyncMock()
+    expansion = inspect.unwrap(tools.expand_application_graph_analysis)
+    result = await expansion(None, "example.com", capture["id"], unit)
+    assert result["status"] == "pending" and result["analysis_unit_id"] == unit
+    with pytest.raises(ToolError, match="unavailable"):
+        await expansion(None, "example.com", capture["id"], "missing")
+
+
+async def test_graph_execution_decorates_manifest_coverage_and_closes_artifacts(graph_paths, monkeypatch):
+    ArtifactStore("db").close()
+    service = SimpleNamespace(elements=lambda scope: {"results": []},
+                              omitted_regions=lambda scope: [{"analysis_unit_id": "deferred"}])
+    monkeypatch.setattr(graph_execution, "GraphQuery", lambda *args, **kwargs: service)
+    result = await graph_execution.execute_graph(None, object(), "elements", "example.com", artifact_db="db")
+    assert result["coverage"]["discovery"] == "pending"
+    assert result["omitted_regions"] == [{"analysis_unit_id": "deferred"}]
+    service.other = lambda: 7
+    assert await graph_execution.execute_graph(None, object(), "other", artifact_db="db") == 7
 
 
 async def test_graph_tools_publish_complete_argument_schemas():
@@ -308,7 +352,7 @@ async def test_endpoint_tool_paginates_defaults_and_filters(tmp_path, monkeypatc
 async def test_graph_query_waits_before_read_and_preserves_incomplete_results(monkeypatch):
     from shyhurricane.indexing_wait import IndexingStatus
 
-    server = SimpleNamespace(graph_store=object())
+    server = SimpleNamespace(db=None, graph_store=object())
     order = []
 
     async def wait(ctx, context, matches, **kwargs):
@@ -367,7 +411,7 @@ async def test_graph_input_validation_trims_before_literals_and_preserves_conten
 
     history = AsyncMock()
     monkeypatch.setattr(tools, "log_tool_history", history)
-    server = SimpleNamespace(graph_store=object())
+    server = SimpleNamespace(db=None, graph_store=object())
     monkeypatch.setattr(tools, "get_server_context", AsyncMock(return_value=server))
     calls = []
 
@@ -413,7 +457,7 @@ def test_graph_validation_rejects_invalid_literals_and_preserves_blank_filters()
 
 async def test_unexpected_graph_failure_logs_original_traceback(monkeypatch, caplog):
     monkeypatch.setattr(tools, "log_tool_history", AsyncMock())
-    monkeypatch.setattr(tools, "get_server_context", AsyncMock(return_value=SimpleNamespace(graph_store=object())))
+    monkeypatch.setattr(tools, "get_server_context", AsyncMock(return_value=SimpleNamespace(db=None, graph_store=object())))
     failure = RuntimeError("original database failure")
 
     def fail(scope):
@@ -502,3 +546,18 @@ async def test_status_exposes_continuation_progress_and_failures(graph_paths, ev
     assert progress["stage"] == "planning" and progress["contexts_completed"] == progress["contexts_discovered"] == 1
     assert progress["checkpoint_age_seconds"] >= 0
     artifacts.close()
+
+
+@pytest.mark.parametrize("blank", [None, "", " \t\n"])
+async def test_optional_blank_filters_normalize_before_dispatch(monkeypatch, blank):
+    server = SimpleNamespace(db=None, graph_store=object())
+    monkeypatch.setattr(tools, "get_server_context", AsyncMock(return_value=server))
+    history = AsyncMock()
+    monkeypatch.setattr(tools, "log_tool_history", history)
+    run = AsyncMock(return_value={"results": [], "instructions": "fixture"})
+    monkeypatch.setattr(tools, "execute_graph", run)
+    await tools.query(None, "find_application_endpoints", "endpoints", "example.com",
+                      url=blank, context_url=blank, method=blank)
+    for field in ("url", "context_url", "method"):
+        assert run.await_args.kwargs[field] is None
+        assert history.await_args.kwargs[field] is None

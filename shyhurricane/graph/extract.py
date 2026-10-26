@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import posixpath
 import re
 import subprocess
@@ -12,13 +13,15 @@ from urllib.parse import parse_qsl, urlsplit
 from bs4 import BeautifulSoup
 from lxml import etree
 
+from shyhurricane.command_image import unix_command_image
 from shyhurricane.graph.analyzer_diagnostics import stderr_summary
 from shyhurricane.graph.artifacts import recovered_sources
+from shyhurricane.graph.discovery_manifest import archive_ir, markup_emitter
+from shyhurricane.graph.markup import scan_markup, scan_svg
 from shyhurricane.graph.model import MAX_BYTES, Projection, identity, web_url
 from shyhurricane.graph.policy import ANALYZER_VERSION, library_analysis
 from shyhurricane.graph.svg import extract_svg, is_svg, svg_root
-from shyhurricane.index.javascript_analysis import javascript_url_from_map, source_map_url
-from shyhurricane.utils import unix_command_image
+from shyhurricane.source_maps import javascript_url_from_map, source_map_url
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +51,8 @@ def run_javascript(source: str, filename: str, mode=None, *, capture_id=None) ->
                 "docker",
                 "run",
                 "--rm",
+                *(["--name", os.environ["_SHYHURRICANE_PARSE_CONTAINER"]]
+                  if "_SHYHURRICANE_PARSE_CONTAINER" in os.environ else []),
                 "--network=none",
                 "--memory=3g",
                 "--cpus=2",
@@ -80,7 +85,8 @@ def run_javascript(source: str, filename: str, mode=None, *, capture_id=None) ->
 
 
 def extract(
-    event: dict, artifacts=None, *, open_world=False, javascript_runner=run_javascript, document_contexts=None
+    event: dict, artifacts=None, *, open_world=False, javascript_runner=run_javascript, document_contexts=None,
+    markup_offset=0, markup_limit=10000, record_discovery=True,
 ) -> Projection:
     mode = library_analysis(event.get("library_analysis"))
     runner = (
@@ -117,6 +123,8 @@ def extract(
         if not target_url:
             return None
         refs.append(target_url)
+        if artifacts and record_discovery:
+            artifacts.manifest.dependency(event["id"], target_url, kind)
         target = graph.resource(target_url, method)
         graph.fact(
             source,
@@ -226,22 +234,47 @@ def extract(
                 field = graph.node("field", identity(event["id"], "form", index, name), name=name, role="source")
                 graph.fact(field, target, "SUBMITS_TO", "ingest.form-field", location=f"forms:{index}")
     scripts = []
-    if len(body.encode()) > MAX_BYTES:
+    oversized = len(body.encode()) > MAX_BYTES
+    markup_locators = []
+    if "html" in mime or body.lstrip().lower().startswith(("<!doctype html", "<html")) or is_svg(mime):
+        try:
+            from contextlib import nullcontext
+
+            with artifacts.manifest.batch() if artifacts else nullcontext():
+                emitter = markup_emitter(artifacts, event, graph.url) if artifacts and record_discovery else None
+                body, deferred = (scan_svg if is_svg(mime) else scan_markup)(
+                    body, emitter or (lambda record: None), maximum=markup_limit,
+                    offset=markup_offset, locators=markup_locators,
+                )
+                if emitter:
+                    emitter.finish()
+        except etree.XMLSyntaxError:
+            body, deferred = "", 0
+            graph.gaps.append("Malformed SVG response")
+        if artifacts and record_discovery:
+            artifacts.manifest.unit(event["id"], graph.url, discovery="complete",
+                                    flow="partial" if deferred else "complete")
+        if deferred:
+            graph.gaps.append("Markup detail deferred; complete declarations remain in discovery manifest")
+    if (oversized and record_discovery) or len(body.encode()) > MAX_BYTES:
         graph.gaps.append("Response exceeds 40 MiB analysis limit")
         body = ""
     if "html" in mime or body.lstrip().lower().startswith(("<!doctype html", "<html")):
         soup = BeautifulSoup(body, "html.parser")
         base_element = soup.find("base", href=True)
         base = web_url(base_element["href"], graph.url) if base_element else graph.url
-        for index, tag in enumerate(soup.find_all(True)):
+        tags = soup.find_all(True)
+        locations = {id(tag): markup_locators[index] for index, tag in enumerate(tags) if index < len(markup_locators)}
+        for index, tag in enumerate(tags):
             if index >= 10000:
                 graph.gaps.append("HTML element budget reached")
                 break
             if tag.name == "svg" and tag.find_parent("svg") is None:
-                extract_svg(tag, graph, page, reference, scripts, base, inline=True, prefix=f"html:{index}:svg")
+                extract_svg(tag, graph, page, reference, scripts, base, inline=True, prefix=f"html:{index}:svg",
+                            locators=locations)
             if tag.name == "svg" or tag.find_parent("svg") is not None:
                 continue
-            locator = f"html:{index}:{tag.name}"
+            locator = locations.get(id(tag), f"html:{index}:{tag.name}")
             owner = (
                 (soup.find("form", id=tag["form"]) if tag.get("form") else None)
                 if tag.has_attr("form")
@@ -331,7 +364,11 @@ def extract(
     elif is_svg(mime):
         base = graph.url
         try:
-            extract_svg(svg_root(body), graph, page, reference, scripts, base)
+            root = svg_root(body)
+            tags = list(root.iter())
+            locations = {id(tag): markup_locators[index] for index, tag in enumerate(tags)
+                         if index < len(markup_locators)}
+            extract_svg(root, graph, page, reference, scripts, base, locators=locations)
         except etree.XMLSyntaxError:
             graph.gaps.append("Malformed SVG response")
     elif "javascript" in mime or urlsplit(graph.url).path.lower().endswith((".js", ".mjs", ".jsx", ".ts", ".tsx")):
@@ -342,6 +379,7 @@ def extract(
                 data.get("request_headers") or {},
                 open_world and not event["backfill"],
                 response_headers=data.get("response_headers"),
+                observed_at=event["observed_at"],
             )
             if artifacts
             else None
@@ -354,17 +392,32 @@ def extract(
         hint = hint or (match[1].rstrip("*/") if match else None)
         if hint and web_url(hint, graph.url):
             refs.append(web_url(hint, graph.url))
-        sources = recovered_sources(source_map) if source_map else []
+        embedded_map = bool(hint and hint.startswith("data:"))
+        sources = recovered_sources(source_map) if source_map and embedded_map else []
+        if source_map and not embedded_map:
+            graph.candidate_sources.append({
+                "source_digest": identity(body), "map_digest": identity(source_map),
+                "association": "unverified_external",
+                "artifact": artifacts.write(identity("candidate-map", source_map), {"source_map": source_map}).name,
+            })
+            graph.gaps.append("External source map is unverified; delivered JavaScript remains authoritative")
         if not sources and artifacts:
-            from shyhurricane.index.web_resources_pipeline import _deobfuscate_javascript
+            from shyhurricane.javascript_deobfuscation import deobfuscate_javascript
 
-            body = artifacts.deobfuscate(body, _deobfuscate_javascript)
+            body = artifacts.deobfuscate(body, deobfuscate_javascript)
         scripts = sources or [(graph.url, body)]
-        if source_map and not sources:
+        if source_map and embedded_map and not sources:
             graph.gaps.append("Source map has no embedded sources; using delivered JavaScript")
     elif javascript_url_from_map(graph.url):
         try:
-            scripts = recovered_sources(body)
+            recovered_sources(body)  # Validate the supplied map without treating it as delivered code.
+            graph.candidate_sources.append({
+                "map_digest": identity(body), "map_capture_id": event["id"],
+                "association": "unverified_standalone",
+                "artifact": artifacts.write(identity("candidate-map", body), {"source_map": body}).name
+                if artifacts else "",
+            })
+            graph.gaps.append("Standalone source map is unverified candidate evidence")
             refs.append(javascript_url_from_map(graph.url))
         except (ValueError, AttributeError):
             graph.gaps.append("Malformed source map")
@@ -436,6 +489,8 @@ def extract(
                                 "base": web_url(base_tag["href"], captured["url"]) if base_tag else captured["url"],
                             }
                         )
+            if artifacts and record_discovery:
+                archive_ir(artifacts, event, graph.url, filename, result, contexts=contexts)
             apply_javascript(graph, page, filename, result, reference, contexts)
             graph.gaps.extend(result.get("gaps", []))
             logger.info(
@@ -456,8 +511,9 @@ def extract(
             )
     if event["backfill"]:
         graph.gaps.append("Backfilled stored representation; original capture fields may be unavailable")
-    if artifacts:
+    if artifacts and record_discovery:
         artifacts.references(event["id"], refs)
+        artifacts.manifest.archive(graph, artifacts.write)
     return graph
 
 
@@ -528,6 +584,8 @@ def _apply_javascript(graph, page, filename, result, reference, contexts):
             node_key,
             name=item.get("name", ""),
             role=item.get("role", ""),
+            persistent_storage=(item.get("kind") == "storage" and len(origins) == 1
+                                and item.get("name", "").startswith("localStorage:")),
             source_path=filename,
             location=item.get("location", ""),
             module_key=module_key,
@@ -600,6 +658,8 @@ def _apply_javascript(graph, page, filename, result, reference, contexts):
         absolute = web_url(item["url"])
         targets = contexts or ([{"url": None, "base": graph.url, "id": None}] if absolute else [])
         if not targets:
+            if item["url"] not in graph.browser_references:
+                graph.browser_references.append(item["url"])
             unresolved = graph.node(
                 "reference", identity(graph.event["id"], filename, location, item["url"]), name=item["url"]
             )

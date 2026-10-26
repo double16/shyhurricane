@@ -164,7 +164,25 @@ Explore captured resources, forms, fields, scripts, routes, and possible data fl
 read-only application graph tools. Start with `find_application_endpoints`, inspect focused elements
 and relationships, then trace data flow or possible user journeys and review the supporting evidence.
 Standalone and inline SVG analysis extracts links, resource dependencies, scripts, and event handlers.
-The tools work in low-power mode and do not contact targets. Graph paths are investigation candidates;
+The tools work in low-power mode and do not contact targets. Graph production runs in finite,
+restartable epochs: captured inputs are frozen, structural analysis finishes, then inferred links
+are published without replacing structural entities. New captures wait for the next epoch;
+duplicate deliveries do not restart completed work. Inspect `graph.epoch` in `/status` for progress
+and failures. Reference discovery and current-job fields show work before publication;
+unchanged Neo4j counts during discovery do not indicate a stall. Upgrading unfinished legacy graph work requires a fresh data directory.
+All graph tools share a 120-second request budget after the separately configured indexing wait.
+The final five seconds are reserved for continuation checkpoints and saved result pages.
+Interrupted queries preserve completed records and report analysis gaps and `time_limit`.
+Continuations retain unfinished work; failed checkpoints require restarting and publish no unusable token.
+Graph tools continue sending client progress at the established five-second interval.
+Blank optional URL, context URL, and method filters behave like omitted filters. Coverage describes
+retained analysis units, independently of queued work; proven stale capture-unit statuses are
+reconciled automatically in bounded background maintenance.
+Discovery inventories and full IR are retained separately from bounded Neo4j summaries. Results report
+discovery/flow coverage and deferred analysis units. Use `continue_application_graph_query` for
+exploration continuations and `expand_application_graph_analysis` for offline detail expansion.
+This layout requires fresh graph state; preserve existing assessment directories.
+Graph paths are investigation candidates;
 inspect their evidence before treating them as confirmed vulnerabilities.
 
 See the [application graph guide](docs/application-graph.md) for tool arguments and examples,

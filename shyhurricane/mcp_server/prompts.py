@@ -42,6 +42,10 @@ Read full relevant content with fetch_web_resource_content; when contents.has_mo
 advance output_start_position by contents.offset + len(contents.text).
 Follow pagination.next_page_token with get_result_page. Report retrieval_truncated,
 truncation_reasons, analysis_gaps, missing captures, and incomplete scan/indexing status.
+For graph results also inspect coverage and omitted_regions. Use continue_application_graph_query
+with continuation_token to resume exploration within ten minutes; get_result_page only reads saved
+records. Queue expand_application_graph_analysis for an addressable deferred analysis unit when
+detail is necessary; expansion uses retained local artifacts without target requests.
 Empty results do not prove security. Do not repeat pending scans; indexing is asynchronous.
 
 Use graph tools when they can substantiate a candidate. Start discovery with

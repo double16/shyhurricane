@@ -4,9 +4,9 @@ import json
 
 import pytest
 
+from shyhurricane import source_maps as javascript_analysis
 from shyhurricane.graph.artifacts import ArtifactStore, recovered_sources
 from shyhurricane.graph.model import Projection, capture_event, identity, web_url
-from shyhurricane.index import javascript_analysis
 
 
 @pytest.mark.parametrize(

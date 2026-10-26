@@ -39,6 +39,16 @@ def web_url(value: str, base: str = "", *, fragment: bool = False) -> str | None
         return None
 
 
+def optional_filter(value):
+    """Treat blank optional filters as omitted without coercing other types."""
+    return (value.strip() or None) if isinstance(value, str) else value
+
+
+def capture_unit_path(event):
+    """Keep root-unit identity tied to the retained capture, before URL normalization."""
+    return "capture:" + event["data"]["url"]
+
+
 def capture_event(request_response, *, backfill: bool = False) -> dict:
     data = request_response.model_dump() if hasattr(request_response, "model_dump") else dict(request_response)
     capture_id = identity("capture", data)
@@ -71,8 +81,11 @@ class Projection:
         self.evidence: dict[str, dict] = {}
         self.gaps: list[str] = []
         self.contexts: list[dict] = []
+        self.browser_references: list[str] = []
+        self.candidate_sources: list[dict] = []
         self.analysis: list[dict] = []
         self.planned_links = None
+        self.structural_nodes = None
         self.node_limit = MAX_GRAPH_NODES
         self.edge_limit = MAX_GRAPH_EDGES
 
@@ -129,6 +142,8 @@ class Projection:
                 {key: properties[key] for key in ("original_hops", "endpoint_locations", "witness", "summary_notice")}
             )
         edge_id = identity(source, target, kind, evidence_id)
+        if properties.get("context_capture_id") is not None:
+            edge_id = identity(edge_id, properties["context_capture_id"])
         self.edges[edge_id] = {
             "id": edge_id,
             "source": source,
@@ -142,9 +157,17 @@ class Projection:
         return edge_id
 
 
+def compact_event(event):
+    """Capture bodies stay in the immutable capture artifact, not every planning checkpoint."""
+    return {**event, "data": {**event["data"], **{
+        key: "" for key in ("response_body", "request_body") if event["data"].get(key)
+    }}}
+
+
 def projection_snapshot(projection):
     """Intern repeated context arrays in JSON checkpoints and publication digests."""
     state = dict(projection.__dict__)
+    state["event"] = compact_event(projection.event)
     arrays = sorted({
         tuple(record["context_urls"])
         for name in ("nodes", "evidence") for record in state[name].values()

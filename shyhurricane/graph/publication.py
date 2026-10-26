@@ -98,7 +98,15 @@ def write_batches(session, capture_id, stage, statement, parameter, records, *, 
         commit(batch)
 
 
+def activation_metadata(capture):
+    """Context membership lives in indexed rows; activation payloads stay independent of fanout."""
+    return {key: value for key, value in capture.items() if key not in {"context_urls", "context_capture_ids"}}
+
+
 class GraphPublisher:
+    active_pointer = "active_publication_id"
+    staging_pointer = "staging_publication_id"
+
     def __init__(self, store):
         self.store = store
 
@@ -108,7 +116,7 @@ class GraphPublisher:
             row = tx.run(
                 "MERGE (c:GraphCapture {id:$id}) ON CREATE SET c.url=$url,c.host=$host "
                 "SET c.publication_lock=coalesce(c.publication_lock,0)+1 "
-                "WITH c OPTIONAL MATCH (active:GraphPublication {id:c.active_publication_id}) "
+                f"WITH c OPTIONAL MATCH (active:GraphPublication {{id:c.{self.active_pointer}}}) "
                 "RETURN properties(c) AS capture, active.digest AS digest",
                 id=capture["id"],
                 url=capture.get("url"),
@@ -116,10 +124,10 @@ class GraphPublisher:
             ).single()
             current = row["capture"]
             if row["digest"] == digest:
-                return current["active_publication_id"], True
-            expected = current.get("active_publication_id", "")
+                return current[self.active_pointer], True
+            expected = current.get(self.active_pointer, "")
             generation = identity("publication", capture["id"], digest, expected)
-            previous_stage = current.get("staging_publication_id")
+            previous_stage = current.get(self.staging_pointer)
             if previous_stage and previous_stage != generation:
                 tx.run(
                     "MATCH (p:GraphPublication {id:$id}) WHERE p.published_at IS NULL "
@@ -130,9 +138,9 @@ class GraphPublisher:
                 "MERGE (p:GraphPublication {id:$publication.id}) "
                 "ON CREATE SET p += $publication, p.created_at=timestamp()/1000.0 "
                 "REMOVE p:GraphCleanupPending SET p.state='staging', p.retired_at=null, p.cleaned=false "
-                "WITH p MATCH (c:GraphCapture {id:p.capture_id}) SET c.staging_publication_id=p.id",
+                f"WITH p MATCH (c:GraphCapture {{id:p.capture_id}}) SET c.{self.staging_pointer}=p.id",
                 publication={
-                    **capture,
+                    **activation_metadata(capture),
                     "id": generation,
                     "capture_id": capture["id"],
                     "digest": digest,
@@ -140,7 +148,7 @@ class GraphPublisher:
                 },
             ).consume()
             # Preserve compact context metadata for legacy evidence before the capture pointer changes.
-            if current.get("complete") and not expected:
+            if self.active_pointer == "active_publication_id" and current.get("complete") and not expected:
                 tx.run(
                     "MERGE (p:GraphPublication {id:$id}) ON CREATE SET p += $metadata, p.state='legacy'",
                     id=identity("legacy-publication", capture["id"]),
@@ -151,7 +159,7 @@ class GraphPublisher:
                         "published_at": current.get("published_at", 0),
                     },
                 ).consume()
-            if current.get("complete") and not expected:
+            if self.active_pointer == "active_publication_id" and current.get("complete") and not expected:
                 write_contexts(tx, context_records(
                     identity("legacy-publication", capture["id"]), "GraphPublication", current.get("context_urls", [])
                 ))
@@ -166,22 +174,23 @@ class GraphPublisher:
                 "MATCH (c:GraphCapture {id:$capture.id}) "
                 "SET c.publication_lock=coalesce(c.publication_lock,0)+1 "
                 "WITH c MATCH (p:GraphPublication {id:$generation}) "
-                "WHERE p.state='staging' AND c.staging_publication_id=p.id "
-                "AND coalesce(c.active_publication_id,'')=p.expected_active "
+                f"WHERE p.state='staging' AND c.{self.staging_pointer}=p.id "
+                f"AND coalesce(c.{self.active_pointer},'')=p.expected_active "
                 "MERGE (revision:GraphState {id:'publication_revision'}) "
                 "SET revision.value=coalesce(revision.value,0)+1 "
-                "WITH c,p,revision.value AS revision, coalesce(c.active_publication_id,$legacy) AS previous "
-                "SET c += $capture, c.complete=true, c.active_publication_id=p.id, "
-                "c.staging_publication_id=null, c.published_at=timestamp()/1000.0, "
+                f"WITH c,p,revision.value AS revision, coalesce(c.{self.active_pointer},$legacy) AS previous "
+                f"SET c += $capture, c.complete=true, c.{self.active_pointer}=p.id, "
+                f"c.{self.staging_pointer}=null, c.published_at=timestamp()/1000.0, "
                 "p.state='published', p.published_at=c.published_at, p.published_revision=revision "
                 "WITH previous,p,revision OPTIONAL MATCH (old:GraphPublication {id:previous}) "
                 "FOREACH (retired IN CASE WHEN old IS NULL THEN [] ELSE [old] END | "
                 "SET retired:GraphCleanupPending, retired.state='retired', retired.retired_at=timestamp()/1000.0, "
                 "retired.retired_revision=revision) "
                 "RETURN p.id AS id",
-                capture=capture,
+                capture=activation_metadata(capture),
                 generation=generation,
-                legacy=identity("legacy-publication", capture["id"]),
+                legacy=(identity("legacy-publication", capture["id"])
+                        if self.active_pointer == "active_publication_id" else ""),
             ).single()
             if row is None:
                 raise PublicationConflict("A newer capture generation was activated during publication")
@@ -194,7 +203,7 @@ class GraphPublisher:
                 "MATCH (p:GraphPublication {id:$id}), (c:GraphCapture {id:p.capture_id}) "
                 "WHERE p.published_at IS NULL SET p:GraphCleanupPending, p.state='abandoned', "
                 "p.retired_at=timestamp()/1000.0 "
-                "WITH p,c WHERE c.staging_publication_id=p.id SET c.staging_publication_id=null",
+                f"WITH p,c WHERE c.{self.staging_pointer}=p.id SET c.{self.staging_pointer}=null",
                 timeout=graph_timeouts().control,
             ),
             id=generation,
@@ -215,11 +224,12 @@ class GraphPublisher:
             "context_urls": list(dict.fromkeys(context["url"] for context in projection.contexts)),
             "gaps": projection.gaps,
             "analysis_version": ANALYZER_VERSION,
+            "unit_only": False,
             "library_analysis": library_analysis(event.get("library_analysis")),
             "analysis_details": json.dumps(projection.analysis, sort_keys=True),
         }
         # Validate the small activation payload before creating any staging records.
-        list(payload_batches([capture]))
+        list(payload_batches([activation_metadata(capture)]))
         links = projection.planned_links
         if links is None:
             links = LinkPlanner(self.store, projection).plan()
@@ -230,7 +240,7 @@ class GraphPublisher:
             budget_limited=any("budget reached" in gap.lower() for gap in projection.gaps)
             or any(item.get("budget_limited", False) for item in projection.analysis),
         )
-        list(payload_batches([capture]))
+        list(payload_batches([activation_metadata(capture)]))
         snapshot = projection_snapshot(projection)
         digest = identity("analysis", capture, snapshot["nodes"], snapshot["evidence"],
                           projection.edges, snapshot["_context_lists"], links)
@@ -263,7 +273,9 @@ class GraphPublisher:
                             "Graph staging retirement deferred for publication %s", generation, exc_info=True
                         )
                     raise
-        logger.info("Graph capture %s publication activated seconds=%.3f", capture["id"], time.monotonic() - started)
+        logger.info("Graph capture %s publication %s seconds=%.3f", capture["id"],
+                    "unchanged" if completed else "activated", time.monotonic() - started)
+        return not completed
 
     def validate_dependencies(self, links):
         ids = sorted(
@@ -282,11 +294,30 @@ class GraphPublisher:
             if {row["id"] for row in rows} != set(batch):
                 raise PublicationConflict("An inferred link dependency changed during publication; replan the capture")
 
+    def stage_dependencies(self, session, capture, generation, links):
+        """Retain generations referenced by an independently active link or analysis unit."""
+        write_batches(
+            session, capture["id"], "generation-dependencies",
+            "UNWIND $rows AS row MATCH (p:GraphPublication {id:row.generation}),"
+            "(n:GraphEntity {id:row.node}) "
+            "MATCH (dependency:GraphPublication {id:n._publication_id}) "
+            "WHERE dependency.id<>p.id MERGE (p)-[:DEPENDS_ON]->(dependency)", "rows",
+            ({"generation": generation, "node": link[f"_{side}_storage_id"]}
+             for link in links.values() for side in ("source", "target") if not link[f"_{side}_local"]),
+        )
+
     def stage(self, session, capture, generation, projection, links):
+        self.stage_dependencies(session, capture, generation, links)
         write_batches(
             session, capture["id"], "context-lookup",
             "UNWIND $rows AS row MERGE (n:GraphContext {id:row.id}) SET n += row", "rows",
             context_records(generation, "GraphPublication", capture.get("context_urls", [])),
+        )
+        write_batches(
+            session, capture["id"], "document-membership",
+            "UNWIND $rows AS row MERGE (n:GraphDocumentContext {id:row.id}) SET n += row", "rows",
+            ({"id": identity("document-membership", generation, context["id"]),
+              "owner_id": generation, "capture_id": context["id"]} for context in projection.contexts),
         )
         def stored(record):
             result = {
@@ -452,7 +483,16 @@ class GraphPublisher:
                     "MATCH (c:GraphCapture {id:p.capture_id}) "
                     "WHERE p.state IN ['retired','abandoned'] "
                     "AND coalesce(c.active_publication_id,'')<>p.id "
-                    "AND coalesce(c.staging_publication_id,'')<>p.id "
+                    "AND NOT EXISTS { MATCH (unit:GraphAnalysisUnit) "
+            "WHERE unit.active_publication_id=p.id OR unit.staging_publication_id=p.id } "
+            "AND coalesce(c.active_link_publication_id,'')<>p.id "
+                    "AND coalesce(c.staging_link_publication_id,'')<>p.id "
+                    "AND NOT EXISTS { MATCH (dependent:GraphPublication)-[:DEPENDS_ON]->(p) "
+            "WHERE dependent.state IN ['published','staging'] } "
+            "AND NOT EXISTS { MATCH (pin:GraphReadPin) WHERE pin.expires>timestamp()/1000.0 "
+            "AND p.published_revision<=pin.revision "
+            "AND (p.retired_revision IS NULL OR pin.revision<p.retired_revision) } "
+            "AND coalesce(c.staging_publication_id,'')<>p.id "
                     "SET p.cleaned=true REMOVE p:GraphCleanupPending"
                 )
                 write_batches(
@@ -486,10 +526,19 @@ class GraphPublisher:
             ),
         ]
         stages.append((
-            "MATCH (n:GraphContext {owner_id:$id}) RETURN n.id AS id ORDER BY n.id LIMIT $limit",
-            "UNWIND $rows AS row MATCH (n:GraphContext {id:row.id}) DELETE n",
+            "MATCH (p:GraphPublication {id:$id})-[r:DEPENDS_ON]->(dependency) "
+            "RETURN dependency.id AS id ORDER BY id LIMIT $limit",
+            "UNWIND $rows AS row MATCH (p)-[r:DEPENDS_ON]->(dependency:GraphPublication {id:row.id}) DELETE r",
         ))
         if publication["abandoned"]:
+            stages.append((
+                "MATCH (n:GraphContext {owner_id:$id}) RETURN n.id AS id ORDER BY n.id LIMIT $limit",
+                "UNWIND $rows AS row MATCH (n:GraphContext {id:row.id}) DELETE n",
+            ))
+            stages.append((
+                "MATCH (n:GraphDocumentContext {owner_id:$id}) RETURN n.id AS id ORDER BY n.id LIMIT $limit",
+                "UNWIND $rows AS row MATCH (n:GraphDocumentContext {id:row.id}) DELETE n",
+            ))
             stages.append(
                 (
                     "MATCH (e:GraphEvidence {_publication_id:$id}) RETURN e.id AS id ORDER BY e.id LIMIT $limit",
@@ -500,6 +549,15 @@ class GraphPublisher:
             "MATCH (p:GraphPublication {id:$id}), (c:GraphCapture {id:p.capture_id}) "
             "WHERE p.state IN ['retired','abandoned'] AND p.retired_at<$cutoff "
             "AND coalesce(c.active_publication_id,'')<>p.id "
+            "AND NOT EXISTS { MATCH (unit:GraphAnalysisUnit) "
+            "WHERE unit.active_publication_id=p.id OR unit.staging_publication_id=p.id } "
+            "AND coalesce(c.active_link_publication_id,'')<>p.id "
+            "AND coalesce(c.staging_link_publication_id,'')<>p.id "
+            "AND NOT EXISTS { MATCH (dependent:GraphPublication)-[:DEPENDS_ON]->(p) "
+            "WHERE dependent.state IN ['published','staging'] } "
+            "AND NOT EXISTS { MATCH (pin:GraphReadPin) WHERE pin.expires>timestamp()/1000.0 "
+            "AND p.published_revision<=pin.revision "
+            "AND (p.retired_revision IS NULL OR pin.revision<p.retired_revision) } "
             "AND coalesce(c.staging_publication_id,'')<>p.id WITH p,c "
         )
         delete_guard = (
@@ -508,6 +566,15 @@ class GraphPublisher:
             "MATCH (c:GraphCapture {id:p.capture_id}) "
             "WHERE p.state IN ['retired','abandoned'] AND p.retired_at<row.cutoff "
             "AND coalesce(c.active_publication_id,'')<>p.id "
+            "AND NOT EXISTS { MATCH (unit:GraphAnalysisUnit) "
+            "WHERE unit.active_publication_id=p.id OR unit.staging_publication_id=p.id } "
+            "AND coalesce(c.active_link_publication_id,'')<>p.id "
+            "AND coalesce(c.staging_link_publication_id,'')<>p.id "
+            "AND NOT EXISTS { MATCH (dependent:GraphPublication)-[:DEPENDS_ON]->(p) "
+            "WHERE dependent.state IN ['published','staging'] } "
+            "AND NOT EXISTS { MATCH (pin:GraphReadPin) WHERE pin.expires>timestamp()/1000.0 "
+            "AND p.published_revision<=pin.revision "
+            "AND (p.retired_revision IS NULL OR pin.revision<p.retired_revision) } "
             "AND coalesce(c.staging_publication_id,'')<>p.id WITH row,p,c "
         )
         return [

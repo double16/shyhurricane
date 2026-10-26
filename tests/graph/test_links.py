@@ -299,7 +299,7 @@ def test_candidate_selection_filters_elements_before_hydration(event):
     planner = LinkPlanner(store, Projection(event()))
     assert planner.candidates("capture_id", "page")[0]["evidence_id"] == "proof"
     selection = store.read.call_args_list[0].args[0]
-    assert "USING INDEX other:GraphEntity(capture_id)" in selection
+    assert "USING INDEX SEEK other:GraphEntity(capture_id)" in selection
     assert "other.kind='element'" in selection
     assert "OPTIONAL MATCH" not in selection
     assert store.read.call_args.kwargs["ids"] == ["element"]

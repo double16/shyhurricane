@@ -14,7 +14,7 @@ SHUTDOWN_MESSAGE = "Shutting down: waiting up to 5 minutes (300 seconds) for cur
 async def test_registered_tools_publish_first_line_summaries(monkeypatch):
     monkeypatch.setattr(service.mcp_instance, "open_world", True)
     tools = await service.mcp_instance.list_tools()
-    assert len(tools) == 23
+    assert len(tools) == 25
     for tool in tools:
         assert tool.description, tool.name
         summary = tool.description.splitlines()[0]

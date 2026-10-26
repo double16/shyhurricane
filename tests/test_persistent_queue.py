@@ -999,3 +999,33 @@ def test_idle_queue_can_yield_ready_continuations_without_acknowledging_them(tmp
     assert list(iterator) == []
     assert queue.unack_count() == 0
     queue.close()
+
+
+async def test_budgeted_writer_cancel_before_commit_preserves_cancellation(tmp_path, monkeypatch):
+    from shyhurricane.graph.budget import QueryBudget
+
+    entered = asyncio.Event()
+    release = Event()
+    loop = asyncio.get_running_loop()
+    writer = persistent_queue.AsyncIngestWriter(str(tmp_path))
+    budget = QueryBudget()
+    original = writer._put
+
+    def delayed(item, request):
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(2)
+        return original(item, request)
+
+    monkeypatch.setattr(writer, "_put", delayed)
+    task = asyncio.create_task(writer.put({"id": "cancelled"}, budget))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not (tmp_path / "data.db").exists()
+    finally:
+        release.set()
+        await asyncio.to_thread(writer.close)

@@ -536,7 +536,9 @@ def munge_urls(query) -> Tuple[Optional[str], Optional[List[str]]]:
 
 
 def unix_command_image() -> str:
-    return "ghcr.io/double16/shyhurricane_unix_command:main"
+    from shyhurricane.command_image import unix_command_image as image
+
+    return image()
 
 
 def get_state_path(db: str, state_name: str) -> Path:

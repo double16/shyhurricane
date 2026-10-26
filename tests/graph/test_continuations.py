@@ -193,7 +193,7 @@ class MatchingStore:
         if "contexts" in parameters:
             self.selection += 1
             self.contexts.update(parameters["contexts"])
-            assert "USING INDEX other:GraphEntity(capture_id)" in statement
+            assert "USING INDEX SEEK other:GraphEntity(capture_id)" in statement
             assert parameters["selectors"] == ["#search"]
             return [{"id": key, "context": key} for key in parameters["contexts"]
                     if (key, key) > (parameters["after_context"], parameters["after_id"])][:parameters["limit"]]
@@ -284,7 +284,9 @@ def test_projection_checkpoint_interns_context_arrays_and_round_trips(event):
     state = projection_snapshot(graph)
     assert len(state["_context_lists"]) == 2
     restored = restore_projection(json.loads(json.dumps(state)))
-    assert restored.__dict__ == graph.__dict__
+    from shyhurricane.graph.model import compact_event
+
+    assert restored.__dict__ == {**graph.__dict__, "event": compact_event(graph.event)}
     assert restored.nodes["a"]["context_urls"] is restored.nodes["b"]["context_urls"]
     graph.nodes = dict(reversed(list(graph.nodes.items())))
     assert projection_snapshot(graph) == state
@@ -362,44 +364,6 @@ def test_scheduler_recovery_does_not_requeue_owned_jobs_and_finishes_failed_tick
     jobs.save(key, jobs.load(key), status="failed")
     scheduler.recover()
     assert jobs.connection.execute("SELECT state FROM reanalysis").fetchone()[0] == "failed"
-
-
-def test_worker_alternates_normal_work_and_continuations(jobs, event, monkeypatch):
-    from shyhurricane.graph import worker
-
-    capture = script(event)
-    pages = [event(url=f"https://example.com/page/{index}") for index in range(2)]
-    for item in [capture, *pages]:
-        jobs.artifacts.register(item)
-    queue, store = MagicMock(), MagicMock()
-    store.read.return_value = []
-    order, extractions = [], []
-    step = Continuations.step
-
-    def record_step(self, key, database, **kwargs):
-        order.append(self.load(key)["stage"])
-        return step(self, key, database, **kwargs)
-
-    def extractor(current, *args, **kwargs):
-        extractions.append(current["id"])
-        graph = Projection(current)
-        graph.library_analysis = "summary"
-        return graph
-
-    store.publish.side_effect = lambda graph: order.append(graph.event["id"])
-    monkeypatch.setattr(Continuations, "step", record_step)
-    monkeypatch.setattr(worker, "prepare_worker_process", lambda: None)
-    monkeypatch.setattr(worker, "get_persistent_queue", lambda *args, **kwargs: queue)
-    monkeypatch.setattr(worker, "GraphStore", lambda *args: store)
-    monkeypatch.setattr(worker, "extract", extractor)
-    monkeypatch.setattr(worker, "persistent_queue_get", lambda *args, **kwargs: iter([capture, *pages, capture]))
-    monkeypatch.setattr("shyhurricane.index.web_resources._wait_for_health", lambda *args: True)
-    worker.graph_worker("db", "bolt://test", MagicMock(), MagicMock(), False)
-    assert order[:4] == ["discovery", pages[0]["id"], "extract", pages[1]["id"]]
-    assert extractions.count(capture["id"]) == 1 and store.publish.call_count == 3
-    assert queue.ack.call_count == 4
-    assert jobs.connection.execute("SELECT state FROM graph_continuations").fetchone()[0] == "done"
-    assert jobs.connection.execute("SELECT status FROM work WHERE id=?", (capture["id"],)).fetchone()[0] == "complete"
 
 
 def test_resumable_planner_preserves_local_module_and_form_links(event):

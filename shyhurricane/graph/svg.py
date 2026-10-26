@@ -19,7 +19,7 @@ def svg_root(body):
     return etree.fromstring(body.encode("utf-8"), parser=parser)
 
 
-def extract_svg(root, graph, page, reference, scripts, base, *, inline=False, prefix="svg"):
+def extract_svg(root, graph, page, reference, scripts, base, *, inline=False, prefix="svg", locators=None):
     """Extract declared relationships and script text without resolving XML entities."""
     bases = {}
     retained = []
@@ -38,7 +38,7 @@ def extract_svg(root, graph, page, reference, scripts, base, *, inline=False, pr
         declared_base = attrs.get("xml:base") if inline else attrs.get("{http://www.w3.org/XML/1998/namespace}base")
         current_base = (web_url(declared_base, inherited) if declared_base else None) or inherited
         bases[id(tag)] = current_base
-        locator = f"{prefix}:{index}:{name}"
+        locator = locators.get(id(tag), f"{prefix}:{index}:{name}") if locators else f"{prefix}:{index}:{name}"
         element = graph.node(
             "element", identity(graph.event["id"], locator), name=attrs.get("id") or name,
             html_id=attrs.get("id"), html_tag=name, capture_id=graph.event["id"],

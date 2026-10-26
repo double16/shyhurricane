@@ -6,6 +6,7 @@ import sqlite3
 import time
 
 from shyhurricane.graph.artifacts import ArtifactStore
+from shyhurricane.graph.epochs import epoch_status
 from shyhurricane.persistent_queue import persistent_queue_path, read_active_queue_size
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,7 @@ async def graph_status(server_context, *, include_estimates=True) -> dict:
         artifacts = ArtifactStore(server_context.db)
         try:
             details["analyses"] = artifacts.counts()
+            details["epoch"] = epoch_status(artifacts.connection)
             details["backfill_started"] = (artifacts.root / "backfill.json").exists()
             if artifacts.connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='graph_continuations'"
