@@ -71,7 +71,7 @@ class LinkPlanner:
             self.hydration_reads += 1
             rows = self.read(
                 "UNWIND $ids AS id MATCH (other:GraphEntity {id:id}) "
-                "USING INDEX other:GraphEntity(id) "
+                "USING INDEX SEEK other:GraphEntity(id) "
                 f"WHERE {visible_node('other')} "
                 "OPTIONAL MATCH ()-[proof:RELATES]->(other) "
                 "WHERE proof.capture_id=other.capture_id "
@@ -83,7 +83,9 @@ class LinkPlanner:
                 ".disabled,.form_successful,.form_data,.form_field,.form_request,"
                 ".form_target_url,.form_target_method,"
                 ".import_key,.module_key,.reexport_name} AS node, evidence_id, "
-                "CASE WHEN $capture IN c.context_capture_ids THEN [$capture] ELSE [] END AS contexts "
+                "CASE WHEN $capture IN c.context_capture_ids OR EXISTS { "
+                "MATCH (membership:GraphDocumentContext {owner_id:other._publication_id,capture_id:$capture}) "
+                "} THEN [$capture] ELSE [] END AS contexts "
                 "ORDER BY other.id",
                 ids=ids,
                 capture=self.capture_id,
@@ -132,7 +134,7 @@ class LinkPlanner:
                 selected = page.get("selected")
                 if selected is None:
                     selected = self.read(
-                        f"MATCH (other:GraphEntity) USING INDEX other:GraphEntity({field}) "
+                        f"MATCH (other:GraphEntity) USING INDEX SEEK other:GraphEntity({field}) "
                         f"WHERE other.{field}=$value AND other.id>$after {kind}"
                         f"AND {visible_node('other')} "
                         "AND coalesce(other._owner_capture_id,other.capture_id,'')<>$capture "
@@ -457,7 +459,7 @@ class LinkPlanner:
                     self.selection_reads += 1
                     selected = self.read(
                         "UNWIND $contexts AS context WITH context WHERE context>=$after_context "
-                        "MATCH (other:GraphEntity {capture_id:context}) USING INDEX other:GraphEntity(capture_id) "
+                        "MATCH (other:GraphEntity {capture_id:context}) USING INDEX SEEK other:GraphEntity(capture_id) "
                         "WHERE other.kind='element' AND (context>$after_context OR other.id>$after_id) "
                         f"AND {visible_node('other')} "
                         "AND coalesce(other._owner_capture_id,other.capture_id,'')<>$capture "

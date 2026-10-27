@@ -8,7 +8,6 @@ import time
 from pathlib import Path
 
 import pytest
-from persistqueue import Empty
 
 from shyhurricane.graph.database import GraphStore
 from shyhurricane.graph.extract import extract
@@ -365,7 +364,7 @@ def test_cross_module_flows_resolve_in_either_order(neo4j, event, reverse):
 def test_cdn_script_requests_resolve_against_consuming_page(neo4j, event, graph_paths, monkeypatch):
     from shyhurricane.graph.artifacts import ArtifactStore
 
-    monkeypatch.setattr("shyhurricane.index.web_resources_pipeline._deobfuscate_javascript", lambda source: source)
+    monkeypatch.setattr("shyhurricane.javascript_deobfuscation.deobfuscate_javascript", lambda source: source)
     artifacts = ArtifactStore("db")
     page = event(
         url="https://graph-test.invalid/account/", body='<script src="https://cdn.graph-test.invalid/main.js"></script>'
@@ -403,7 +402,7 @@ def test_cdn_script_requests_resolve_against_consuming_page(neo4j, event, graph_
 def test_dom_inputs_connect_to_delivered_script_sinks(neo4j, event, graph_paths, monkeypatch):
     from shyhurricane.graph.artifacts import ArtifactStore
 
-    monkeypatch.setattr("shyhurricane.index.web_resources_pipeline._deobfuscate_javascript", lambda source: source)
+    monkeypatch.setattr("shyhurricane.javascript_deobfuscation.deobfuscate_javascript", lambda source: source)
     artifacts = ArtifactStore("db")
     page = event(
         url="https://graph-test.invalid/form", body='<input id="name" name="name"><script src="/form.js"></script>'
@@ -424,10 +423,10 @@ def test_dom_inputs_connect_to_delivered_script_sinks(neo4j, event, graph_paths,
     artifacts.close()
 
 
-def test_shared_script_reanalysis_coalesces_and_keeps_all_page_relationships(neo4j, event, graph_paths, monkeypatch):
-    from shyhurricane.graph import worker
+def test_shared_script_epoch_keeps_all_page_relationships(neo4j, event, graph_paths, monkeypatch):
+    from shyhurricane.graph import epochs
     from shyhurricane.graph.artifacts import ArtifactStore
-    from shyhurricane.persistent_queue import get_persistent_queue
+    from shyhurricane.graph.epochs import Epochs, epoch_status
 
     script = event(
         url="https://cdn.graph-test.invalid/shared.js",
@@ -444,49 +443,30 @@ def test_shared_script_reanalysis_coalesces_and_keeps_all_page_relationships(neo
     artifacts = ArtifactStore("db")
     for capture in [script, *pages]:
         artifacts.register(capture)
-    artifacts.close()
-    queue = get_persistent_queue("db", "graph_queue", auto_resume=False)
-    for page in pages:
-        queue.put(page)
-    queue.close()
-    publications = []
-    publish = neo4j.publish
-
-    def record(projection):
-        publications.append(projection.event["id"])
-        publish(projection)
-
-    def available(queue, **kwargs):
-        while True:
-            try:
-                yield queue.get(block=False)
-            except Empty:
-                return
-
-    monkeypatch.setattr(neo4j, "publish", record)
-    monkeypatch.setattr(worker, "prepare_worker_process", lambda: None)
-    monkeypatch.setattr(worker, "GraphStore", lambda *args: neo4j)
-    monkeypatch.setattr(worker, "persistent_queue_get", available)
-    monkeypatch.setattr(worker, "extract", lambda *args, **kwargs: extract(*args, **kwargs, javascript_runner=runner))
-    monkeypatch.setattr("shyhurricane.index.web_resources_pipeline._deobfuscate_javascript", lambda source: source)
-    monkeypatch.setattr("shyhurricane.index.web_resources._wait_for_health", lambda *args: True)
-    health = threading.Event()
-    health.set()
-    worker.graph_worker("db", neo4j.location, health, threading.Event(), False)
-    assert publications.count(script["id"]) == 1
-    assert len(publications) == len(pages) + 1
+    monkeypatch.setattr(epochs, "extract", lambda *args, **kwargs: extract(*args, **kwargs, javascript_runner=runner))
+    monkeypatch.setattr("shyhurricane.javascript_deobfuscation.deobfuscate_javascript", lambda source: source)
+    engine = Epochs(artifacts, neo4j)
+    try:
+        for index, page in enumerate(pages):
+            engine.accept(page, index)
+        for _ in range(500):
+            if not engine.available():
+                break
+            engine.step()
+        status = epoch_status(artifacts.connection)
+        assert status["phase"] == "done"
+        assert status["structural_activations"] == len(pages) + 1
+        assert status["link_activations"] == len(pages) + 1
+        assert status["completed"] == len(pages) + 1
+    finally:
+        engine.close()
+        artifacts.close()
     rows = neo4j.read(
         "MATCH ()-[r:RELATES]->(target:GraphEntity) WHERE r.capture_id=$id AND r.kind='REQUESTS' "
         "RETURN DISTINCT target.url AS url",
         id=script["id"],
     )
     assert {row["url"] for row in rows} == {page["data"]["url"] + "submit" for page in pages}
-    reopened = get_persistent_queue("db", "graph_queue", auto_resume=False)
-    try:
-        assert reopened.unack_count() == reopened.ready_count() == 0
-    finally:
-        reopened.close()
-
 
 @pytest.mark.skipif(not os.environ.get("GRAPH_ANALYZER_TEST_IMAGE"), reason="Requires built analyzer image")
 def test_production_container_parses_without_executing(monkeypatch):
@@ -500,7 +480,7 @@ def test_production_container_parses_without_executing(monkeypatch):
 def test_published_form_response_flow_and_request(neo4j, event, graph_paths, monkeypatch):
     from shyhurricane.graph.artifacts import ArtifactStore
 
-    monkeypatch.setattr("shyhurricane.index.web_resources_pipeline._deobfuscate_javascript", lambda source: source)
+    monkeypatch.setattr("shyhurricane.javascript_deobfuscation.deobfuscate_javascript", lambda source: source)
     source = Path("src/docker/unix_command/graph-analysis/test/dataFlow.js").read_text()
     page = event(
         url="https://graph-test.invalid/form",
@@ -1166,14 +1146,17 @@ def test_focused_queries_ignore_tenfold_disconnected_noise(neo4j, event):
     for count in (0, 1000, 10000):
         if count:
             with neo4j.connect().session() as session:
-                session.run(
-                    "UNWIND range(1,$count) AS i "
-                    "MERGE (n:GraphEntity {id:'efficiency-noise-'+toString(i)}) "
-                    "SET n.url=$prefix+toString(i),n.kind='resource',n._reverse_host=$host "
-                    "MERGE (context:GraphContext {id:'efficiency-context-'+toString(i)}) "
-                    "SET context.url=n.url,context.reverse_host=$host,context.owner_kind='GraphEntity',context.owner_id=n.id",
-                    count=count, prefix="https://graph-test.invalid/noise/", host=reverse_host(url),
-                ).consume()
+                for start in range(1, count + 1, 500):
+                    session.run(
+                        "UNWIND range($start,$end) AS i "
+                        "MERGE (n:GraphEntity {id:'efficiency-noise-'+toString(i)}) "
+                        "SET n.url=$prefix+toString(i),n.kind='resource',n._reverse_host=$host "
+                        "MERGE (context:GraphContext {id:'efficiency-context-'+toString(i)}) "
+                        "SET context.url=n.url,context.reverse_host=$host,"
+                        "context.owner_kind='GraphEntity',context.owner_id=n.id",
+                        start=start, end=min(start + 499, count),
+                        prefix="https://graph-test.invalid/noise/", host=reverse_host(url),
+                    ).consume()
         hits = []
 
         def profile(statement, **parameters):

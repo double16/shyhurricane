@@ -1,12 +1,12 @@
 """Durable, fair slices of shared-script discovery and inferred-link planning."""
 
-import json
 import logging
 import time
 from uuid import uuid4
 
 from bs4 import BeautifulSoup, SoupStrainer
 
+from shyhurricane.graph.blob_store import owner_triggers
 from shyhurricane.graph.extract import extract
 from shyhurricane.graph.links import LinkPlanner
 from shyhurricane.graph.model import identity, projection_snapshot, restore_projection, web_url
@@ -38,6 +38,8 @@ class Continuations:
             "CREATE INDEX IF NOT EXISTS graph_continuations_updated ON graph_continuations(updated_at);"
         )
 
+        owner_triggers(self.connection, "graph_continuations", "checkpoint", "id")
+
     @staticmethod
     def eligible(event):
         data = event["data"]
@@ -66,7 +68,7 @@ class Continuations:
             self.connection.execute(
                 "INSERT INTO graph_continuations(id,capture_id,ticket,state,stage,checkpoint,updated_at) "
                 "VALUES (?,?,?,'pending','discovery',?,?)",
-                (key, event["id"], item.get("reanalysis_ticket"), self.artifacts.reference(path), time.time()),
+                (key, event["id"], item.get("reanalysis_ticket"), path, time.time()),
             )
         return key
 
@@ -81,29 +83,27 @@ class Continuations:
 
     def load(self, key):
         row = self.connection.execute("SELECT checkpoint FROM graph_continuations WHERE id=?", (key,)).fetchone()
-        state = json.loads(self.artifacts.resolve(row[0]).read_text())
+        state = self.artifacts.read(row[0])
         if state.get("version") != CHECKPOINT_VERSION:
             raise ValueError("Unsupported graph continuation checkpoint version")
         return state
 
     def save(self, key, state, *, status="pending", error="", delay=0, retries=0):
         old = self.connection.execute("SELECT checkpoint FROM graph_continuations WHERE id=?", (key,)).fetchone()[0]
-        if "base_projection" in state:
-            state["base_projection"] = self.artifacts.reference(state["base_projection"])
         path = self.artifacts.write(f"continuation-{uuid4().hex}", state)
         cursor = state.get("planner", {}).get("cursor", {})
         with self.connection:
             self.connection.execute(
                 "UPDATE graph_continuations SET state=?,stage=?,checkpoint=?,next_attempt=?,retries=?,"
                 "updated_at=?,error=?,contexts_done=?,contexts_total=? WHERE id=?",
-                (status, state["stage"], self.artifacts.reference(path), time.time() + delay,
+                (status, state["stage"], path, time.time() + delay,
                  retries, time.time(), error[:1000],
                  cursor.get("context", state.get("contexts_completed", 0)),
                  len(state["contexts"]) if "contexts" in state else state.get("contexts_total", 0), key),
             )
         # A crash before this deletion leaves an unreferenced JSON file, never a lost checkpoint.
         try:
-            self.artifacts.resolve(old).unlink(missing_ok=True)
+            self.artifacts.delete(old)
         except OSError:
             logger.warning("Graph checkpoint cleanup deferred: %s", old, exc_info=True)
 
@@ -126,7 +126,7 @@ class Continuations:
             for capture_id, path in rows:
                 if count >= SLICE_CONTEXTS or time.monotonic() >= deadline:
                     return
-                event = json.loads(self.artifacts.resolve(path).read_text())
+                event = self.artifacts.read(path)
                 data = event["data"]
                 headers = {key.lower(): value for key, value in data.get("response_headers", {}).items()}
                 mime = headers.get("content-type", "").lower()
@@ -180,7 +180,7 @@ class Continuations:
                 base = self.artifacts.write(f"projection-{key}", projection_snapshot(projection))
                 state.update(
                     projection=projection_snapshot(projection),
-                    base_projection=self.artifacts.reference(base), stage="planning",
+                    base_projection=base, stage="planning",
                 )
             elif state["stage"] == "planning":
                 projection = restore_projection(state["projection"])
@@ -208,7 +208,7 @@ class Continuations:
             if planner is not None:
                 state.update(projection=projection_snapshot(planner.graph), planner=planner.checkpoint())
             if isinstance(error, PublicationConflict):
-                state["projection"] = json.loads(self.artifacts.resolve(state["base_projection"]).read_text())
+                state["projection"] = self.artifacts.read(state["base_projection"])
                 state.pop("planner", None)
                 state["stage"] = "planning"
                 self.save(key, state, error=str(error), delay=5)
@@ -240,7 +240,7 @@ class Continuations:
         self.save(key, completed, status="done")
         if base:
             try:
-                self.artifacts.resolve(base).unlink(missing_ok=True)
+                self.artifacts.delete(base)
             except OSError:
                 logger.warning("Graph projection cleanup deferred: %s", base, exc_info=True)
         with self.connection:

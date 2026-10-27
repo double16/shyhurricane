@@ -17,6 +17,7 @@ _R = TypeVar("_R")
 logger = logging.getLogger(__name__)
 PROGRESS_INTERVAL_SECONDS = 20.0
 GRAPH_TOOLS = frozenset({
+    "continue_application_graph_query", "expand_application_graph_analysis",
     "find_application_endpoints", "find_application_elements", "find_application_relationships",
     "trace_application_data_flow", "find_user_journey_paths", "fetch_application_graph_evidence",
 })

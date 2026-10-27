@@ -78,9 +78,28 @@ class ScopedAckQueue(persistqueue.SQLiteAckQueue):
         )
 
     def _insert_into(self, *record):
-        with self.tran_lock, self._putter as connection:
-            row_id = connection.execute(self._sql_insert, record).lastrowid
-            self._write_scopes(connection, row_id, record[0])
+        budget = getattr(self, "request_budget", None)
+        if budget is None:
+            with self.tran_lock, self._putter as connection:
+                row_id = connection.execute(self._sql_insert, record).lastrowid
+                self._write_scopes(connection, row_id, record[0])
+            return row_id
+        while not self.tran_lock.acquire(timeout=0.05):
+            budget.check()
+        connection = self._putter
+        try:
+            budget.check()
+            connection.execute("PRAGMA busy_timeout=50")
+            connection.set_progress_handler(lambda: int(budget.remaining() <= 0), 1000)
+            with connection:
+                row_id = connection.execute(self._sql_insert, record).lastrowid
+                self._write_scopes(connection, row_id, record[0])
+                with budget.lock:
+                    budget.check()
+                    connection.commit()
+        finally:
+            connection.set_progress_handler(None, 0)
+            self.tran_lock.release()
         return row_id
 
     def _update(self, key, *args):

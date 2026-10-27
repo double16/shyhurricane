@@ -128,15 +128,22 @@ class GraphStore:
         self.schema_ready = False
 
     def connect(self):
-        with self.lock:
+        budget = current_budget.get()
+        while not self.lock.acquire(timeout=0.05):
+            if budget is not None:
+                budget.check()
+        try:
             if self.driver is None:
                 self.uri = resolve_uri(self.location)
                 password = os.environ.get("NEO4J_PASSWORD")
                 auth = (os.environ.get("NEO4J_USERNAME", "neo4j"), password) if password else None
                 self.driver = GraphDatabase.driver(
-                    self.uri, auth=auth, connection_timeout=3, max_transaction_retry_time=5
+                    self.uri, auth=auth, connection_timeout=3,
+                    max_transaction_retry_time=5, connection_acquisition_timeout=0.1,
                 )
-        return self.driver
+            return self.driver
+        finally:
+            self.lock.release()
 
     def close(self):
         with self.lock:
@@ -145,11 +152,11 @@ class GraphStore:
                 self.driver = None
                 self.schema_ready = False
 
-    def read(self, statement: str, *, timeout: float | None = None, **parameters) -> list[dict]:
+    def read(self, statement: str, *, timeout: float | None = None, access_mode="READ", **parameters) -> list[dict]:
         """Read with managed retries normally, or one deadline-bounded transaction."""
         if timeout is not None and (not math.isfinite(timeout) or timeout <= 0):
             raise ValueError("Graph read timeout must be finite and positive")
-        with self.connect().session(database="neo4j", default_access_mode="READ") as session:
+        with self.connect().session(database="neo4j", default_access_mode=access_mode) as session:
             if timeout is not None:
                 # Explicit transactions do not perform driver-managed retries, which could
                 # otherwise outlive the caller's remaining hydration budget.
@@ -159,14 +166,20 @@ class GraphStore:
                     with budget.lock:
                         budget.terminate = lambda: self.terminate_read(budget.request_id)
                 try:
-                    if budget and budget.cancelled.is_set():
-                        raise TimeoutError("Graph query cancelled")
+                    if budget is not None:
+                        budget.check()
+                        timeout = min(timeout, budget.remaining())
                     with session.begin_transaction(
                         timeout=min(self.timeouts.read, timeout), **({"metadata": metadata} if metadata else {})
                     ) as tx:
                         if budget and budget.cancelled.is_set():
                             raise TimeoutError("Graph query cancelled")
-                        return [dict(row) for row in tx.run(statement, **parameters)]
+                        records = []
+                        for row in tx.run(statement, **parameters):
+                            if budget is not None:
+                                budget.check()
+                            records.append(dict(row))
+                        return records
                 finally:
                     if budget:
                         with budget.lock:
@@ -210,10 +223,16 @@ class GraphStore:
             "GraphState",
             "GraphPublication",
             "GraphContext",
+            "GraphAnalysisUnit",
+            "GraphReadPin",
+            "GraphDocumentContext",
         ):
             run(
                 f"CREATE CONSTRAINT {label.lower()}_id IF NOT EXISTS FOR (n:{label}) REQUIRE n.id IS UNIQUE"
             ).consume()
+        run("CREATE INDEX graph_read_pin_expiry IF NOT EXISTS FOR (n:GraphReadPin) ON (n.expires)").consume()
+        run("CREATE INDEX graph_document_context_owner IF NOT EXISTS "
+            "FOR (n:GraphDocumentContext) ON (n.owner_id,n.capture_id)").consume()
         run("CREATE INDEX graph_entity_url IF NOT EXISTS FOR (n:GraphEntity) ON (n.url)").consume()
         run("CREATE INDEX graph_entity_host IF NOT EXISTS FOR (n:GraphEntity) ON (n._reverse_host)").consume()
         for field in ("url", "_reverse_host"):
@@ -270,6 +289,13 @@ class GraphStore:
         from shyhurricane.graph.publication import GraphPublisher
 
         GraphPublisher(self).publish(projection)
+
+    def expire_query_pins(self, *, timeout):
+        return self.read(
+            "MATCH (p:GraphReadPin) WHERE p.expires<=timestamp()/1000.0 "
+            "WITH p LIMIT 500 DELETE p RETURN count(*) AS deleted",
+            timeout=timeout, access_mode="WRITE",
+        )
 
     def cleanup(self, **kwargs):
         from shyhurricane.graph.publication import GraphPublisher

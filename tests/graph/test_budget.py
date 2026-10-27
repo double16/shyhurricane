@@ -16,7 +16,7 @@ def test_single_budget_clamps_reads_reports_progress_and_cancels(monkeypatch):
     store.read.assert_called_with("READ", timeout=5)
     progress.assert_called_once()
     assert budget.current_budget.get() is None
-    clock[0] = 119
+    clock[0] = 114
     request.read(store, "READ")
     store.read.assert_called_with("READ", timeout=1)
     request.terminate = MagicMock()
@@ -34,5 +34,16 @@ def test_budget_context_is_reset_on_database_error():
     store = MagicMock()
     store.read.side_effect = ValueError("bad query")
     with pytest.raises(ValueError):
+        request.read(store, "READ")
+    assert budget.current_budget.get() is None
+
+
+def test_pool_exhaustion_is_a_bounded_timeout():
+    from neo4j.exceptions import ConnectionAcquisitionTimeoutError
+
+    request = budget.QueryBudget()
+    store = MagicMock()
+    store.read.side_effect = ConnectionAcquisitionTimeoutError("pool exhausted")
+    with pytest.raises(TimeoutError, match="connection-pool"):
         request.read(store, "READ")
     assert budget.current_budget.get() is None

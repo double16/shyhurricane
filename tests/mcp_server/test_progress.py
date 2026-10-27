@@ -245,3 +245,34 @@ async def test_concurrent_idle_requests_share_nested_counters_only(monkeypatch):
 
     results = await asyncio.gather(request(), request())
     assert results == [[(1, "nested"), (2, "port_scan is still running")]] * 2
+
+
+@pytest.mark.parametrize("tool", [
+    "find_application_endpoints", "find_application_elements", "find_application_relationships",
+    "trace_application_data_flow", "find_user_journey_paths", "continue_application_graph_query",
+    "fetch_application_graph_evidence", "expand_application_graph_analysis",
+])
+async def test_graph_tools_keep_five_second_heartbeat(monkeypatch, tool):
+    from shyhurricane.mcp_server import progress
+
+    entered = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def heartbeat(self, ctx, message):
+        assert self.interval == 5.0
+        assert message == f"{tool} is still running"
+        entered.set()
+        try:
+            await asyncio.Future()
+        finally:
+            stopped.set()
+
+    monkeypatch.setattr(progress.ProgressReporter, "heartbeat", heartbeat)
+
+    @progress_scope(fresh=True)
+    async def run():
+        async with progress.idle_progress(SimpleNamespace(), tool):
+            await entered.wait()
+
+    await run()
+    assert stopped.is_set()
