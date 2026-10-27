@@ -1,3 +1,4 @@
+import base64
 import json
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -33,6 +34,13 @@ class Store:
                 )
             ]
             return [{"seed": node} for node in sorted(nodes, key=lambda node: node["id"])[: parameters["limit"]]]
+        if "traversal:probe" in statement:
+            backward = "(other:GraphEntity)-[r:RELATES]->(anchor)" in statement
+            return [{"id": key, "found": any(
+                edge["target" if backward else "source"] == key
+                and (parameters["kinds"] is None or edge["kind"] in parameters["kinds"])
+                for edge in self.graph.edges.values()
+            )} for key in parameters["ids"]]
         if "traversal:frontier" in statement:
             backward = "(other:GraphEntity)-[r:RELATES]->(anchor)" in statement
             both = "(anchor)-[r:RELATES]-(other:GraphEntity)" in statement
@@ -78,6 +86,38 @@ class Store:
             for edge in self.graph.edges.values()
             if edge["id"] in parameters["ids"]
         ]
+
+
+def test_dense_layered_flow_finds_shortest_witness_before_repeated_routes(event):
+    from shyhurricane.graph.model import Projection
+
+    graph = Projection(event())
+    source = graph.node("symbol", "source", role="source")
+    sink = graph.node("symbol", "sink", role="sink")
+    layers = [[source]] + [[graph.node("symbol", f"layer-{layer}-{index}") for index in range(20)]
+                          for layer in range(4)] + [[sink]]
+    for previous, following in zip(layers, layers[1:]):
+        for left in previous:
+            for right in following:
+                graph.fact(left, right, "FLOWS_TO", "fixture.flow")
+    assert len(graph.nodes) == 82 and len(graph.edges) == 1240
+    result = GraphQuery(Store(graph)).paths("example.com", source, end=sink, mode="flow")
+    assert len(result["results"]) == 1 and len(result["results"][0]["steps"]) == 5
+    assert not result["retrieval_truncated"]
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_document_context_switch_requires_an_explicit_persistent_storage_boundary(event, persistent):
+    from shyhurricane.graph.model import Projection
+
+    graph = Projection(event())
+    source = graph.node("symbol", "source", role="source")
+    storage = graph.node("storage", "shared", persistent_storage=persistent)
+    sink = graph.node("symbol", "sink", role="sink")
+    graph.fact(source, storage, "WRITES_TO", "fixture.write", context_capture_id="first-document")
+    graph.fact(storage, sink, "READS_FROM", "fixture.read", context_capture_id="second-document")
+    result = GraphQuery(Store(graph)).paths("example.com", source, end=sink, mode="flow")
+    assert bool(result["results"]) is persistent
 
 
 def test_normalized_capture_context_preserves_cdn_scope_and_evidence(event):
@@ -397,11 +437,13 @@ def test_forms_reach_request_but_not_response_and_named_reads_are_isolated(event
     assert service.paths("example.com", sink["id"], direction="backward", mode="flow")["results"]
 
 
-def test_async_module_reexports_preserve_parameter_and_return_paths(event, javascript_runner):
+def test_async_module_reexports_preserve_parameter_and_return_paths(event, javascript_runner, graph_paths):
+    from shyhurricane.graph.artifacts import ArtifactStore
     from shyhurricane.graph.links import LinkPlanner
 
     source_map = json.dumps(
         {
+            "version": 3,
             "sources": ["src/api.js", "src/barrel.js", "src/main.js"],
             "sourcesContent": [
                 "export async function identity(value){return value;} export function safe(value){return 'safe';}",
@@ -412,10 +454,14 @@ def test_async_module_reexports_preserve_parameter_and_return_paths(event, javas
             ],
         }
     )
+    artifacts = ArtifactStore("db")
     graph = extract(
-        event(url="https://example.com/bundle.js.map", body=source_map, mime="application/json"),
-        javascript_runner=javascript_runner,
+        event(url="https://example.com/bundle.js", mime="text/javascript",
+              body="//# sourceMappingURL=data:application/json;base64," +
+              base64.b64encode(source_map.encode()).decode()),
+        artifacts, javascript_runner=javascript_runner,
     )
+    artifacts.close()
     store = MagicMock()
     store.read.return_value = []
     graph.edges.update(LinkPlanner(store, graph).plan())
@@ -587,7 +633,7 @@ def test_hydration_passes_remaining_timeout_and_stops_after_transaction_expiry(h
     def clock():
         nonlocal now
         if now == 0:
-            now = 115
+            now = 110
             return 0
         return now
 
@@ -667,3 +713,47 @@ def test_compressed_edges_are_visible_in_flow_traces_and_evidence_but_not_journe
     assert proof["original_hops"] == 25
     assert proof["classification"] == "statically_inferred"
     assert not service.paths("example.com", source, end=sink, mode="journey")["results"]
+
+
+def test_interrupted_frontier_is_unknown_and_pending_is_retained(event, monkeypatch):
+    from shyhurricane.graph.traversal import TraversalSnapshot
+
+    graph = extract(event(body="<form><input name='q'></form>"))
+    service = GraphQuery(Store(graph))
+    reader = TraversalSnapshot(service, "example.com")
+    reader.lookup(list(graph.nodes))
+    key = next(iter(reader.nodes))
+
+    def interrupted(*args, **kwargs):
+        reader.limit("time_limit")
+        return {}
+
+    monkeypatch.setattr(reader, "load", interrupted)
+    reader.expand([key], "forward", None)
+    assert key not in reader.adjacent
+    reader.metadata["truncation_reasons"].clear()
+    reader.metadata["retrieval_truncated"] = False
+    monkeypatch.setattr(reader, "read", lambda *args, **kwargs: interrupted() or [])
+    reader.probe([key], "forward", None)
+    assert key not in reader.probes
+
+
+def test_probes_batch_anchors_and_preserve_direction_and_kind(event):
+    from shyhurricane.graph.model import Projection
+    from shyhurricane.graph.traversal import TraversalSnapshot
+
+    graph = Projection(event())
+    nodes = [graph.node("symbol", f"node-{index}") for index in range(1001)]
+    graph.fact(nodes[0], nodes[1], "FLOWS_TO", "fixture")
+    store = Store(graph)
+    service = GraphQuery(store)
+    reader = TraversalSnapshot(service, "example.com")
+    reader.cache_nodes(graph.nodes.values())
+    before = service.budget.reads
+    reader.probe(nodes, "forward", {"FLOWS_TO"})
+    assert service.budget.reads - before == 3
+    assert reader.probes[nodes[0]] and not reader.probes[nodes[1]]
+    reader.probe(nodes, "backward", {"FLOWS_TO"})
+    assert reader.probes[nodes[1]] and not reader.probes[nodes[0]]
+    reader.probe(nodes, "forward", {"LOADS"})
+    assert not any(reader.probes.values())

@@ -123,7 +123,7 @@ class ReanalysisScheduler:
         path = self.connection.execute("SELECT path FROM captures WHERE id=?", (item["id"],)).fetchone()
         if path is None:
             raise ValueError("Reanalysis capture is unavailable")
-        event = json.loads(self.artifacts.resolve(path[0]).read_text())
+        event = self.artifacts.read(path[0])
         route = json.loads(row[0])
         return {
             **event,

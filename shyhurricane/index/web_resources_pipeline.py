@@ -2,7 +2,7 @@ import datetime
 import hashlib
 import json
 import logging
-import subprocess
+import subprocess as subprocess
 import sys
 from collections import defaultdict
 from dataclasses import replace
@@ -98,38 +98,9 @@ def is_binary(content: Optional[str], mime_type: Optional[str]) -> bool:
 
 
 def _deobfuscate_javascript(content: str) -> str:
-    if not content:
-        return content
+    from shyhurricane.javascript_deobfuscation import deobfuscate_javascript
 
-    docker_command = ["docker", "run", "--rm", "-i", unix_command_image(), 'timeout', '--preserve-status',
-                      '--kill-after=1m', '30m', '/usr/local/bin/jsdeobf.sh']
-    logger.debug(f"Deobfuscating javascript with command {' '.join(docker_command)}")
-    proc = subprocess.Popen(docker_command, universal_newlines=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL)
-    result = ""
-    try:
-        proc.stdin.write(content)
-        proc.stdin.close()
-        while proc.poll() is None:
-            line_out = proc.stdout.readline()
-            if line_out:
-                result += line_out
-        # read any buffered output
-        while True:
-            line_out = proc.stdout.readline()
-            if not line_out:
-                break
-            result += line_out
-    except EOFError:
-        pass
-
-    return_code = proc.wait()
-    if return_code != 0 or not result.strip():
-        logger.warning("Deobfuscating javascript failed with exit code %d", return_code)
-        return content
-    else:
-        logger.info("Deobfuscating javascript completed, from %d bytes to %d bytes", len(content), len(result))
-        return result
+    return deobfuscate_javascript(content, image=unix_command_image())
 
 
 class SuffixIdSplitter(DocumentSplitter):

@@ -220,7 +220,7 @@ def test_staging_storage_ids_context_links_and_legacy_evidence(event, monkeypatc
 def test_cleanup_is_bounded_preserves_published_evidence_and_defers_failure(monkeypatch, caplog):
     store = MagicMock()
     publication_record = {"id": "retired", "capture": "capture", "abandoned": False}
-    store.read.side_effect = [[publication_record], [{"id": "edge"}], [], [], [], []]
+    store.read.side_effect = [[publication_record], [{"id": "edge"}]] + [[]] * 7
     publisher = GraphPublisher(store)
     session, transactions = session_with_transactions()
     store.connect.return_value.session.return_value.__enter__.return_value = session

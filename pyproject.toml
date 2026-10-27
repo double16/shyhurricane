@@ -51,6 +51,7 @@ dependencies = [
     "litellm-haystack>=1.2.0",
     "textual>=7.3,<8.3",
     "concurrent-log-handler>=0.9.31,<1",
+    "zstandard>=0.23,<1",
 ]
 
 [project.optional-dependencies]
@@ -65,7 +66,8 @@ dev = [
     "black",
     "isort",
     "flake8",
-    "mypy"
+    "mypy",
+    "lz4>=4,<5",
 ]
 
 [tool.pytest.ini_options]

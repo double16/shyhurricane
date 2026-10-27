@@ -2,6 +2,7 @@
 
 import json
 import logging
+import sqlite3
 import time
 from collections import deque
 from itertools import batched
@@ -12,7 +13,7 @@ from neo4j.exceptions import Neo4jError
 from shyhurricane.graph.budget import QueryBudget
 from shyhurricane.graph.config import graph_timeouts
 from shyhurricane.graph.discovery import INTERPRETATION, ResourceDiscovery, in_context, present
-from shyhurricane.graph.model import FLOW_KINDS, JOURNEY_KINDS, identity, web_url
+from shyhurricane.graph.model import FLOW_KINDS, JOURNEY_KINDS, identity, optional_filter, web_url
 from shyhurricane.graph.visibility import public_properties, visible_node, visible_relationship
 
 logger = logging.getLogger(__name__)
@@ -49,9 +50,11 @@ def scope_predicate(scope: str):
 
 
 class GraphQuery:
-    def __init__(self, store, *, budget=None):
+    def __init__(self, store, *, budget=None, artifacts=None):
         self.store = store
         self.budget = budget or QueryBudget()
+        self.cursor_store = None
+        self.artifacts = artifacts
 
     def read(self, statement, **parameters):
         return self.budget.read(self.store, statement, **parameters)
@@ -63,7 +66,9 @@ class GraphQuery:
             if isinstance(error, Neo4jError) and "TransactionTimedOut" not in (error.code or ""):
                 raise
             return {}, [], {
-                "analysis_gaps": ["Snapshot selection exceeded its query budget; lookup migration may still be pending"],
+                "analysis_gaps": [
+                    "Snapshot selection exceeded its query budget; lookup migration may still be pending"
+                ],
                 "analysis_summaries": [], "retrieval_truncated": True, "truncation_reasons": ["time_limit"],
                 "instructions": INTERPRETATION,
             }
@@ -78,6 +83,7 @@ class GraphQuery:
                 "AND any(n IN [a,b] WHERE ($role IS NULL OR n.role=$role) "
                 "AND ($context_url IS NULL OR n.url=$context_url OR "
                 "(n.context_owner_id IS NULL AND $context_url IN coalesce(n.context_urls,[])) OR EXISTS { "
+                "MATCH (lookup:GraphContext {owner_id:n.context_owner_id,url:$context_url}) } OR EXISTS { "
                 "OPTIONAL MATCH (p:GraphPublication {id:n.context_owner_id}) "
                 "OPTIONAL MATCH (archive:GraphPublication {capture_id:n.context_owner_id}) "
                 "WHERE archive.digest IS NULL "
@@ -89,30 +95,37 @@ class GraphQuery:
         references = self.read(
             "MATCH (c:GraphCapture) WHERE c.complete=true AND ($as_of IS NULL OR c.observed_at <= $as_of) "
             "AND ($historical OR NOT EXISTS { MATCH (newer:GraphCapture) "
-            "WHERE newer.complete=true AND newer.resource_key=c.resource_key AND newer.observed_at>c.observed_at "
+            "WHERE newer.complete=true AND newer.resource_key=c.resource_key "
+            "AND (newer.observed_at>c.observed_at "
+            "OR (newer.observed_at=c.observed_at AND newer.id<c.id)) "
             "AND ($as_of IS NULL OR newer.observed_at <= $as_of) }) "
             "AND (c.host=$host OR c.host ENDS WITH '.'+$host OR EXISTS { "
-            "MATCH (document:GraphCapture) WHERE document.id IN c.context_capture_ids "
+            "MATCH (document:GraphCapture) WHERE (document.id IN c.context_capture_ids OR EXISTS { "
+            "MATCH (membership:GraphDocumentContext {owner_id:c.active_publication_id,capture_id:document.id}) }) "
             "AND (document.host=$host OR document.host ENDS WITH '.'+$host) "
             "AND ($prefix IS NULL OR document.url STARTS WITH $prefix) "
             "AND document.complete=true AND ($as_of IS NULL OR document.observed_at <= $as_of) "
             "AND ($historical OR NOT EXISTS { MATCH (newer:GraphCapture) "
             "WHERE newer.complete=true AND newer.resource_key=document.resource_key "
-            "AND newer.observed_at>document.observed_at AND ($as_of IS NULL OR newer.observed_at <= $as_of) }) }) "
+            "AND (newer.observed_at>document.observed_at "
+            "OR (newer.observed_at=document.observed_at AND newer.id<document.id)) "
+            "AND ($as_of IS NULL OR newer.observed_at <= $as_of) }) }) "
             "WITH c,c.active_publication_id AS selected_generation "
             "MATCH (a:GraphEntity)-[r:RELATES]->(b:GraphEntity) WHERE r.capture_id=c.id "
             f"AND {visible_relationship('r', 'c')} AND {visible_node('a', 'c')} AND {visible_node('b', 'c')} "
             "AND (r.context_capture_id IS NULL OR EXISTS { MATCH (context:GraphCapture {id:r.context_capture_id}) "
             "WHERE context.complete=true AND ($as_of IS NULL OR context.observed_at <= $as_of) "
             "AND ($historical OR NOT EXISTS { MATCH (next:GraphCapture) WHERE next.complete=true "
-            "AND next.resource_key=context.resource_key AND next.observed_at>context.observed_at "
+            "AND next.resource_key=context.resource_key "
+            "AND (next.observed_at>context.observed_at "
+            "OR (next.observed_at=context.observed_at AND next.id<context.id)) "
             "AND ($as_of IS NULL OR next.observed_at <= $as_of) }) }) "
             "AND all(n IN [a,b] WHERE n.capture_id IS NULL OR n.capture_id=c.id "
             "OR EXISTS { MATCH (owner:GraphCapture {id:n.capture_id}) "
             "WHERE owner.complete=true AND ($as_of IS NULL OR owner.observed_at <= $as_of) "
             "AND ($historical OR NOT EXISTS { MATCH (later:GraphCapture) "
             "WHERE later.complete=true AND later.resource_key=owner.resource_key "
-            "AND later.observed_at>owner.observed_at "
+            "AND (later.observed_at>owner.observed_at OR (later.observed_at=owner.observed_at AND later.id<owner.id)) "
             "AND ($as_of IS NULL OR later.observed_at <= $as_of) }) }) "
             f"{element_filter}"
             "RETURN r.id AS membership_id,c.id AS capture_id, "
@@ -293,7 +306,9 @@ class GraphQuery:
                 "OPTIONAL MATCH (c:GraphCapture {id:owner.id}) "
                 "WITH owner,p,archive,c WHERE p IS NOT NULL OR archive IS NOT NULL OR c IS NOT NULL "
                 "RETURN owner.id AS id, "
-                "coalesce(p.context_urls,archive.context_urls,c.context_urls,[]) AS context_urls",
+                "CASE WHEN EXISTS { MATCH (lookup:GraphContext {owner_id:p.id}) } "
+                "THEN COLLECT { MATCH (context:GraphContext {owner_id:p.id}) RETURN context.url } "
+                "ELSE coalesce(p.context_urls,archive.context_urls,c.context_urls,[]) END AS context_urls",
                 "contexts",
                 "contexts",
             ):
@@ -356,7 +371,13 @@ class GraphQuery:
         return result, gaps, reasons
 
     def endpoints(self, scope, *, url=None, method=None, historical=False, as_of=None, detail="inventory"):
+        url, method = map(optional_filter, (url, method))
         if detail == "inventory":
+            if self.artifacts is not None:
+                from shyhurricane.graph.manifest_query import manifest_query
+
+                return manifest_query(self.artifacts, scope, kind="resource", url=url, method=method,
+                                      historical=historical, as_of=as_of)
             from shyhurricane.graph.inventory import endpoint_inventory
 
             return endpoint_inventory(self, scope, url=url, method=method, historical=historical, as_of=as_of)
@@ -366,7 +387,8 @@ class GraphQuery:
 
         reader = TraversalSnapshot(self, scope, historical=historical, as_of=as_of)
         if reader.indexed():
-            reader.candidates(scope, kinds=["resource"], url=web_url(url, fragment=True) if url else None, method=method)
+            reader.candidates(scope, kinds=["resource"],
+                              url=web_url(url, fragment=True) if url else None, method=method)
             selected = list(reader.nodes)
             if len(selected) > MAX_RESULTS:
                 reader.limit("result_limit")
@@ -418,8 +440,25 @@ class GraphQuery:
         historical=False,
         as_of=None,
     ):
+        url, context_url = map(optional_filter, (url, context_url))
         present({}, detail)
         normalized_context = web_url(context_url, fragment=True) if context_url is not None else None
+        if self.artifacts is not None:
+            from shyhurricane.graph.manifest_query import manifest_query
+
+            result = manifest_query(self.artifacts, scope, kinds=kinds, role=role, url=url,
+                                    context_url=normalized_context, historical=historical, as_of=as_of,
+                                    exclude_kinds=() if kinds else ("relationship", "reference", "candidate_source"))
+            try:
+                result["omitted_regions"] = self.omitted_regions(scope)
+            except TimeoutError:
+                result.setdefault("analysis_gaps", []).append(
+                    "Deferred analysis-unit details exceeded the query budget"
+                )
+                result["retrieval_truncated"] = True
+                if "time_limit" not in result["truncation_reasons"]:
+                    result["truncation_reasons"].append("time_limit")
+            return result
         from shyhurricane.graph.traversal import TraversalSnapshot
 
         reader = TraversalSnapshot(self, scope, historical=historical, as_of=as_of)
@@ -468,6 +507,8 @@ class GraphQuery:
         max_depth=8,
         historical=False,
         as_of=None,
+        _resume=None,
+        _expires=None,
     ):
         present({}, detail)
         if direction not in {"forward", "backward"}:
@@ -476,12 +517,27 @@ class GraphQuery:
             raise ValueError("max_depth must be between 1 and 32")
         from shyhurricane.graph.traversal import TraversalSnapshot
 
-        reader = TraversalSnapshot(self, scope, historical=historical, as_of=as_of)
+        reader = TraversalSnapshot(self, scope, historical=historical, as_of=as_of, resume=_resume)
+        if _resume is not None:
+            reader.parameters["revision"] = _resume["revision"]
+            reader.nodes.update(_resume["nodes"])
+            reader.memberships.update(_resume.get("memberships", {}))
+            reader.selected_memberships.update(_resume.get("selected_memberships", []))
+            reader.association_edges.update(_resume.get("association_edges", {}))
+            reader.associated.update(_resume.get("associated", []))
+            for field in ("analysis_gaps", "analysis_summaries"):
+                reader.metadata[field] = _resume.get(field, [])
+            for key, values in _resume["storage"].items():
+                reader.storage[key].update(values)
+            reader.resolved.update(_resume.get("resolved", []))
         nodes, metadata = reader.nodes, reader.metadata
         start_role = ("sink" if direction == "backward" else "source") if mode == "flow" else None
         end_role = ("source" if direction == "backward" else "sink") if mode == "flow" else None
-        starts = reader.select(start, start_role)
-        targets = set(reader.select(end, end_role, boundary=True)) if end else set()
+        seeds_complete = _resume is not None and _resume.get("seeds_complete", True)
+        starts = _resume["starts"] if seeds_complete else reader.select(start, start_role)
+        targets = (set(_resume["targets"]) if seeds_complete
+                   else set(reader.select(end, end_role, boundary=True)) if end else set())
+        seeds_complete = not reader.stopped
         if mode == "flow":
             metadata.update(
                 resolved_start_ids=starts[:20],
@@ -500,7 +556,9 @@ class GraphQuery:
             allowed = set(kinds) & allowed if allowed is not None else set(kinds)
         reverse = direction == "backward"
         adjacent = reader.adjacent
-        pending = deque(([key], []) for key in starts)
+        pending = deque(_resume["pending"] if _resume and _resume.get("seeds_complete", True)
+                        else (([key], [], None) for key in starts))
+        reached = {tuple(item) for item in _resume["reached"]} if _resume else {(key, key, None) for key in starts}
         result = []
         expansions = 0
         scope_boundary = False
@@ -510,6 +568,8 @@ class GraphQuery:
             pending
             and len(result) < MAX_RESULTS
             and expansions < MAX_ENTITIES
+            and self.budget.remaining() > 0
+            and not reader.stopped
             and time.thread_time() - cpu_started < 10
         ):
             # Prefetch only this breadth-first layer; repeated path states share adjacency.
@@ -517,12 +577,16 @@ class GraphQuery:
             frontier = list(
                 dict.fromkeys(
                     path[-1]
-                    for path, steps in pending
+                    for path, steps, _ in pending
                     if len(steps) == depth and not (end and steps and path[-1] in targets)
                 )
             )[:500]
             reader.expand(frontier, direction, allowed, probe=depth >= max_depth, depth=depth)
-            visited, steps = pending.popleft()
+            if (metadata["retrieval_truncated"] and pending[0][0][-1] not in adjacent
+                    and pending[0][0][-1] not in reader.probes):
+                metadata["analysis_gaps"].append("Frontier loading incomplete; unfinished work retained")
+                break
+            visited, steps, context = pending.popleft()
             current = visited[-1]
             if steps and (
                 (end and current in targets)
@@ -549,17 +613,39 @@ class GraphQuery:
             for item in adjacent.get(current, []):
                 expansions += 1
                 target = item["source"] if reverse else item["target"]
-                if target not in visited:
-                    pending.append(([*visited, target], [*steps, item]))
-                if expansions >= MAX_ENTITIES:
-                    break
+                boundary_context = None if nodes[current].get("persistent_storage") else context
+                next_context = item.get("context_capture_id") or boundary_context
+                if (mode == "flow" and boundary_context
+                        and item.get("context_capture_id") not in {None, boundary_context}):
+                    continue
+                signature = (visited[0], target, next_context)
+                if (target not in visited
+                        and (mode not in {"flow", "journey"} and end is None or signature not in reached)):
+                    reached.add(signature)
+                    pending.append(([*visited, target], [*steps, item], next_context))
+        # Destinations already hydrated by completed frontiers remain valid even if
+        # the next read or metadata operation exhausts the request budget.
+        if reader.stopped or self.budget.remaining() <= 0:
+            unfinished = deque()
+            for visited, steps, context in pending:
+                terminal = bool(steps) and (
+                    (end and visited[-1] in targets)
+                    or (not end and mode == "flow" and nodes[visited[-1]].get("role") == end_role)
+                )
+                if terminal and len(result) < MAX_RESULTS:
+                    result.append({"nodes": [present(nodes[key], detail) for key in visited],
+                                   "steps": [present(step, detail, step=True) for step in steps],
+                                   "possible_path": True})
+                else:
+                    unfinished.append((visited, steps, context))
+            pending = unfinished
         metadata["retrieval_truncated"] |= bool(pending)
         if pending:
             if len(result) >= MAX_RESULTS:
                 metadata["truncation_reasons"].append("result_limit")
             if expansions >= MAX_ENTITIES:
                 metadata["truncation_reasons"].append("expansion_limit")
-            if time.thread_time() - cpu_started >= 10:
+            if self.budget.remaining() <= 0 or time.thread_time() - cpu_started >= 10:
                 metadata["truncation_reasons"].append("time_limit")
         metadata["truncation_reasons"] = sorted(set(metadata["truncation_reasons"]))
         if not starts:
@@ -605,7 +691,131 @@ class GraphQuery:
                 for gap in metadata["analysis_gaps"]
             ]
         reader.finish(len(result))
+        metadata_started = time.monotonic()
+        if self.artifacts is not None:
+            try:
+                metadata["coverage"] = self.artifacts.manifest.coverage(scope=scope, historical=historical, as_of=as_of)
+                metadata["omitted_regions"] = self.omitted_regions(scope)
+            except TimeoutError:
+                metadata.setdefault("coverage", {"discovery": "unknown", "flow": "unknown"})
+                metadata.setdefault("omitted_regions", [])
+                reader.limit("time_limit", "Graph metadata exceeded the query budget")
+            logger.debug("Graph request=%s stage=metadata seconds=%.3f",
+                         self.budget.request_id, time.monotonic() - metadata_started)
+            if (pending or not seeds_complete) and "generation_unavailable" not in metadata["truncation_reasons"]:
+                from shyhurricane.graph.cursors import QueryCursors
+
+                checkpoint_started = time.monotonic()
+                cursors = self.cursor_store
+                try:
+                    with self.budget.checkpoint():
+                        cursors = cursors or QueryCursors(self.artifacts.root, self.budget)
+                    with self.budget.checkpoint(), cursors.transaction():
+                        token = cursors.save({
+                            "operation": "paths",
+                            "parameters": {
+                                "scope": scope, "start": start, "end": end, "direction": direction, "mode": mode,
+                                "detail": detail, "kinds": kinds, "max_depth": max_depth,
+                                "historical": historical, "as_of": as_of,
+                            },
+                            "search": {
+                                "revision": reader.parameters["revision"], "nodes": nodes,
+                                "storage": {key: sorted(values) for key, values in reader.storage.items()},
+                                "resolved": sorted(reader.resolved), "reads": reader.read_cache,
+                                "seeds_complete": seeds_complete, "memberships": reader.memberships,
+                                "selected_memberships": sorted(reader.selected_memberships),
+                                "association_edges": reader.association_edges,
+                                "associated": sorted(reader.associated),
+                                "analysis_gaps": metadata["analysis_gaps"],
+                                "analysis_summaries": metadata["analysis_summaries"],
+                                "starts": starts, "targets": sorted(targets), "pending": list(pending),
+                                "reached": sorted(reached, key=str),
+                            },
+                        }, expires=_expires)
+                        self.pin_query(token, reader.parameters["revision"], expires=_expires)
+                        metadata["continuation_token"] = token
+                except (TimeoutError, OSError, ValueError, Neo4jError, sqlite3.Error) as error:
+                    reader.limit(
+                        "time_limit", f"Continuation checkpoint failed; restart required: {type(error).__name__}"
+                    )
+                    metadata.pop("continuation_token", None)
+                finally:
+                    if self.cursor_store is None and cursors is not None:
+                        cursors.close()
+                    logger.debug("Graph request=%s stage=checkpoint seconds=%.3f",
+                                 self.budget.request_id, time.monotonic() - checkpoint_started)
         return {**metadata, "results": result}
+
+    def pin_query(self, token, revision, *, expires=None):
+        from shyhurricane.graph.cursors import TTL_SECONDS
+
+        rows = self.budget.read(
+            self.store,
+            "MERGE (p:GraphReadPin {id:$id}) SET p.revision=$revision,p.expires=$expires RETURN p.id AS id",
+            timeout=graph_timeouts().control, access_mode="WRITE",
+            id=identity(token), revision=revision,
+            expires=expires if expires is not None else time.time() + TTL_SECONDS,
+        )
+
+        if not any(row["id"] == identity(token) for row in rows):
+            raise TimeoutError("Graph revision pin could not be confirmed")
+
+    def omitted_regions(self, scope):
+        if self.artifacts is None:
+            return []
+        records, _ = self.artifacts.manifest.page(scope, kind="analysis_unit", limit=1000)
+        return [{"analysis_unit_id": row["analysis_unit_id"], "capture_id": row["capture_id"],
+                 "status": row["materialization"], "flow": row["flow"], "error": row["error"],
+                 "source_path": row["source_path"]}
+                for row in records if row["expandable"] and
+                (row["flow"] != "complete" or row["materialization"] != "complete")]
+
+    def continue_query(self, token, limit=1000):
+        from shyhurricane.graph.cursors import QueryCursors
+        from shyhurricane.graph.manifest_query import manifest_query
+
+        if self.artifacts is None:
+            raise ValueError("Graph analysis continuations are unavailable")
+        cursors = QueryCursors(self.artifacts.root, self.budget)
+        result = None
+        try:
+            with cursors.locked(token):
+                self.cursor_store = cursors
+                cached = cursors.response(token)
+                if cached is not None:
+                    return cached
+                state, expires = cursors.load(token)
+                with cursors.transaction():
+                    if state["operation"] == "manifest":
+                        result = manifest_query(
+                            self.artifacts, **{key: value for key, value in state.items() if key != "operation"},
+                            limit=limit, expires=expires, cursor_store=cursors,
+                        )
+                    elif state["operation"] == "paths":
+                        result = self.paths(**state["parameters"], _resume=state["search"], _expires=expires)
+                    else:
+                        raise ValueError("Unsupported graph continuation")
+                    with self.budget.checkpoint():
+                        cursors.complete(token, result)
+                    return result
+        except (TimeoutError, OSError, ValueError, sqlite3.Error):
+            if result is None:
+                raise
+            result.pop("continuation_token", None)
+            result["retrieval_truncated"] = True
+            result.setdefault("analysis_gaps", []).append("Continuation checkpoint failed; restart required")
+            reasons = result.setdefault("truncation_reasons", [])
+            if "time_limit" not in reasons:
+                reasons.append("time_limit")
+            return result
+        finally:
+            self.cursor_store = None
+            cursors.close()
+
+    def expansion(self, scope, capture_id, unit_id):
+        from shyhurricane.graph.manifest_query import expand_analysis
+
+        return expand_analysis(self.artifacts, None, scope, capture_id, unit_id)
 
     def evidence(self, evidence_id):
         rows = self.read(
@@ -619,7 +829,9 @@ class GraphQuery:
             "OPTIONAL MATCH (analysis:GraphPublication {id:e._publication_id}) "
             "OPTIONAL MATCH (capture:GraphCapture {id:e.capture_id}) "
             "RETURN properties(e) AS evidence, "
-            "coalesce(publication.context_urls,context.context_urls) AS context_urls, "
+            "CASE WHEN EXISTS { MATCH (lookup:GraphContext {owner_id:publication.id}) } THEN "
+            "COLLECT { MATCH (lookup:GraphContext {owner_id:publication.id}) RETURN lookup.url } "
+            "ELSE coalesce(publication.context_urls,context.context_urls) END AS context_urls, "
             "coalesce(analysis.analysis_details,capture.analysis_details) AS analysis_details",
             id=evidence_id,
         )

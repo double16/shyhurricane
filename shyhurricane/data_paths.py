@@ -77,3 +77,10 @@ def neo4j_location(data_dir: str | os.PathLike | None = None) -> str:
             raise ValueError("NEO4J must be a Bolt/Neo4j URI; use --data-dir for local storage")
         return endpoint
     return str(resolve_data_dir(data_dir) / "graph")
+
+
+def persistent_queue_path(db: str, queue_name: str) -> Path:
+    """Resolve a queue directory without opening or changing its database."""
+    if queue_name == "graph_state":
+        return state_path("graph_state")
+    return state_path("queues") / queue_name

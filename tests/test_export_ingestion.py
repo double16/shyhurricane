@@ -12,6 +12,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from shyhurricane import export_ingestion as ex
+from shyhurricane.graph.blob_store import BlobStore, initialize
 
 
 def capture(**overrides):
@@ -35,13 +36,12 @@ def graph(root, events):
     directory = root / "graph_state"
     directory.mkdir(parents=True, exist_ok=True)
     with closing(sqlite3.connect(directory / "artifacts.sqlite")) as db, db:
+        initialize(db)
         db.execute("CREATE TABLE captures (id TEXT PRIMARY KEY, path TEXT)")
         for index, event in enumerate(events):
             identifier = str(index)
-            path = directory / f"{identifier}.json"
-            path.write_text(json.dumps({"id": identifier, **event}))
-            # Simulate artifacts copied from a container's /data mount.
-            db.execute("INSERT INTO captures VALUES (?,?)", (identifier, f"/data/graph_state/{path.name}"))
+            reference = BlobStore(db).put("a:" + identifier, {"id": identifier, **event})
+            db.execute("INSERT INTO captures VALUES (?,?)", (identifier, reference))
     return directory
 
 
@@ -224,19 +224,22 @@ def test_corrupt_graph_and_payloads_are_redacted(run_export):
 def test_missing_and_mismatched_artifacts(tmp_path):
     root = tmp_path / "data"
     directory = graph(root, [{"data": capture()}, {"data": capture()}])
-    (directory / "0.json").unlink()
-    (directory / "1.json").write_text('{"id":"wrong"}')
+    with closing(sqlite3.connect(directory / "artifacts.sqlite")) as db, db:
+        db.execute("UPDATE captures SET path='missing' WHERE id='0'")
+        reference = BlobStore(db).put("wrong", {"id": "wrong"})
+        db.execute("UPDATE captures SET path=? WHERE id='1'", (reference,))
     out = tmp_path / "out"
     assert ex.export(root, out, graph_only=True) == 2
     assert json.loads((out / "export-report.json").read_text())["skipped_records"] == 2
 
 
-def test_symlink_escape_is_skipped(tmp_path):
+def test_filesystem_references_are_not_followed(tmp_path):
     root = tmp_path / "data"
     directory = graph(root, [{"data": capture()}])
     outside = tmp_path / "outside.json"
-    (directory / "0.json").rename(outside)
-    (directory / "0.json").symlink_to(outside)
+    outside.write_text('{"id":"0"}')
+    with closing(sqlite3.connect(directory / "artifacts.sqlite")) as db, db:
+        db.execute("UPDATE captures SET path=?", (str(outside),))
     assert ex.export(root, tmp_path / "out", graph_only=True) == 2
 
 
@@ -382,11 +385,10 @@ def test_ipv6_legacy_netloc_recovered(run_export):
 
 def test_live_wal_captures_are_included(tmp_path):
     directory = graph(tmp_path, [])
-    path = directory / "capture.json"
-    path.write_text(json.dumps({"id": "wal", "data": capture()}))
     with closing(sqlite3.connect(directory / "artifacts.sqlite")) as writer, writer:
         writer.execute("PRAGMA journal_mode=WAL")
-        writer.execute("INSERT INTO captures VALUES (?,?)", ("wal", str(path)))
+        reference = BlobStore(writer).put("a:wal", {"id": "wal", "data": capture()})
+        writer.execute("INSERT INTO captures VALUES (?,?)", ("wal", reference))
         writer.commit()
         assert (directory / "artifacts.sqlite-wal").exists()
         assert ex.export(tmp_path, tmp_path / "out", graph_only=True) == 0
@@ -669,17 +671,10 @@ def test_failed_publish_progress_never_reports_success(tmp_path, monkeypatch, ca
     assert not output.exists()
 
 
-@pytest.mark.parametrize("reference_kind", ["relative", "absolute", "external", "traversal"])
-def test_graph_reference_resolution(tmp_path, reference_kind):
+@pytest.mark.parametrize("reference", ["a:0", "missing", "/data/0.json", "../../0.json"])
+def test_graph_reference_resolution(tmp_path, reference):
     root = tmp_path / "data"
     directory = graph(root, [{"data": capture()}])
-    path = directory / "0.json"
-    reference = path.name if reference_kind == "relative" else str(path)
-    if reference_kind in {"external", "traversal"}:
-        external = tmp_path / "0.json"
-        external.write_text(path.read_text())
-        reference = str(external) if reference_kind == "external" else "../../0.json"
     with closing(sqlite3.connect(directory / "artifacts.sqlite")) as db, db:
         db.execute("UPDATE captures SET path=?", (reference,))
-    expected = 2 if reference_kind in {"external", "traversal"} else 0
-    assert ex.export(root, tmp_path / "out", graph_only=True) == expected
+    assert ex.export(root, tmp_path / "out", graph_only=True) == 2
