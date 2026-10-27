@@ -69,7 +69,7 @@ schedule another reconciliation traversal. Duplicate input deliveries create no 
 Queue receipts remain processing until their epoch completes or fails, including across restarts.
 The worker checks for new inputs before each epoch step and advances runnable work without an
 input-queue timeout. When no work can run, it waits up to one second before checking again;
-future retries and inputs waiting behind a failed epoch do not cause busy polling.
+future retries and failed inputs awaiting explicit redelivery do not cause busy polling.
 
 `/status` includes `graph.epoch` with the epoch ID, phase, affected/completed capture counts,
 outstanding jobs, waiting inputs, unchanged-publication count, activation counts, conflicts, and
@@ -608,7 +608,12 @@ cursor; queue row IDs remain attached to their input obligations until success o
 The `graph.epoch` status fields describe this work. The older `continuations` status field is retained
 for inspecting legacy state, but new work uses epoch checkpoints. Checkpoint writes do not increment
 the publication revision. Retrieval indexing waits continue to include outstanding queue receipts.
-The failed-queue retry action submits a failed capture to a new finite epoch. A matching explicit rebuild
+A phase-level failed epoch is terminal: its diagnostics and checkpoints remain retained, while
+unrelated waiting inputs can start a new epoch. Failed inputs require explicit redelivery; the
+failed-queue retry action submits them to a new finite epoch rather than resuming the failed one.
+Membership expansion commits its replacement snapshot and new jobs together, then reopens the
+snapshot before further work so parser subprocesses use the current retained reference and policies.
+A failed replacement commit leaves the prior snapshot usable. A matching explicit rebuild
 can also redeliver its original failed policy request. Incompatible unfinished legacy work requires
 fresh graph state and is not automatically migrated.
 

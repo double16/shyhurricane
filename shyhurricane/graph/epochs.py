@@ -158,14 +158,14 @@ class Epochs:
             return active <= time.time()
         if self.expansions.available():
             return True
-        return (
-            not self.connection.execute("SELECT 1 FROM graph_epochs WHERE phase<>'done' LIMIT 1").fetchone()
-            and self.connection.execute("SELECT 1 FROM graph_epoch_inputs WHERE state='waiting' LIMIT 1").fetchone()
-            is not None
-        )
+        return self.connection.execute(
+            "SELECT 1 FROM graph_epoch_inputs WHERE state='waiting' LIMIT 1"
+        ).fetchone() is not None
 
     def start(self):
-        if self.connection.execute("SELECT 1 FROM graph_epochs WHERE phase<>'done' LIMIT 1").fetchone():
+        if self.connection.execute(
+            "SELECT 1 FROM graph_epochs WHERE phase NOT IN ('done','failed') LIMIT 1"
+        ).fetchone():
             return
         if not self.connection.execute("SELECT 1 FROM graph_epoch_inputs WHERE state='waiting' LIMIT 1").fetchone():
             return
@@ -302,7 +302,7 @@ class Epochs:
                 ):
                     self.repeat_context_discovery(epoch)
                     return
-                if phase == "references" and self.expand_membership(epoch, artifacts):
+                if phase == "references" and self.expand_membership(epoch):
                     return
                 following = {
                     "references": "contexts",
@@ -355,7 +355,7 @@ class Epochs:
                         self.artifacts.status(job[0], "failed", str(error))
             logger.warning("Graph epoch %s retained phase=%s transient=%s", epoch, phase, transient, exc_info=True)
 
-    def expand_membership(self, epoch, artifacts):
+    def expand_membership(self, epoch):
         row = self.connection.execute("SELECT snapshot FROM graph_epochs WHERE id=?", (epoch,)).fetchone()
         state = self.artifacts.read(row[0])
         existing = {
@@ -382,16 +382,15 @@ class Epochs:
                 ).fetchone()
                 mode = policy[0] if policy else library_analysis()
                 state["policies"].append((capture, mode, bool(policy)))
-                artifacts.connection.execute("INSERT INTO analysis_policies VALUES (?,?,NULL,NULL)", (capture, mode))
-                if policy:
-                    artifacts.connection.execute("INSERT INTO epoch_explicit_policies VALUES (?)", (capture,))
                 self.connection.execute("INSERT INTO graph_epoch_jobs VALUES (?,?,'references','')", (epoch, capture))
             self.connection.execute("UPDATE graph_epochs SET affected=affected+? WHERE id=?", (len(members), epoch))
             path = self.artifacts.write(f"epoch-{epoch}", state)
             self.connection.execute(
                 "UPDATE graph_epochs SET snapshot=? WHERE id=?", (path, epoch)
             )
-        artifacts.connection.commit()
+        # Rebuild temporary policy tables and parser references from the committed snapshot.
+        # Keep the old snapshot usable if the replacement transaction fails.
+        self.close()
         return True
 
     def quarantine(self, epoch, job, error):

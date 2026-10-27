@@ -558,7 +558,7 @@ def test_root_unit_materialization_uses_original_url(runtime, event):
     ("references", False, True, False),
     ("references", True, False, True),
     ("references", True, True, True),
-    ("failed", False, False, False),
+    ("failed", False, False, True),
     ("failed", False, True, True),
     ("done", False, False, True),
 ])
@@ -600,3 +600,135 @@ def test_worker_shutdown_after_delivery_skips_epoch_step(graph_paths, monkeypatc
     engine.accept.assert_not_called()
     engine.step.assert_not_called()
     engine.close.assert_called_once()
+
+
+@pytest.mark.parametrize("restart", [False, True])
+def test_phase_failure_allows_independent_work_and_explicit_retry(runtime, event, monkeypatch, restart):
+    engine, artifacts, store, writes = runtime
+    capture = artifacts.register(event())
+    token = engine.accept(capture, 1)
+    engine.step()
+    failed_epoch = epoch_status(engine.connection)["id"]
+    original = engine.expand_membership
+
+    def fail_phase(epoch):
+        raise ValueError("phase boundary failed")
+
+    monkeypatch.setattr(engine, "expand_membership", fail_phase)
+    engine.step()
+    monkeypatch.setattr(engine, "expand_membership", original)
+    assert epoch_status(engine.connection)["phase"] == "failed"
+    retained = artifacts.connection.execute(
+        "SELECT snapshot,error FROM graph_epochs WHERE id=?", (failed_epoch,),
+    ).fetchone()
+    assert retained[0] and "phase boundary failed" in retained[1]
+    queue = MagicMock()
+    engine.settle(queue)
+    queue.ack_failed.assert_called_once_with(id=1)
+    assert not engine.available()
+    if restart:
+        engine.close()
+        engine = Epochs(artifacts, store)
+    try:
+        independent = artifacts.register(event(url="https://example.com/independent"))
+        engine.accept(independent, 2)
+        assert drain(engine)["phase"] == "done"
+        assert capture["id"] not in writes["structural"]
+        assert engine.connection.execute(
+            "SELECT state FROM graph_epoch_inputs WHERE token=?", (token,),
+        ).fetchone() == ("failed",)
+        assert engine.accept(capture, 1) == token
+        assert engine.available()
+        assert drain(engine)["phase"] == "done"
+        engine.settle(queue)
+        assert capture["id"] in writes["structural"]
+        assert engine.connection.execute(
+            "SELECT phase,snapshot,error FROM graph_epochs WHERE id=?", (failed_epoch,),
+        ).fetchone() == ("failed", *retained)
+        assert artifacts.blobs.exists(retained[0])
+        assert engine.connection.execute("SELECT count(*) FROM graph_epochs").fetchone()[0] == 3
+        assert queue.ack.call_count == 2
+        assert not engine.available()
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("explicit", [False, True])
+def test_expanded_snapshot_survives_obsolete_snapshot_collection(runtime, event, monkeypatch, explicit):
+    from shyhurricane.graph.epoch_catalog import SnapshotArtifacts
+
+    engine, artifacts, _, _ = runtime
+    first = artifacts.register(event())
+    second = artifacts.register(event(url="https://example.com/dependency"))
+    if explicit:
+        with artifacts.connection:
+            artifacts.connection.execute(
+                "INSERT INTO analysis_policies(capture_id,mode) VALUES (?,'full')", (second["id"],),
+            )
+    engine.accept(first, 1)
+    engine.start()
+    epoch, previous = engine.connection.execute("SELECT id,snapshot FROM graph_epochs").fetchone()
+    old = engine.open_snapshot(epoch, previous)
+    artifacts.manifest.dependency(first["id"], second["data"]["url"], "LOADS")
+    assert engine.expand_membership(epoch)
+    assert engine.snapshot is None
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        old.connection.execute("SELECT 1")
+    reference = engine.connection.execute("SELECT snapshot FROM graph_epochs WHERE id=?", (epoch,)).fetchone()[0]
+    assert reference != previous
+    now = epochs.time.time()
+    monkeypatch.setattr(epochs.time, "time", lambda: now + 3601)
+    for _ in range(20):
+        with artifacts.connection:
+            result = artifacts.blobs.maintain(batch=500)
+        if not result["pending"]:
+            break
+    assert not artifacts.blobs.exists(previous)
+    reopened = engine.open_snapshot(epoch, reference)
+    assert reopened.snapshot_reference == reference
+    # A parser subprocess constructs this same snapshot from its request reference.
+    child = SnapshotArtifacts(artifacts.root, reopened.snapshot_reference)
+    try:
+        for snapshot in (reopened, child):
+            assert snapshot.connection.execute(
+                "SELECT mode FROM analysis_policies WHERE capture_id=?", (second["id"],),
+            ).fetchone() == ("full" if explicit else "summary",)
+            assert bool(snapshot.connection.execute(
+                "SELECT 1 FROM epoch_explicit_policies WHERE capture_id=?", (second["id"],),
+            ).fetchone()) is explicit
+    finally:
+        child.close()
+    assert drain(engine)["phase"] == "done"
+
+
+def test_failed_membership_commit_preserves_jobs_ownership_and_open_snapshot(runtime, event):
+    engine, artifacts, _, _ = runtime
+    first = artifacts.register(event())
+    second = artifacts.register(event(url="https://example.com/dependency"))
+    engine.accept(first, 1)
+    engine.start()
+    epoch, reference = engine.connection.execute("SELECT id,snapshot FROM graph_epochs").fetchone()
+    snapshot = engine.open_snapshot(epoch, reference)
+    artifacts.manifest.dependency(first["id"], second["data"]["url"], "LOADS")
+    nodes = engine.connection.execute("SELECT id,owners FROM graph_nodes ORDER BY id").fetchall()
+
+    def deny_commit(action, argument, *unused):
+        committing = action == sqlite3.SQLITE_TRANSACTION and argument == "COMMIT"
+        return sqlite3.SQLITE_DENY if committing else sqlite3.SQLITE_OK
+
+    engine.connection.set_authorizer(deny_commit)
+    try:
+        with pytest.raises(sqlite3.DatabaseError, match="not authorized"):
+            engine.expand_membership(epoch)
+    finally:
+        engine.connection.set_authorizer(None)
+    assert engine.snapshot is snapshot
+    assert engine.connection.execute("SELECT snapshot,affected FROM graph_epochs").fetchone() == (reference, 1)
+    assert engine.connection.execute("SELECT capture_id FROM graph_epoch_jobs").fetchall() == [(first["id"],)]
+    assert engine.connection.execute("SELECT id,owners FROM graph_nodes ORDER BY id").fetchall() == nodes
+    assert snapshot.read(reference)["policies"] == [[first["id"], "summary", False]]
+    assert snapshot.connection.execute(
+        "SELECT mode FROM analysis_policies WHERE capture_id=?", (second["id"],),
+    ).fetchone() is None
+    assert engine.expand_membership(epoch)
+    assert drain(engine)["phase"] == "done"
