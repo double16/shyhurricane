@@ -4066,7 +4066,7 @@ wheels = [
 
 [[package]]
 name = "sentence-transformers-haystack"
-version = "0.2.0"
+version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "haystack-ai" },
@@ -4074,9 +4074,9 @@ dependencies = [
     { name = "pypdfium2" },
     { name = "sentence-transformers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/1b/73/d1281fcbd63d460eb572bf0e66cca5d0cc13b6d1805004edf4e0d8d5e3b2/sentence_transformers_haystack-0.2.0.tar.gz", hash = "sha256:b3f5f4de2eab0d03e6d585515a1a6ada7fa758e9fc4f1f051dc38cf7316b3fb5", size = 258221, upload-time = "2026-10-01T10:01:12.958Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bb/3f/9558e521a545d83bed6b214785897a89a77c22dffff6d23f4e8b41f47130/sentence_transformers_haystack-2.0.0.tar.gz", hash = "sha256:dba6dafbb268622ccc4a2263b8d99da9a27e4cc1916f423c0049c1736b0fdc5d", size = 258036, upload-time = "2026-10-23T10:02:41.531Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/f7/55/669bf755b99a833ff7da68c35d5712000f0190790486c61e1279d9dd6a7b/sentence_transformers_haystack-0.2.0-py3-none-any.whl", hash = "sha256:ddc47f61df4470700214033d3fb3fb20d5f7a698fb01759aff6a20ddab06533b", size = 37653, upload-time = "2026-10-01T10:01:11.25Z" },
+    { url = "https://files.pythonhosted.org/packages/1e/ed/c91d54ccc0f34e6a80ff54f9b8c9788b3091f4ab006365a7355ee74aebe7/sentence_transformers_haystack-2.0.0-py3-none-any.whl", hash = "sha256:f0fca17d86d0324cc4f1328d8a2119a2781ba96e9a4678347b979d683d855fd8", size = 37553, upload-time = "2026-10-23T10:02:40.078Z" },
 ]
 
 [[package]]
@@ -4204,7 +4204,7 @@ requires-dist = [
     { name = "respx", marker = "extra == 'dev'" },
     { name = "ruff", marker = "extra == 'dev'" },
     { name = "sentence-transformers", specifier = "~=5.7.0" },
-    { name = "sentence-transformers-haystack", specifier = "~=0.2.0" },
+    { name = "sentence-transformers-haystack", specifier = ">=0.2,<2.1" },
     { name = "textual", specifier = ">=7.3,<8.3" },
     { name = "tinycss2", specifier = "~=1.5.1" },
     { name = "tldextract", specifier = ">=5.3,<5.5" },
