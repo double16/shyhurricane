@@ -17,7 +17,7 @@ dependencies = [
     "pyobjc-framework-Cocoa>=12.2.2,<13; sys_platform == 'darwin'",
     "neo4j>=6.4,<7",
     "haystack-ai>=3.3,<3.5",
-    "sentence-transformers-haystack~=0.2.0",
+    "sentence-transformers-haystack>=0.2,<2.1",
     "qdrant-haystack>=10.6,<13.1",
     "fastembed-haystack~=2.7.0",
     "numpy>=2.3.0",
