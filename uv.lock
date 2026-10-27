@@ -1825,15 +1825,15 @@ wheels = [
 
 [[package]]
 name = "litellm-haystack"
-version = "1.2.0"
+version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "haystack-ai" },
     { name = "litellm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/63/af/59daaa54c04abf0ec4e4445cc9cf09c1e1f37e3e714aa993fb75cb61eb0f/litellm_haystack-1.2.0.tar.gz", hash = "sha256:3dcfc003cbd3a8afe08d5f03c55e2ed454caa1cea07bdb99619e3b0f27fd2cd4", size = 15106, upload-time = "2026-07-30T10:36:39.684Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ad/7b/23e037ced1be354b2a013644b4258a872bfabacb6a22c0218c9e6a30bf27/litellm_haystack-2.0.0.tar.gz", hash = "sha256:b30bebaa95c34cde04399e2e406b50e483c2e384099f47a5a4694d7341d6045f", size = 15229, upload-time = "2026-10-19T07:25:12.291Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/39/3b/fa51595c730888cd7c000aaf7c42b6eb64e912870eb54756eb3a83801911/litellm_haystack-1.2.0-py3-none-any.whl", hash = "sha256:61992b624428b71dbbcb52253e08ec9fba09fe76dbc2ad51e177f79458d4c6e0", size = 10990, upload-time = "2026-07-30T10:36:38.695Z" },
+    { url = "https://files.pythonhosted.org/packages/cb/00/7b7807360481b87872d426f867cc7d07566eb7cb2d87928b09d28ff55090/litellm_haystack-2.0.0-py3-none-any.whl", hash = "sha256:5eac5f23daf9960a6d9086b89d5a91810feb1c962efcafe4f9d255ce1fb944b4", size = 11025, upload-time = "2026-10-19T07:25:10.692Z" },
 ]
 
 [[package]]
