@@ -13,8 +13,14 @@ logger = logging.getLogger(__name__)
 
 def normalize_xml(xml: str) -> str:
     parser = etree.XMLParser(remove_blank_text=True, resolve_entities=False, recover=True)
+    # Content has already been decoded by ingestion. A byte-encoding label must not
+    # reinterpret those Unicode characters, but version and standalone still apply.
+    declaration = re.match(r"^\ufeff?\s*<\?xml\s+[^?]*\?>", xml)
+    if declaration:
+        cleaned = re.sub(r"\s+encoding\s*=\s*(['\"])[^'\"]*\1", "", declaration[0])
+        xml = cleaned.lstrip("\ufeff \t\r\n") + xml[declaration.end():]
     tree = etree.fromstring(xml, parser)
-    return etree.tostring(tree, pretty_print=True, encoding="utf-8", xml_declaration=True).decode("utf-8")
+    return etree.tostring(tree.getroottree(), pretty_print=True, encoding="utf-8", xml_declaration=True).decode("utf-8")
 
 
 DYNAMIC_ATTRS = {"nonce", "data-reactroot", "data-hydration-id"}

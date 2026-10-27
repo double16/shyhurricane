@@ -6,6 +6,8 @@ import sqlite3
 import time
 
 from shyhurricane.graph.artifacts import ArtifactStore
+from shyhurricane.graph.epochs import epoch_status
+from shyhurricane.graph.storage_maintenance import StorageMaintenance
 from shyhurricane.persistent_queue import persistent_queue_path, read_active_queue_size
 
 logger = logging.getLogger(__name__)
@@ -118,7 +120,10 @@ async def graph_status(server_context, *, include_estimates=True) -> dict:
         artifacts = ArtifactStore(server_context.db)
         try:
             details["analyses"] = artifacts.counts()
-            details["backfill_started"] = (artifacts.root / "backfill.json").exists()
+            details["epoch"] = epoch_status(artifacts.connection)
+            details["backfill_started"] = bool(artifacts.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='backfill'"
+            ).fetchone())
             if artifacts.connection.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='graph_continuations'"
             ).fetchone():
@@ -157,6 +162,11 @@ async def graph_status(server_context, *, include_estimates=True) -> dict:
         result.update(await asyncio.to_thread(collect))
     except Exception as error:
         result["statistics_error"] = type(error).__name__
+    storage = getattr(server_context, "_graph_storage_cache", None)
+    if storage is None:
+        storage = StatisticsCache(prefix="storage", interval=60)
+        server_context._graph_storage_cache = storage
+    result["storage"] = storage.snapshot(StorageMaintenance(server_context.db), True)
     if include_estimates:
         references = getattr(server_context, "_graph_reference_cache", None)
         if references is None:

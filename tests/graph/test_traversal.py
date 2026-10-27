@@ -293,3 +293,65 @@ def test_candidates_keep_context_discovery_without_in_scope_exact_url(applicatio
     monkeypatch.setattr(reader, "lookup_pages", pages)
     reader.candidates("example.com", url=url)
     assert labels == ["GraphEntity", "GraphContext"]
+
+
+def test_real_continuations_match_reference_and_confirm_pins(application, graph_paths, event, monkeypatch):
+    from shyhurricane.graph import query
+    from shyhurricane.graph.artifacts import ArtifactStore
+
+    graph, _, source, sink, _ = application
+
+    class PinnedStore(Store):
+        def read(self, statement, **parameters):
+            if "MERGE (p:GraphReadPin" in statement:
+                assert parameters["access_mode"] == "WRITE"
+                return [{"id": parameters["id"]}]
+            return super().read(statement, **parameters)
+
+    artifacts = ArtifactStore("db")
+    artifacts.register(event())
+    expected = GraphQuery(Store(graph)).paths("example.com", source, end=sink, mode="flow")
+    monkeypatch.setattr(query, "MAX_ENTITIES", 1)
+    service = GraphQuery(PinnedStore(graph), artifacts=artifacts)
+    try:
+        result = service.paths("example.com", source, end=sink, mode="flow")
+        actual = signatures(result)
+        for _ in range(10):
+            token = result.get("continuation_token")
+            if not token:
+                break
+            result = service.continue_query(token)
+            assert service.continue_query(token) == result
+            actual.extend(signatures(result))
+        assert not result.get("continuation_token")
+        assert actual == signatures(expected)
+    finally:
+        artifacts.close()
+
+
+def test_pin_failure_rolls_back_cursor_and_preserves_results(application, graph_paths, event, monkeypatch):
+    from shyhurricane.graph import query
+    from shyhurricane.graph.artifacts import ArtifactStore
+    from shyhurricane.graph.cursors import QueryCursors
+
+    graph, _, source, _, _ = application
+    artifacts = ArtifactStore("db")
+    artifacts.register(event())
+    monkeypatch.setattr(query, "MAX_ENTITIES", 2)
+    store = Store(graph)
+    read = store.read
+    store.read = lambda statement, **parameters: ([] if "MERGE (p:GraphReadPin" in statement
+                                                 else read(statement, **parameters))
+    service = GraphQuery(store, artifacts=artifacts)
+    try:
+        result = service.paths("example.com", source, mode="relationships")
+        assert result["results"]
+        assert result.get("continuation_token") is None
+        assert any("restart required" in gap for gap in result["analysis_gaps"])
+        cursors = QueryCursors(artifacts.root)
+        try:
+            assert cursors.connection.execute("SELECT count(*) FROM cursors").fetchone()[0] == 0
+        finally:
+            cursors.close()
+    finally:
+        artifacts.close()

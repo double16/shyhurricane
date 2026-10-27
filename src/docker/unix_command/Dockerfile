@@ -21,6 +21,9 @@ RUN echo 'path-exclude=/usr/share/doc/*'        >  /etc/dpkg/dpkg.cfg.d/excludes
     echo 'path-exclude=/usr/share/lintian/*'    >> /etc/dpkg/dpkg.cfg.d/excludes &&\
     echo 'path-include=/usr/share/doc/*/copyright' >> /etc/dpkg/dpkg.cfg.d/excludes
 
+# Uncomment with healthy mirror from https://mirror-traces.kali.org/ if failing
+# RUN sed -i 's|http://http.kali.org/kali/|http://mirror.freedif.org/kali/|' /etc/apt/sources.list.d/kali.sources
+
 RUN apt-get update &&\
     apt-get install -y --no-install-recommends rsync nmap curl git feroxbuster ffuf nodejs npm mitmproxy python3-pip python3-virtualenv jq seclists \
     build-essential gcc g++ python3-dev libffi-dev &&\

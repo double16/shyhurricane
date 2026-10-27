@@ -2,7 +2,6 @@
 
 import argparse
 import json
-import os
 
 from haystack import Document
 from qdrant_client import QdrantClient
@@ -48,7 +47,6 @@ class StoredCollection:
 def backfill(db: str, *, stores=None) -> int:
     artifacts = ArtifactStore(db)
     queue = get_persistent_queue(db, "graph_queue", auto_resume=False)
-    checkpoint = artifacts.root / "backfill.json"
     artifacts.connection.execute("CREATE TABLE IF NOT EXISTS backfill (key TEXT PRIMARY KEY)")
     total = 0
     try:
@@ -78,10 +76,6 @@ def backfill(db: str, *, stores=None) -> int:
                 queue.put(event)
                 with artifacts.connection:
                     artifacts.connection.execute("INSERT OR IGNORE INTO backfill VALUES (?)", (key,))
-                # Publication is atomic; a crash before this checkpoint safely requeues the same identity.
-                temporary = checkpoint.with_suffix(".tmp")
-                temporary.write_text(json.dumps({"last_queued": key}))
-                os.replace(temporary, checkpoint)
                 total += 1
         return total
     finally:

@@ -13,4 +13,5 @@ def result_store(tmp_path, monkeypatch):
         return store
 
     monkeypatch.setattr(result_pages, "get_result_store", get_store)
-    return store
+    yield store
+    store.close()

@@ -36,7 +36,7 @@ def test_discovery_pages_all_12538_consumers_without_loading_them_at_once(jobs, 
     capture = script(event)
     page = event(body='<base href="/base/"><script src="/app.js"></script>')
     path = jobs.artifacts.write("shared-fixture-body", page)
-    jobs.connection.executemany("INSERT INTO captures VALUES (?,?,?,?)", [
+    jobs.connection.executemany("INSERT INTO captures(id,url,stamp,path) VALUES (?,?,?,?)", [
         (f"page-{index:05}", page["data"]["url"], index, str(path)) for index in range(12538)
     ])
     jobs.connection.executemany("INSERT INTO refs VALUES (?,?)", [
@@ -193,7 +193,7 @@ class MatchingStore:
         if "contexts" in parameters:
             self.selection += 1
             self.contexts.update(parameters["contexts"])
-            assert "USING INDEX other:GraphEntity(capture_id)" in statement
+            assert "USING INDEX SEEK other:GraphEntity(capture_id)" in statement
             assert parameters["selectors"] == ["#search"]
             return [{"id": key, "context": key} for key in parameters["contexts"]
                     if (key, key) > (parameters["after_context"], parameters["after_id"])][:parameters["limit"]]
@@ -284,7 +284,9 @@ def test_projection_checkpoint_interns_context_arrays_and_round_trips(event):
     state = projection_snapshot(graph)
     assert len(state["_context_lists"]) == 2
     restored = restore_projection(json.loads(json.dumps(state)))
-    assert restored.__dict__ == graph.__dict__
+    from shyhurricane.graph.model import compact_event
+
+    assert restored.__dict__ == {**graph.__dict__, "event": compact_event(graph.event)}
     assert restored.nodes["a"]["context_urls"] is restored.nodes["b"]["context_urls"]
     graph.nodes = dict(reversed(list(graph.nodes.items())))
     assert projection_snapshot(graph) == state
@@ -362,44 +364,6 @@ def test_scheduler_recovery_does_not_requeue_owned_jobs_and_finishes_failed_tick
     jobs.save(key, jobs.load(key), status="failed")
     scheduler.recover()
     assert jobs.connection.execute("SELECT state FROM reanalysis").fetchone()[0] == "failed"
-
-
-def test_worker_alternates_normal_work_and_continuations(jobs, event, monkeypatch):
-    from shyhurricane.graph import worker
-
-    capture = script(event)
-    pages = [event(url=f"https://example.com/page/{index}") for index in range(2)]
-    for item in [capture, *pages]:
-        jobs.artifacts.register(item)
-    queue, store = MagicMock(), MagicMock()
-    store.read.return_value = []
-    order, extractions = [], []
-    step = Continuations.step
-
-    def record_step(self, key, database, **kwargs):
-        order.append(self.load(key)["stage"])
-        return step(self, key, database, **kwargs)
-
-    def extractor(current, *args, **kwargs):
-        extractions.append(current["id"])
-        graph = Projection(current)
-        graph.library_analysis = "summary"
-        return graph
-
-    store.publish.side_effect = lambda graph: order.append(graph.event["id"])
-    monkeypatch.setattr(Continuations, "step", record_step)
-    monkeypatch.setattr(worker, "prepare_worker_process", lambda: None)
-    monkeypatch.setattr(worker, "get_persistent_queue", lambda *args, **kwargs: queue)
-    monkeypatch.setattr(worker, "GraphStore", lambda *args: store)
-    monkeypatch.setattr(worker, "extract", extractor)
-    monkeypatch.setattr(worker, "persistent_queue_get", lambda *args, **kwargs: iter([capture, *pages, capture]))
-    monkeypatch.setattr("shyhurricane.index.web_resources._wait_for_health", lambda *args: True)
-    worker.graph_worker("db", "bolt://test", MagicMock(), MagicMock(), False)
-    assert order[:4] == ["discovery", pages[0]["id"], "extract", pages[1]["id"]]
-    assert extractions.count(capture["id"]) == 1 and store.publish.call_count == 3
-    assert queue.ack.call_count == 4
-    assert jobs.connection.execute("SELECT state FROM graph_continuations").fetchone()[0] == "done"
-    assert jobs.connection.execute("SELECT status FROM work WHERE id=?", (capture["id"],)).fetchone()[0] == "complete"
 
 
 def test_resumable_planner_preserves_local_module_and_form_links(event):
@@ -543,29 +507,21 @@ def test_candidate_page_resume_and_timeout_reduction(event):
     assert len(LinkPlanner(store, planner.graph).candidates("selector", "#search")) == 3
 
 
-def test_relocated_legacy_checkpoints_resume_and_cleanup(jobs, event, monkeypatch):
+def test_relocated_checkpoints_resume_and_cleanup(jobs, event, monkeypatch):
     capture = script(event)
     page = event(body='<script src="/app.js"></script>')
     jobs.artifacts.register(page)
     jobs.artifacts.references(page["id"], [capture["data"]["url"]])
     key = jobs.enqueue(capture, capture, False)
     checkpoint = jobs.connection.execute("SELECT checkpoint FROM graph_continuations").fetchone()[0]
-    assert checkpoint == jobs.artifacts.resolve(checkpoint).name
+    assert checkpoint.startswith("a:")
     state = jobs.load(key)
     projection = jobs.artifacts.write("base", Projection(capture).__dict__)
     state["base_projection"] = str(projection)
     jobs.save(key, state)
-    assert jobs.load(key)["base_projection"] == projection.name
-    # Emulate legacy absolute references in both SQLite and the checkpoint JSON.
+    assert jobs.load(key)["base_projection"] == projection
     old_root = jobs.artifacts.root
     checkpoint = jobs.connection.execute("SELECT checkpoint FROM graph_continuations").fetchone()[0]
-    state["base_projection"] = str(projection)
-    jobs.artifacts.resolve(checkpoint).write_text(json.dumps(state))
-    jobs.connection.execute("UPDATE graph_continuations SET checkpoint=?", (str(old_root / checkpoint),))
-    jobs.connection.execute("UPDATE captures SET path=?", (str(old_root / jobs.connection.execute(
-        "SELECT path FROM captures"
-    ).fetchone()[0]),))
-    jobs.connection.commit()
     jobs.artifacts.close()
     moved = old_root.with_name("moved")
     old_root.rename(moved)
@@ -577,10 +533,12 @@ def test_relocated_legacy_checkpoints_resume_and_cleanup(jobs, event, monkeypatc
     jobs.discover(loaded)
     assert page["id"] in loaded["contexts"]
     jobs.save(key, loaded)
-    assert not (moved / checkpoint).exists()
-    assert jobs.load(key)["base_projection"] == projection.name
+    assert not jobs.artifacts.blobs.exists(checkpoint)
+    assert jobs.load(key)["base_projection"] == projection
     jobs.finish(key, loaded)
-    assert not (moved / projection.name).exists()
+    with jobs.connection:
+        jobs.artifacts.blobs.maintain()
+    assert not jobs.artifacts.blobs.exists(projection)
     assert jobs.load(key)["stage"] == "complete"
 
 

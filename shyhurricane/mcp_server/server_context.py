@@ -79,6 +79,7 @@ class ServerContext:
     )
     _closed: bool = field(default=False, init=False)
     _ingest_writer: AsyncIngestWriter | None = field(default=None, init=False)
+    _graph_expansion_writer: AsyncIngestWriter | None = field(default=None, init=False)
 
     async def enqueue_ingest(self, item) -> None:
         if self._closed:
@@ -86,6 +87,16 @@ class ServerContext:
         if self._ingest_writer is None:
             self._ingest_writer = AsyncIngestWriter(self.ingest_queue.path)
         await self._ingest_writer.put(item)
+
+    async def enqueue_graph_expansion(self, item, budget):
+        if self._closed:
+            raise RuntimeError("Server is shutting down")
+        if self._graph_expansion_writer is None:
+            from shyhurricane.data_paths import persistent_queue_path
+
+            self._graph_expansion_writer = AsyncIngestWriter(str(persistent_queue_path(self.db, "graph_queue")))
+        async with asyncio.timeout(budget.remaining()):
+            await self._graph_expansion_writer.put(item, budget)
 
     def set_low_power(self, enabled: bool) -> None:
         self.low_power = enabled
@@ -165,7 +176,10 @@ class ServerContext:
             self.ingest_queue.close()
         except Exception:
             pass
+        if self._graph_expansion_writer is not None:
+            self._graph_expansion_writer.close(timeout=max(0, deadline - time.monotonic()))
         if self.result_store is not None:
+            self.result_store.close()
             self.result_store.cleanup()
         if self.graph_store is not None:
             self.graph_store.close()
@@ -224,6 +238,7 @@ async def get_server_context() -> ServerContext:
         ResultPageStore, cache_path, int(os.environ.get("TOOL_RESULT_TTL_SECONDS", "86400")),
     )
     await asyncio.to_thread(result_store.cleanup)
+    result_store.start_maintenance()
 
     db = server_config.database
     logger.info("Using Qdrant database at %s", db)
@@ -311,6 +326,7 @@ async def get_server_context() -> ServerContext:
     try:
         _server_context.graph_maintenance = GraphMaintenance(
             graph_store.location, lambda: graph_store.schema_ready and health_monitor.neo4j_healthy is True,
+            artifact_db=db,
         )
         _server_context.graph_maintenance.start()
         document_pipeline, _, stores = await build_document_pipeline(

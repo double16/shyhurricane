@@ -1,18 +1,18 @@
 """Queue rows reflect publication outcomes, including durable continuation handoffs."""
 
 import sqlite3
+from threading import Event
 from unittest.mock import MagicMock
 
 import pytest
 from neo4j.exceptions import CypherSyntaxError, ServiceUnavailable
 from persistqueue import SQLiteAckQueue
 
-from shyhurricane.graph import worker
+from shyhurricane.graph import epochs, worker
 from shyhurricane.graph.artifacts import ArtifactStore
-from shyhurricane.graph.continuations import Continuations
+from shyhurricane.graph.epochs import epoch_status
 from shyhurricane.graph.model import Projection
 from shyhurricane.graph.queue_receipts import QueueReceipts
-from shyhurricane.graph.scheduling import ReanalysisScheduler
 
 
 def projection(current, *args, **kwargs):
@@ -66,130 +66,68 @@ def test_payload_only_queue_adapter_and_no_receipts():
     connection.close()
 
 
+
 @pytest.mark.parametrize("script", [False, True])
-@pytest.mark.parametrize("stage", ["publish", "reconcile"])
+@pytest.mark.parametrize("stage", ["structural", "links"])
 @pytest.mark.parametrize("failure", [None, ServiceUnavailable("down"), CypherSyntaxError("bad query"),
                                   TimeoutError("deadline")])
-def test_worker_marks_real_queue_rows_only_after_storage_outcome(
+def test_worker_marks_real_queue_rows_only_after_epoch_outcome(
     graph_paths, event, monkeypatch, script, stage, failure
 ):
     capture = event(url="https://example.com/app.js" if script else "https://example.com/",
                     body="const x=1;" if script else "page",
                     mime="text/javascript" if script else "text/html")
-    artifacts = ArtifactStore("db")
-    artifacts.register(capture)
-    artifacts.close()
-    queue = SQLiteAckQueue(str(graph_paths / "actual-queue"), auto_commit=True, auto_resume=False)
-    queue.put(capture)
-    store = MagicMock()
-    store.read.return_value = []
-    published = []
-
-    def publish(graph):
-        assert queue.acked_count() == 0
-        assert queue.unack_count() == 1
-        published.append(graph.event["id"])
-        if failure and stage == "publish":
-            raise failure
-
-    store.publish.side_effect = publish
-    if failure and stage == "reconcile":
-        def fail_reconcile(*args, **kwargs):
-            raise failure
-
-        if script:
-            monkeypatch.setattr(Continuations, "reconcile", fail_reconcile)
-        else:
-            monkeypatch.setattr(worker, "complete_capture", fail_reconcile)
-    monkeypatch.setattr(worker, "prepare_worker_process", lambda: None)
-    monkeypatch.setattr(worker, "get_persistent_queue", lambda *a, **kw: queue)
-    monkeypatch.setattr(worker, "persistent_queue_get", lambda *a, **kw: iter([queue.get(raw=True)]))
-    monkeypatch.setattr(worker, "GraphStore", lambda *a: store)
-    monkeypatch.setattr(worker, "extract", projection)
-    monkeypatch.setattr("shyhurricane.index.web_resources._wait_for_health", lambda *a: True)
-    worker.graph_worker("db", "graph", MagicMock(), MagicMock(), False)
-    queue = SQLiteAckQueue(str(graph_paths / "actual-queue"), auto_commit=True, auto_resume=False)
-    assert len(published) == 1
-    assert queue.acked_count() == int(failure is None)
-    transient = isinstance(failure, ServiceUnavailable)
-    assert queue.ack_failed_count() == int(failure is not None and not transient)
-    assert queue.ready_count() == int(transient and not script)
-    assert queue.unack_count() == int(transient and script)
-    queue.close()
-
-
-def test_running_managed_continuation_survives_restart_and_explicit_failed_retry(graph_paths, event, monkeypatch):
-    artifacts = ArtifactStore("db")
-    capture = artifacts.register(event(url="https://example.com/a.js", body="x", mime="text/javascript"))
     queue_path = str(graph_paths / "actual-queue")
     queue = SQLiteAckQueue(queue_path, auto_commit=True, auto_resume=False)
-    scheduler = ReanalysisScheduler(artifacts, queue)
-    scheduler.request(capture["id"], [], 0)
-    scheduler.flush()
-    receipt = queue.get(raw=True)
-    claimed = scheduler.claim(receipt["data"])
-    jobs = Continuations(artifacts)
-    key = jobs.enqueue(claimed, receipt["data"], False)
-    QueueReceipts(artifacts.connection, queue).track(key, receipt)
-    queue.close()
-
-    artifacts.close()
-    store = MagicMock()
-    store.read.return_value = []
-    store.publish.side_effect = CypherSyntaxError("bad query after restart")
-    monkeypatch.setattr(worker, "prepare_worker_process", lambda: None)
-    monkeypatch.setattr(worker, "get_persistent_queue", lambda *a, **kw: queue)
-    monkeypatch.setattr(worker, "persistent_queue_get", lambda *a, **kw: iter([queue.get(raw=True, block=False)]))
-    monkeypatch.setattr(worker, "GraphStore", lambda *a: store)
-    monkeypatch.setattr(worker, "extract", projection)
-    monkeypatch.setattr("shyhurricane.index.web_resources._wait_for_health", lambda *a: True)
-    queue = SQLiteAckQueue(queue_path, auto_commit=True, auto_resume=False)
-    worker.graph_worker("db", "graph", MagicMock(), MagicMock(), False)
-    queue = SQLiteAckQueue(queue_path, auto_commit=True, auto_resume=False)
-    assert queue.ack_failed_count() == 1 and queue.acked_count() == 0
-    # Explicitly redeliver the failed row; no scheduler or continuation auto-retry is needed.
-    queue.nack(id=receipt["pqid"])
-    store.publish.side_effect = None
-    worker.graph_worker("db", "graph", MagicMock(), MagicMock(), False)
-    queue = SQLiteAckQueue(queue_path, auto_commit=True, auto_resume=False)
-    assert queue.acked_count() == 1 and queue.ack_failed_count() == 0
-    assert store.publish.call_count == 2
-    queue.close()
-
-
-@pytest.mark.parametrize("stage", ["publish", "reconcile"])
-def test_transient_continuation_recovers_automatically_after_restart(graph_paths, event, monkeypatch, stage):
-    artifacts = ArtifactStore("db")
-    capture = artifacts.register(event(url="https://example.com/a.js", body="x", mime="text/javascript"))
-    queue_path = str(graph_paths / "retry-queue")
-    queue = SQLiteAckQueue(queue_path, auto_commit=True, auto_resume=False)
     queue.put(capture)
     store = MagicMock()
     store.read.return_value = []
-    if stage == "publish":
-        store.publish.side_effect = [ServiceUnavailable("temporary outage"), None]
-    else:
-        monkeypatch.setattr(Continuations, "reconcile", MagicMock(side_effect=[ServiceUnavailable("outage"), True]))
-    artifacts.close()
+    attempts = []
+
+    def publish(kind, graph):
+        assert queue.acked_count() == 0
+        assert queue.unack_count() == 1
+        attempts.append(kind)
+        if failure and kind == stage:
+            raise failure
+        return True
+
+    monkeypatch.setattr(epochs.GraphPublisher, "publish", lambda self, graph: publish("structural", graph))
+    monkeypatch.setattr(epochs.LinkPublisher, "publish", lambda self, graph: publish("links", graph))
     monkeypatch.setattr(worker, "prepare_worker_process", lambda: None)
+    monkeypatch.setattr(worker, "Epochs", lambda artifacts, database, **kw: epochs.Epochs(artifacts, database))
     monkeypatch.setattr(worker, "get_persistent_queue", lambda *a, **kw: queue)
-    monkeypatch.setattr(worker, "persistent_queue_get", lambda *a, **kw: iter([queue.get(raw=True, block=False)]))
+
+    def deliveries(*args, **kwargs):
+        yield queue.get(raw=True, block=False)
+        yield from ({"graph_epoch": True} for _ in range(30))
+
+    monkeypatch.setattr(worker, "persistent_queue_get", deliveries)
     monkeypatch.setattr(worker, "GraphStore", lambda *a: store)
-    monkeypatch.setattr(worker, "extract", projection)
+    monkeypatch.setattr(epochs, "extract", projection)
     monkeypatch.setattr("shyhurricane.index.web_resources._wait_for_health", lambda *a: True)
-    worker.graph_worker("db", "graph", MagicMock(), MagicMock(), False)
+    worker.graph_worker("db", "graph", MagicMock(), Event(), False)
     queue = SQLiteAckQueue(queue_path, auto_commit=True, auto_resume=False)
-    assert queue.acked_count() == queue.ack_failed_count() == 0
-    assert queue.unack_count() == 1
-    artifacts = ArtifactStore("db")
-    assert artifacts.connection.execute("SELECT state,retries FROM graph_continuations").fetchone() == ("pending", 1)
-    assert artifacts.connection.execute("SELECT status FROM work").fetchone()[0] == "pending"
-    # Simulate expiry of the persisted retry deadline without a wall-clock sleep or manual queue retry.
-    with artifacts.connection:
-        artifacts.connection.execute("UPDATE graph_continuations SET next_attempt=0")
-    artifacts.close()
-    worker.graph_worker("db", "graph", MagicMock(), MagicMock(), False)
-    queue = SQLiteAckQueue(queue_path, auto_commit=True, auto_resume=False)
-    assert queue.acked_count() == 1 and queue.ack_failed_count() == 0
-    assert store.publish.call_count == (2 if stage == "publish" else 1)
+    transient = isinstance(failure, ServiceUnavailable)
+    assert queue.acked_count() == int(failure is None)
+    assert queue.ack_failed_count() == int(failure is not None and not transient)
+    assert queue.unack_count() == int(transient)
+    assert len(attempts) == (2 if stage == "links" or failure is None else 1)
+    if failure:
+        artifacts = ArtifactStore("db")
+        status = epoch_status(artifacts.connection)
+        assert status["phase"] == (stage if transient else "done")
+        if transient:
+            with artifacts.connection:
+                artifacts.connection.execute("UPDATE graph_epochs SET next_attempt=0")
+        else:
+            failed = queue._getter.execute("SELECT _id FROM ack_queue_default WHERE status=9").fetchone()[0]
+            queue.nack(id=failed)
+        artifacts.close()
+        # Restart recovery redelivers the processing row or the explicitly retried failure.
+        queue.resume_unack_tasks()
+        failure = None
+        worker.graph_worker("db", "graph", MagicMock(), Event(), False)
+        queue = SQLiteAckQueue(queue_path, auto_commit=True, auto_resume=False)
+        assert queue.acked_count() == 1 and queue.ack_failed_count() == queue.unack_count() == 0
     queue.close()

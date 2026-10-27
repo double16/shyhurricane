@@ -70,6 +70,11 @@ All assessment prompts use an endpoint-first graph workflow: overview, focused c
 traces, then step evidence. They request full graph details only when needed, distinguish bounded
 examples from complete results, and keep navigation hypotheses separate from data-flow evidence.
 
+Prompt workflows name the tool arguments explicitly: continuation results map to `token`, deferred
+`analysis_unit_id` values map to `unit_id`, and saved-page tokens map to `page_token`.
+Graph discovery and traversal calls retain the assessment `scope`, including when using opaque IDs.
+`score_threshold` applies only to finding searches; resource searches use `retrieval_limit`.
+
 Graph paths are investigation candidates, not proof of exploitation. Reports distinguish verified
 steps, inferred links, missing prerequisites, and analysis gaps. Workflows direct the client to save
 new evidence-backed findings with verification status, avoid duplicates, and keep unsupported
@@ -164,7 +169,35 @@ Explore captured resources, forms, fields, scripts, routes, and possible data fl
 read-only application graph tools. Start with `find_application_endpoints`, inspect focused elements
 and relationships, then trace data flow or possible user journeys and review the supporting evidence.
 Standalone and inline SVG analysis extracts links, resource dependencies, scripts, and event handlers.
-The tools work in low-power mode and do not contact targets. Graph paths are investigation candidates;
+The tools work in low-power mode and do not contact targets. Graph production runs in finite,
+restartable epochs: captured inputs are frozen, structural analysis finishes, then inferred links
+are published without replacing structural entities. New captures wait for the next epoch;
+duplicate deliveries do not restart completed work. Inspect `graph.epoch` in `/status` for progress
+and failures. Reference discovery and current-job fields show work before publication;
+unchanged Neo4j counts during discovery do not indicate a stall. Upgrading unfinished legacy graph work requires a fresh data directory.
+All graph tools share a 120-second request budget after the separately configured indexing wait.
+The final five seconds are reserved for continuation checkpoints and saved result pages.
+Interrupted queries preserve completed records and report analysis gaps and `time_limit`.
+Continuations retain unfinished work; failed checkpoints require restarting and publish no unusable token.
+Graph tools continue sending client progress at the established five-second interval.
+Blank optional URL, context URL, and method filters behave like omitted filters. Coverage describes
+retained analysis units, independently of queued work; proven stale capture-unit statuses are
+reconciled automatically in bounded background maintenance.
+Graph discovery and traversal tools infer omitted, null, or blank `scope` from a supplied HTTP(S)
+URL's hostname and explicit port. Endpoints use `url`; elements use `context_url` before `url`;
+relationships use URL-valued `element_id`; flow traces and journeys use URL-valued `start`.
+Explicit scope takes precedence. Opaque IDs require explicit scope, and `end` never supplies scope.
+For example, `find_application_endpoints(url="https://app.example.com:8443/api/items")` uses
+`app.example.com:8443` scope while retaining the exact URL filter.
+Discovery inventories and full IR are retained separately from bounded Neo4j summaries. Results report
+discovery/flow coverage and deferred analysis units. Use `continue_application_graph_query` for
+exploration continuations and `expand_application_graph_analysis` for offline detail expansion.
+Graph state uses immutable, compressed SQLite artifacts, normalized discovery indexes, and
+incremental storage accounting. Cleanup commits bounded batches and resumes unfinished work.
+Recomputable analysis caches have a 256 MiB default budget; captured evidence and offline expansion
+artifacts are retained independently. This storage version requires a fresh assessment directory;
+existing layouts are rejected without migration. Preserve existing assessment directories.
+Graph paths are investigation candidates;
 inspect their evidence before treating them as confirmed vulnerabilities.
 
 See the [application graph guide](docs/application-graph.md) for tool arguments and examples,
