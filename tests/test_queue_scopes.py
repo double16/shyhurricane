@@ -106,3 +106,63 @@ def test_missing_database_is_empty_and_unmigrated_database_is_unavailable(tmp_pa
     with pytest.raises(sqlite3.OperationalError, match="indexing_scope"):
         scoped_queue_rows(tmp_path, 1)
     queue.close()
+
+
+def test_budgeted_queue_commit_and_cancellation_rollback(tmp_path, monkeypatch):
+    from shyhurricane.graph.budget import QueryBudget
+
+    queue = open_persistent_queue(str(tmp_path))
+    budget = QueryBudget()
+    queue.request_budget = budget
+    try:
+        row_id = queue.put(capture())
+        assert scoped_queue_rows(tmp_path, 1)[0][0] == row_id
+        original = queue._write_scopes
+
+        def cancel_before_commit(*args):
+            original(*args)
+            budget.cancel()
+
+        monkeypatch.setattr(queue, "_write_scopes", cancel_before_commit)
+        with pytest.raises(TimeoutError):
+            queue.put(capture("https://example.com/cancelled"))
+        assert len(scoped_queue_rows(tmp_path, 1)) == 1
+        assert queue._putter.execute("SELECT count(*) FROM ack_queue_default").fetchone()[0] == 1
+    finally:
+        queue.close()
+
+
+def test_budgeted_queue_lock_wait_is_cancellable(tmp_path):
+    import threading
+
+    from shyhurricane.graph.budget import QueryBudget
+
+    queue = open_persistent_queue(str(tmp_path))
+    queue.request_budget = QueryBudget()
+    queue.tran_lock.acquire()
+    timer = threading.Timer(0.02, queue.request_budget.cancel)
+    timer.start()
+    try:
+        with pytest.raises(TimeoutError):
+            queue.put(capture())
+    finally:
+        queue.tran_lock.release()
+        timer.join()
+        queue.close()
+
+
+def test_budgeted_queue_sqlite_lock_does_not_enqueue_later(tmp_path):
+    from shyhurricane.graph.budget import QueryBudget
+
+    queue = open_persistent_queue(str(tmp_path))
+    queue.request_budget = QueryBudget()
+    blocker = sqlite3.connect(tmp_path / "data.db")
+    blocker.execute("BEGIN IMMEDIATE")
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            queue.put(capture())
+        blocker.rollback()
+        assert not scoped_queue_rows(tmp_path, 1)
+    finally:
+        blocker.close()
+        queue.close()

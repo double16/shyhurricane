@@ -209,7 +209,7 @@ def test_save_rolls_back_files_on_failure(result_store, monkeypatch):
     original_write = result_store._write
     calls = 0
 
-    def fail(path, value):
+    def fail(path, value, *args):
         nonlocal calls
         calls += 1
         if calls == 6:
@@ -285,9 +285,9 @@ async def test_decorator_cleanup_validation_and_exactly_once(result_store, monke
         return Items(items=["a", "b", "c"])
 
     result = await query()
-    assert calls == ["clean", "query"]
+    assert calls == ["query"]
     assert result_store.read(result.pagination.next_page_token)["result"]["items"] == ["c"]
-    assert calls == ["clean", "query"]
+    assert calls == ["query"]
     for limit in (0, 1001, None, True):
         with pytest.raises(ToolError):
             await query(limit=limit)
@@ -427,7 +427,7 @@ async def test_cancelled_snapshot_rolls_back_before_returning(result_store, monk
     original_write = result_store._write
     calls = 0
 
-    def write(path, value):
+    def write(path, value, *args):
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -449,3 +449,69 @@ async def test_cancelled_snapshot_rolls_back_before_returning(result_store, monk
     finally:
         release.set()
         await asyncio.gather(task, return_exceptions=True)
+
+
+def test_bounded_cleanup_and_requested_page_integrity(result_store, monkeypatch):
+    for index in range(105):
+        (result_store.tokens / f"orphan-{index}.json").write_text("invalid")
+    result_store.cleanup_batch()
+    assert len(list(result_store.tokens.iterdir())) == 5
+    result_store.cleanup_batch()
+    assert not list(result_store.tokens.iterdir())
+    first, token = snapshot(result_store)
+    result_store.cleanup_batch()
+    assert result_store.read(token)["result"] == first
+    directory = next(result_store.snapshots.iterdir())
+    (directory / "0.json").write_text("{}")
+    with pytest.raises(ToolError):
+        result_store.read(token)
+
+
+def test_page_save_budget_and_cancelled_lock_wait_roll_back(result_store):
+    import threading
+
+    from shyhurricane.graph.budget import QueryBudget
+
+    budget = QueryBudget()
+    budget.deadline = budget.started
+    with pytest.raises(TimeoutError):
+        result_store.save("test", [{"items": ["a"]}], 1, 1, budget=budget)
+    cancelled = threading.Event()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def lock():
+        with result_store._lock:
+            entered.set()
+            release.wait(2)
+
+    thread = threading.Thread(target=lock)
+    thread.start()
+    assert entered.wait(2)
+    cancelled.set()
+    try:
+        with pytest.raises(OSError, match="cancelled"):
+            result_store.save("test", [{"items": ["a"]}], 1, 1, cancelled=cancelled)
+    finally:
+        release.set()
+        thread.join()
+    assert not list(result_store.snapshots.iterdir())
+
+
+async def test_graph_page_timeout_preserves_completed_results(result_store):
+    from shyhurricane.graph.budget import QueryBudget, page_budget
+    from shyhurricane.mcp_server.tools.application_graph import GraphResult
+
+    budget = QueryBudget()
+    budget.deadline = budget.started
+    token = page_budget.set(budget)
+    result = GraphResult(results=[{"id": "completed"}], instructions="captured evidence")
+    try:
+        saved = await result_pages.paginate_result("trace_application_data_flow", result, "results", 1)
+        assert saved.results == result.results
+        assert saved.pagination is None and saved.retrieval_truncated
+        assert saved.truncation_reasons == ["time_limit"]
+        assert "restart required" in saved.analysis_gaps[-1]
+        assert budget.checkpointing == 0
+    finally:
+        page_budget.reset(token)

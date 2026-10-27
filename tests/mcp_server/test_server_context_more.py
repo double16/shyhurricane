@@ -234,3 +234,24 @@ def test_shutdown_cleans_saved_results_once_after_workers(result_store, monkeypa
     ctx.close()
     ctx.close()
     spy.assert_called_once()
+
+
+async def test_expansion_reuses_durable_writer_and_rejects_shutdown(tmp_path, monkeypatch):
+    from shyhurricane.graph.budget import QueryBudget
+    from shyhurricane.persistent_queue import read_active_queue_size
+
+    monkeypatch.setattr("shyhurricane.data_paths.persistent_queue_path", lambda *args: tmp_path)
+    ctx = make_context()
+    item = {"id": "capture", "data": {"url": "https://example.com/"}, "analysis_unit_id": "unit"}
+    try:
+        await ctx.enqueue_graph_expansion(item, QueryBudget())
+        writer = ctx._graph_expansion_writer
+        await ctx.enqueue_graph_expansion(item, QueryBudget())
+        assert ctx._graph_expansion_writer is writer
+        assert read_active_queue_size(tmp_path) == 2
+        ctx._closed = True
+        with pytest.raises(RuntimeError, match="shutting down"):
+            await ctx.enqueue_graph_expansion(item, QueryBudget())
+    finally:
+        ctx._closed = False
+        ctx.close()

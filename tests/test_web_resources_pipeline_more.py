@@ -635,3 +635,15 @@ def test_native_id_filter_with_real_local_qdrant(monkeypatch):
 def test_native_id_filter_missing_store_preserves_documents():
     doc = Document(id="doc", content="x", meta={"type": "content"})
     assert wrp.FilterExistingDocumentsById({"content": None}).run([doc])["documents"] == [doc]
+
+
+@pytest.mark.parametrize("encoding", ["UTF-8", "ISO-8859-1", "UTF-16"])
+def test_xml_declaration_normalizes_without_corrupting_decoded_unicode(encoding, caplog):
+    doc = Document(
+        content=f'<?xml version="1.0" encoding="{encoding}"?><root>Café 漢字</root>',
+        meta={"type": "content", "content_type": "application/xml", "response_headers": "{}"},
+    )
+    result = wrp.NormalizeDocuments(object(), {"content": Store()}).run([doc])["documents"][0]
+    assert "Café 漢字" in result.content
+    assert result.meta["normalized"] is True
+    assert "Normalizing content failed" not in caplog.text

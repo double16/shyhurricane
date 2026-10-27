@@ -11,6 +11,7 @@ import shutil
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from functools import wraps
 from inspect import signature
@@ -18,6 +19,8 @@ from pathlib import Path
 
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
+
+from shyhurricane.graph.budget import page_budget, paging
 
 logger = logging.getLogger(__name__)
 _IDENTIFIER = re.compile(r"[0-9a-f]{32}")
@@ -54,17 +57,88 @@ class ResultPageStore:
         self.tokens = self.root / "tokens"
         self.ttl_seconds = ttl_seconds
         self._lock = threading.RLock()
+        self._maintenance = None
+        self._maintenance_stop = threading.Event()
+        self._cleanup_entries = None
         for path in (self.root, self.snapshots, self.tokens):
             path.mkdir(mode=0o700, parents=True, exist_ok=True)
             path.chmod(0o700)
 
+    def start_maintenance(self):
+        if self._maintenance is None:
+            def maintain():
+                while not self._maintenance_stop.wait(60):
+                    self.cleanup_batch()
+            self._maintenance = threading.Thread(target=maintain, name="saved-page-cleanup", daemon=True)
+            self._maintenance.start()
+
+    def close(self):
+        self._maintenance_stop.set()
+        if self._maintenance is not None:
+            self._maintenance.join(timeout=2)
+
+    def cleanup_batch(self):
+        """Inspect at most 100 entries or one second; reads verify page integrity."""
+        started = time.monotonic()
+        if self._cleanup_entries is None:
+            from itertools import chain
+            self._cleanup_entries = chain(self.snapshots.iterdir(), self.tokens.iterdir())
+        for _ in range(100):
+            if time.monotonic() - started >= 1:
+                break
+            if not self._lock.acquire(blocking=False):
+                break
+            try:
+                path = next(self._cleanup_entries, None)
+                if path is None:
+                    self._cleanup_entries = None
+                    break
+                try:
+                    if path.parent == self.snapshots:
+                        self._manifest(path.name)
+                    else:
+                        mapping = self._read(path)
+                        manifest = self._manifest(mapping["snapshot_id"])
+                        if type(mapping["page"]) is not int or not 0 <= mapping["page"] < manifest["pages"]:
+                            raise ValueError("Invalid token page")
+                except (OSError, ValueError, KeyError, TypeError):
+                    if path.is_dir() and not path.is_symlink():
+                        shutil.rmtree(path)
+                    else:
+                        path.unlink(missing_ok=True)
+            except OSError:
+                logger.exception("Failed saved-page maintenance pass")
+                self._cleanup_entries = None
+                break
+            finally:
+                self._lock.release()
+
+    @contextmanager
+    def saving(self, cancelled, budget):
+        while not self._lock.acquire(timeout=0.05):
+            self._check_save(cancelled, budget)
+        try:
+            self._check_save(cancelled, budget)
+            yield
+        finally:
+            self._lock.release()
+
     @staticmethod
-    def _write(path: Path, value: dict) -> None:
+    def _check_save(cancelled, budget):
+        if cancelled is not None and cancelled.is_set():
+            raise OSError("Snapshot creation cancelled")
+        if budget is not None:
+            budget.check()
+
+    @staticmethod
+    def _write(path: Path, value: dict, cancelled=None, budget=None) -> None:
         temporary = path.with_suffix(".tmp")
         try:
             with temporary.open("x", encoding="utf-8") as stream:
                 os.chmod(temporary, 0o600)
-                json.dump(value, stream, ensure_ascii=False)
+                for chunk in json.JSONEncoder(ensure_ascii=False).iterencode(value):
+                    ResultPageStore._check_save(cancelled, budget)
+                    stream.write(chunk)
             os.replace(temporary, path)
         finally:
             temporary.unlink(missing_ok=True)
@@ -89,10 +163,11 @@ class ResultPageStore:
         total_items: int,
         retrieval_truncated: bool = False,
         cancelled: threading.Event | None = None,
+        budget=None,
     ) -> tuple[dict, str | None]:
         if not total_items:
             return pages[0], None
-        with self._lock:
+        with self.saving(cancelled, budget):
             snapshot_id = uuid.uuid4().hex
             directory = self.snapshots / snapshot_id
             directory.mkdir(mode=0o700)
@@ -116,7 +191,7 @@ class ResultPageStore:
                         retrieval_truncated=retrieval_truncated,
                     ).model_dump()
                     path = directory / f"{number}.json"
-                    self._write(path, {"source_tool": source_tool, "result": page})
+                    self._write(path, {"source_tool": source_tool, "result": page}, cancelled, budget)
                     digests.append(hashlib.sha256(path.read_bytes()).hexdigest())
                 self._write(
                     directory / "manifest.json",
@@ -227,7 +302,7 @@ async def get_result_store() -> ResultPageStore:
 
 async def start_query() -> ResultPageStore:
     store = await get_result_store()
-    await asyncio.to_thread(store.cleanup)
+    store.start_maintenance()
     return store
 
 
@@ -241,6 +316,7 @@ async def _save_pages(
     save_failure_message: str | None = None,
 ):
     cancelled = threading.Event()
+    budget = page_budget.get()
     task = asyncio.create_task(
         asyncio.to_thread(
             store.save,
@@ -250,6 +326,7 @@ async def _save_pages(
             total_items,
             retrieval_truncated,
             cancelled,
+            budget,
         )
     )
     try:
@@ -262,19 +339,45 @@ async def _save_pages(
             pass
         raise
     except OSError as error:
-        raise ToolError(save_failure_message or "Unable to save result pages. Repeat the original operation.") from error
+        raise ToolError(
+            save_failure_message or "Unable to save result pages. Repeat the original operation."
+        ) from error
 
 
 async def paginate_result(
     source_tool: str, result: BaseModel, field: str, page_size: int, retrieval_truncated: bool = False,
     save_failure_message: str | None = None,
 ) -> BaseModel:
+    budget = page_budget.get()
+    started = time.monotonic()
+    if budget is not None:
+        budget.checkpointing += 1
+    try:
+        return await _paginate_result(source_tool, result, field, page_size, retrieval_truncated, save_failure_message)
+    except (TimeoutError, ToolError):
+        if budget is None or not hasattr(result, "analysis_gaps"):
+            raise
+        return result.model_copy(update={
+            "pagination": None, "retrieval_truncated": True,
+            "analysis_gaps": [*result.analysis_gaps, "Result page saving exceeded its budget; restart required"],
+            "truncation_reasons": sorted(set(result.truncation_reasons) | {"time_limit"}),
+        })
+    finally:
+        if budget is not None:
+            budget.checkpointing -= 1
+            logger.debug("Graph request=%s stage=pagination seconds=%.3f",
+                         budget.request_id, time.monotonic() - started)
+
+
+async def _paginate_result(source_tool, result, field, page_size, retrieval_truncated, save_failure_message):
     store = await get_result_store()
     value = result.model_dump(mode="json")
     nested = field == "contents.text"
     items = value["contents"]["text"] if nested else value[field]
     pages = []
     for offset in range(0, len(items), page_size):
+        if page_budget.get() is not None:
+            page_budget.get().check()
         chunk = items[offset : offset + page_size]
         if nested:
             page = {
@@ -302,7 +405,7 @@ async def paginate_result(
 
 
 def paged_results(field: str):
-    """Clean before executing and paginate the complete result afterward."""
+    """Paginate the complete result after execution."""
 
     def decorate(function):
         function_signature = signature(function)
@@ -315,14 +418,17 @@ def paged_results(field: str):
             if type(page_size) is not int or not 1 <= page_size <= 1000:
                 raise ToolError("limit must be between 1 and 1000")
             await start_query()
-            result = await function(*bound.args, **bound.kwargs)
-            return await paginate_result(
-                function.__name__,
-                result,
-                field,
-                page_size,
-                bool(result.model_dump().get("retrieval_truncated", False)),
-            )
+            token = page_budget.set(None)
+            paging_token = paging.set(True)
+            try:
+                result = await function(*bound.args, **bound.kwargs)
+                return await paginate_result(
+                    function.__name__, result, field, page_size,
+                    bool(result.model_dump().get("retrieval_truncated", False)),
+                )
+            finally:
+                page_budget.reset(token)
+                paging.reset(paging_token)
 
         return wrapped
 
