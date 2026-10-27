@@ -145,7 +145,7 @@ async def test_endpoint_detail_selects_graph_budget(monkeypatch, arguments, seco
     monkeypatch.setattr(graph_execution, "GraphQuery", Service)
     monkeypatch.setattr(graph_execution, "report_progress", AsyncMock())
     await graph_execution.execute_graph(None, object(), "endpoints", "example.com", **arguments)
-    assert budgets[0].deadline - budgets[0].started == seconds
+    assert budgets[0].deadline == budgets[0].started + seconds
 
 
 @pytest.mark.parametrize("operation", [
@@ -161,7 +161,7 @@ async def test_all_graph_operations_share_request_budget(monkeypatch, operation)
     monkeypatch.setattr(graph_execution, "GraphQuery", service)
     monkeypatch.setattr(graph_execution, "report_progress", AsyncMock())
     await graph_execution.execute_graph(None, object(), operation, "example.com")
-    assert budgets[0].deadline - budgets[0].started == 120
+    assert budgets[0].deadline == budgets[0].started + 120
     assert budgets[0].remaining() <= 115
 
 

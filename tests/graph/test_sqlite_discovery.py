@@ -225,7 +225,7 @@ async def test_tool_cancellation_waits_for_sqlite_worker_cleanup(populated, monk
     with pytest.raises(asyncio.CancelledError):
         await task
     assert finished.is_set() and not budgets[0].interrupts
-    assert budgets[0].deadline - budgets[0].started == 120
+    assert budgets[0].deadline == budgets[0].started + 120
 
 
 @pytest.mark.parametrize("stage", ["coverage", "omitted"])
