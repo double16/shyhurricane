@@ -97,10 +97,10 @@ test("endpoint selection prioritizes security, boundaries, DOM and reference ori
   assert.equal(output.nodes.length, 500);
   assert.ok(output.nodes.some((item) => item.id === "callback"));
   assert.ok(output.nodes.some((item) => item.id === "export"));
-  assert.deepEqual(output.analysis.omitted_endpoints, { security: 0, boundary: 1, dom: 1, reference: 1 });
+  assert.deepEqual(output.analysis.omitted_endpoints, { security: 3, boundary: 0, dom: 0, reference: 0 });
   assert.equal(output.analysis.endpoint_limited, true);
-  assert.equal(output.analysis.reference_limited, true);
-  assert.equal(output.references.length, 0);
+  assert.equal(output.analysis.reference_limited, false);
+  assert.equal(output.references.length, 1);
   const security = summarize(result(Array.from({ length: 502 }, (_, index) => node(`s${index}`, "source"))));
   assert.equal(security.analysis.omitted_endpoints.security, 2);
 });
@@ -109,8 +109,8 @@ test("reference caps, missing origins and original analysis limits are explicit"
   const references = Array.from({ length: 51 }, (_, index) => ({ source: "r", url: `/${index}` }));
   references.push({ url: "/global" }, { source: "missing", url: "/invalid" });
   const output = summarize(result([node("r")], [], references, ["JavaScript edge budget reached"]));
-  assert.equal(output.references.length, 50);
-  assert.equal(output.analysis.omitted_references, 3);
+  assert.equal(output.references.length, 53);
+  assert.equal(output.analysis.omitted_references, 0);
   assert.equal(output.analysis.analysis_limited, true);
   assert.equal(output.analysis.traversal_limited, false);
   assert.equal(output.analysis.publication_limited, false);
@@ -176,10 +176,10 @@ test("summary-mode initial analysis limits remain explicit", () => {
   const source = Array.from({ length: 50100 }, (_, index) => `const unused${index}=${index};`).join("");
   const output = analyze(source);
   assert.equal(output.analysis.mode, "summary");
-  assert.equal(output.analysis.analysis_limited, true);
-  assert.ok(output.analysis.input_nodes <= 50000);
-  assert.ok(output.analysis.input_edges <= 100000);
-  assert.ok(output.gaps.some((gap) => /JavaScript node budget reached/.test(gap)));
+  assert.equal(output.analysis.analysis_limited, false);
+  assert.ok(output.analysis.input_nodes > 50000);
+  assert.equal(output.archive.nodes.length, output.analysis.input_nodes);
+  assert.ok(!output.gaps.some((gap) => /JavaScript node budget reached/.test(gap)));
 });
 
 test("representative script fixtures retain endpoint reachability while reducing graph size", (context) => {
@@ -205,4 +205,38 @@ test("representative script fixtures retain endpoint reachability while reducing
     assert.ok(summary.nodes.length < full.nodes.length / 10);
     context.diagnostic(`${name}: ${full.nodes.length} -> ${summary.nodes.length} nodes; ${securityNodes.length}/${securityNodes.length} security endpoints and all endpoint reachability retained`);
   }
+});
+
+test("source and boundary classes survive sink saturation and all references remain archived", () => {
+  const sinks = Array.from({length: 501}, (_, index) => node(`sink${index}`, "sink"));
+  const references = Array.from({length: 60}, (_, index) => ({source: "input", kind: "REQUESTS", url: `/api/${index}`}));
+  const full = result([node("input", "source"), { ...node("boundary"), export_name: "handler" }, ...sinks, ...padding],
+    [edge("input", "sink0")], references);
+  const summary = summarize(full);
+  assert.ok(summary.nodes.some(item => item.id === "input"));
+  assert.ok(summary.nodes.some(item => item.id === "boundary"));
+  assert.equal(summary.references.length, 60);
+  assert.equal(summary.archive.nodes.length, full.nodes.length);
+  assert.equal(summary.analysis.endpoint_limited, true);
+});
+
+test("benign declaration padding cannot hide a late source, sink, or request", () => {
+  const filler = Array.from({length: 10050}, (_, index) => `const benign${index}=${index};`).join("");
+  const source = filler + 'const input=location.hash; eval(input); fetch("/tail",{body:input});';
+  for (const mode of ["summary", "full"]) {
+    const graph = analyze(source, "fixture.js", mode);
+    assert.ok(graph.nodes.some(item => item.role === "source"));
+    assert.ok(graph.nodes.some(item => item.role === "sink"));
+    assert.ok(graph.references.some(item => item.url === "/tail"));
+  }
+});
+
+test("persistent storage remains an explicit cross-document boundary in summaries", () => {
+  const storage = {...node("storage"), kind: "storage"};
+  const full = result([node("input", "source"), storage, node("output", "sink"), ...padding],
+    [edge("input", "storage", "WRITES_TO"), edge("storage", "output", "READS_FROM")]);
+  const graph = summarize(full);
+  assert.ok(graph.nodes.some(item => item.id === "storage"));
+  assert.deepEqual(reachability(graph, ["input", "storage", "output"]),
+    reachability(full, ["input", "storage", "output"]));
 });

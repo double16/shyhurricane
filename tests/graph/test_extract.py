@@ -1,3 +1,4 @@
+import base64
 import json
 import subprocess
 from pathlib import Path
@@ -136,7 +137,7 @@ def test_structured_resources(event):
 
 
 def test_javascript_inputs_map_recovery_and_failures(graph_paths, event, monkeypatch):
-    monkeypatch.setattr("shyhurricane.index.web_resources_pipeline._deobfuscate_javascript", lambda source: source)
+    monkeypatch.setattr("shyhurricane.javascript_deobfuscation.deobfuscate_javascript", lambda source: source)
     artifacts = ArtifactStore("db")
     mapping = {"version": 3, "sources": ["src/a.ts"], "sourcesContent": ["const x:string=location.hash"]}
     artifacts.register(event(url="https://example.com/a.js.map", body=json.dumps(mapping)))
@@ -162,7 +163,9 @@ def test_javascript_inputs_map_recovery_and_failures(graph_paths, event, monkeyp
         }
 
     graph = extract(
-        event(url="https://example.com/a.js", body="delivered", mime="text/javascript"),
+        event(url="https://example.com/a.js",
+              body="//# sourceMappingURL=data:application/json;base64," +
+              base64.b64encode(json.dumps(mapping).encode()).decode(), mime="text/javascript"),
         artifacts,
         javascript_runner=runner,
     )
@@ -234,7 +237,7 @@ def test_supplied_forms_cookie_scopes_and_policies(event):
 
 
 def test_map_fallbacks_and_recovered_imports(event, graph_paths, monkeypatch):
-    monkeypatch.setattr("shyhurricane.index.web_resources_pipeline._deobfuscate_javascript", lambda source: source)
+    monkeypatch.setattr("shyhurricane.javascript_deobfuscation.deobfuscate_javascript", lambda source: source)
     artifacts = ArtifactStore("db")
     artifacts.register(event(url="https://example.com/a.js.map", body='{"version":3,"sources":[]}'))
     graph = extract(
@@ -242,13 +245,15 @@ def test_map_fallbacks_and_recovered_imports(event, graph_paths, monkeypatch):
         artifacts,
         javascript_runner=lambda *a: {"nodes": [], "edges": [], "references": []},
     )
-    assert any("no embedded" in gap for gap in graph.gaps)
+    assert any("unverified" in gap for gap in graph.gaps)
     assert extract(event(url="https://example.com/a.js.map", body="bad", mime="application/json")).gaps
     graph = extract(
         event(
-            url="https://example.com/b.js.map",
-            mime="application/json",
-            body=json.dumps({"sources": ["src/a.ts"], "sourcesContent": ["source"]}),
+            url="https://example.com/b.js",
+            mime="text/javascript",
+            body="//# sourceMappingURL=data:application/json;base64," + base64.b64encode(
+                json.dumps({"version": 3, "sources": ["src/a.ts"], "sourcesContent": ["source"]}).encode()
+            ).decode(),
         ),
         artifacts,
         javascript_runner=lambda *a: {
@@ -408,7 +413,7 @@ def test_summary_source_map_recovery_is_not_skipped(graph_paths, event, monkeypa
         seen.append((source, filename))
         return {"nodes": [], "edges": [], "references": [], "analysis": {"mode": "full"}}
 
-    graph = extract(event(url="https://example.com/vendor.js", mime="text/javascript", body="/* React */"),
+    graph = extract(event(url="https://example.com/vendor.js", mime="text/javascript", body="//# sourceMappingURL=data:application/json;base64,inline"),
                     artifacts, javascript_runner=runner)
     assert [source for source, _ in seen] == ["export const React = {};", "eval(location.hash)"]
     assert len(graph.analysis) == 2
@@ -516,7 +521,7 @@ def test_svg_does_not_resolve_entities_and_rejects_non_web_links(event, tmp_path
 
 def test_svg_element_and_response_budgets(event, monkeypatch):
     graph = extract(event(mime="image/svg+xml", body="<svg>" + "<g/>" * 10001 + "</svg>"))
-    assert "SVG element budget reached" in graph.gaps
+    assert len(graph.nodes) < 10  # Decorative groups do not consume the semantic projection budget.
     monkeypatch.setattr("shyhurricane.graph.extract.MAX_BYTES", 5)
     graph = extract(event(mime="image/svg+xml", body="<svg><image href='/skip'/></svg>"))
     assert "Response exceeds 40 MiB analysis limit" in graph.gaps

@@ -131,7 +131,7 @@ async def test_late_worker_updates_are_discarded(monkeypatch):
     assert notify.await_count == calls
 
 
-@pytest.mark.parametrize("arguments,seconds", [({}, 30), ({"detail": "inventory"}, 30), ({"detail": "summary"}, 120)])
+@pytest.mark.parametrize("arguments,seconds", [({}, 120), ({"detail": "inventory"}, 120), ({"detail": "summary"}, 120)])
 async def test_endpoint_detail_selects_graph_budget(monkeypatch, arguments, seconds):
     budgets = []
 
@@ -145,4 +145,67 @@ async def test_endpoint_detail_selects_graph_budget(monkeypatch, arguments, seco
     monkeypatch.setattr(graph_execution, "GraphQuery", Service)
     monkeypatch.setattr(graph_execution, "report_progress", AsyncMock())
     await graph_execution.execute_graph(None, object(), "endpoints", "example.com", **arguments)
-    assert budgets[0].deadline - budgets[0].started == seconds
+    assert budgets[0].deadline == budgets[0].started + seconds
+
+
+@pytest.mark.parametrize("operation", [
+    "elements", "endpoints", "paths", "continue_query", "evidence", "expansion",
+])
+async def test_all_graph_operations_share_request_budget(monkeypatch, operation):
+    budgets = []
+
+    def service(store, *, budget):
+        budgets.append(budget)
+        return SimpleNamespace(**{operation: lambda *args, **kwargs: {"results": []}})
+
+    monkeypatch.setattr(graph_execution, "GraphQuery", service)
+    monkeypatch.setattr(graph_execution, "report_progress", AsyncMock())
+    await graph_execution.execute_graph(None, object(), operation, "example.com")
+    assert budgets[0].deadline == budgets[0].started + 120
+    assert budgets[0].remaining() <= 115
+
+
+async def test_metadata_timeout_preserves_completed_results(tmp_path, monkeypatch):
+    from shyhurricane.graph.artifacts import ArtifactStore
+    from shyhurricane.graph.manifest import ManifestStore
+
+    monkeypatch.setattr("shyhurricane.graph.artifacts.persistent_queue_path", lambda *args: tmp_path)
+    ArtifactStore("db").close()
+    result = {"results": [{"id": "completed"}], "coverage": {"discovery": "complete"},
+              "analysis_gaps": ["existing"], "truncation_reasons": []}
+    service = SimpleNamespace(paths=lambda scope: result,
+                              omitted_regions=MagicMock(side_effect=TimeoutError()))
+    monkeypatch.setattr(graph_execution, "GraphQuery", lambda *args, **kwargs: service)
+    monkeypatch.setattr(graph_execution, "report_progress", AsyncMock())
+    actual = await graph_execution.execute_graph(None, object(), "paths", "example.com", artifact_db="db")
+    assert actual["results"] == [{"id": "completed"}]
+    assert actual["coverage"] == {"discovery": "complete"}
+    assert actual["analysis_gaps"][0] == "existing"
+    assert actual["truncation_reasons"] == ["time_limit"]
+    result.pop("coverage")
+    monkeypatch.setattr(ManifestStore, "coverage", MagicMock(side_effect=TimeoutError()))
+    actual = await graph_execution.execute_graph(None, object(), "paths", "example.com", artifact_db="db")
+    assert actual["coverage"] == {"discovery": "unknown", "flow": "unknown"}
+
+
+async def test_request_deadline_interrupts_worker_and_keeps_completed_result(monkeypatch):
+    from shyhurricane.graph.budget import QueryBudget
+
+    finished = threading.Event()
+    budget = QueryBudget(seconds=0.05)
+
+    class Service:
+        def __init__(self, store, *, budget):
+            self.budget = budget
+
+        def evidence(self, value):
+            assert self.budget.cancelled.wait(2)
+            finished.set()
+            return {"id": value}
+
+    monkeypatch.setattr(graph_execution, "GraphQuery", Service)
+    monkeypatch.setattr(graph_execution, "report_progress", AsyncMock())
+    assert await graph_execution.execute_graph(None, object(), "evidence", "completed", budget=budget) == {
+        "id": "completed",
+    }
+    assert finished.is_set() and budget.cancelled.is_set()
