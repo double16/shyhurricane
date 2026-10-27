@@ -173,7 +173,8 @@ def test_budget_read_metadata_and_cancellation_termination(monkeypatch):
         return [{"value": 1}]
 
     tx.run.side_effect = run
-    assert request.read(store, "RETURN 1") == [{"value": 1}]
+    with pytest.raises(TimeoutError):
+        request.read(store, "RETURN 1")
     assert session.begin_transaction.call_args.kwargs["metadata"] == {"graph_request": request.request_id}
     assert request.terminate is None
     assert any("TERMINATE TRANSACTIONS" in str(call.args[0]) for call in session.run.call_args_list)

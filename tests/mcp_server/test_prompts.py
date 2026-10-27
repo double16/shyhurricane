@@ -1,9 +1,11 @@
 """Assessment prompt discovery, rendering, scope validation, and protocol access."""
 
+import ast
 import json
 from unittest.mock import AsyncMock
 
 import pytest
+from jsonschema import Draft202012Validator
 from mcp import MCPError
 from mcp.client import Client
 from mcp.server import MCPServer
@@ -245,3 +247,97 @@ def test_focused_prompts_render_semantic_call_and_inventory_remains_exhaustive(n
     assert ("site:app.example.com:8443 " in lookup) == focused
     if name == "hunt_vulnerability":
         assert 'query="site:app.example.com:8443 SQL injection"' in lookup
+
+
+CALL_EXAMPLES = [
+    'find_application_endpoints(scope=target, detail="inventory")',
+    "find_urls(host_query=target)",
+    "find_hosts(domain_query=target)",
+    "find_netloc(domain_query=target)",
+    "fetch_web_resource_content(url=resource.uri)",
+    "get_result_page(page_token=pagination.next_page_token)",
+    "continue_application_graph_query(token=continuation_token)",
+    "expand_application_graph_analysis(scope=target, capture_id=region.capture_id, unit_id=region.analysis_unit_id)",
+    "find_application_relationships(scope=target, element_id=selected_id)",
+    "trace_application_data_flow(scope=target, start=selected_id)",
+    "find_user_journey_paths(scope=target, start=start_resource, end=end_resource)",
+    "save_finding(target=affected_target, markdown=finding_markdown, title=finding_title)",
+]
+ACTIVE_CALL_EXAMPLES = [
+    "spider_website(url=selected_url)",
+    "directory_buster(url=selected_url)",
+    "index_http_url(url=selected_url)",
+    "port_scan(hostnames=[selected_hostname])",
+]
+
+
+def example_arguments(expression):
+    """Resolve only documented example placeholders, without executing any calls."""
+    values = {
+        "target": "https://app.example.com:8443/api/",
+        "resource.uri": "web://content/opaque-resource-id",
+        "pagination.next_page_token": "opaque-page-token",
+        "continuation_token": "opaque-continuation-token",
+        "region.capture_id": "opaque-capture-id",
+        "region.analysis_unit_id": "opaque-unit-id",
+        "selected_id": "opaque-element-id",
+        "start_resource": "opaque-start-id",
+        "end_resource": "opaque-end-id",
+        "affected_target": "https://app.example.com:8443/api/items",
+        "finding_markdown": "# Title\nExample finding",
+        "finding_title": None,
+        "selected_url": "https://app.example.com:8443/api/items",
+        "selected_hostname": "app.example.com",
+    }
+    call = ast.parse(expression, mode="eval").body
+    result = {}
+    for keyword in call.keywords:
+        node = keyword.value
+        if isinstance(node, ast.List):
+            result[keyword.arg] = [values[ast.unparse(item)] for item in node.elts]
+        elif isinstance(node, ast.Constant):
+            result[keyword.arg] = node.value
+        else:
+            result[keyword.arg] = values[ast.unparse(node)]
+    return call.func.id, result
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("name", CATALOG)
+@pytest.mark.parametrize("mode", ["analysis", "active"])
+async def test_prompt_call_examples_match_registered_tool_schemas(name, mode):
+    tools = {tool.name: tool.input_schema for tool in await mcp_service.mcp_instance.list_tools()}
+    text = " ".join(getattr(prompts, name)(**arguments(name, mode=mode)).split())
+    examples = CALL_EXAMPLES + (ACTIVE_CALL_EXAMPLES if mode == "active" else [])
+    for expression in examples:
+        assert expression in text
+        tool, values = example_arguments(expression)
+        schema = tools[tool]
+        assert set(values) <= schema["properties"].keys()
+        Draft202012Validator(schema).validate(values)
+    assert "Only query_findings accepts score_threshold" in text
+    assert "find_web_resources uses retrieval_limit" in text
+    assert "Opaque IDs require scope" in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool,values",
+    [
+        ("continue_application_graph_query", {"continuation_token": "opaque-token"}),
+        ("expand_application_graph_analysis", {
+            "scope": "example.com", "capture_id": "capture", "analysis_unit_id": "unit",
+        }),
+        ("find_web_resources", {"query": "site:example.com", "score_threshold": 0.5}),
+        ("save_finding", {"target": "example.com", "markdown": "# Finding"}),
+        ("find_user_journey_paths", {"start": "opaque-start"}),
+        ("find_application_endpoints", {"scope": "example.com", "detail": "full"}),
+        ("find_application_relationships", {"element_id": "opaque-id", "max_depth": 4}),
+        ("find_web_resources", {"query": "site:example.com", "retrieval_limit": 1001}),
+    ],
+)
+async def test_inconsistent_example_arguments_are_rejected(tool, values):
+    tools = {item.name: item.input_schema for item in await mcp_service.mcp_instance.list_tools()}
+    schema = tools[tool]
+    unknown = set(values) - schema["properties"].keys()
+    assert unknown or list(Draft202012Validator(schema).iter_errors(values))

@@ -2,12 +2,14 @@
 
 import logging
 from typing import Annotated, Literal
+from urllib.parse import urlsplit
 
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from pydantic import BaseModel, BeforeValidator, Field
 
+from shyhurricane.graph.model import optional_filter
 from shyhurricane.graph.query import scope_predicate
 from shyhurricane.indexing_wait import IndexingStatus, indexing_scope, wait_for_indexing
 from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
@@ -30,6 +32,17 @@ Scope = Annotated[
         description="Application scope: hostname, host:port, or HTTP(S) URL prefix. "
         "Hostname scopes include subdomains; URL scopes restrict scheme, host, and path prefix. "
         "Surrounding whitespace is trimmed from all graph string arguments and kinds entries."
+    ),
+]
+OptionalScope = Annotated[
+    TrimmedString | None,
+    Field(
+        description="Application scope: hostname, host:port, or HTTP(S) URL prefix. "
+        "Explicit scope takes precedence. Omitted, null, or blank scope is inferred from the URL's "
+        "hostname and explicit port, including subdomains. Endpoints use url; elements use context_url "
+        "before url; relationships use element_id; flow traces and journeys use start. "
+        "URL-valued selectors must be absolute HTTP(S) URLs. Opaque IDs require explicit scope; "
+        "end never supplies scope. Surrounding whitespace is trimmed."
     ),
 ]
 Historical = Annotated[
@@ -91,13 +104,16 @@ Detail = Annotated[
 ]
 ExactUrl = Annotated[
     TrimmedString | None,
-    Field(description="Exact resource URL filter, not a prefix or text search. Null applies no URL filter."),
+    Field(description="Exact resource URL filter, not a prefix or text search. Null or blank applies no URL filter."),
 ]
 
 
 class GraphResult(BaseModel):
     indexing: IndexingStatus | None = None
     results: list[dict]
+    coverage: dict = Field(default_factory=dict)
+    omitted_regions: list[dict] = Field(default_factory=list)
+    continuation_token: str | None = None
     analysis_gaps: list[str] = Field(default_factory=list)
     analysis_summaries: list[dict] = Field(default_factory=list)
     instructions: str
@@ -111,6 +127,38 @@ class GraphResult(BaseModel):
     seed_ids_limited: bool = Field(False, description="True if resolved seed ID examples omit selected seeds")
 
 
+def resolve_scope(scope, arguments):
+    """Infer host scope from the query's primary URL without changing its selectors."""
+    if scope:
+        return scope
+    source = arguments.get("context_url") or arguments.get("url") or arguments.get("start")
+    message = "Supply scope or an absolute HTTP(S) URL in url, context_url, element_id, or start"
+    if not isinstance(source, str):
+        raise ValueError(message)
+    try:
+        parsed = urlsplit(source)
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or any(character.isspace() or ord(character) < 32 for character in source)
+            or "\\" in parsed.netloc
+            or parsed.netloc.endswith(":")
+        ):
+            raise ValueError(message)
+        host = parsed.hostname
+        host = f"[{host}]" if ":" in host else host
+        port = parsed.port
+        port_text = parsed.netloc.rsplit(":", 1)[1] if port is not None else None
+        authority = f"{host}:{port_text}" if port is not None else host
+        if parsed.netloc.lower() != authority.lower():
+            raise ValueError(message)
+        return f"{host}:{port}" if port is not None else host
+    except ValueError as error:
+        raise ValueError(f"{message}; URL must have a valid host and port and no credentials") from error
+
+
 @indexing_scope()
 async def query(ctx, tool, operation, scope, **arguments):
     scope = trim_input(scope)
@@ -118,6 +166,13 @@ async def query(ctx, tool, operation, scope, **arguments):
         key: [trim_input(item) for item in value] if isinstance(value, list) else trim_input(value)
         for key, value in arguments.items()
     }
+    for key in ("url", "context_url", "method"):
+        if key in arguments:
+            arguments[key] = optional_filter(arguments[key])
+    try:
+        scope = resolve_scope(scope, arguments)
+    except ValueError as error:
+        raise ToolError(str(error)) from error
     await log_tool_history(ctx, tool, scope=scope, **arguments)
     server = await get_server_context()
     if server.graph_store is None:
@@ -125,7 +180,7 @@ async def query(ctx, tool, operation, scope, **arguments):
     try:
         matches = scope_predicate(scope)
         indexing = await wait_for_indexing(ctx, server, matches, graph=True)
-        result = await execute_graph(ctx, server.graph_store, operation, scope, **arguments)
+        result = await execute_graph(ctx, server.graph_store, operation, scope, artifact_db=server.db, **arguments)
         if result is not None:
             return {**result, "indexing": indexing.model_dump()}
         return {"indexing": indexing.model_dump()} if indexing.potentially_incomplete else None
@@ -140,7 +195,7 @@ async def query(ctx, tool, operation, scope, **arguments):
 @paged_results("results")
 async def find_application_endpoints(
     ctx: Context,
-    scope: Scope,
+    scope: OptionalScope = None,
     url: ExactUrl = None,
     method: Annotated[
         TrimmedString | None,
@@ -174,6 +229,8 @@ async def find_application_endpoints(
     Avoid broad summaries during reconnaissance. Summary examples are bounded, not complete.
     Inspect truncation, indexing, analysis gaps and unknown capture status before drawing conclusions.
     External dependencies need focused relationship discovery; inventory does not enumerate them.
+    A referenced endpoint is known through a reference, without a capture in the selected snapshot.
+    Zero summary counts mean no associated inputs, scripts, sources or sinks were found.
     Script association is not flow evidence. Neither mode infers business operations.
 
     Examples: find_application_endpoints(scope="target.local", detail="inventory");
@@ -199,7 +256,7 @@ async def find_application_endpoints(
 @paged_results("results")
 async def find_application_elements(
     ctx: Context,
-    scope: Scope,
+    scope: OptionalScope = None,
     kinds: Annotated[
         list[TrimmedString] | None,
         Field(
@@ -264,8 +321,8 @@ async def find_application_elements(
 @paged_results("results")
 async def find_application_relationships(
     ctx: Context,
-    scope: Scope,
     element_id: ElementId,
+    scope: OptionalScope = None,
     direction: Direction = "forward",
     kinds: Annotated[
         list[TrimmedString] | None,
@@ -309,8 +366,8 @@ async def find_application_relationships(
 @paged_results("results")
 async def trace_application_data_flow(
     ctx: Context,
-    scope: Scope,
     start: ElementId,
+    scope: OptionalScope = None,
     end: Annotated[
         TrimmedString | None,
         Field(
@@ -357,9 +414,9 @@ async def trace_application_data_flow(
 @paged_results("results")
 async def find_user_journey_paths(
     ctx: Context,
-    scope: Scope,
     start: JourneyEndpoint,
     end: JourneyEndpoint,
+    scope: OptionalScope = None,
     max_depth: Depth = 8,
     historical: Historical = False,
     as_of: AsOf = None,
@@ -420,3 +477,55 @@ async def fetch_application_graph_evidence(
             evidence_id,
         )
         raise ToolError("Application graph query failed; inspect Neo4j health and ingest backlog") from error
+
+
+@mcp_instance.tool(annotations=ToolAnnotations(read_only_hint=True, open_world_hint=False))
+@paged_results("results")
+async def continue_application_graph_query(
+    ctx: Context, token: Annotated[TrimmedString, Field(description="Opaque graph continuation token")],
+    limit: PageSize = 20,
+) -> GraphResult:
+    """Continue graph exploration at its pinned revision.
+
+    Pass continuation_token unchanged within ten minutes. Retries return the same result.
+    Use get_result_page with pagination.next_page_token to read records already saved in a result.
+    """
+    server = await get_server_context()
+    if server.graph_store is None:
+        raise ToolError("Application graph is unavailable")
+    try:
+        result = await execute_graph(ctx, server.graph_store, "continue_query", token,
+                                     artifact_db=server.db, limit=limit)
+        return GraphResult(**result)
+    except ValueError as error:
+        raise ToolError(str(error)) from error
+
+
+@mcp_instance.tool(annotations=ToolAnnotations(read_only_hint=False, open_world_hint=False))
+async def expand_application_graph_analysis(
+    ctx: Context, scope: Scope,
+    capture_id: Annotated[TrimmedString, Field(description="Capture ID from graph coverage or manifest results")],
+    unit_id: Annotated[TrimmedString, Field(description="Analysis unit ID from omitted_regions or manifest results")],
+) -> dict:
+    """Queue retained local source for detailed analysis.
+
+    Supply scope and capture_id; pass analysis_unit_id from omitted_regions or discovery results
+    as the unit_id argument.
+    The graph worker reads archived IR locally; it does not make target requests.
+    """
+    import asyncio
+
+    from shyhurricane.graph.budget import QueryBudget
+
+    server = await get_server_context()
+    budget = QueryBudget()
+    try:
+        item, result = await execute_graph(ctx, server.graph_store, "expansion", scope,
+                                          capture_id, unit_id, artifact_db=server.db, budget=budget)
+        await server.enqueue_graph_expansion(item, budget)
+        return result
+    except ValueError as error:
+        raise ToolError(str(error)) from error
+    except asyncio.CancelledError:
+        budget.cancel()
+        raise

@@ -37,7 +37,9 @@ captures are partial representations; unmatched backfills and Qdrant records are
 Only unambiguous forms/content matches are combined. Ambiguous representations remain separate
 and are counted in the report. Exact exchanges are deduplicated, and output order is deterministic.
 
-Graph metadata is read through a consistent SQLite backup, including committed WAL contents.
+Graph metadata and compressed capture content are read from the same consistent SQLite backup,
+including committed WAL contents. The exporter requires the current compact graph storage version
+and does not follow filesystem artifact paths.
 The backup deadline defaults to 300 seconds. For large databases or slow storage, increase it
 with `--graph-backup-timeout-seconds 1800`. The value must be finite and greater than zero.
 Timeout errors show page-copy progress and the retry option; no partial export is published.

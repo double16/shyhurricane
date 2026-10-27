@@ -37,8 +37,8 @@ Progress logs identify committed batches, record counts, payload sizes, activati
 budget failures. Transaction-memory errors subdivide the affected batch down to one record. If a
 single record still cannot fit, the capture is recorded as a failed analysis and other work continues;
 the prior complete graph remains available. Analyzer failures and timeouts remain analysis gaps.
-Consuming-document context URL lists are stored on capture/publication metadata and resolved by graph queries,
-avoiding repeated large properties on each JavaScript node and evidence record. Existing graph
+Consuming-document URLs and capture memberships are stored as indexed context rows, keeping activation
+payloads independent of context fanout and avoiding repeated lists on JavaScript nodes and evidence. Existing graph
 records remain readable and adopt publication generations when reprocessed.
 Committed staging batches can be replayed after a crash; acknowledgement loss after activation does
 not republish the same generation. Superseded entities and relationships become eligible for bounded
@@ -50,21 +50,137 @@ active graph. Published evidence and its context metadata are
 retained, including evidence referenced by earlier saved result pages. Abandoned staging evidence
 is reclaimed with its staged graph.
 
-New reanalysis requests are coalesced by capture ID in a durable scheduler. Repeated requests
-share one pending task; updates received during processing produce at most one follow-up task.
-Different capture versions remain separate. Delivery tickets and persisted traversal budgets
-preserve crash recovery and bound cycles to 32 captures per traversal. Existing queue entries
-drain normally without compaction; only newly scheduled reanalysis uses coalescing. The dashboard
-continues to show one count of queued and processing graph work. Graph producers do not reclaim
-live tasks; the single graph worker performs recovery on startup. Scheduler state is added
-automatically to the existing artifact SQLite database; no backfill rerun is required.
+Graph production uses durable, finite analysis epochs. An epoch freezes retained captures and
+analysis policies through revision-filtered SQLite views; arrivals during processing wait for the next
+epoch. Source maps fetched in open-world mode are pinned and reused throughout that epoch. Reference discovery finishes before structural publication. Consuming-document discovery
+then follows references in bounded, cycle-safe pages. Browser-relative lazy dependencies are
+resolved to a fixed point before final analysis, reusing discovery cursors and cached AST results.
+Cached AST results are shared between
+reference discovery and the final context analysis. Only actual load/import dependencies and their
+consumers are affected; navigation links do not invalidate other captures. Completed job rows are
+compacted before the next epoch. The catalog stores revision markers rather than full database copies. Planning checkpoints omit
+HTTP bodies and reload the immutable capture only when extraction needs it.
+
+Each capture has at most one structural activation and one inferred-link activation per epoch.
+Structural work finishes for every capture before inferred-link planning starts. Inferred links
+have their own publication pointer and never replace structural entity or evidence IDs. A sliced
+planner therefore sees stable dependencies even when more captures arrive. Completion does not
+schedule another reconciliation traversal. Duplicate input deliveries create no additional epoch.
+Queue receipts remain processing until their epoch completes or fails, including across restarts.
+The worker checks for new inputs before each epoch step and advances runnable work without an
+input-queue timeout. When no work can run, it waits up to one second before checking again;
+future retries and failed inputs awaiting explicit redelivery do not cause busy polling.
+
+`/status` includes `graph.epoch` with the epoch ID, phase, affected/completed capture counts,
+outstanding jobs, waiting inputs, unchanged-publication count, activation counts, conflicts, and
+errors. The epoch phases are `references`, `contexts`, `structural`, `links`, `done`, and `failed`.
+Transient database failures retain the current checkpoint with bounded retry backoff. Unexpected
+publication conflicts and permanent capture failures quarantine that capture and block its consumers.
+Independent captures continue. Retry failed inputs explicitly through the dashboard. A catalog-wide
+failure stops the epoch visibly; newer inputs remain durable.
+
+### Graph-state storage
+
+Use a fresh assessment directory for storage version 2. Version 1 compact directories and older
+layouts are not supported. Existing storage versions are
+rejected before schema initialization; there is no migration or legacy file reader. Preserve old
+assessment directories and rebuild deployments into new directories.
+
+`graph_state/artifacts.sqlite` holds captures, shared response/source text, complete IR, detail
+shards, manifest facts, and restart checkpoints. Artifacts use compact JSON encoded as Zstandard
+level 1 BLOBs, or raw bytes when compression would enlarge them. SHA-256 content addresses share
+identical payloads and large text across captures and projections. Readers validate encoding version,
+decoded size, and checksum. Opaque references identify immutable content, not file paths. Replacing a
+checkpoint creates a new reference; parser workers receive the epoch snapshot reference explicitly.
+Nested artifact dependencies resolve to existing immutable objects, forming an acyclic graph.
+
+The manifest interns repeated identifiers and URLs as integer keys. Context documents are stored
+once per distinct version, with separate compact membership tables. Indexed metadata selects bounded
+candidates before payload decompression; public IDs, pagination order, snapshot watermarks, temporal
+selection, and coverage semantics remain independent of storage keys.
+
+Captured evidence, successful external source-map responses, complete analysis, and expansion shards
+remain retained. External source-map evidence remains unverified; retaining it does not establish
+that it matches delivered JavaScript. Recomputable extraction
+caches use least-recently-used eviction, with a default 256 MiB compressed-content budget per
+assessment. Shared text is counted once and evidence-owned content is excluded from the cache budget.
+`0` disables new cache retention. Maintenance evicts in bounded batches, so an over-budget cache may
+need multiple passes. Cache eviction never removes content referenced by retained evidence or active
+checkpoints. Nested artifact references are tracked explicitly.
+
+Completed jobs retain completion metadata rather than checkpoint artifacts. Successful epochs release
+snapshots and pinned source-map records; unused content is reclaimed asynchronously. Newly staged
+objects have a one-hour grace period before orphan reclamation. A cache hit renews this grace before
+returning nested references, allowing the caller to save its next checkpoint safely. Eviction drops
+the cache key while preserving this read/staging grace, so physical disk usage may remain above the
+cache budget temporarily; `staged_bytes` reports this allocation. Complete reads use SQLite snapshots.
+Parser output is temporary and is
+removed after parsing; a worker restart removes abandoned parser output before starting new parsers.
+There are at most 64 artifact lock files, independent of artifact count. A small
+`cache-leases.sqlite` coordinates exact cache keys without holding bucket locks across nested parser
+processes; expired leases or leases from exited processes can be reclaimed.
+
+Ownership, cache roots, and dependency edges update reference counts transactionally. Blob usage
+metadata is separate from compressed payloads, so accounting changes do not rewrite large bodies.
+Unique logical/stored byte totals update at insertion and deletion; retained/cache classification
+changes propagate through a durable work queue. Each edge records its applied contribution, making
+retries and overlapping changes idempotent without a whole-catalog reachability scan.
+
+Independent maintenance processes at most 500 items per pass in committed sub-batches of at most 64
+items, cooperatively bounded by two seconds. Each item updates one dependency, cache key, or garbage
+candidate using indexed lookups. A deadline yields normally and preserves earlier commits; pending
+work is retried after one second, idle maintenance after 60 seconds. Deletions recheck physical reference counts transactionally and release
+children incrementally. Newly unreferenced content becomes an indexed reclamation candidate.
+
+SQLite `BUSY`/`LOCKED` contention during graph storage maintenance is a normal deferral.
+Maintenance retains committed batches, rolls back the active batch, and retries after one second
+without failure backoff. Deferrals are logged at INFO with the stage, SQLite code, and committed
+item count. Other database failures retain warning logs and exponential retry backoff.
+
+Incremental vacuum and passive WAL checkpointing get a separate short budget even when accounting
+yields. Readers can delay physical reclamation. Normal operation never runs a full vacuum. Neo4j has
+its own retired-generation cleanup and may reuse allocation rather than return it to the filesystem.
+
+`graph.storage` in `/status` reads aggregate counters and allocation metadata. It reports
+`logical_payload_bytes`, `stored_payload_bytes`, `retained_bytes`, `cache_bytes`, `staged_bytes`, cache
+budget, database/WAL allocation, and reclaimable SQLite bytes. Classification totals can temporarily
+lag while `accounting_pending` is true. `pending_work_count` counts queued classification jobs and
+retiring nodes; `last_maintenance_progress_at` is the Unix timestamp of the last committed work.
+Maintenance continues enforcing the cache budget as classification converges.
+
+Refreshes run in the background; `storage_stale`, refresh time, and errors indicate when samples are
+unavailable or old. Counters are consistent within a SQLite read transaction; measurements are not an
+atomic snapshot across SQLite, filesystem allocation, and Neo4j.
+
+For an isolated artifact-format comparison, install development dependencies and run:
+
+```shell
+UV_CACHE_DIR="$PWD/.uv-cache" uv run python .github/scripts/benchmark-graph-storage.py \
+  --corpus /path/to/artifacts-or-index.jsonl --output /tmp/graph-storage-benchmark.json
+```
+
+The benchmark reads a bounded sample without changing the source, and compares JSON files, raw SQLite,
+LZ4, Zstandard level 1, and the production deduplicating artifact store in temporary databases. It
+reports allocation, file counts, write time, warm-cache read latency, and peak Python allocations;
+native codec/SQLite allocations are excluded. This comparison does not measure catalog normalization.
 
 ## Graph tools
 
 All graph tools are read-only, work in low-power mode, and never make target requests.
-Discovery and traversal tools require an explicit scope; evidence retrieval requires only an evidence ID.
+Discovery and traversal tools accept an explicit scope or infer it from a supplied HTTP(S) URL;
+evidence retrieval requires only an evidence ID.
 Scope accepts a hostname, `host:port`, or HTTP(S) URL prefix. Hostname scopes include
 subdomains on hostname boundaries; URL scopes restrict scheme, host, and path prefix.
+
+Explicit nonblank scope takes precedence. Omitted, null, or blank scope is inferred from `url`
+for endpoints, `context_url` before `url` for elements, URL-valued `element_id` for relationships,
+and URL-valued `start` for flow traces and journeys. Opaque IDs require explicit scope; `end`
+never supplies scope. An invalid selected URL produces an error rather than falling back to
+another argument. Inferred scope uses the hostname and explicit port, including IPv6 brackets;
+paths, queries, and fragments stay in the original selector but are excluded from scope.
+URLs must be absolute HTTP(S) URLs with valid hosts and ports and no credentials.
+For example, `find_application_endpoints(url="https://app.example.com:8443/api/items?id=1")`
+uses scope `app.example.com:8443`. Existing hostname scope semantics include subdomains.
 
 | Tool | Purpose |
 |------|---------|
@@ -90,9 +206,8 @@ Begin domain/host discovery with `find_application_endpoints(detail="inventory")
 Each record includes a resource ID, URL, method, `capture_status`, and focused `follow_up` calls.
 Inventory includes resources whose own URL matches scope, including assets; external dependencies
 remain discoverable through focused relationship tools. Uncomputed inputs, scripts, sources, and
-sinks are omitted, not reported as zero. `capture_status` is `captured` when a visible observed
-`HOSTED_AT` relationship exists, `referenced` when that check completes without one, and `unknown`
-when classification cannot finish. Referenced does not mean the resource has never been captured.
+sinks are omitted, not reported as zero. Inventory `capture_status` is `captured` when a selected captured resource fact exists
+for that URL and method, and `referenced` when the check completes without one. Referenced does not mean the resource has never been captured.
 
 For inputs/forms, scripts, sources, and sinks, request `detail="summary"` with an exact `url` and
 HTTP `method` when known. If the endpoint is already known and needs rich details, request its
@@ -102,20 +217,19 @@ Counts describe graph elements in a bounded snapshot, not unique business inputs
 application inventory. `association` distinguishes directly related nodes from script-context
 candidates; a related script does not prove that an endpoint input reaches its sinks.
 
-Inventory uses resource indexes and validates candidates in batches without loading summaries.
-Graph execution has a 30-second budget with five-second read deadlines, separate from the
-configurable indexing wait (default 60 seconds). Database termination and response delivery may add
-small overhead. It scans at most 5,000 storage candidates and saves at most 1,000 unique resources;
-`limit` controls saved-page size only. Completed records survive budget exhaustion. Inspect
-`retrieval_truncated`, `truncation_reasons`, `analysis_gaps`, and indexing status. `scan_limit`,
-`result_limit`, `time_limit`, and `memory_limit` explain incomplete selection. `classification_limit`
-means capture-status checks stopped while resource selection continued. `lookup_unavailable`
-means lookup migration or the resource index is not ready. Startup creates resource indexes for
-existing data without reingestion; queries wait for online indexes rather than doing a broad scan.
-Summaries retain the existing 120-second graph budget and captured/referenced classification.
+Inventory reads resource facts through URL and hostname indexes without loading summaries.
+It processes at most five batches of 1,000 storage candidates and retains at most 1,000 unique
+resources per query response; `limit` controls saved-page size only. Inventory and element
+discovery have a 120-second request budget, including metadata, separate from the configurable
+indexing wait (default 60 seconds). Response delivery may add small overhead. Completed records
+survive budget exhaustion. Inspect `retrieval_truncated`, `truncation_reasons`, `analysis_gaps`,
+and indexing status. `page_limit` means more candidates remain; `time_limit` means execution
+reached its deadline. Follow the continuation token to resume without losing discovery records.
+Existing discovery manifests need no index migration or reingestion for these query changes.
+Summaries share the same 120-second graph budget and captured/referenced classification.
 
-Element discovery applies `context_url` and `role` filters in Neo4j before selecting and hydrating
-its bounded snapshot. Context matching includes direct URL matches and consuming-document contexts
+Element discovery applies `context_url` and `role` filters to the paged discovery manifest before
+selecting records; deferred elements retain stable IDs for offline expansion. Context matching includes direct URL matches and consuming-document contexts
 for external scripts. Unexpected graph query failures log the original exception and traceback;
 clients receive the existing generic error. Startup automatically adds an index on publication
 capture IDs for legacy context lookups.
@@ -133,7 +247,8 @@ IDs on saved pages have the same meaning as IDs on the first page (`get_result_p
 | `method` | `find_application_endpoints` | string or null; default null | Exact HTTP method filter, ignoring case; e.g. `GET` or `POST` |
 | `detail` | Elements, relationships, data flow, journeys | string; default `compact` | `compact` keeps essential identity and evidence fields; `full` returns all public properties |
 | `context_url` | `find_application_elements` | string or null; default null | Exact page URL matched against an element’s own URL or its consuming-document contexts, including external scripts |
-| `scope` | All except evidence retrieval | string, required | Hostname, `host:port`, or HTTP(S) URL prefix; restricts the application evidence queried |
+| `scope` | Discovery and traversal | string or null; default null | Hostname, `host:port`, or HTTP(S) URL prefix; inferred from the primary URL when missing; required for opaque-ID-only calls |
+| `scope` | `expand_application_graph_analysis` | string, required | Explicit application scope for offline expansion |
 | `kinds` | `find_application_elements` | array of strings or null; default null | Match any case-sensitive element kind, e.g. `resource`, `element`, `field`, `cookie`, `origin`; discover other values in `results[].kind`. Omitted, null, or `[]` applies no kind filter |
 | `kinds` | `find_application_relationships` | array of strings or null; default null | Match any case-sensitive relationship kind, e.g. `CONTAINS`, `LOADS`, `NAVIGATES_TO`, `SUBMITS_TO`, `FLOWS_TO`; discover values in `results[].steps[].kind`. Omitted, null, or `[]` applies no kind filter |
 | `role` | `find_application_elements` | string or null; default null | `source` reads input; `sink` consumes data. Null includes all roles. These static classifications are investigation candidates |
@@ -223,7 +338,8 @@ A checkpointed maintenance backfill adds these access paths to existing data in 
 New publications stage lookup records before activation. Until the backfill completes, discovery
 uses the compatibility query within the same request budget; a timeout is reported as truncation.
 
-All graph queries share a 120-second query budget after the separate indexing wait, within the
+All graph tools, including evidence retrieval and expansion submission, share a 120-second request
+budget after the separate indexing wait, within the
 five-minute generation cleanup grace period. Reads use the configured transaction timeout (default
 30 seconds) or the remaining budget, whichever is shorter, without automatic transaction retries.
 Hydration loads immutable relationships, entities, metadata, and shared contexts in windows of at
@@ -233,7 +349,8 @@ and missing-generation limits. Repeat the query when a generation is unavailable
 Cancellation stops new batches and attempts to terminate only database reads tagged for that request;
 external Neo4j users need permission to inspect and terminate their own transactions. If termination
 is unavailable, the transaction timeout remains the bound for an already running read.
-DEBUG logs report stage, batch size, returned records, elapsed time, and remaining budget. A completion
+DEBUG logs report stage, batch size, returned records, elapsed time, and remaining budget.
+Core traversal, metadata, continuation checkpoint, and pagination timings are recorded separately. A completion
 summary reports selected/completed relationships, memory subdivisions, and incompleteness reasons;
 incomplete hydration is logged at WARNING. See [hydration measurements](graph_hydration.md).
 
@@ -243,7 +360,7 @@ scripts; association edges do not become flow evidence, and unlabelled intermedi
 External destinations can be returned as boundary nodes but are not expanded beyond scope.
 The 20,000-membership budget counts distinct relationships loaded for seed associations and traversal;
 unrelated graph regions no longer displace focused paths. Shared dependencies and adjacency are cached
-per request, with a shared 120-second database-work deadline, configurable read caps, and a separate
+per request, with a shared 120-second request deadline, configurable read caps, and a separate
 ten-second traversal CPU budget. No-path diagnostics describe the explored graph rather than claiming
 application-wide absence of sources or sinks.
 
@@ -282,8 +399,9 @@ TSX without evaluating the application. It follows lexical bindings, assignments
 parameters, returns, calls, callbacks, and imports/exports. It recognizes common browser sources and
 sinks, fetch/XHR, Axios/Angular HTTP calls, storage access, navigation, workers, and messaging.
 Explicit imported function argument/return interfaces link across ingested modules. Processing is
-bounded to 40 MiB per source artifact, 10,000 semantic nodes and 20,000 edges per script, and 240
-seconds per analyzer container, with a 3 GiB container memory limit.
+bounded to 40 MiB per source artifact and 240 seconds per analyzer container, with a 3 GiB container
+memory limit. HTML/SVG declarations are streamed before choosing a 10,000-element semantic projection;
+decorative markup does not consume that projection budget.
 
 Framework models cover React/Next.js links, forms, state and HTML sinks; Vue/Nuxt bindings, navigation
 and HTTP helpers; Angular delivered templates, forms, routing and HttpClient; and Svelte/SvelteKit
@@ -299,6 +417,68 @@ vulnerabilities. Recognized transformations do not prove sanitization. Captures 
 sessions, so journey paths are possibilities rather than recorded user sessions. Session storage is
 not joined across unrelated captures. Historical paths can span observations at different times.
 
+## Discovery coverage and deferred detail
+
+Blank optional URL, context URL, and HTTP-method filters are treated as omitted; exact nonblank
+filters retain their existing meaning. A referenced endpoint is known through a reference without
+a capture in the selected snapshot. Zero summary association counts mean no associated inputs,
+scripts, sources or sinks were found, rather than that the endpoint itself is absent.
+
+Coverage describes persisted analysis completeness, independently of indexing queue state.
+`units` counts selected analysis units, not queued jobs. One pending unit can keep coverage pending
+when queues are empty. Root capture units retain their original identity across URL normalization.
+Background reconciliation runs every 60 seconds, inspecting at most 100 pending units within one
+second per pass. It repairs legacy root aliases only when a matching completed projection archive
+exists for the same capture and analyzer version, retaining partial flow status and existing IDs.
+Missing evidence leaves coverage unchanged; lock contention is retried independently. Query
+execution remains read-only. Existing assessments need no rebuild or reingestion.
+
+Endpoint inventory, element discovery, and their manifest continuations share a 120-second
+request budget, including coverage and deferred-unit metadata, after the indexing wait.
+Reads use existing indexes and finite candidate batches; exact URL filters start with URL lookups.
+Deadline expiry retains completed records and returns `time_limit`. The final five seconds are
+reserved for checkpointing and page publication. A continuation is returned only after its state
+and revision pin have been saved; failed checkpoints report a restart-required analysis gap.
+Continuation lock waits check cancellation at least every 50 milliseconds. Progress updates retain
+the established five-second interval, including continuations and offline expansion submission.
+Saved-page maintenance runs in the background every 60 seconds, inspecting at most 100 entries
+or one second per pass. Requested pages retain integrity checks; explicit full cleanup remains available.
+Unfinished coverage is reported as `unknown`, with no unit count and an explicit analysis gap.
+Incomplete deferred-unit details are also reported as a gap. Cancellation interrupts the SQLite
+read and closes its read-only connection. These retrieval fixes need no data rebuild or migration.
+
+The SQLite discovery manifest is independent of the Neo4j projection. Endpoint and element discovery
+page retained declarations, references, and IR facts even when summary selection omits their nodes.
+Each result includes an `analysis_unit_id`. Coverage reports discovery and flow separately using
+`complete`, `partial`, `pending`, `blocked`, or `failed`. Completeness describes supported static
+analysis, not runtime behavior or proof of security. Parser failures remain visible.
+
+The full IR and its strongly connected components and acyclic component graph remain archived.
+Addressable detail shards contain at most 2,000 flow edges and their endpoints, or 2,000 isolated
+nodes, with at most 100 consuming documents per context shard. HTML/SVG detail uses windows of
+1,000 semantic elements, preserving required form, base and XML ancestry. `omitted_regions` identifies deferred
+units; use `find_application_elements(kinds=["analysis_unit"])` to page the full unit catalog. Call `expand_application_graph_analysis` with
+the scope, capture ID and unit ID to queue offline materialization. Prefer a `#flow-shard=` or
+`#node-shard=` unit for large inputs. Expansion has independent publication ownership and does
+not replace the capture summary. Detail units can also recover evidence when base capture analysis
+failed; coverage still reports the incomplete base. Deferred inline scripts retain source for offline parsing.
+
+Inventory pages use a fixed fact watermark and bind filters, scope, historical selection and cutoff.
+When `continuation_token` is present, use `continue_application_graph_query` within ten minutes.
+Path continuations retain their frontier and pin the publication revision against cleanup.
+Retries replay the saved response. At most 16 active continuations and 64 MiB per cursor state are
+allowed. Cursor state plus replay responses have a 256 MiB total budget and at most 64 retained
+tokens; budget exhaustion requires a narrower query or waiting for expiry. These tokens differ from
+`pagination.next_page_token`, which `get_result_page` uses to read already computed result records.
+Flow and destination-directed searches visit reachable states breadth-first, returning shortest
+witnesses for reached context states. Relationship exploration can enumerate alternate routes
+within its bounds. Report truncation and omitted units alongside results.
+
+Captured external source maps are selected at or before the bundle observation, with deterministic
+capture-ID tie breaking. An external map URL alone does not establish content association: its
+sources remain unverified candidate evidence and cannot replace delivered JavaScript. Embedded maps
+can supply recovered sources. Original bundle and candidate-map digests remain available.
+
 ## Large-script summaries and graph size estimates
 
 By default, scripts exceeding 2,000 generated nodes or 4,000 edges are compressed, regardless of
@@ -308,8 +488,9 @@ are analyzed individually. Set `GRAPH_LIBRARY_ANALYSIS=full` to bypass compressi
 detailed-analysis limits; the variable keeps its existing name for compatibility.
 
 Summaries prioritize security sources/sinks, import/export and resolved callback boundaries, DOM
-bindings, then reference origins. They retain at most 500 endpoints, 500 flow relationships, and 50
-resource references per script. Direct endpoint edges retain their original evidence. Internal directed
+bindings, then reference origins. Selection reserves space across source, sink, boundary, DOM,
+and reference classes so a large sink population cannot displace every source. Summaries retain at
+most 500 endpoints and 500 flow relationships. All resource references remain in the discovery manifest. Direct endpoint edges retain their original evidence. Internal directed
 flow paths become `SUMMARIZED_FLOW` edges with original hop counts, endpoint locations, and samples
 of the first four and last four edges. Paths have no fixed depth cutoff; traversal stops at the next
 retained endpoint and is bounded to 100,000 edge visits per script. Summary edges participate in flow
@@ -322,8 +503,10 @@ flowchart LR
     retainedSource[Retained input] -->|SUMMARIZED_FLOW: original hop count and witness sample| retainedSink[Retained sink]
 ```
 
-Summary-mode initial analysis permits 50,000 nodes and 100,000 edges; full mode retains its existing
-10,000-node and 20,000-edge limits. Parsing, subprocess, and capture limits still apply. Compression
+Summary and full modes share discovery and complete IR archival on successful parsing; neither stops
+AST traversal at a node prefix. Type inference and specialized graph searches have explicit work caps.
+Parsing runs in a supervised process with a 240-second wall-time, 3 GiB RSS and 64 MiB output budget; the analyzer
+container also has a 3 GiB memory limit. Limit failures retain the capture and report incomplete coverage. Compression
 reduces stored graph size and downstream query work, but does not avoid initial parsing and analysis.
 Publication allows up to 1,000 nodes and 2,000 relationships per summarized script, including auxiliary
 reference/context facts, within capture-wide limits. Endpoint nodes and their flows precede references.
@@ -394,50 +577,45 @@ refreshes; explicit `/status` requests retain those existing fields and caches.
 
 ## Resumable shared-script linking
 
-External JavaScript and source-map captures with response bodies use durable continuation jobs.
-Dependency discovery reads referenced captures in deterministic pages, retaining all consuming page
-contexts rather than imposing a document-coverage cap. Cycles are deduplicated. The extracted
-projection is saved once; repeated context URL arrays are shared in checkpoints and publication
-digests to avoid serializing the same thousands of URLs for every evidence record.
+External JavaScript and source-map captures with response bodies use durable epoch checkpoints.
+Dependency discovery reads referenced captures in deterministic pages and retains all consuming
+page contexts. Cycles are deduplicated. Repeated context arrays are shared inside projection
+snapshots to avoid serializing the same URL list for every evidence record.
 
-The worker alternates one normal queue item with one ready continuation slice. Discovery,
-planning, and reconciliation yield between bounded batches. Planning slices consider at most 100
-contexts or 200 database reads and check a 30-second budget between operations. Each planning
-read uses a five-second transaction without driver-managed retries. Extraction and final
-publication keep their existing operation bounds; the slice budget does not interrupt an AST
-analyzer or an in-flight operation. Identical selectors share context queries, matching elements
-are filtered before evidence hydration, and completed contexts are not reread after recovery.
+The worker consumes at most one queue delivery between epoch steps. Discovery and planning yield
+between bounded batches. Planning slices consider at most 100 contexts or 200 database reads and
+check a 30-second budget between operations. Equality lookups require index seeks, preventing
+Neo4j from substituting scans of unrelated graph records. Extraction and final publication keep their existing
+operation bounds; the slice budget does not interrupt an AST analyzer or an in-flight operation.
+Identical selectors share context queries and completed work is checkpointed across restarts.
+New arrivals cannot replace dependencies during the active epoch's link-planning phase.
 
-Only a finished plan proceeds to staged publication and atomic activation. The previous generation
-remains visible meanwhile. Existing node, edge, and inferred-link limits still produce explicit
-analysis gaps; continuations do not add a context-coverage cap. Late dependencies use the existing
-reanalysis scheduler and receive a fresh discovery pass.
+Only a finished plan proceeds to staged inferred-link publication and atomic activation. Structural
+entity IDs remain unchanged during this phase. Existing node, edge, and inferred-link limits still
+produce explicit analysis gaps; epochs add no consuming-document coverage cap. Late dependencies
+and policy changes are processed by a subsequent frozen epoch.
 
 Timeouts and memory failures split candidate/hydration batches. Transient Neo4j connection,
 transaction-timeout, read-only, and retryable server errors remain pending for automatic retry.
-Continuation retries back off for 5, 30, then 120 seconds, capped at 120 seconds until recovery;
+Epoch retries back off for 5, 30, then 120 seconds, capped at 120 seconds until recovery;
 their queue receipts remain processing without a success or failed acknowledgement.
-Terminal storage failures mark the continuation and its original queue items failed and require explicit retry.
-Generation conflicts restart planning from the saved extracted projection. Failed checkpoints and
-errors remain available for investigation. Successful jobs retain a small completion record and
-remove their saved projection. New work for the same capture runs in order; a successful replacement
-supersedes older failed continuations for that capture.
+Terminal capture failures quarantine the affected job and block its dependent inputs; independent jobs
+continue. Generation conflicts fail the affected job instead of restarting planning indefinitely. Failed
+checkpoints and errors remain available for investigation. Successful jobs retain a small completion
+record and remove their saved projection. Restarting resumes the saved reference, context, or planning
+cursor; queue row IDs remain attached to their input obligations until success or failure.
 
-Graph status adds `continuations`: pending/running/failed counts, the most recent stage,
-`contexts_completed`, `contexts_discovered`, and `checkpoint_age_seconds`. The monitor shows
-these values on separate lines in its graph panel. Checkpoints do not increment the publication revision.
-The original graph queue items remain processing through continuation publication and reconciliation.
-Durable queue receipts preserve their row IDs across restarts, including duplicate deliveries.
-Only completed publication and reconciliation acknowledge success; terminal failures mark those rows failed.
-Retrieval indexing waits include both queue and continuation work, so a handoff cannot look complete.
-
-Continuation tables and indexes are added when the graph worker starts. Restarting reclaims running
-jobs and resumes their saved cursors. Existing queue payloads and published graphs remain compatible;
-failed queue items are not automatically retried or rebuilt. Explicit graph rebuild scheduling can
-create new work for failed continuations; the failed-queue retry action resumes their checkpoints.
-Existing continuations handed off by older versions lack queue receipts: their failures remain in
-graph continuation/work status, but previously acknowledged queue rows cannot be reconstructed.
-No data-directory migration is needed.
+The `graph.epoch` status fields describe this work. The older `continuations` status field is retained
+for inspecting legacy state, but new work uses epoch checkpoints. Checkpoint writes do not increment
+the publication revision. Retrieval indexing waits continue to include outstanding queue receipts.
+A phase-level failed epoch is terminal: its diagnostics and checkpoints remain retained, while
+unrelated waiting inputs can start a new epoch. Failed inputs require explicit redelivery; the
+failed-queue retry action submits them to a new finite epoch rather than resuming the failed one.
+Membership expansion commits its replacement snapshot and new jobs together, then reopens the
+snapshot before further work so parser subprocesses use the current retained reference and policies.
+A failed replacement commit leaves the prior snapshot usable. A matching explicit rebuild
+can also redeliver its original failed policy request. Incompatible unfinished legacy work requires
+fresh graph state and is not automatically migrated.
 
 ## JavaScript data-flow coverage
 
@@ -473,7 +651,8 @@ call-site sensitivity, implicit control flows, and backend execution are not mod
 An empty trace distinguishes missing seeds, missing source/sink operations, disconnected edges,
 requested scope boundaries, and reached traversal limits through `analysis_gaps` and truncation
 metadata. No result establishes safety. Broaden scope only when authorized, and inspect step evidence.
-The analyzer policy version is now 3; existing captures require an explicit rebuild to gain these links.
+The analyzer policy version is 7. This graph layout requires fresh graph state; preserve the old
+data directory and build in a new directory. Existing stopped assessments are not migrated or deleted.
 
 Rebuild retained captures explicitly after updating the analyzer image and restarting the service:
 
@@ -503,7 +682,8 @@ unauthenticated connection model as Qdrant; external servers can use credentials
 
 | Environment variable | Default | Description |
 |----------------------|---------|-------------|
-| `GRAPH_LIBRARY_ANALYSIS` | `summary` | `summary` compresses scripts exceeding 2,000 generated nodes or 4,000 edges while retaining bounded security endpoints and flow summaries; `full` bypasses compression within ordinary analysis limits |
+| `GRAPH_LIBRARY_ANALYSIS` | `summary` | `summary` compresses scripts exceeding 2,000 generated nodes or 4,000 edges; `full` materializes more detail. Both preserve the same discovery inventory and archive complete IR on successful parsing |
+| `GRAPH_ARTIFACT_CACHE_MAX_BYTES` | `268435456` | Non-negative compressed-content budget for recomputable graph caches per assessment; `0` disables cache retention. Evidence and active work are excluded; bounded maintenance reclaims excess asynchronously |
 | `NEO4J` | Unset; `bolt://graph:7687` in Compose | External Bolt/Neo4j server URI; managed local storage uses `<data-dir>/graph` |
 | `NEO4J_USERNAME` | `neo4j` | Username when `NEO4J_PASSWORD` is supplied |
 | `NEO4J_PASSWORD` | Unset | Password for authenticated connections; also initializes authentication on a newly created managed container |
@@ -589,3 +769,37 @@ content, network, and forms collections without target requests, including witho
 It checkpoints submitted items and resumes on the next invocation. Existing normalized documents
 cannot reconstruct missing request bodies, original markup, or discarded observations; resulting
 evidence explicitly reports that limitation.
+
+
+### Parser progress and diagnostics
+
+Isolated parsers load lightweight graph dependencies instead of indexing and ML models, including
+for JavaScript normalization. Each parse retains its 240-second wall-time, 3 GiB RSS, and 64 MiB
+result limits. Captured source and deferred analysis units remain available when a bound is reached.
+
+The additive `graph.epoch` status fields distinguish reference discovery from publication:
+
+| Field | Meaning |
+|-------|---------|
+| `discovery_total` | Current epoch membership; may increase while dependencies are discovered |
+| `discovery_completed` | Members past reference discovery, excluding failed and blocked members |
+| `current_job` | Capture ID, stage, start timestamp, and interrupted flag; null between jobs |
+| `last_progress_at` | Unix timestamp of the last successfully completed work step, or null |
+
+Context discovery and structural/link publication follow reference discovery. Existing `stages`,
+`failed`, `blocked`, and publication fields remain available. A successful step can checkpoint
+part of a job; it does not necessarily complete a capture. After restart, interrupted current-job
+metadata is marked until the next job starts. The worker logs progress at most every 30 seconds,
+plus phase changes and failures. Counts retained as processing queue receipts can include work
+awaiting the epoch publication barrier.
+
+Child failures report the exception type, initialization/extraction stage, and up to 32 traceback
+frame locations. Exception values, source lines, bodies, headers, and credentials are omitted.
+The parent logs capture/epoch identifiers and diagnostic frames; debug logs include elapsed time
+and exit status. Temporary parser output is removed after success or failure.
+
+These changes preserve analyzer output and checkpoint versions; no graph rebuild is required.
+To adopt them later, stop the server gracefully and restart with the updated code and the same data
+directory. Retry failed queue work only after checking the recorded cause; completed work remains
+preserved. The dashboard `f` action retries failures across queues, so use it only when that broader
+retry is intended. Code installation alone does not restart workers or retry an assessment.

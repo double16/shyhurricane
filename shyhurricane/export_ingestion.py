@@ -16,7 +16,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from shyhurricane.data_paths import add_data_dir_argument, qdrant_location, resolve_data_dir
-from shyhurricane.graph.artifact_paths import resolve_artifact_path
+from shyhurricane.graph.blob_store import BlobStore, validate
 
 
 class GraphBackupTimeout(TimeoutError):
@@ -224,12 +224,8 @@ class Exporter:
             for identifier, stored_path in snapshot.execute("SELECT id,path FROM captures ORDER BY id"):
                 seen += 1
                 try:
-                    candidate = resolve_artifact_path(graph_root, stored_path)
-                    if not candidate.is_file():
-                        raise ValueError("Missing artifact")
-                    if not candidate.resolve().is_relative_to(graph_root.resolve()):
-                        raise ValueError("Artifact escapes graph_state")
-                    event = json.loads(candidate.read_text())
+                    validate(snapshot)
+                    event = BlobStore(snapshot).read(stored_path)
                     if event["id"] != identifier:
                         raise ValueError("Capture identity mismatch")
                     kind = "backfill" if event.get("backfill", False) else "graph"

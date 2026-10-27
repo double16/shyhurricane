@@ -8,7 +8,7 @@ import zlib
 from contextlib import closing
 from pathlib import Path
 from threading import Event
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from haystack import Document
@@ -51,7 +51,9 @@ class FakeQueue:
 
 
 @pytest.mark.parametrize("stop_on_claim", [False, True])
-def test_raw_queue_receipts_preserve_sentinel_and_shutdown_handling(tmp_path, monkeypatch, stop_on_claim):
+@pytest.mark.parametrize("prefer_ready_work", [False, True])
+def test_raw_queue_receipts_preserve_sentinel_and_shutdown_handling(
+        tmp_path, monkeypatch, stop_on_claim, prefer_ready_work):
     queue = SQLiteAckQueue(str(tmp_path / "raw-queue"), auto_commit=True)
     stop = Event()
     if not stop_on_claim:
@@ -66,7 +68,9 @@ def test_raw_queue_receipts_preserve_sentinel_and_shutdown_handling(tmp_path, mo
         return receipt
 
     monkeypatch.setattr(queue, "get", claim)
-    items = persistent_queue.persistent_queue_get(queue, stop_event=stop, raw=True)
+    items = persistent_queue.persistent_queue_get(
+        queue, stop_event=stop, raw=True, prefer_ready_work=prefer_ready_work,
+    )
     if stop_on_claim:
         assert list(items) == []
         assert queue.ready_count() == 1
@@ -999,3 +1003,105 @@ def test_idle_queue_can_yield_ready_continuations_without_acknowledging_them(tmp
     assert list(iterator) == []
     assert queue.unack_count() == 0
     queue.close()
+
+
+async def test_budgeted_writer_cancel_before_commit_preserves_cancellation(tmp_path, monkeypatch):
+    from shyhurricane.graph.budget import QueryBudget
+
+    entered = asyncio.Event()
+    release = Event()
+    loop = asyncio.get_running_loop()
+    writer = persistent_queue.AsyncIngestWriter(str(tmp_path))
+    budget = QueryBudget()
+    original = writer._put
+
+    def delayed(item, request):
+        loop.call_soon_threadsafe(entered.set)
+        assert release.wait(2)
+        return original(item, request)
+
+    monkeypatch.setattr(writer, "_put", delayed)
+    task = asyncio.create_task(writer.put({"id": "cancelled"}, budget))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not (tmp_path / "data.db").exists()
+    finally:
+        release.set()
+        await asyncio.to_thread(writer.close)
+
+
+@pytest.mark.parametrize("raw", [False, True])
+def test_ready_work_checks_inputs_each_turn_without_blocking(raw):
+    stop = Event()
+    queue = MagicMock()
+    queue.get.side_effect = [Empty, {"data": "input"} if raw else "input", Empty]
+    callback = Mock(return_value={"epoch": True})
+    maintenance = MagicMock()
+    maintenance.count = 0
+
+    with patch.object(persistent_queue, "QueueMaintenance", return_value=maintenance):
+        iterator = persistent_queue.persistent_queue_get(
+            queue, stop_event=stop, raw=raw, idle_callback=callback, prefer_ready_work=True,
+        )
+        assert next(iterator) == {"epoch": True}
+        assert next(iterator) == ({"data": "input"} if raw else "input")
+        assert next(iterator) == {"epoch": True}
+        assert maintenance.count == 1
+        assert all(call.kwargs["block"] is False for call in queue.get.call_args_list)
+        assert callback.call_count == 2
+        queue.ack.assert_not_called()
+        stop.set()
+        assert list(iterator) == []
+
+
+def test_ready_work_blocks_when_idle_and_rechecks_after_timeout():
+    stop = Event()
+    queue = MagicMock()
+    queue.get.side_effect = [Empty, Empty]
+    callback = Mock(side_effect=[None, "due retry"])
+    iterator = persistent_queue.persistent_queue_get(
+        queue, stop_event=stop, idle_callback=callback, prefer_ready_work=True,
+    )
+    assert next(iterator) == "due retry"
+    assert [call.kwargs for call in queue.get.call_args_list] == [
+        {"block": False}, {"block": True, "timeout": 1},
+    ]
+    stop.set()
+    assert list(iterator) == []
+
+
+@pytest.mark.parametrize("after_timeout", [False, True])
+def test_ready_work_shutdown_during_callback_does_not_yield(after_timeout):
+    stop = Event()
+    queue = MagicMock()
+    queue.get.side_effect = Empty
+    calls = 0
+
+    def callback():
+        nonlocal calls
+        calls += 1
+        if not after_timeout or calls == 2:
+            stop.set()
+            return "epoch"
+        return None
+
+    assert list(persistent_queue.persistent_queue_get(
+        queue, stop_event=stop, idle_callback=callback, prefer_ready_work=True,
+    )) == []
+    queue.ack.assert_not_called()
+
+
+def test_ready_work_without_callback_blocks_for_input():
+    stop = Event()
+    queue = MagicMock()
+    queue.get.side_effect = [Empty, "input"]
+    iterator = persistent_queue.persistent_queue_get(queue, stop_event=stop, prefer_ready_work=True)
+    assert next(iterator) == "input"
+    assert queue.get.call_args.kwargs == {"block": True, "timeout": 1}
+    stop.set()
+    assert list(iterator) == []

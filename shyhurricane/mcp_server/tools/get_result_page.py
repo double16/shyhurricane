@@ -94,6 +94,7 @@ class PortScanXmlPage(BaseModel):
 
 class ApplicationGraphPage(BaseModel):
     source_tool: Literal[
+        "continue_application_graph_query",
         "find_application_endpoints",
         "find_application_elements",
         "find_application_relationships",
