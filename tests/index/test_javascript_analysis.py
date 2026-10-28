@@ -262,3 +262,23 @@ def test_unusable_map_or_scan_result_produces_no_finding(monkeypatch):
 
     monkeypatch.setattr(analysis, "_run_opengrep", lambda *args: {"results": [{}, result()["results"][0]]})
     assert analysis.analyze_document(document(), False, Store(), queue) == 1
+
+
+def test_scanner_metadata_retains_rule_coordinates_and_verifiable_source_hash(monkeypatch):
+    import hashlib
+
+    queue = Queue()
+    matched = result()
+    matched["results"][0]["extra"]["metadata"] = {"cwe": "CWE-79: XSS"}
+    monkeypatch.setattr(analysis, "_run_opengrep", lambda *args: matched)
+    assert analysis.analyze_document(document(), False, Store(), queue) == 1
+    metadata = queue.items[0].metadata
+    assert metadata["rule_id"] == "javascript.security.eval"
+    assert metadata["severity"] == "medium"
+    assert metadata["native_severity"] == "WARNING"
+    assert metadata["verification_status"] == "unverified"
+    assert metadata["cwe_ids"] == ["CWE-79"]
+    assert metadata["code_location"] == {"source_path": "source.js", "start_line": 4, "coordinate_space": "delivered"}
+    assert metadata["content_sha256"] == hashlib.sha256(b"eval(input)").hexdigest()
+    assert analysis._finding("https://example.com/app.js", matched["results"][0], True).metadata[
+        "code_location"]["coordinate_space"] == "recovered"

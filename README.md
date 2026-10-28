@@ -101,6 +101,7 @@ The following tools are provided:
 | register_http_headers       | Register HTTP headers that should be sent on every request.                                         | No          |
 | save_finding                | Save findings as a markdown.                                                                        | No          |
 | query_findings              | Query for previous findings for a target.                                                           | No          |
+| find_investigation_targets  | Read ranked finding/graph targets, hotspots, and possible chains.                                    | No          |
 | deobfuscate_javascript      | De-obfuscate JavaScript content (automatically done during indexing)                                | No          |
 | get_result_page             | Retrieve a saved page using an opaque navigation token.                                             | No          |
 
@@ -162,6 +163,24 @@ indexing and reports when results may still be incomplete; avoid starting duplic
 
 See the [tool reference](docs/tool-reference.md) for search predicates, result limits, pagination,
 content retrieval, and indexing-status fields.
+
+## Ranked investigation targets
+
+`find_investigation_targets(scope="example.com")` reads background-ranked finding/graph correlations,
+shared hotspots, and possible vulnerability chains. Results include supporting paths, evidence IDs,
+priority contributions, missing prerequisites, and freshness/coverage limits. Scores rank investigation
+work, not exploit probability. The tool works without model calls or target requests, including in
+low-power mode. Pending results fall back to the existing scoped finding and graph tools.
+
+HTTP `/findings` and MCP `save_finding` accept optional structured `metadata`, including scanner rule,
+severity, confidence, verification status, affected request method, parameter, CWE, and code location.
+Sources can omit unavailable fields. `query_findings` exposes stable finding IDs and this metadata.
+Resubmissions fill missing metadata and record conflicts while preserving the original finding.
+Use fresh assessment storage for finding version 3; existing payloads remain valid.
+
+See [finding correlation and operations](docs/investigation-targets.md), including the exact contract,
+scoring rules, and ready-to-send Codex prompts for [Burp](docs/codex-burp-findings.md) and
+[ZAP](docs/codex-zap-findings.md) extension updates.
 
 ## Application Relationship Graph
 
@@ -321,7 +340,7 @@ When started from an interactive terminal, the server displays a `shyhurricane` 
 configuration, queue, database, indexing, and MCP tool information. It refreshes immediately
 on startup and every 30 seconds afterward. Press `r` to refresh immediately. Press `q` to stop the
 dashboard and shut down the server. Press `f` to mark failed items pending across the ingest,
-type-specific indexing, scan-finding, and graph queues. The notification reports counts and any
+type-specific indexing, scan-finding, and graph queues, plus failed investigation correlations. The notification reports counts and any
 per-queue errors; successful queues are committed even if another queue fails. Retrying preserves
 payloads and leaves processing items untouched. Workers pick up pending work asynchronously and
 may fail again if the original problem remains. Repeated key presses do not overlap retry operations.
@@ -443,7 +462,7 @@ cat LoggerPlusPlus.csv | python3 ingest.py --mcp-url http://127.0.0.1:8000/ --cs
 tail -f LoggerPlusPlus.csv | python3 ingest.py --mcp-url http://127.0.0.1:8000/ --csv
 ```
 
-### Burp Suite request/response XML
+### Burp Suite request/response and issues XML
 
 Export requests and responses as XML from Burp Suite, then ingest the complete export:
 
@@ -455,6 +474,14 @@ Both base64 and plain-text HTTP messages are supported. Each valid exchange is c
 to `/index`. Invalid or incomplete items are reported to stderr and skipped. Malformed XML stops ingestion with a
 nonzero exit status; exchanges already queued remain queued. XML ingestion requires a complete export rather than
 a continuously appended stream. XML exports must be converted through `ingest.py` before submission to `/index`.
+
+Burp `--burp-xml` also detects `<issues>` exports. Findings go to `/findings`, one per evidence request,
+with extension-compatible summaries (1,024 characters per body). Complete exchanges also go to `/index`
+with full bodies. Both plain-text and base64 exports are accepted.
+
+Incomplete or invalid exchanges are skipped independently of findings. Export time is used for indexed
+exchange timestamps, falling back to ingestion time. Finding submission failures are reported and
+remaining records continue; malformed XML returns a nonzero exit status.
 
 ### Extensions
 

@@ -7,11 +7,10 @@ import logging
 import subprocess
 import tarfile
 
-import httpx as httpx
 from haystack import Document
 
 from shyhurricane.doc_type_model_map import map_mime_to_type
-from shyhurricane.source_maps import MAX_SOURCE_MAP_BYTES as MAX_SOURCE_MAP_BYTES
+from shyhurricane.finding_metadata import scanner_metadata
 from shyhurricane.source_maps import _cached_map, _fetch_map, _valid_map, javascript_url_from_map, source_map_url
 from shyhurricane.task_queue.types import SaveFindingQueueItem
 from shyhurricane.utils import unix_command_image
@@ -76,7 +75,13 @@ def _finding(url: str, match: dict, map_used: bool) -> SaveFindingQueueItem | No
         "## Fix\nReview the matched code and apply the rule's recommended remediation.\n\n"
         f"## References\nOpengrep rule `{rule}`.\n"
     )
-    return SaveFindingQueueItem(target=url, markdown=markdown, title=title, finding_id=key)
+    cwes = (extra.get("metadata") or {}).get("cwe") or []
+    metadata = scanner_metadata("opengrep", rule, severity, cwes=cwes if isinstance(cwes, list) else [cwes])
+    metadata["code_location"] = {
+        "source_path": source_path, "start_line": line,
+        "coordinate_space": "recovered" if map_used else "delivered",
+    }
+    return SaveFindingQueueItem(target=url, markdown=markdown, title=title, finding_id=key, metadata=metadata)
 
 
 def analyze_document(doc: Document, open_world: bool, content_store, finding_queue, artifacts=None) -> int:
@@ -115,6 +120,8 @@ def analyze_document(doc: Document, open_world: bool, content_store, finding_que
     for match in result.get("results", []):
         finding = _finding(target_url, match, source_map is not None)
         if finding is not None:
+            if not source_map and source:
+                finding.metadata["content_sha256"] = hashlib.sha256(source.encode()).hexdigest()
             finding_queue.put(finding)
             count += 1
     return count

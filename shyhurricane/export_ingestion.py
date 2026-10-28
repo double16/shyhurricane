@@ -306,6 +306,8 @@ class Exporter:
         if not isinstance(title, str):
             raise ValueError("Invalid finding title")
         record = {"target": target, "title": title, "markdown": markdown}
+        if meta.get("finding_metadata"):
+            record["metadata"] = meta["finding_metadata"]
         self.db.execute(
             "INSERT INTO findings VALUES (?,?,?)",
             (

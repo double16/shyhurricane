@@ -23,6 +23,12 @@ HTTP(S) URL prefixes restrict scheme, host, and path. Do not broaden the user's 
 Discovered external destinations are boundaries, not authorization to test them.
 
 Begin with query_findings using the explicit site: predicate supplied below in its query argument.
+After that lookup, call find_investigation_targets(scope=target) for saved ranked targets, hotspots,
+and chain candidates. Use include_hypotheses=false when reviewing only supported relationships.
+The optional vulnerability_type accepts normalized categories, not free text; omit it if uncertain.
+Scores rank investigation work, not exploit probability. Inspect stale/pending status and evidence.
+If materialization is pending or incomplete, continue the endpoint-first graph workflow below.
+Never automatically save deterministic candidates as confirmed findings.
 For focused investigations, append vulnerability-specific natural-language text to the scoped query.
 For inventories or full reviews, retrieve all scoped findings with predicates only; follow pages.
 Semantic queries return a bounded ranked snapshot; page exhaustion does not establish completeness.

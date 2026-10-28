@@ -393,3 +393,20 @@ for investigations and use predicates only for an exhaustive scoped review.
 Semantic retrieval requires normal power mode. In low-power mode, use predicate-only queries to retrieve findings
 without embeddings. Search reports scope counts and embedding, ranking, and loading stages, with
 idle heartbeats after 20 seconds without updates. Clients need not support progress notifications.
+
+## Structured findings and investigation targets
+
+`save_finding(target, markdown, title, metadata=null)` accepts the optional structured finding object
+also accepted by HTTP `/findings`. `query_findings` returns stable `finding_id`, `metadata`, and
+`metadata_conflicts` fields. Metadata is optional for all producers; the affected request method is
+`metadata.affected_method`, independent of the HTTP POST used to submit findings.
+
+`find_investigation_targets(scope, vulnerability_type=null, include_hypotheses=true, limit=20)` reads
+background materialization. Scope uses graph hostname/port/URL-prefix semantics; category filters use
+normalized names rather than semantic text. Results include witnesses, evidence IDs, numeric priority
+contributions, coverage gaps, freshness/status, and focused follow-up calls. `limit` is saved-page size
+(1–1,000); follow page tokens with `get_result_page`. Queries never contact applications or start scans.
+
+See the [complete finding contract and investigation guide](investigation-targets.md#finding-submission-contract)
+for field types, normalization, adapter mappings, lifecycle, and scoring/chain policies. This is finding
+storage version 3: preserve existing assessments and replay into fresh storage; no automatic migration.

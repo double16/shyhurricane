@@ -160,6 +160,12 @@ async def retry_failed_queue_items(db: str) -> dict[str, int | str]:
             finally:
                 if connection is not None:
                     connection.close()
+        from shyhurricane.investigation.storage import retry_correlations
+
+        try:
+            results["investigation"] = retry_correlations(db)
+        except (OSError, sqlite3.Error) as error:
+            results["investigation"] = type(error).__name__
         return results
 
     return await asyncio.to_thread(retry)

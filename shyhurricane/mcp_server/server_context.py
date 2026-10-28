@@ -293,6 +293,11 @@ async def get_server_context() -> ServerContext:
 
     ingest_pool.processes.append(start_graph_worker(db, graph_store.location, health_monitor.ready,
                                                    stop_event, server_config.open_world))
+    from shyhurricane.investigation.worker import start_investigation_worker
+
+    ingest_pool.processes.append(start_investigation_worker(
+        db, graph_store.location, health_monitor.ready, stop_event,
+    ))
     task_worker_ipc = start_task_worker(db, ingest_queue.path, server_config.task_pool_size, log_timestamp,
                                        stop_event=stop_event)
 

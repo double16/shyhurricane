@@ -116,11 +116,15 @@ class SaveFindingQueueItem:
                  target: str,
                  markdown: str,
                  title: Optional[str],
-                 finding_id: Optional[str] = None):
+                 finding_id: Optional[str] = None,
+                 metadata: Optional[dict] = None):
         self.target = target
         self.markdown = markdown
         self.title = title
         self.finding_id = finding_id
+        from shyhurricane.finding_metadata import metadata_dict
+
+        self.metadata = metadata_dict(metadata)
 
 
 class TaskPool:

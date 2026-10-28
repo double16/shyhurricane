@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
@@ -116,13 +117,27 @@ def format_database_panel(document_counts: dict[str, int]) -> str:
     return f"[b]Database statistics[/b]\n{counts}"
 
 
+def format_duration_since(timestamp: float | None, now: float | None = None) -> str:
+    if timestamp is None:
+        return "awaiting results"
+    seconds = max(0, int((time.time() if now is None else now) - timestamp))
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
 def format_graph_panel(graph: dict | None) -> str:
     graph = graph or {}
     revision = graph.get("publication_revision")
     delta = graph.get("publication_revision_delta")
     elapsed = graph.get("seconds_since_observed_progress")
     change = f"+{delta}" if delta is not None else "awaiting baseline"
-    progress = f"{elapsed:.0f}s ago" if elapsed is not None else "not yet observed"
+    now = time.time()
+    progress = format_duration_since(now - elapsed, now=now) if elapsed is not None else "not yet observed"
     analyses = graph.get("analyses", {})
     lines = [
         "[b]Graph activity[/b]",
@@ -134,6 +149,18 @@ def format_graph_panel(graph: dict | None) -> str:
         f"Queue depth: {graph.get('queue_depth', 0)}",
         f"Failed: {analyses.get('failed', 0)}",
     ]
+    investigation = graph.get("investigation")
+    if investigation:
+        lines.extend([
+            f"Investigations: {investigation.get('completed', 0)} completed / "
+            f"{investigation.get('pending', 0)} pending / {investigation.get('failed', 0)} failed",
+            f"Investigation lag: {investigation.get('stale', 0)} findings; "
+            f"policy {investigation.get('policy_version', 1)}",
+            "Investigation last refresh: "
+            f"{format_duration_since(investigation.get('last_successful_refresh'))}",
+        ])
+        if investigation.get("error"):
+            lines.append(f"Investigation error: {escape(str(investigation['error']))}")
     continuations = graph.get("continuations")
     if continuations:
         lines.extend([

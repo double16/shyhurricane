@@ -803,3 +803,11 @@ To adopt them later, stop the server gracefully and restart with the updated cod
 directory. Retry failed queue work only after checking the recorded cause; completed work remains
 preserved. The dashboard `f` action retries failures across queues, so use it only when that broader
 retry is intended. Code installation alone does not restart workers or retry an assessment.
+
+## Finding correlation
+
+The background investigation worker consumes published graph revisions and saved findings to
+materialize exact URL/method anchors, compatible code operations, script consumers, flow witnesses,
+shared hotspots, and explicit chain candidates. `find_investigation_targets` reads these saved results;
+`graph.investigation` in `/status` reports progress, lag, and failures. Candidate scores are investigation
+priority and do not establish exploitation. See [finding correlation](investigation-targets.md).

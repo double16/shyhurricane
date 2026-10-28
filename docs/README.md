@@ -6,6 +6,7 @@ Start with the [project README](../README.md) for installation and everyday usag
 |-------|----------|
 | [Architecture](architecture.md) | Server processes, content indexing, command isolation, and replay proxy |
 | [Tool reference](tool-reference.md) | Search predicates, pagination, response limits, and indexing waits |
+| [Investigation targets](investigation-targets.md) | Optional finding metadata, correlation, ranking, chain rules, and Burp/ZAP Codex handoffs |
 | [Application graph](application-graph.md) | Graph tools, analysis coverage, publication architecture, Neo4j operations, and rebuilds |
 | [MCP transports](mcp-transports.md) | Transport configuration, client state, elicitation, and progress |
 | [Storage and configuration](configuration.md) | Data directories, Qdrant index tuning, logging, and environment variables |

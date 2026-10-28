@@ -1045,3 +1045,43 @@ def test_disk_status_rendering(state, error, minimums, expected):
     }
     assert expected in format_disk_status(snapshot)
     assert format_disk_status(None) == "Disk: unavailable"
+
+
+def test_graph_panel_reports_investigation_progress_and_errors(monkeypatch):
+    monkeypatch.setattr("shyhurricane.monitor.time.time", lambda: 220)
+    panel = format_graph_panel({"investigation": {
+        "completed": 3, "pending": 2, "failed": 1, "stale": 2, "policy_version": 1,
+        "last_successful_refresh": 100, "error": "ServiceUnavailable",
+    }})
+    assert "Investigations: 3 completed / 2 pending / 1 failed" in panel
+    assert "Investigation lag: 2 findings; policy 1" in panel
+    assert "Investigation last refresh: 2m ago" in panel
+    assert "Investigation error: ServiceUnavailable" in panel
+
+
+@pytest.mark.parametrize(("timestamp", "now", "expected"), [
+    (95, 100, "5s ago"),
+    (40, 100, "1m ago"),
+    (-3500, 100, "1h ago"),
+    (-86300, 100, "1d ago"),
+    (110, 100, "0s ago"),
+    (None, 100, "awaiting results"),
+])
+def test_investigation_refresh_duration(timestamp, now, expected):
+    from shyhurricane.monitor import format_duration_since
+
+    assert format_duration_since(timestamp, now) == expected
+
+
+@pytest.mark.parametrize(("elapsed", "expected"), [
+    (31.9, "31s ago"),
+    (60, "1m ago"),
+    (3600, "1h ago"),
+    (86400, "1d ago"),
+    (-10, "0s ago"),
+    (None, "not yet observed"),
+])
+def test_graph_last_advance_duration(monkeypatch, elapsed, expected):
+    monkeypatch.setattr("shyhurricane.monitor.time.time", lambda: 100000)
+    panel = format_graph_panel({"seconds_since_observed_progress": elapsed})
+    assert f"Last observed advance: {expected}" in panel
