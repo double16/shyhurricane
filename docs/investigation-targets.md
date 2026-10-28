@@ -152,14 +152,16 @@ Each finding job shares a pinned graph revision across focused queries and uses 
 120-second budget and traversal limits. It retains at most 100 witnesses per relation, considers at most
 20 resource methods, 10 code operations, and 100 neighboring findings, and reports reached limits.
 Witnesses retain at most three consuming-context examples per node, prioritizing the affected URL,
-without copying unbounded shared-script context lists. Jobs atomically replace their previous result
-and related derived records. Interrupted jobs restart
-at a fresh graph revision; incomplete work never overwrites a successful materialization. Successful
+without copying unbounded shared-script context lists. Finding jobs atomically publish individual
+results. Separate durable jobs derive chains and rebuild hotspots without repeating graph analysis. Each job uses a generation guard so an older completion
+cannot acknowledge newer work. Derived publications also validate contributing result generations.
+Interrupted jobs restart at a fresh graph revision; incomplete work never overwrites a successful materialization. Successful
 bounded graph queries may publish partial witnesses with explicit gaps.
 
 The worker runs independently of model loading and supports low-power mode. It pauses while dependency
 health is unavailable and stops claiming work at shutdown. Transient failures retry with bounded backoff;
-permanent failures require dashboard `f` retry. Previous successful results remain readable as stale.
+permanent failures require dashboard `f` retry, including chain and hotspot jobs. Previous successful
+results remain readable as stale.
 Queries do not trigger synchronous recomputation or target requests.
 
 `graph.investigation` in `/status` and the graph dashboard panel report pending, completed, failed,
@@ -172,3 +174,35 @@ This finding metadata version is 3. Use a fresh assessment directory and replay 
 old findings are not migrated. Preserve existing directories. The graph format itself is unchanged.
 New server deployments accept old extension payloads, so extensions can be upgraded independently.
 See the [Burp handoff](codex-burp-findings.md) and [ZAP handoff](codex-zap-findings.md) for ready-to-send prompts.
+
+Correlation policy 2 uses storage format 3 and requires rebuilt assessment storage. Older correlation
+files are rejected without migration or automatic deletion. Finding metadata remains version 3.
+
+### Scheduling and bounded reads
+
+A compact persistent work table holds correlation, chain derivation, and hotspot aggregation jobs.
+Indexed eligibility times provide deterministic work selection and retry backoff. New metadata and
+manual retries advance job generations; stale completions and failures leave newer work untouched.
+Graph refresh sweeps checkpoint batches of 100 finding IDs. A sweep finishes before another begins,
+coalescing newer graph revisions without repeatedly restarting its prefix. New findings enqueue directly.
+
+Chain selection uses explicit flow, storage/message, and response-endpoint identities. These lookup
+keys select neighbors; the witness prerequisites above still determine supported relationships.
+Pairing considers at most 100 keys and 100 neighbors and reports reached bounds. Hotspot membership
+uses shared URLs, contexts, operations, and sinks, independently of chain lookup keys. Rebuilding one
+hotspot retains at most 100 members in deterministic ID order and reports bounded contributing counts.
+Pending or failed members keep the previous aggregate readable as stale. Excluding one member
+rebuilds the group from its remaining members; fewer than two eligible members removes the hotspot.
+
+Saved-result reads filter lightweight headers by scope, category, hypotheses, and complete dependency
+membership before loading witness payloads in batches of at most 100. They retain at most 1,000 results;
+`limit` is the saved page size. A qualifying extra header detects truncation without loading another
+payload. Scope selection retains at most 10,000 finding headers and reports when that bound is reached.
+Reads use a consistent SQLite snapshot and batch dependency checks. Memory scales with retained
+results and the working batch rather than every matching payload.
+
+`graph.investigation.work` reports `pending` and `failed` job counts under `correlate`, `derive`, and
+`hotspot`. These are work counts; existing finding-level counts retain their meaning. The dashboard
+shows these queues and `f` retries failed jobs of all three kinds. Derived candidates report incomplete
+materialization while their contributing results or derived jobs are pending, failed, or stale.
+Bare IPv6 finding targets are accepted; graph scope arguments use bracketed IPv6 authorities.

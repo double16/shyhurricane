@@ -1085,3 +1085,11 @@ def test_graph_last_advance_duration(monkeypatch, elapsed, expected):
     monkeypatch.setattr("shyhurricane.monitor.time.time", lambda: 100000)
     panel = format_graph_panel({"seconds_since_observed_progress": elapsed})
     assert f"Last observed advance: {expected}" in panel
+
+
+def test_graph_panel_displays_derived_work_counts():
+    panel = format_graph_panel({"investigation": {"work": {
+        "derive": {"pending": 3, "failed": 1}, "hotspot": {"pending": 2, "failed": 0},
+    }}})
+    assert "Investigation derive work: 3 pending / 1 failed" in panel
+    assert "Investigation hotspot work: 2 pending / 0 failed" in panel

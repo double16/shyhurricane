@@ -7,10 +7,12 @@ import logging
 import subprocess
 import tarfile
 
+import httpx as httpx
 from haystack import Document
 
 from shyhurricane.doc_type_model_map import map_mime_to_type
 from shyhurricane.finding_metadata import scanner_metadata
+from shyhurricane.source_maps import MAX_SOURCE_MAP_BYTES as MAX_SOURCE_MAP_BYTES
 from shyhurricane.source_maps import _cached_map, _fetch_map, _valid_map, javascript_url_from_map, source_map_url
 from shyhurricane.task_queue.types import SaveFindingQueueItem
 from shyhurricane.utils import unix_command_image

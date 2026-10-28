@@ -29,6 +29,7 @@ def pair_candidate(left, right, rule, witnesses, *, hotspot=False):
         "rule_id": rule,
         "finding_ids": members,
         "finding_revisions": {**left["finding_revisions"], **right["finding_revisions"]},
+        "result_generations": {**left.get("result_generations", {}), **right.get("result_generations", {})},
         "graph_revision": min(left["graph_revision"], right["graph_revision"]),
         "policy_version": left["policy_version"],
         "materialized_at": max(left["materialized_at"], right["materialized_at"]),
@@ -68,7 +69,7 @@ def state_witnesses(candidate):
     return reads, writes
 
 
-def derive(left, neighbors):
+def derive(left, neighbors, *, include_hotspots=True):
     """Bounded pairs; matching names/hosts alone never establish a chain."""
     results = {}
     if left.get("excluded"):
@@ -149,27 +150,36 @@ def derive(left, neighbors):
                 candidate = pair_candidate(left, right, "navigation", journeys)
                 candidate["missing_prerequisites"].append("Establish session continuity and privilege transitions")
                 results[candidate["id"]] = candidate
-    # Aggregate all contributing neighbors for each shared endpoint/operation/sink.
-    for key in left.get("association_keys", []):
-        if not key.startswith(("url:", "node:")):
-            continue
-        members = [
-            item
-            for item in [left, *(item for item in neighbors if item["id"] != left["id"])]
-            if not item.get("excluded")
-            and item["graph_revision"] == left["graph_revision"]
-            and key in item.get("association_keys", [])
-        ]
-        members = sorted({item["id"]: item for item in members}.values(), key=lambda item: item["id"])
-        if len(members) < 2:
-            continue
-        candidate = members[0]
-        for member in members[1:]:
-            candidate = pair_candidate(
-                candidate, member, "shared_hotspot", candidate["witnesses"] + member["witnesses"], hotspot=True
-            )
-        candidate["id"] = identity("hotspot", key)
-        candidate["shared_key"] = key
-        candidate["contributing_finding_count"] = len(candidate["finding_ids"])
-        results[candidate["id"]] = candidate
+    if include_hotspots:
+        for key in left.get("hotspot_keys", left.get("association_keys", [])):
+            members = [
+                item
+                for item in [*(item for item in neighbors if item["id"] != left["id"]), left]
+                if not item.get("excluded")
+                and item["graph_revision"] == left["graph_revision"]
+                and key in item.get("hotspot_keys", item.get("association_keys", []))
+            ]
+            if candidate := aggregate_hotspot(key, members):
+                results[candidate["id"]] = candidate
     return sorted(results.values(), key=lambda item: item["id"])
+
+
+def aggregate_hotspot(key, members, *, limited=False):
+    """Aggregate one indexed group independently of whichever member changed."""
+    if not key.startswith(("url:", "node:")):
+        return None
+    members = sorted({item["id"]: item for item in members}.values(), key=lambda item: item["id"])
+    if len(members) < 2:
+        return None
+    candidate = members[0]
+    for member in members[1:]:
+        candidate = pair_candidate(
+            candidate, member, "shared_hotspot", candidate["witnesses"] + member["witnesses"], hotspot=True
+        )
+    candidate["id"] = identity("hotspot", key)
+    candidate["shared_key"] = key
+    candidate["contributing_finding_count"] = len(candidate["finding_ids"])
+    if limited:
+        candidate["contexts_limited"] = True
+        candidate["analysis_gaps"].append("Hotspot membership limited to 100 contributing findings")
+    return candidate

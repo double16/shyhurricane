@@ -3,14 +3,14 @@
 import hashlib
 import re
 import time
-from urllib.parse import urlsplit
 
 from shyhurricane.finding_metadata import categories
 from shyhurricane.graph.budget import QueryBudget
-from shyhurricane.graph.model import identity, web_url
+from shyhurricane.graph.model import identity
 from shyhurricane.graph.query import GraphQuery
 from shyhurricane.investigation.ranking import score
 from shyhurricane.investigation.storage import POLICY_VERSION
+from shyhurricane.investigation.targets import target_coordinates
 
 
 class RevisionQuery(GraphQuery):
@@ -116,10 +116,8 @@ def artifact_hash_verifier(artifacts):
 def correlate(job, query, graph_revision, *, verify_hash=lambda node, digest: False):
     metadata = job["metadata"]
     target = job["target"]
-    url = web_url(target) if "://" in target else None
-    parsed = urlsplit(target if url else f"https://{target}")
-    host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
-    scope = f"{host}:{parsed.port}" if parsed.port else host
+    coordinates = target_coordinates(target)
+    url, scope = coordinates.url, coordinates.scope
     conflicts = job["conflicts"]
     anchor_conflict = any(
         item["field"].split(".")[0]
@@ -328,6 +326,32 @@ def correlate(job, query, graph_revision, *, verify_hash=lambda node, digest: Fa
             if w["relation"] == "journey"
             for node in w["nodes"]
             if node.get("url")
+        }
+    )
+    candidate["hotspot_keys"] = list(candidate["association_keys"])
+    candidate["pairing_keys"] = sorted(
+        set(candidate["hotspot_keys"])
+        | {f"url:{value}" for value in candidate["affected_urls"]}
+        | {
+            f"flow:{node['id']}"
+            for witness in candidate["witnesses"]
+            if witness["relation"] == "flow"
+            for node in witness["nodes"]
+        }
+        | {
+            f"state:{node['id']}"
+            for witness in candidate["witnesses"]
+            if witness["relation"] == "flow"
+            for node in witness["nodes"]
+            if node.get("kind") in {"storage", "message"}
+        }
+        | {
+            f"url:{node['url']}"
+            for witness in candidate["witnesses"]
+            if witness["relation"] == "response"
+            for node in witness["nodes"]
+            if node.get("url")
+            and any(step["kind"] == "RESPONSE_FROM" and step["target"] == node["id"] for step in witness["steps"])
         }
     )
     candidate.update(score(candidate))

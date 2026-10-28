@@ -20,8 +20,8 @@ def publish(store, finding_id="a", target="https://example.com/app.js", metadata
     store.set_setting("graph_revision", revision)
     task = store.work(revision)
     result = correlate(task, Query(), revision)
-    assert store.publish(task, result, [], revision)
-    return task, result
+    assert store.publish(task, result, revision)
+    return task, store.load_result(finding_id)
 
 
 def test_obligations_survive_restart_and_publish_atomically():
@@ -32,7 +32,7 @@ def test_obligations_survive_restart_and_publish_atomically():
     with closing(CorrelationStore("test")) as store:
         assert store.work(1) == task
         candidate = correlate(task, Query(), 1)
-        store.publish(task, candidate, [], 1)
+        store.publish(task, candidate, 1)
         assert store.work(1) is None
         assert store.work(2)["id"] == "a"
         store.set_setting("graph_revision", 2)
@@ -47,16 +47,16 @@ def test_stale_metadata_is_not_activated_and_last_result_retained():
     with closing(CorrelationStore("test")) as store:
         task, candidate = publish(store)
         store.submit("a", task["target"], {"severity": "high"})
-        assert not store.publish(task, candidate, [], 1)
+        assert not store.publish(task, candidate, 1)
         assert store.read("example.com")["results"][0]["stale"]
         new = store.work(1)
         replacement = correlate(new, Query(), 1)
-        store.publish(new, replacement, [], 1)
+        store.publish(new, replacement, 1)
         assert not store.read("example.com")["results"][0]["stale"]
         assert store.read("example.com")["results"][0]["priority"] > candidate["priority"]
         store.submit("a", task["target"], {"severity": "high"})
         assert store.work(1) is None
-        assert not store.publish({**task, "id": "missing"}, candidate, [], 1)
+        assert not store.publish({**task, "id": "missing"}, candidate, 1)
 
 
 def test_permanent_failure_retry_and_transient_backoff():
@@ -70,10 +70,11 @@ def test_permanent_failure_retry_and_transient_backoff():
         assert store.status()["failed"] == 1
         assert retry_correlations("test") == 1
         assert store.work(1)["id"] == "a"
+        task = store.work(1)
         store.failed(task, TimeoutError(), transient=True)
         assert store.work(1) is None
         assert store.attempts("a") == 1
-        store.connection.execute("UPDATE findings SET retry_at=0")
+        store.connection.execute("UPDATE jobs SET due=0")
         store.connection.commit()
         assert store.work(1)
 
@@ -90,7 +91,7 @@ def test_neighbors_are_bounded_indexed_and_false_positives_remove_results():
         assert store.neighbors(result["association_keys"])[0] == []
         store.submit("a", task["target"], {"verification_status": "false_positive"})
         task = store.work(1)
-        store.publish(task, correlate(task, Query(), 1), [], 1)
+        store.publish(task, correlate(task, Query(), 1), 1)
         assert store.read("example.com")["results"] == []
 
 
@@ -101,7 +102,8 @@ def test_scope_category_and_hypothesis_filters_and_cross_scope_dependencies():
         task, left = publish(store, "a", "https://example.com:8443/admin", {"vulnerability_types": ["xss"]})
         _, right = publish(store, "b", "https://api.example.com/user", {"vulnerability_types": ["configuration"]})
         chain = pair_candidate(left, right, "protection_gap", [])
-        store.publish(task, left, [chain], 1)
+        derive_job = store._select_job(("derive",))
+        store.publish_derived(derive_job, [chain], dependency=left)
         assert len(store.read("example.com")["results"]) == 3
         assert len(store.read("example.com", include_hypotheses=False)["results"]) == 2
         assert len(store.read("example.com", vulnerability_type="xss")["results"]) == 2
@@ -162,7 +164,9 @@ def test_neighbor_key_budget_is_reported_and_failed_results_keep_status():
     with closing(CorrelationStore("test")) as store:
         task, _ = publish(store)
         assert store.neighbors([str(index) for index in range(101)])[1]
-        store.failed(task, ValueError(), transient=False)
+        with store.connection:
+            store.enqueue("correlate", task["id"])
+        store.failed(store.work(1), ValueError(), transient=False)
         assert store.read("example.com")["results"][0]["materialization_status"] == "failed"
 
 
@@ -173,3 +177,58 @@ def test_reconciliation_cannot_overwrite_a_newer_enrichment():
         assert store.work(0)["metadata"] == {"severity": "critical"}
         store.submit("a", "example.com", {"severity": "high"}, source_revision=3)
         assert store.work(0)["metadata"] == {"severity": "high"}
+
+
+def test_bare_ipv6_submission_and_correlation():
+    with closing(CorrelationStore("test")) as store:
+        store.submit("ipv6", "2001:db8::1", {})
+        task = store.work(1)
+        result = correlate(task, Query(), 1)
+        assert result["anchor"] == "host"
+        store.publish(task, result, 1)
+        assert store.read("[2001:db8::1]")["results"]
+
+
+def test_publication_starts_write_transaction_before_revision_check():
+    import sqlite3
+
+    with closing(CorrelationStore("test")) as store:
+        store.submit("a", "example.com", {})
+        task = store.work(1)
+        statements = []
+        store.connection.set_trace_callback(statements.append)
+        store.publish(task, correlate(task, Query(), 1), 1)
+        begin = next(i for i, sql in enumerate(statements) if sql == "BEGIN IMMEDIATE")
+        check = next(i for i, sql in enumerate(statements) if sql.startswith("SELECT revision"))
+        assert begin < check
+        assert not store.connection.in_transaction
+        assert isinstance(store.connection, sqlite3.Connection)
+
+
+def test_second_connection_cannot_enrich_between_revision_check_and_commit():
+    import sqlite3
+
+    import pytest
+
+    with closing(CorrelationStore("test")) as store, closing(CorrelationStore("test")) as writer:
+        store.submit("a", "example.com", {})
+        task = store.work(1)
+        writer.connection.execute("PRAGMA busy_timeout=0")
+        checked = []
+
+        def during_publication(sql):
+            if sql.startswith("SELECT revision FROM findings"):
+                with pytest.raises(sqlite3.OperationalError, match="locked"):
+                    writer.submit("a", "example.com", {"severity": "high"})
+                checked.append(True)
+
+        store.connection.set_trace_callback(during_publication)
+        assert store.publish(task, correlate(task, Query(), 1), 1)
+        assert checked
+        store.connection.set_trace_callback(None)
+        writer.submit("a", "example.com", {"severity": "high"})
+        new = store.work(1)
+        assert new["generation"] > task["generation"]
+        assert new["metadata"] == {"severity": "high"}
+        store.failed(task, ValueError(), transient=False)
+        assert store.work(1) == new

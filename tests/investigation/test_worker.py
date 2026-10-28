@@ -50,12 +50,13 @@ def test_materialize_atomic_publish_and_failure_classes(monkeypatch):
         monkeypatch.setattr(store, "neighbors", lambda *args: ([], True))
         assert worker.materialize_one(store, Mock(), Mock(), 1)
         result = store.read("example.com")["results"][0]
-        assert any("100 neighbors" in text for text in result["analysis_gaps"])
-        assert result["contexts_limited"]
+        assert result["finding_ids"] == ["finding"]
+        while store._select_job(("derive", "hotspot")):
+            assert worker.materialize_one(store, Mock(), Mock(), 1)
         monkeypatch.setattr(worker, "correlate", Mock(side_effect=TimeoutError()))
         assert worker.materialize_one(store, Mock(), Mock(), 2)
         assert store.status()["pending"] == 1
-        store.connection.execute("UPDATE findings SET retry_at=0")
+        store.connection.execute("UPDATE jobs SET due=0")
         store.connection.commit()
         monkeypatch.setattr(worker, "correlate", Mock(side_effect=ValueError()))
         assert worker.materialize_one(store, Mock(), Mock(), 2)

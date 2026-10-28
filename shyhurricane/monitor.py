@@ -159,6 +159,9 @@ def format_graph_panel(graph: dict | None) -> str:
             "Investigation last refresh: "
             f"{format_duration_since(investigation.get('last_successful_refresh'))}",
         ])
+        for kind, counts in investigation.get("work", {}).items():
+            lines.append(f"Investigation {escape(kind)} work: {counts.get('pending', 0)} pending / "
+                         f"{counts.get('failed', 0)} failed")
         if investigation.get("error"):
             lines.append(f"Investigation error: {escape(str(investigation['error']))}")
     continuations = graph.get("continuations")

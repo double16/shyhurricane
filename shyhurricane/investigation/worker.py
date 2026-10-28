@@ -11,7 +11,7 @@ from qdrant_client.http import models as qm
 from shyhurricane.graph.database import GraphStore
 from shyhurricane.graph.retry_policy import transient_neo4j_error
 from shyhurricane.investigation.engine import artifact_hash_verifier, correlate, correlation_query
-from shyhurricane.investigation.rules import derive
+from shyhurricane.investigation.rules import aggregate_hotspot, derive
 from shyhurricane.investigation.storage import CorrelationStore
 from shyhurricane.task_queue.types import prepare_worker_process
 
@@ -73,26 +73,35 @@ async def reconcile(store, client):
 
 
 def materialize_one(store, graph, artifacts, revision):
-    job = store.work(revision)
+    job = store.next_job(revision)
     if job is None:
         return False
     try:
-        result = correlate(
-            job, correlation_query(graph, revision), revision, verify_hash=artifact_hash_verifier(artifacts)
-        )
-        neighbors, limited = store.neighbors(result.get("association_keys", []))
-        if limited:
-            result["analysis_gaps"].append("Related finding selection limited to 100 neighbors")
-            result["contexts_limited"] = True
-        derived = derive(result, neighbors)
-        store.publish(job, result, derived, revision)
-        logger.info(
-            "Investigation refreshed finding=%s revision=%s derived=%s gaps=%s",
-            job["id"],
-            revision,
-            len(derived),
-            len(result["analysis_gaps"]),
-        )
+        if job["kind"] == "hotspot":
+            members, limited, waiting = store.hotspot_members(job["id"], revision)
+            candidate = aggregate_hotspot(job["id"], members, limited=limited)
+            store.publish_derived(job, [candidate] if candidate else [], waiting=waiting)
+        elif job["kind"] == "derive":
+            result = store.load_result(job["id"])
+            if result is None:
+                store.publish_derived(job, [], waiting=True)
+            else:
+                neighbors, limited = store.neighbors(result.get("pairing_keys", result.get("association_keys", [])))
+                candidates = derive(result, neighbors, include_hotspots=False)
+                if limited:
+                    for candidate in candidates:
+                        candidate["contexts_limited"] = True
+                        candidate["analysis_gaps"].append("Related finding selection limited to 100 neighbors or keys")
+                store.publish_derived(job, candidates, dependency=result, limited=limited)
+        else:
+            result = correlate(
+                job, correlation_query(graph, revision), revision, verify_hash=artifact_hash_verifier(artifacts)
+            )
+            if len(result.get("pairing_keys", [])) > 100:
+                result["contexts_limited"] = True
+                result["analysis_gaps"].append("Related finding lookup limited to 100 keys")
+            store.publish(job, result, revision)
+        logger.info("Investigation refreshed kind=%s key=%s revision=%s", job["kind"], job["id"], revision)
     except Exception as error:
         transient = isinstance(error, (TimeoutError, OSError, sqlite3.OperationalError)) or transient_neo4j_error(error)
         store.failed(job, error, transient=transient)
