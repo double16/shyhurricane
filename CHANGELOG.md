@@ -4,6 +4,7 @@
 
 ### Features
 
+- Show assessment title, aggregate health dot, and work status in interactive iTerm2 tabs.
 - Ingest Burp issues XML as findings and index complete evidence exchanges.
 - Accept optional structured finding metadata across HTTP, MCP, Opengrep, and Nuclei, expose stable
   finding IDs, and enrich duplicate submissions while retaining conflicting producer values.

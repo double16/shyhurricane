@@ -1128,3 +1128,79 @@ async def test_monitor_literal_urls_and_markup_recovery(monkeypatch):
         await app.refresh_data()
         assert "Unavailable" in app.query_one("#urls", Static).content.plain
         assert isinstance(app.query_one("#urls", Static).content, Text)
+
+
+@pytest.mark.parametrize("ready,tools,count,expected", [
+    (True, [], 0, "idle"), (True, [], 1, "working"),
+    (False, [], 1, "blocked"), (False, ["tool"], 1, "working"),
+    (True, [], None, "blocked"),
+])
+def test_terminal_activity(ready, tools, count, expected):
+    from types import SimpleNamespace
+
+    from shyhurricane.monitor import terminal_status
+
+    data = SimpleNamespace(model_health=True, qdrant_health=True, graph={"healthy": True},
+                           disk={"state": "disabled"}, queue_sizes={"queue": count})
+    assert terminal_status(data, ready, tools) == ("#00ff00", expected)
+    data.model_health = None
+    assert terminal_status(data, ready, tools)[0] == "#ffa500"
+    data.qdrant_health = False
+    assert terminal_status(data, ready, tools)[0] == "#ff0000"
+
+
+@pytest.mark.parametrize("graph", [
+    {"investigation": {"work": {"reconcile": {"pending": 1}}}},
+    {"continuations": {"running": 1}}, {"analyses": {"processing": 1}},
+    {"queue_depth": 1},
+])
+def test_terminal_background_work(graph):
+    from shyhurricane.monitor import terminal_status
+
+    data = SimpleNamespace(model_health=True, qdrant_health=True, graph=graph,
+                           disk={"state": "healthy"}, queue_sizes={})
+    assert terminal_status(data, True, [])[1] == "working"
+    assert terminal_status(data, False, [])[1] == "blocked"
+
+
+def test_terminal_unknown_counts_preserve_previous_activity():
+    from shyhurricane.monitor import terminal_status
+
+    data = SimpleNamespace(model_health=True, qdrant_health=True, graph={"error": "unavailable"},
+                           disk={"state": "checking"}, queue_sizes={})
+    assert terminal_status(data, True, [], "working") == ("#ffa500", "working")
+    data.disk = {"state": "paused"}
+    assert terminal_status(data, True, [])[0] == "#ff0000"
+
+
+def test_terminal_output_and_cleanup(monkeypatch):
+    from pathlib import Path
+    from unittest.mock import Mock
+
+    monkeypatch.setenv("TERM_PROGRAM", "iTerm.app")
+    monkeypatch.setattr("shyhurricane.monitor.sys.stdout.isatty", lambda: True)
+    monkeypatch.setattr("shyhurricane.monitor.resolve_data_dir", lambda: Path("/tmp/assessment\x1b\n"))
+    context = SimpleNamespace(health_monitor=SimpleNamespace(ready=SimpleNamespace(is_set=lambda: True)))
+    app = MonitorApp(context, "127.0.0.1", 8000, SimpleNamespace(running_tools=[]))
+    driver = Mock(is_headless=False)
+    app._driver = driver
+    data = SimpleNamespace(model_health=True, qdrant_health=True, graph={"healthy": True},
+                           disk={"state": "healthy"}, queue_sizes={})
+    app.publish_terminal_status(data)
+    assert driver.write.call_args_list[0].args == ("\x1b]1;shyhurricane - assessment\x1b\\",)
+    assert driver.write.call_args_list[1].args == ("\x1b]21337;indicator=#00ff00;status=idle\x1b\\",)
+    app.publish_terminal_status(data)
+    assert driver.write.call_count == 2
+    app.on_unmount()
+    assert driver.write.call_args.args == ("\x1b]21337;status=;indicator=;status-color=\x1b\\",)
+    driver.reset_mock()
+    app._iterm_enabled = False
+    app.publish_terminal_status(data)
+    driver.write.assert_not_called()
+    app._iterm_enabled = True
+    driver.is_headless = True
+    app.publish_terminal_status(data)
+    driver.write.assert_not_called()
+    app._driver = None
+    app.publish_terminal_status(data)
+    app.on_unmount()

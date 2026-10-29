@@ -359,6 +359,13 @@ per-queue errors; successful queues are committed even if another queue fails. R
 payloads and leaves processing items untouched. Workers pick up pending work asynchronously and
 may fail again if the original problem remains. Repeated key presses do not overlap retry operations.
 
+In iTerm2, the tab title shows `shyhurricane - <data-directory basename>`. The health dot is
+green when all checks pass, red when any fail, and orange while checks are unknown. The subtitle
+shows `working` for queued or processing work, `blocked` when readiness prevents queued work,
+and `idle` otherwise. Running MCP tools take precedence and show `working`. Updates follow the
+existing dashboard refresh cadence. Enable “Show status in tab subtitle” in iTerm2’s Session Status
+tool settings to see the second line. Status is cleared when the monitor closes.
+
 The **MCP tools** panel lists running tools followed by the last five completed calls, newest first.
 Yellow dots indicate running tools, green dots indicate completed calls, and red dots indicate
 failures (including cancelled calls). History is kept in memory until the server restarts.

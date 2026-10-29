@@ -1,5 +1,7 @@
 import asyncio
 import logging
+import os
+import sys
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -15,6 +17,7 @@ from textual.binding import Binding
 from textual.containers import Container, VerticalScroll
 from textual.widgets import Footer, Header, Static
 
+from shyhurricane.data_paths import resolve_data_dir
 from shyhurricane.db import get_domain_and_host_counts
 from shyhurricane.disk_space import disk_status
 from shyhurricane.graph.status import graph_status
@@ -358,6 +361,39 @@ def format_tools_panel(running_tools: list[str], recent_tools: list[tuple[str, s
     return f"[b]MCP tools[/b]\n{tools}"
 
 
+def terminal_status(data, ready, running_tools, previous=None):
+    """Summarize cached checks and work without performing probes."""
+    checks = [data.model_health, data.qdrant_health, (data.graph or {}).get("healthy")]
+    disk = data.disk or {}
+    checks.append({"healthy": True, "disabled": True, "paused": False}.get(disk.get("state")))
+    color = "#ff0000" if False in checks else "#ffa500" if None in checks else "#00ff00"
+    counts = list(data.queue_sizes.values())
+    graph = data.graph or {}
+    investigation = graph.get("investigation", {})
+    sections = [investigation, graph.get("continuations", {}), graph.get("analyses", {})]
+    sections.extend(investigation.get("work", {}).values())
+    counts.append(graph.get("queue_depth", 0))
+    if graph.get("error"):
+        counts.append(None)
+    for section in sections:
+        counts.extend(section.get(key, 0) for key in ("pending", "processing", "running"))
+    if running_tools:
+        activity = "working"
+    elif any(value is not None and value > 0 for value in counts):
+        activity = "working" if ready else "blocked"
+    elif None in counts:
+        activity = previous or "blocked"
+    else:
+        activity = "idle"
+    return color, activity
+
+
+def terminal_title():
+    """Keep filesystem names from injecting terminal control sequences."""
+    name = resolve_data_dir().name
+    return "shyhurricane - " + "".join(c for c in name if c.isprintable())
+
+
 class MonitorApp(App[None]):
     TITLE = "shyhurricane"
     CSS = """
@@ -385,6 +421,8 @@ class MonitorApp(App[None]):
         self.server = server
         self._retrying_failed = False
         self.qdrant_cache = MonitorQdrantCache()
+        self._tab_status = None
+        self._iterm_enabled = os.environ.get("TERM_PROGRAM") == "iTerm.app" and sys.stdout.isatty()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -413,6 +451,23 @@ class MonitorApp(App[None]):
                 content = Text(content)
         self.query_one(selector, Static).update(content)
 
+    def publish_terminal_status(self, data):
+        if not self._iterm_enabled or self._driver is None or self.is_headless:
+            return
+        monitor = getattr(self.server_context, "health_monitor", None)
+        ready = monitor is not None and monitor.ready.is_set()
+        previous = self._tab_status[1] if self._tab_status else None
+        status = terminal_status(data, ready, self.server.running_tools, previous)
+        if status != self._tab_status:
+            color, activity = status
+            self._driver.write(f"\x1b]1;{terminal_title()}\x1b\\")
+            self._driver.write(f"\x1b]21337;indicator={color};status={activity}\x1b\\")
+            self._tab_status = status
+
+    def on_unmount(self):
+        if self._tab_status is not None and self._driver is not None:
+            self._driver.write("\x1b]21337;status=;indicator=;status-color=\x1b\\")
+
     async def refresh_data(self) -> None:
         data = await collect_monitor_data(
             self.server_context, self.host, self.port, self.server.running_tools, self.server.recent_tools,
@@ -420,6 +475,7 @@ class MonitorApp(App[None]):
         )
         if not self.is_running:
             return
+        self.publish_terminal_status(data)
         self.update_panel("#configuration-content", format_configuration_panel(data))
         queues = format_queue_panel(data.queue_sizes, data.queue_failures)
         self.update_panel("#queues", f"[b]Queue status[/b]\n{queues}")
