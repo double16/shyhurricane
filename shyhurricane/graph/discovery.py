@@ -9,6 +9,11 @@ NODE_FIELDS = {"id", "kind", "name", "role", "url", "method", "source_path", "lo
 STEP_FIELDS = {
     "id", "kind", "source", "target", "classification", "evidence_id", "original_hops", "summary_notice"
 }
+MANIFEST_FIELDS = STEP_FIELDS | {
+    "manifest_id", "analysis_unit_id", "capture_id", "capture_status", "follow_up",
+    "discovery", "flow", "materialization", "error", "expandable", "oversized", "artifact",
+    "target_url", "reference_url", "source_sha256",
+}
 INTERPRETATION = (
     "Source/sink labels describe static operations, including network boundaries, not proven attacker control. "
     "Framework symbols and generic property reads do not establish prototype pollution or template injection. "
@@ -23,6 +28,11 @@ def present(item, detail, *, step=False):
         return dict(item)
     fields = STEP_FIELDS if step else NODE_FIELDS
     return {key: value for key, value in item.items() if key in fields}
+
+
+def present_manifest(item, detail):
+    """Keep discovery navigation and coverage alongside compact element properties."""
+    return {**present(item, detail), **{key: value for key, value in item.items() if key in MANIFEST_FIELDS}}
 
 
 def in_context(node, url):
