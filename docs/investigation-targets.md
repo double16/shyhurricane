@@ -105,7 +105,7 @@ A script consumer is an association; only flow relationships establish a flow wi
 Source/sink labels alone do not prove attacker control or exploitation. Unknown methods, uncaptured
 resources, missing imports, deferred detail, mismatched versions, and disconnected paths remain gaps.
 
-### Priority policy version 1
+### Priority scoring version 2
 
 | Contribution | Points |
 |--------------|--------|
@@ -175,7 +175,7 @@ old findings are not migrated. Preserve existing directories. The graph format i
 New server deployments accept old extension payloads, so extensions can be upgraded independently.
 See the [Burp handoff](codex-burp-findings.md) and [ZAP handoff](codex-zap-findings.md) for ready-to-send prompts.
 
-Correlation policy 2 uses storage format 3 and requires rebuilt assessment storage. Older correlation
+Correlation policy 3 uses storage format 4 and requires rebuilt assessment storage. Older correlation
 files are rejected without migration or automatic deletion. Finding metadata remains version 3.
 
 ### Scheduling and bounded reads
@@ -206,3 +206,55 @@ results and the working batch rather than every matching payload.
 shows these queues and `f` retries failed jobs of all three kinds. Derived candidates report incomplete
 materialization while their contributing results or derived jobs are pending, failed, or stale.
 Bare IPv6 finding targets are accepted; graph scope arguments use bracketed IPv6 authorities.
+
+The “Find vulnerability chains” MCP prompt uses this tool as its initial worklist. It validates
+chains and hotspots through returned follow-up calls, retrieving finding details or exploring the
+graph only when necessary. Hypotheses and stale results remain explicitly qualified.
+
+## Contributor context and classification
+
+Responses include `findings`, keyed by contributing finding ID, containing `title`, the original
+submitted `target`, `metadata_revision`, `metadata`, `metadata_conflicts`, and `category_basis`.
+Saved pages include only their own contributors. Titles and targets remain independent: a scanner's
+title can describe an application page while its submitted target identifies an evidence request.
+Full finding Markdown remains available through scoped `query_findings`.
+
+`category_basis` records producer categories and recognized CWE mappings. If neither provides a known
+category, a source-specific scanner rule allowlist is used. Unknown IDs remain unknown; names and
+Markdown never drive classification. ZAP already provides CWE and, for selected CWEs, explicit categories.
+The initial Burp mappings are reflected XSS (2097920), stored XSS (2097408), DOM XSS (2097936), and
+client-side template injection (2097928). References:
+[reflected XSS](https://portswigger.net/kb/issues/00200300_cross-site-scripting-reflected),
+[stored XSS](https://portswigger.net/kb/issues/00200100_cross-site-scripting-stored),
+[DOM XSS](https://portswigger.net/kb/issues/00200310_cross-site-scripting-dom-based),
+[template injection](https://portswigger.net/kb/issues/00200308_client-side-template-injection).
+The scanner-rule allowlist is versioned with correlation policy 3.
+
+`category_coverage` counts scoped `categorized`, `unknown`, and `without_metadata` findings, before
+category filtering. These describe the bounded scoped finding selection; they are not mutually exclusive:
+metadata-free findings are also unknown. A complete processing status does not establish classification,
+graph completeness, or exploitation verification.
+
+Hotspots expose `association_basis` (`direct` or `contextual`), `direct_contributor_count`, and
+`contextual_contributor_count`. Direct support requires at least two findings whose submitted affected
+URL or compatible anchored operation matches the shared key. Context-only groups remain readable but
+score at most 20 with no context-count bonus. Scoring version 2 retains other contributions.
+Witnesses are deduplicated and selected deterministically, prioritizing the shared key within the existing
+ten-witness bound; `omitted_witness_count` reports distinct witnesses beyond that bound. Follow-up calls
+are deduplicated after scope rewriting. Full distinct retained evidence remains in the response.
+
+Storage format 4 rejects older correlation databases without migration or deletion. Rebuild assessment
+storage and replay findings/captures; this change does not update a running assessment automatically.
+
+Additional allowlisted Burp types:
+
+| Decimal rule ID | Category | Definition |
+|-----------------|----------|------------|
+| 2097938 | xss | [PortSwigger definition](https://portswigger.net/kb/issues/00200312_cross-site-scripting-stored-dom-based) |
+| 1048832 | injection | [PortSwigger definition](https://portswigger.net/kb/issues/00100100_os-command-injection) |
+| 1049088 | injection | [PortSwigger definition](https://portswigger.net/kb/issues/00100200_sql-injection) |
+| 1049104 | injection | [PortSwigger definition](https://portswigger.net/kb/issues/00100210_sql-injection-second-order) |
+| 1052800 | injection | [PortSwigger definition](https://portswigger.net/kb/issues/00101080_server-side-template-injection) |
+| 3146256 | ssrf | [PortSwigger definition](https://portswigger.net/kb/issues/00300210_external-service-interaction-http) |
+| 5244416 | configuration | [PortSwigger definition](https://portswigger.net/kb/issues/00500600_cookie-without-httponly-flag-set) |
+| 16777984 | configuration | [PortSwigger definition](https://portswigger.net/kb/issues/01000300_strict-transport-security-not-enforced) |

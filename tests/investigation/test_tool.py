@@ -36,9 +36,11 @@ async def test_tool_pagination_filters_and_pending_fallback(monkeypatch):
     result = await tool.find_investigation_targets(None, "example.com", limit=1)
     assert len(result.results) == 1
     assert result.pagination.total_items == 2
+    assert set(result.findings) == set(result.results[0]["finding_ids"])
     saved = await get_result_page(None, result.pagination.next_page_token)
     assert saved.source_tool == "find_investigation_targets"
     assert len(saved.result.results) == 1
+    assert set(saved.result.findings) == set(saved.result.results[0]["finding_ids"])
     assert saved.result.pagination.next_page_token is None
     with pytest.raises(ToolError, match="Unsupported vulnerability_type"):
         await tool.find_investigation_targets(None, "example.com", vulnerability_type="SQL stuff")

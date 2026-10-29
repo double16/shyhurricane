@@ -17,7 +17,10 @@ async def test_reconcile_is_vector_free_bounded_and_restartable():
         scroll=AsyncMock(
             return_value=(
                 [
-                    qm.Record(id=1, payload={"id": "finding", "meta": {"url": "https://example.com/a"}}),
+                    qm.Record(
+                        id=1,
+                        payload={"id": "finding", "meta": {"url": "https://example.com/a", "title": "Example finding"}},
+                    ),
                     qm.Record(
                         id=2, payload={"meta": {"host": "example.com", "finding_metadata": {"severity": "high"}}}
                     ),
@@ -31,6 +34,9 @@ async def test_reconcile_is_vector_free_bounded_and_restartable():
         await worker.reconcile(store, client)
         assert store.setting("reconcile_offset") == 4
         assert store.status()["pending"] == 2
+        assert (
+            store.connection.execute("SELECT title FROM findings WHERE id='finding'").fetchone()[0] == "Example finding"
+        )
         assert client.scroll.call_args.kwargs["with_vectors"] is False
         assert client.scroll.call_args.kwargs["limit"] == 100
         client.scroll.return_value = ([], None)

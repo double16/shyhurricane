@@ -172,6 +172,13 @@ priority contributions, missing prerequisites, and freshness/coverage limits. Sc
 work, not exploit probability. The tool works without model calls or target requests, including in
 low-power mode. Pending results fall back to the existing scoped finding and graph tools.
 
+Ranked investigation responses include a contributor `findings` dictionary with original titles,
+submitted targets, structured metadata, and category provenance. `category_coverage` reports scoped
+categorized, unknown, and metadata-free findings independently of category filters. Contextual hotspots
+are capped at priority 20; inspect association basis before inferring composition. Processing completion
+does not establish complete evidence. Correlation storage format 4 requires rebuilding assessment storage.
+
+
 HTTP `/findings` and MCP `save_finding` accept optional structured `metadata`, including scanner rule,
 severity, confidence, verification status, affected request method, parameter, CWE, and code location.
 Sources can omit unavailable fields. `query_findings` exposes stable finding IDs and this metadata.

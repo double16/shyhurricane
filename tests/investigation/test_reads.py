@@ -61,3 +61,45 @@ def test_scope_bound_is_reported_without_loading_unrelated_payloads():
             )
         result = store.read("https://example.com/missing")
         assert result["results"] == [] and result["retrieval_truncated"]
+
+
+def test_finding_context_coverage_and_title_revision():
+    from shyhurricane.investigation.engine import correlate
+    from tests.investigation.test_engine import Query
+    with closing(CorrelationStore("test")) as store:
+        metadata = {"source": "burp", "rule_id": "2097936"}
+        store.submit("a", "https://example.com/app.js", metadata, title="DOM XSS")
+        store.set_setting("graph_revision", 1)
+        task = store.work(1)
+        store.publish(task, correlate(task, Query(), 1), 1)
+        result = store.read("example.com", "xss")
+        assert result["findings"]["a"]["title"] == "DOM XSS"
+        assert result["findings"]["a"]["metadata"] == metadata
+        assert result["category_coverage"] == {"categorized": 1, "unknown": 0, "without_metadata": 0}
+        assert store.read("other.example.com")["findings"] == {}
+        assert store.read("example.com", "ssrf")["findings"] == {}
+        store.submit("a", "https://example.com/app.js", metadata, title="Updated title")
+        assert store.work(1)
+        assert store.read("example.com")["results"][0]["stale"]
+
+
+def test_category_coverage_includes_unknowns_before_filtering():
+    with closing(CorrelationStore("test")) as store:
+        publish(store)
+        value = store.read("example.com", "xss")
+        assert value["results"] == []
+        assert value["category_coverage"] == {"categorized": 0, "unknown": 1, "without_metadata": 1}
+        assert value["findings"] == {}
+
+
+def test_read_deduplicates_identical_witnesses_and_calls():
+    with closing(CorrelationStore("test")) as store:
+        task, candidate = publish(store)
+        candidate["witnesses"] *= 2
+        candidate["follow_up"] *= 2
+        with store.connection:
+            store._write_target(candidate, json.dumps(candidate))
+        result = store.read("example.com")["results"][0]
+        assert len(result["witnesses"]) == len(candidate["witnesses"]) // 2
+        calls = [json.dumps(call, sort_keys=True) for call in result["follow_up"]]
+        assert len(calls) == len(set(calls))

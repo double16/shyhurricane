@@ -6,13 +6,14 @@ import time
 from contextlib import closing
 
 from shyhurricane.data_paths import state_path
+from shyhurricane.finding_metadata import categories, category_basis
 from shyhurricane.graph.model import identity
 from shyhurricane.graph.query import scope_predicate
 from shyhurricane.investigation.jobs import POLICY_VERSION, JobStore
 from shyhurricane.investigation.targets import target_coordinates
 
 MAX_TARGETS = 1000
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 
 def store_path(db):
@@ -39,7 +40,8 @@ class CorrelationStore(JobStore):
             if populated and version != SCHEMA_VERSION:
                 raise ValueError("Unsupported correlation database; rebuild assessment storage")
             statements = (
-                "CREATE TABLE IF NOT EXISTS findings (id TEXT PRIMARY KEY,target TEXT NOT NULL,"
+                "CREATE TABLE IF NOT EXISTS findings (id TEXT PRIMARY KEY,title TEXT NOT NULL DEFAULT '',"
+                "target TEXT NOT NULL,"
                 "host_key TEXT NOT NULL,metadata TEXT NOT NULL,conflicts TEXT NOT NULL,revision TEXT NOT NULL,"
                 "source_revision INTEGER NOT NULL DEFAULT 1,state TEXT NOT NULL DEFAULT 'pending',"
                 "graph_revision INTEGER NOT NULL DEFAULT -1,policy INTEGER NOT NULL DEFAULT 0,"
@@ -86,15 +88,16 @@ class CorrelationStore(JobStore):
         with self.connection:
             self._setting(key, value)
 
-    def submit(self, finding_id, target, metadata, conflicts=(), source_revision=1):
-        revision = identity(metadata, conflicts)
+    def submit(self, finding_id, target, metadata, conflicts=(), source_revision=1, *, title=""):
+        revision = identity(metadata, conflicts, title)
         host_key = target_coordinates(target).host_key
         with self.connection:
             self.connection.execute("BEGIN IMMEDIATE")
             changed = self.connection.execute(
-                "INSERT INTO findings(id,target,host_key,metadata,conflicts,revision,source_revision) "
-                "VALUES (?,?,?,?,?,?,?) "
-                "ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata,conflicts=excluded.conflicts,"
+                "INSERT INTO findings(id,target,host_key,metadata,conflicts,revision,source_revision,title) "
+                "VALUES (?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(id) DO UPDATE SET title=excluded.title,metadata=excluded.metadata,"
+                "conflicts=excluded.conflicts,"
                 "revision=excluded.revision,source_revision=excluded.source_revision,state='pending',error=NULL "
                 "WHERE findings.revision!=excluded.revision "
                 "AND excluded.source_revision>=findings.source_revision",
@@ -106,6 +109,7 @@ class CorrelationStore(JobStore):
                     json.dumps(list(conflicts)),
                     revision,
                     source_revision,
+                    title,
                 ),
             ).rowcount
             if changed:
@@ -389,6 +393,9 @@ class CorrelationStore(JobStore):
                     item["analysis_gaps"] = [*item["analysis_gaps"], "Related contexts outside requested scope omitted"]
                     item["context_urls"] = retained_contexts
                     item["witnesses"] = witnesses
+                item["witnesses"] = list(
+                    {json.dumps(witness, sort_keys=True): witness for witness in witnesses}.values()
+                )
                 item["evidence_ids"] = sorted(
                     {step["evidence_id"] for w in witnesses for step in w.get("steps", []) if step.get("evidence_id")}
                 )
@@ -400,6 +407,9 @@ class CorrelationStore(JobStore):
                     {"tool": "fetch_application_graph_evidence", "arguments": {"evidence_id": key}}
                     for key in item["evidence_ids"][:3]
                 ]
+                item["follow_up"] = list(
+                    {json.dumps(call, sort_keys=True): call for call in item["follow_up"]}.values()
+                )
                 item["stale"] = stale
                 states = {dependency[2] for dependency in dependencies}
                 if kind != "target":
@@ -419,7 +429,28 @@ class CorrelationStore(JobStore):
             name: sum(row[2] == name for row in selected.values()) for name in ("pending", "failed", "complete")
         }
         statuses["stale"] = sum(row[3] != revision for row in selected.values())
+        contributor_ids = {key for item in results for key in item["finding_ids"]}
+        finding_context = {}
+        coverage = {"categorized": 0, "unknown": 0, "without_metadata": 0}
+        for key, title, target, metadata, conflicts, source_revision in self.connection.execute(
+            "SELECT f.id,f.title,f.target,f.metadata,f.conflicts,f.source_revision FROM findings f "
+            "JOIN selected_findings s ON s.id=f.id"
+        ):
+            metadata = json.loads(metadata)
+            coverage["unknown" if categories(metadata) == ["unknown"] else "categorized"] += 1
+            coverage["without_metadata"] += not metadata
+            if key in contributor_ids:
+                finding_context[key] = {
+                    "title": title,
+                    "target": target,
+                    "metadata_revision": source_revision,
+                    "metadata": metadata,
+                    "metadata_conflicts": json.loads(conflicts),
+                    "category_basis": category_basis(metadata),
+                }
         return {
+            "findings": finding_context,
+            "category_coverage": coverage,
             "results": results,
             "status": statuses,
             "graph_revision": revision,
@@ -476,4 +507,5 @@ def submit_document(db, doc):
             doc.meta.get("finding_metadata", {}),
             doc.meta.get("finding_metadata_conflicts", []),
             doc.meta.get("finding_metadata_revision", 1),
+            title=doc.meta.get("title", ""),
         )

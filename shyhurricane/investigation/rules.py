@@ -178,6 +178,27 @@ def aggregate_hotspot(key, members, *, limited=False):
         )
     candidate["id"] = identity("hotspot", key)
     candidate["shared_key"] = key
+    direct = [
+        member
+        for member in members
+        if (key.startswith("url:") and key[4:] in member["affected_urls"])
+        or (key.startswith("node:") and key[5:] in member.get("operation_ids", []))
+    ]
+    candidate["association_basis"] = "direct" if len(direct) >= 2 else "contextual"
+    candidate["direct_contributor_count"] = len(direct)
+    candidate["contextual_contributor_count"] = len(members) - len(direct)
+    witnesses = {identity(witness): witness for member in members for witness in member["witnesses"]}
+    ordered = sorted(
+        witnesses.values(),
+        key=lambda witness: (
+            not any(node.get("id") == key[5:] or node.get("url") == key[4:] for node in witness.get("nodes", [])),
+            identity(witness),
+        ),
+    )
+    candidate["witnesses"] = ordered[:10]
+    candidate["omitted_witness_count"] = max(0, len(ordered) - 10)
+    candidate["follow_up"] = list({identity(call): call for member in members for call in member["follow_up"]}.values())
+    candidate.update(score(candidate))
     candidate["contributing_finding_count"] = len(candidate["finding_ids"])
     if limited:
         candidate["contexts_limited"] = True

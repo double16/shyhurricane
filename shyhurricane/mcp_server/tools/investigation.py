@@ -20,6 +20,8 @@ from shyhurricane.result_pages import Pagination, paged_results
 
 class InvestigationResult(BaseModel):
     results: list[dict] = Field(default_factory=list)
+    findings: dict = Field(default_factory=dict)
+    category_coverage: dict = Field(default_factory=dict)
     status: dict = Field(default_factory=dict)
     graph_revision: int = 0
     policy_version: int = 1
@@ -28,6 +30,7 @@ class InvestigationResult(BaseModel):
     analysis_gaps: list[str] = Field(default_factory=list)
     pagination: Pagination | None = None
     instructions: str = (
+        "Complete status means processing completed, not complete evidence or verification. "
         "Priority scores rank investigation work, not exploit probability. Review witnesses and evidence IDs. "
         "Materialization runs asynchronously; pending, stale, failed, or bounded results are incomplete. "
         "Navigation/protection hypotheses do not establish exploit composition or session continuity. "

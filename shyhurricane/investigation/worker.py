@@ -43,6 +43,7 @@ async def reconcile(store, client):
         with_payload=[
             "id",
             "meta.url",
+            "meta.title",
             "meta.netloc",
             "meta.host",
             "meta.finding_metadata",
@@ -64,6 +65,7 @@ async def reconcile(store, client):
             metadata.get("finding_metadata", {}),
             metadata.get("finding_metadata_conflicts", []),
             metadata.get("finding_metadata_revision", 1),
+            title=metadata.get("title", ""),
         )
     store.set_setting("reconcile_offset", offset)
     if offset is None:

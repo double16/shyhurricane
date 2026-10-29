@@ -1,6 +1,6 @@
 """Versioned investigation priority, independent of vulnerability confidence."""
 
-SCORING_VERSION = 1
+SCORING_VERSION = 2
 ANCHORS = {"host": 0, "url": 8, "method": 12, "operation": 20}
 
 
@@ -16,8 +16,13 @@ def score(candidate):
         "metadata_conflict": -10 if candidate.get("anchor_conflict") else 0,
         "incomplete_path": -10 if candidate.get("incomplete_path") else 0,
     }
+    contextual = candidate.get("association_basis") == "contextual"
+    if contextual:
+        contributions["affected_contexts"] = 0
     priority = max(0, sum(contributions.values()))
     cap = 40 if candidate.get("hypothesis") else 100
+    if contextual:
+        cap = min(cap, 20)
     if candidate["anchor"] == "host":
         cap = min(cap, 20)
     return {

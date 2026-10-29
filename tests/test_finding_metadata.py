@@ -94,3 +94,26 @@ def test_scanner_mapping(source, label, expected):
     assert result["native_severity"] == label
     assert result["verification_status"] == "unverified"
     assert result["cwe_ids"] == ["CWE-79"]
+
+
+@pytest.mark.parametrize("rule,expected", [
+    ("2097920", "xss"), ("2097408", "xss"), ("2097936", "xss"), ("2097928", "injection"),
+])
+def test_burp_rule_categories_have_explicit_provenance(rule, expected):
+    from shyhurricane.finding_metadata import category_basis
+    metadata = {"source": "burp", "rule_id": rule}
+    assert categories(metadata) == [expected]
+    assert category_basis(metadata) == [
+        {"category": expected, "basis": "scanner_rule", "source": "burp", "value": rule}
+    ]
+    assert categories({**metadata, "source": "zap"}) == ["unknown"]
+    assert categories({**metadata, "cwe_ids": ["CWE-918"]}) == ["ssrf"]
+    assert categories({**metadata, "vulnerability_types": ["configuration"]}) == ["configuration"]
+    assert categories({"source": "burp", "rule_id": "9999999"}) == ["unknown"]
+
+
+def test_every_allowlisted_rule_is_source_specific():
+    from shyhurricane.finding_metadata import SCANNER_CATEGORIES
+    for (source, rule), category in SCANNER_CATEGORIES.items():
+        assert categories({"source": source, "rule_id": rule}) == [category]
+        assert categories({"source": "custom", "rule_id": rule}) == ["unknown"]

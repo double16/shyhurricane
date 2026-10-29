@@ -116,3 +116,37 @@ def test_hotspot_refresh_uses_new_finding_revision_not_its_previous_result():
     assert hotspots
     assert all(item["finding_revisions"]["a"] == "enriched" for item in hotspots)
     assert all(item["score_contributions"]["severity"] == 25 for item in hotspots)
+
+
+def test_hotspot_basis_scoring_and_deduplication_are_order_independent():
+    from shyhurricane.investigation.rules import aggregate_hotspot
+    left, right = candidate(), candidate("b")
+    left["metadata"] = right["metadata"] = {"severity": "critical"}
+    direct = aggregate_hotspot("url:" + left["affected_urls"][0], [left, right])
+    assert direct["association_basis"] == "direct"
+    assert direct["direct_contributor_count"] == 2
+    contextual = aggregate_hotspot("url:https://example.com/other", [left, right])
+    assert contextual["association_basis"] == "contextual"
+    assert contextual["priority"] <= 20
+    assert contextual["score_contributions"]["affected_contexts"] == 0
+    assert contextual == aggregate_hotspot("url:https://example.com/other", [right, left])
+    assert len(contextual["follow_up"]) == len(left["follow_up"])
+    assert len(contextual["witnesses"]) <= 10
+
+
+def test_hotspot_selects_key_witnesses_and_reports_distinct_omissions():
+    from shyhurricane.investigation.rules import aggregate_hotspot
+    left, right = candidate(), candidate("b")
+    witnesses = [
+        {"relation": "consumer", "nodes": [{"id": str(index), "url": "https://example.com/other"}], "steps": []}
+        for index in range(15)
+    ]
+    left["witnesses"] = witnesses
+    right["witnesses"] = [*witnesses, {"relation": "consumer", "nodes": [{"id": "match", "url": URL}], "steps": []}]
+    value = aggregate_hotspot("url:" + URL, [left, right])
+    assert value["witnesses"][0]["nodes"][0]["id"] == "match"
+    assert len(value["witnesses"]) == 10
+    assert value["omitted_witness_count"] == 6
+    assert value == aggregate_hotspot("url:" + URL, [right, left])
+    left["operation_ids"] = right["operation_ids"] = ["shared-operation"]
+    assert aggregate_hotspot("node:shared-operation", [left, right])["association_basis"] == "direct"

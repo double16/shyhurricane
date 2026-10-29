@@ -1093,3 +1093,38 @@ def test_graph_panel_displays_derived_work_counts():
     }}})
     assert "Investigation derive work: 3 pending / 1 failed" in panel
     assert "Investigation hotspot work: 2 pending / 0 failed" in panel
+
+
+@pytest.mark.asyncio
+async def test_monitor_literal_urls_and_markup_recovery(monkeypatch):
+    from rich.text import Text
+
+    data = MonitorData(
+        bound_address="localhost:8000", proxy_address="not started", model="model", model_health=True,
+        certificate_fingerprint=None, database="db", qdrant_host_bind="localhost", qdrant_http_port=6333,
+        qdrant_health=True, low_power=False, document_counts={}, domain_count=0, host_count=0,
+        top_domains=[], top_hosts=[], queue_sizes={}, running_tools=[],
+        recent_urls=["https://example.com/", "https://[::1]/", "https://example.com/[/bad]",
+                     "https://example.com/[bold]literal[/bold]"],
+    )
+    monkeypatch.setattr("shyhurricane.monitor.collect_monitor_data", AsyncMock(return_value=data))
+    monkeypatch.setattr("shyhurricane.monitor.format_configuration_panel", lambda data: "[/bad]")
+    app = MonitorApp(SimpleNamespace(), "localhost", 8000, SimpleNamespace(running_tools=[], recent_tools=[]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.query_one("#configuration-content", Static).content.plain == "[/bad]"
+        assert app.query_one("#urls", Static).content.plain == (
+            "Last five URLs indexed\n" + "\n".join(data.recent_urls)
+        )
+        assert "No MCP tools run" in app.query_one("#tools", Static).content
+        app.update_panel("#configuration-content", "[b]Recovered[/b]")
+        assert app.query_one("#configuration-content", Static).content == "[b]Recovered[/b]"
+        await app.refresh_data()
+        assert app.is_running
+        data.recent_urls.clear()
+        await app.refresh_data()
+        assert "No URLs indexed" in app.query_one("#urls", Static).content.plain
+        data.qdrant_freshness["urls"] = {"status": "unavailable"}
+        await app.refresh_data()
+        assert "Unavailable" in app.query_one("#urls", Static).content.plain
+        assert isinstance(app.query_one("#urls", Static).content, Text)

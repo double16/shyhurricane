@@ -45,11 +45,11 @@ def test_refresh_sweep_finishes_prefix_and_coalesces_new_revisions(monkeypatch):
         store.sweep(2)
         assert store.setting("sweep")["after"] == "b"
         store.sweep(3)
-        assert store.setting("swept") == [2, 2]
+        assert store.setting("swept") == [2, jobs.POLICY_VERSION]
         store.sweep(3)
         assert store.setting("sweep")["after"] == "b"
         store.sweep(3)
-        assert store.setting("swept") == [3, 2]
+        assert store.setting("swept") == [3, jobs.POLICY_VERSION]
         assert store.work(3)
         with store.connection:
             store.enqueue("correlate", "c", revision=0, force=False)
@@ -109,5 +109,5 @@ def test_new_graph_revision_preserves_transient_backoff():
 def test_policy_refresh_with_same_graph_revision_is_enqueued(monkeypatch):
     with closing(CorrelationStore("test")) as store:
         publish(store)
-        monkeypatch.setattr(jobs, "POLICY_VERSION", 3)
+        monkeypatch.setattr(jobs, "POLICY_VERSION", jobs.POLICY_VERSION + 1)
         assert store.work(1)

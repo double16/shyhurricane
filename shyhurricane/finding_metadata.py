@@ -158,12 +158,45 @@ def merge_metadata(saved, incoming, conflicts=None):
     return result, conflicts
 
 
+# Burp issue type indexes; documented sources are in docs/investigation-targets.md.
+# Source: PortSwigger scanner issue definitions; indexes are decimal typeIndex values.
+SCANNER_CATEGORIES = {
+    ("burp", "2097920"): "xss",
+    ("burp", "2097408"): "xss",
+    ("burp", "2097936"): "xss",
+    ("burp", "2097928"): "injection",
+    ("burp", "2097938"): "xss",
+    ("burp", "1048832"): "injection",
+    ("burp", "1049088"): "injection",
+    ("burp", "1049104"): "injection",
+    ("burp", "1052800"): "injection",
+    ("burp", "3146256"): "ssrf",
+    ("burp", "5244416"): "configuration",
+    ("burp", "16777984"): "configuration",
+}
+
+
+def category_basis(metadata):
+    """Return deterministic classification provenance without interpreting prose."""
+    basis = [
+        {"category": value, "basis": "producer"}
+        for value in metadata.get("vulnerability_types", [])
+        if value != "unknown"
+    ]
+    basis.extend(
+        {"category": CWE_TYPES[cwe], "basis": "cwe", "value": cwe}
+        for cwe in metadata.get("cwe_ids", [])
+        if cwe in CWE_TYPES
+    )
+    key = (metadata.get("source"), metadata.get("rule_id"))
+    if not basis and key in SCANNER_CATEGORIES:
+        basis.append({"category": SCANNER_CATEGORIES[key], "basis": "scanner_rule", "source": key[0], "value": key[1]})
+    return basis
+
+
 def categories(metadata):
-    """Only producer-supplied categories and explicit CWE mappings drive rules."""
-    return sorted(
-        set(metadata.get("vulnerability_types") or [])
-        | {CWE_TYPES[cwe] for cwe in metadata.get("cwe_ids", []) if cwe in CWE_TYPES}
-    ) or ["unknown"]
+    """Classify explicit metadata, falling back to known scanner rule identities."""
+    return sorted({item["category"] for item in category_basis(metadata)}) or ["unknown"]
 
 
 def scanner_metadata(source, rule_id, severity, *, cwes=()):

@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Iterable
 
 from qdrant_client.http import models as qm
+from rich.errors import MarkupError
 from rich.markup import escape
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, VerticalScroll
@@ -402,6 +404,15 @@ class MonitorApp(App[None]):
         await self.refresh_data()
         self.set_interval(30, self.refresh_data)
 
+    def update_panel(self, selector: str, content: str | Text) -> None:
+        if isinstance(content, str):
+            try:
+                Text.from_markup(content)
+            except MarkupError:
+                logger.warning("Invalid markup in monitor panel %s; displaying literal text", selector)
+                content = Text(content)
+        self.query_one(selector, Static).update(content)
+
     async def refresh_data(self) -> None:
         data = await collect_monitor_data(
             self.server_context, self.host, self.port, self.server.running_tools, self.server.recent_tools,
@@ -409,19 +420,20 @@ class MonitorApp(App[None]):
         )
         if not self.is_running:
             return
-        self.query_one("#configuration-content", Static).update(format_configuration_panel(data))
+        self.update_panel("#configuration-content", format_configuration_panel(data))
         queues = format_queue_panel(data.queue_sizes, data.queue_failures)
-        self.query_one("#queues", Static).update(f"[b]Queue status[/b]\n{queues}")
-        self.query_one("#database", Static).update(format_monitor_database_panel(data))
-        self.query_one("#graph", Static).update(format_graph_panel(data.graph))
-        self.query_one("#domains", Static).update(format_domain_and_host_panel(data))
+        self.update_panel("#queues", f"[b]Queue status[/b]\n{queues}")
+        self.update_panel("#database", format_monitor_database_panel(data))
+        self.update_panel("#graph", format_graph_panel(data.graph))
+        self.update_panel("#domains", format_domain_and_host_panel(data))
         freshness = data.qdrant_freshness.get("urls", {})
         urls = ("Unavailable" if freshness.get("status") == "unavailable"
                 else "\n".join(data.recent_urls) or "No URLs indexed")
-        self.query_one("#urls", Static).update(
-            f"[b]Last five URLs indexed[/b]{format_qdrant_freshness(freshness)}\n{urls}"
-        )
-        self.query_one("#tools", Static).update(format_tools_panel(data.running_tools, data.recent_tools))
+        url_content = Text()
+        url_content.append("Last five URLs indexed", style="bold")
+        url_content.append(f"{format_qdrant_freshness(freshness)}\n{urls}", style="")
+        self.update_panel("#urls", url_content)
+        self.update_panel("#tools", format_tools_panel(data.running_tools, data.recent_tools))
 
     async def action_refresh(self) -> None:
         await self.refresh_data()
