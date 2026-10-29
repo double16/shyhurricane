@@ -461,7 +461,10 @@ class MonitorApp(App[None]):
         if status != self._tab_status:
             color, activity = status
             self._driver.write(f"\x1b]1;{terminal_title()}\x1b\\")
-            self._driver.write(f"\x1b]21337;indicator={color};status={activity}\x1b\\")
+            subtitle_color = {"working": "#ffa500", "blocked": "#ff0000"}.get(activity, "")
+            self._driver.write(
+                f"\x1b]21337;indicator={color};status={activity};status-color={subtitle_color}\x1b\\"
+            )
             self._tab_status = status
 
     def on_unmount(self):

@@ -362,7 +362,8 @@ may fail again if the original problem remains. Repeated key presses do not over
 In iTerm2, the tab title shows `shyhurricane - <data-directory basename>`. The health dot is
 green when all checks pass, red when any fail, and orange while checks are unknown. The subtitle
 shows `working` for queued or processing work, `blocked` when readiness prevents queued work,
-and `idle` otherwise. Running MCP tools take precedence and show `working`. Updates follow the
+and `idle` otherwise. The subtitle is orange for `working`, red for `blocked`, and uses the
+default color for `idle`. Running MCP tools take precedence and show `working`. Updates follow the
 existing dashboard refresh cadence. Enable “Show status in tab subtitle” in iTerm2’s Session Status
 tool settings to see the second line. Status is cleared when the monitor closes.
 

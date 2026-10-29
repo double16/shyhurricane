@@ -1188,9 +1188,24 @@ def test_terminal_output_and_cleanup(monkeypatch):
                            disk={"state": "healthy"}, queue_sizes={})
     app.publish_terminal_status(data)
     assert driver.write.call_args_list[0].args == ("\x1b]1;shyhurricane - assessment\x1b\\",)
-    assert driver.write.call_args_list[1].args == ("\x1b]21337;indicator=#00ff00;status=idle\x1b\\",)
+    assert driver.write.call_args_list[1].args == ("\x1b]21337;indicator=#00ff00;status=idle;status-color=\x1b\\",)
     app.publish_terminal_status(data)
     assert driver.write.call_count == 2
+    data.queue_sizes = {"queue": 1}
+    app.publish_terminal_status(data)
+    assert driver.write.call_args.args == (
+        "\x1b]21337;indicator=#00ff00;status=working;status-color=#ffa500\x1b\\",
+    )
+    context.health_monitor.ready.is_set = lambda: False
+    app.publish_terminal_status(data)
+    assert driver.write.call_args.args == (
+        "\x1b]21337;indicator=#00ff00;status=blocked;status-color=#ff0000\x1b\\",
+    )
+    data.queue_sizes = {}
+    app.publish_terminal_status(data)
+    assert driver.write.call_args.args == (
+        "\x1b]21337;indicator=#00ff00;status=idle;status-color=\x1b\\",
+    )
     app.on_unmount()
     assert driver.write.call_args.args == ("\x1b]21337;status=;indicator=;status-color=\x1b\\",)
     driver.reset_mock()
