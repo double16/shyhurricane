@@ -49,6 +49,12 @@ In low-power mode use predicate-only queries, then inspect captured content dire
 Read full relevant content with fetch_web_resource_content(url=resource.uri) when a returned
 resource.uri is available; otherwise supply an indexed HTTP(S) URL. When contents.has_more is true,
 advance output_start_position by contents.offset + len(contents.text).
+Indexed JavaScript may be normalized, deobfuscated, or reconstructed from source maps for readability.
+Formatting, variable names, file paths, and line numbers may differ from code served by the target.
+Finding coordinates and source hashes identify the analyzed source artifact; do not apply them
+directly to the deployed bundle. Prefer readable source for analysis, correlate artifact identity,
+and compare captured or live code when validating behavior, subject to the selected mode and scope.
+Transformation may be partial or fail; readable code is not proof of complete or faithful recovery.
 Follow pagination.next_page_token with get_result_page(page_token=pagination.next_page_token).
 Report retrieval_truncated,
 truncation_reasons, analysis_gaps, missing captures, and incomplete scan/indexing status.
@@ -384,7 +390,10 @@ Start in returned priority order, adjusting for freshness, evidence strength, an
 Scores rank investigation work, not exploit probability. Inspect materialization_status, stale,
 witnesses, evidence_ids, missing_prerequisites, and analysis_gaps. Distinguish hypotheses from
 supported relationships; neither establishes exploitation. Never automatically save candidates.
-Use returned follow_up tool names and arguments, retaining scope=target. Deduplicate repeated
+Use the page-level follow_up list and its result_ids to avoid repeated tool calls.
+Inspect binding_status and applicability_status before interpreting associations; inspect
+unknown_categories for classification gaps. Reuse evidence already retrieved in this investigation.
+Use returned tool names and arguments, retaining scope=target. Deduplicate repeated
 calls and evidence retrieval across candidates. Use scoped query_findings only for contributing
 finding details absent from ranked results; match finding_ids locally, without inventing ID filters.
 If results are empty, pending, failed, stale, or incomplete, use scoped findings and focused graph

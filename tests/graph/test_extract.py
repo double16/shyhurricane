@@ -413,8 +413,11 @@ def test_summary_source_map_recovery_is_not_skipped(graph_paths, event, monkeypa
         seen.append((source, filename))
         return {"nodes": [], "edges": [], "references": [], "analysis": {"mode": "full"}}
 
-    graph = extract(event(url="https://example.com/vendor.js", mime="text/javascript", body="//# sourceMappingURL=data:application/json;base64,inline"),
-                    artifacts, javascript_runner=runner)
+    graph = extract(
+        event(url="https://example.com/vendor.js", mime="text/javascript",
+              body="//# sourceMappingURL=data:application/json;base64,inline"),
+        artifacts, javascript_runner=runner,
+    )
     assert [source for source, _ in seen] == ["export const React = {};", "eval(location.hash)"]
     assert len(graph.analysis) == 2
     artifacts.close()
@@ -574,3 +577,50 @@ def test_inline_svg_css_and_non_javascript_scripts(event):
     assert "LOADS" in kinds(graph)
     assert not graph.analysis
     assert any(node.get("url") == "https://example.com/paint.svg" for node in graph.nodes.values())
+
+
+def test_readable_source_digest_is_retained_with_operations(event):
+    import hashlib
+    source = "const readable = input;"
+    graph = extract(
+        event(url="https://example.com/app.js", body=source, mime="text/javascript"),
+        javascript_runner=lambda *args: {
+            "nodes": [{"id": "input", "kind": "value", "name": "input", "location": "1:0"}],
+            "edges": [], "references": [],
+        },
+    )
+    operation = next(n for n in graph.nodes.values() if n.get("name") == "input")
+    assert operation["source_sha256"] == hashlib.sha256(source.encode()).hexdigest()
+
+
+@pytest.mark.parametrize("recovered", [False, True])
+def test_opengrep_binding_uses_readable_graph_source(graph_paths, event, monkeypatch, recovered):
+    import hashlib
+
+    from shyhurricane.index.javascript_analysis import _finding
+    from shyhurricane.investigation.engine import artifact_hash_verifier, operation_matches
+
+    readable = "const readable = input;"
+    monkeypatch.setattr("shyhurricane.javascript_deobfuscation.deobfuscate_javascript", lambda source: readable)
+    mapping = json.dumps({"version": 3, "sources": ["original.js"], "sourcesContent": [readable]})
+    body = ("//# sourceMappingURL=data:application/json;base64," + base64.b64encode(mapping.encode()).decode()
+            if recovered else "const r=input;")
+    url = "https://example.com/app.js"
+    capture = event(url=url, body=body, mime="text/javascript")
+    artifacts = ArtifactStore("db")
+    try:
+        artifacts.register(capture)
+        graph = extract(capture, artifacts, javascript_runner=lambda *args: {
+            "nodes": [{"id": "input", "kind": "value", "name": "input", "location": "1:0"}],
+            "edges": [], "references": [],
+        })
+        operation = next(n for n in graph.nodes.values() if n.get("name") == "input")
+        path = "original.js" if recovered else "source.js"
+        finding = _finding(url, {"check_id": "rule", "path": path, "start": {"line": 1}}, recovered)
+        finding.metadata["content_sha256"] = hashlib.sha256(readable.encode()).hexdigest()
+        verify = artifact_hash_verifier(artifacts)
+        assert operation_matches(operation, finding.metadata, url, verify)
+        finding.metadata["content_sha256"] = hashlib.sha256(body.encode()).hexdigest()
+        assert not operation_matches(operation, finding.metadata, url, verify)
+    finally:
+        artifacts.close()

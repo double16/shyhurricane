@@ -73,6 +73,11 @@ async def test_each_workflow_renders_without_running_tools(name, mode, monkeypat
     assert "URL filters omit host-level findings" in text
     assert "fetch_web_resource_content" in text
     assert "contents.offset + len(contents.text)" in text
+    assert "normalized, deobfuscated, or reconstructed from source maps" in text
+    assert "variable names, file paths, and line numbers may differ" in text
+    assert "do not apply them\ndirectly to the deployed bundle" in text
+    assert "subject to the selected mode and scope" in text
+    assert "not proof of complete or faithful recovery" in text
     assert "get_result_page" in text
     assert "fetch_application_graph_evidence" in text
     assert "no scope is required and this lookup does not wait for indexing" in text

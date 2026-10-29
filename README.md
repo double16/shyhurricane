@@ -177,6 +177,13 @@ submitted targets, structured metadata, and category provenance. `category_cover
 categorized, unknown, and metadata-free findings independently of category filters. Contextual hotspots
 are capped at priority 20; inspect association basis before inferring composition. Processing completion
 does not establish complete evidence. Correlation storage format 4 requires rebuilding assessment storage.
+Page-level `follow_up` calls are deduplicated and reference their recommending result IDs.
+`binding_status` explains operation matches, and `unknown_categories` groups remaining classification gaps.
+Normalized JavaScript and recovered sources retain analyzed-source hashes for coordinate binding;
+these graph changes require fresh assessment storage.
+Assessment prompts and evidence tools explain that readable JavaScript may differ from deployed
+bundles. Source coordinates and hashes identify the analyzed artifact; correlate artifact identity
+when validating behavior rather than transferring its line numbers directly to deployed code.
 
 
 HTTP `/findings` and MCP `save_finding` accept optional structured `metadata`, including scanner rule,

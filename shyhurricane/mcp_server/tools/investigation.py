@@ -22,6 +22,9 @@ class InvestigationResult(BaseModel):
     results: list[dict] = Field(default_factory=list)
     findings: dict = Field(default_factory=dict)
     category_coverage: dict = Field(default_factory=dict)
+    unknown_categories: list[dict] = Field(default_factory=list)
+    unknown_categories_truncated: bool = False
+    follow_up: list[dict] = Field(default_factory=list)
     status: dict = Field(default_factory=dict)
     graph_revision: int = 0
     policy_version: int = 1
@@ -34,6 +37,9 @@ class InvestigationResult(BaseModel):
         "Priority scores rank investigation work, not exploit probability. Review witnesses and evidence IDs. "
         "Materialization runs asynchronously; pending, stale, failed, or bounded results are incomplete. "
         "Navigation/protection hypotheses do not establish exploit composition or session continuity. "
+        "JavaScript may be normalized, deobfuscated, or reconstructed from source maps for readability. "
+        "Its formatting, variable names, file paths, and line numbers may differ from deployed code. "
+        "Coordinates and source hashes identify the analyzed artifact; do not apply them directly to the deployed bundle. "
         "Use scoped graph discovery when results are pending. Do not automatically save these candidates as findings."
     )
 
@@ -52,10 +58,12 @@ async def find_investigation_targets(
 ) -> InvestigationResult:
     """Read background-ranked finding/graph correlations, shared hotspots, and possible chains.
 
-    Use after scoped query_findings, then inspect suggested focused evidence calls.
+    Start with this ranked worklist, then inspect suggested focused evidence calls.
     All fields are captured evidence or deterministic rules; this tool never invokes a model or target.
     Follow pagination.next_page_token with get_result_page. A complete saved page set does not
     establish assessment completeness. Unknown metadata remains unknown.
+    JavaScript may be normalized, deobfuscated, or reconstructed from source maps for readability.
+    Coordinates and source hashes identify the analyzed artifact and may differ from the deployed bundle.
     """
     try:
         scope_predicate(scope)

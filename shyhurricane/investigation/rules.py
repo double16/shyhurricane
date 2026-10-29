@@ -131,6 +131,17 @@ def derive(left, neighbors, *, include_hotspots=True):
                 and other.get("sink_ids")
             ):
                 candidate = pair_candidate(left, right, "protection_gap", other["witnesses"])
+                candidate["applicability_status"] = "unproven"
+                candidate["association_reason"] = {
+                    "configuration_finding_ids": owner["finding_ids"],
+                    "related_finding_ids": other["finding_ids"],
+                    "vulnerability_types": other["vulnerability_types"],
+                    "shared_contexts": sorted(contexts),
+                    "context_basis": (
+                        "affected_resource" if set(owner["affected_urls"]) & set(other["affected_urls"])
+                        else "shared_resource"
+                    ),
+                }
                 candidate["missing_prerequisites"].append(
                     "Establish protection applicability and bypass; co-location is insufficient"
                 )

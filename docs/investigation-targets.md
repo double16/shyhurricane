@@ -105,15 +105,15 @@ A script consumer is an association; only flow relationships establish a flow wi
 Source/sink labels alone do not prove attacker control or exploitation. Unknown methods, uncaptured
 resources, missing imports, deferred detail, mismatched versions, and disconnected paths remain gaps.
 
-### Priority scoring version 2
+### Priority scoring version 3
 
 | Contribution | Points |
 |--------------|--------|
 | Severity: informational/unknown, low, medium, high, critical | 0, 5, 10, 20, 25 |
 | Anchor: host, URL, method, compatible operation | 0, 8, 12, 20 |
-| Connectivity: association, contextual flow, anchored flow | 0, 15, 30 |
+| Connectivity: association, contextual flow, anchored flow | 0, 0, 30 |
 | Verification: unverified/unknown, suspected, confirmed | 0, 4, 10 |
-| Distinct captured contexts | 1 each, capped at 10 |
+| Distinct directly affected URLs | 1 each, capped at 10 |
 | Producer confidence: low/unknown, medium, high | 0, 2, 5 |
 | Anchor-critical metadata conflict | -10 |
 | Incomplete or summarized supporting path | -10 |
@@ -171,11 +171,11 @@ not elapsed-time estimates. Query `status` is scoped. Check both freshness and a
 using a score. Empty or complete saved pages never establish assessment completeness or safety.
 
 This finding metadata version is 3. Use a fresh assessment directory and replay captures/findings;
-old findings are not migrated. Preserve existing directories. The graph format itself is unchanged.
+old findings are not migrated. Preserve existing directories. Readable-source hash provenance requires rebuilding graph analysis.
 New server deployments accept old extension payloads, so extensions can be upgraded independently.
 See the [Burp handoff](codex-burp-findings.md) and [ZAP handoff](codex-zap-findings.md) for ready-to-send prompts.
 
-Correlation policy 3 uses storage format 4 and requires rebuilt assessment storage. Older correlation
+Correlation policy 4 uses storage format 4 and requires rebuilt assessment storage. Older correlation
 files are rejected without migration or automatic deletion. Finding metadata remains version 3.
 
 ### Scheduling and bounded reads
@@ -228,7 +228,7 @@ client-side template injection (2097928). References:
 [stored XSS](https://portswigger.net/kb/issues/00200100_cross-site-scripting-stored),
 [DOM XSS](https://portswigger.net/kb/issues/00200310_cross-site-scripting-dom-based),
 [template injection](https://portswigger.net/kb/issues/00200308_client-side-template-injection).
-The scanner-rule allowlist is versioned with correlation policy 3.
+The scanner-rule allowlist is versioned with correlation policy 4.
 
 `category_coverage` counts scoped `categorized`, `unknown`, and `without_metadata` findings, before
 category filtering. These describe the bounded scoped finding selection; they are not mutually exclusive:
@@ -258,3 +258,83 @@ Additional allowlisted Burp types:
 | 3146256 | ssrf | [PortSwigger definition](https://portswigger.net/kb/issues/00300210_external-service-interaction-http) |
 | 5244416 | configuration | [PortSwigger definition](https://portswigger.net/kb/issues/00500600_cookie-without-httponly-flag-set) |
 | 16777984 | configuration | [PortSwigger definition](https://portswigger.net/kb/issues/01000300_strict-transport-security-not-enforced) |
+
+Contextual flows receive no connectivity bonus. Context-count scoring uses directly affected URLs.
+Protection-gap hypotheses have unproven applicability and a priority cap of 20; their association
+reason identifies contributors and shared contexts. Correlation policy 4 uses scoring version 3.
+
+### Evidence relevance and readable source identity
+
+Graph analyzer version 8 records SHA-256 of the normalized or reconstructed source alongside
+operation coordinates. Opengrep matches those analyzed-source hashes; raw response hashes are
+not substituted for normalized coordinates. Recovered sources also retain their own hashes.
+Code-location lookup filters by source path and line range before hydrating at most 1,000 operations,
+using the selected publication revision and existing query budget.
+
+Target `binding_status` is `not_requested`, `bound`, `conflicting_metadata`, `bounded_lookup`,
+`missing_artifact`, `hash_mismatch`, or `coordinate_mismatch`. An unbound location retains URL
+fallback and never becomes an operation anchor on line numbers alone. Witness `evidence_basis`
+distinguishes operation-bound flows, contextual flows, and resource associations. Operation-bound
+witnesses precede contextual evidence when recommending evidence reads.
+
+Each page includes unique `follow_up` tool/argument combinations with `result_ids`; per-result
+calls and full witnesses remain available. Reuse retrieved evidence across pages.
+`unknown_categories` groups scoped unknown findings by source/rule, before category filtering,
+with counts and at most three example IDs. At most 100 groups are returned; inspect
+`unknown_categories_truncated`. Generic Burp extension IDs remain unknown without structured
+producer categories or CWEs; finding titles are never used to infer categories or affected URLs.
+
+Additional reviewed category sources:
+
+| Burp type index | Category | Definition |
+|---|---|---|
+| 1049600 | injection | [XXE](https://portswigger.net/kb/issues/00100400_xml-external-entity-injection) |
+| 2097664 | injection | [Header injection](https://portswigger.net/kb/issues/00200200_http-response-header-injection) |
+| 2097942 | injection | [Prototype pollution](https://portswigger.net/kb/issues/00200316_client-side-prototype-pollution) |
+| 5243392 | configuration | [Insecure cookie](https://portswigger.net/kb/issues/00500200_tls-cookie-without-secure-flag-set) |
+| 5243008 | dependency | [Vulnerable dependency](https://portswigger.net/kb/issues/00500080_vulnerable-javascript-dependency) |
+
+Corresponding CWE fallbacks include CWE-611, CWE-113, CWE-915/CWE-1321, CWE-614, and CWE-1104.
+These categories group investigation work; they do not assert exploitability.
+Rebuild assessment storage for the new graph source identities; no migration or automatic replay is provided.
+
+## Expanded web classification catalog
+
+Reviewed against PortSwigger issue definitions and the MITRE OWASP Top Ten CWE view.
+Mappings are investigation categories, not exploitability claims. Existing mappings take precedence
+over broader groupings. Generic upload functionality, custom extension rules, hardware, memory
+safety, and standalone denial-of-service findings are intentionally not classified.
+
+| Decimal ID | Category | Definition |
+|---|---|---|
+| 1049344 | access_control | [file-path-traversal](https://portswigger.net/kb/issues/00100300_file-path-traversal) |
+| 1049856 | injection | [ldap-injection](https://portswigger.net/kb/issues/00100500_ldap-injection) |
+| 1050112 | injection | [xpath-injection](https://portswigger.net/kb/issues/00100600_xpath-injection) |
+| 1050368 | injection | [xml-injection](https://portswigger.net/kb/issues/00100700_xml-injection) |
+| 1051648 | injection | [php-code-injection](https://portswigger.net/kb/issues/00100c00_php-code-injection) |
+| 1051904 | injection | [server-side-javascript-code-injection](https://portswigger.net/kb/issues/00100d00_server-side-javascript-code-injection) |
+| 1052160 | injection | [perl-code-injection](https://portswigger.net/kb/issues/00100e00_perl-code-injection) |
+| 1052416 | injection | [ruby-code-injection](https://portswigger.net/kb/issues/00100f00_ruby-code-injection) |
+| 1052432 | injection | [python-code-injection](https://portswigger.net/kb/issues/00100f10_python-code-injection) |
+| 1052448 | injection | [expression-language-injection](https://portswigger.net/kb/issues/00100f20_expression-language-injection) |
+| 1052672 | injection | [unidentified-code-injection](https://portswigger.net/kb/issues/00101000_unidentified-code-injection) |
+| 1052928 | injection | [ssi-injection](https://portswigger.net/kb/issues/00101100_ssi-injection) |
+| 2097937 | xss | [cross-site-scripting-reflected-dom-based](https://portswigger.net/kb/issues/00200311_cross-site-scripting-reflected-dom-based) |
+| 4195328 | exposure | [password-returned-in-url-query-string](https://portswigger.net/kb/issues/00400400_password-returned-in-url-query-string) |
+| 16777472 | cryptography | [tls-certificate](https://portswigger.net/kb/issues/01000100_tls-certificate) |
+
+CWE additions (each identifier links to its authoritative definition):
+
+- xss: [CWE-80](https://cwe.mitre.org/data/definitions/80.html), [CWE-81](https://cwe.mitre.org/data/definitions/81.html), [CWE-83](https://cwe.mitre.org/data/definitions/83.html), [CWE-84](https://cwe.mitre.org/data/definitions/84.html), [CWE-85](https://cwe.mitre.org/data/definitions/85.html), [CWE-86](https://cwe.mitre.org/data/definitions/86.html), [CWE-87](https://cwe.mitre.org/data/definitions/87.html).
+- injection: [CWE-74](https://cwe.mitre.org/data/definitions/74.html), [CWE-77](https://cwe.mitre.org/data/definitions/77.html), [CWE-88](https://cwe.mitre.org/data/definitions/88.html), [CWE-90](https://cwe.mitre.org/data/definitions/90.html), [CWE-91](https://cwe.mitre.org/data/definitions/91.html), [CWE-93](https://cwe.mitre.org/data/definitions/93.html), [CWE-95](https://cwe.mitre.org/data/definitions/95.html), [CWE-96](https://cwe.mitre.org/data/definitions/96.html), [CWE-97](https://cwe.mitre.org/data/definitions/97.html), [CWE-98](https://cwe.mitre.org/data/definitions/98.html), [CWE-99](https://cwe.mitre.org/data/definitions/99.html), [CWE-1336](https://cwe.mitre.org/data/definitions/1336.html), [CWE-502](https://cwe.mitre.org/data/definitions/502.html), [CWE-643](https://cwe.mitre.org/data/definitions/643.html), [CWE-652](https://cwe.mitre.org/data/definitions/652.html), [CWE-917](https://cwe.mitre.org/data/definitions/917.html).
+- access_control: [CWE-22](https://cwe.mitre.org/data/definitions/22.html), [CWE-23](https://cwe.mitre.org/data/definitions/23.html), [CWE-36](https://cwe.mitre.org/data/definitions/36.html), [CWE-284](https://cwe.mitre.org/data/definitions/284.html), [CWE-285](https://cwe.mitre.org/data/definitions/285.html), [CWE-352](https://cwe.mitre.org/data/definitions/352.html), [CWE-425](https://cwe.mitre.org/data/definitions/425.html), [CWE-441](https://cwe.mitre.org/data/definitions/441.html), [CWE-565](https://cwe.mitre.org/data/definitions/565.html), [CWE-732](https://cwe.mitre.org/data/definitions/732.html), [CWE-749](https://cwe.mitre.org/data/definitions/749.html).
+- authentication: [CWE-256](https://cwe.mitre.org/data/definitions/256.html), [CWE-259](https://cwe.mitre.org/data/definitions/259.html), [CWE-288](https://cwe.mitre.org/data/definitions/288.html), [CWE-289](https://cwe.mitre.org/data/definitions/289.html), [CWE-290](https://cwe.mitre.org/data/definitions/290.html), [CWE-294](https://cwe.mitre.org/data/definitions/294.html), [CWE-295](https://cwe.mitre.org/data/definitions/295.html), [CWE-297](https://cwe.mitre.org/data/definitions/297.html), [CWE-306](https://cwe.mitre.org/data/definitions/306.html), [CWE-307](https://cwe.mitre.org/data/definitions/307.html), [CWE-308](https://cwe.mitre.org/data/definitions/308.html), [CWE-309](https://cwe.mitre.org/data/definitions/309.html), [CWE-346](https://cwe.mitre.org/data/definitions/346.html), [CWE-347](https://cwe.mitre.org/data/definitions/347.html), [CWE-521](https://cwe.mitre.org/data/definitions/521.html), [CWE-613](https://cwe.mitre.org/data/definitions/613.html), [CWE-620](https://cwe.mitre.org/data/definitions/620.html), [CWE-640](https://cwe.mitre.org/data/definitions/640.html), [CWE-645](https://cwe.mitre.org/data/definitions/645.html), [CWE-646](https://cwe.mitre.org/data/definitions/646.html), [CWE-647](https://cwe.mitre.org/data/definitions/647.html).
+- configuration: [CWE-15](https://cwe.mitre.org/data/definitions/15.html), [CWE-209](https://cwe.mitre.org/data/definitions/209.html), [CWE-444](https://cwe.mitre.org/data/definitions/444.html), [CWE-548](https://cwe.mitre.org/data/definitions/548.html), [CWE-602](https://cwe.mitre.org/data/definitions/602.html), [CWE-614](https://cwe.mitre.org/data/definitions/614.html), [CWE-615](https://cwe.mitre.org/data/definitions/615.html), [CWE-693](https://cwe.mitre.org/data/definitions/693.html), [CWE-942](https://cwe.mitre.org/data/definitions/942.html), [CWE-1004](https://cwe.mitre.org/data/definitions/1004.html), [CWE-1021](https://cwe.mitre.org/data/definitions/1021.html).
+- exposure: [CWE-201](https://cwe.mitre.org/data/definitions/201.html), [CWE-203](https://cwe.mitre.org/data/definitions/203.html), [CWE-204](https://cwe.mitre.org/data/definitions/204.html), [CWE-215](https://cwe.mitre.org/data/definitions/215.html), [CWE-359](https://cwe.mitre.org/data/definitions/359.html), [CWE-497](https://cwe.mitre.org/data/definitions/497.html), [CWE-498](https://cwe.mitre.org/data/definitions/498.html), [CWE-532](https://cwe.mitre.org/data/definitions/532.html), [CWE-538](https://cwe.mitre.org/data/definitions/538.html), [CWE-539](https://cwe.mitre.org/data/definitions/539.html), [CWE-540](https://cwe.mitre.org/data/definitions/540.html), [CWE-541](https://cwe.mitre.org/data/definitions/541.html), [CWE-598](https://cwe.mitre.org/data/definitions/598.html).
+- cryptography: [CWE-261](https://cwe.mitre.org/data/definitions/261.html), [CWE-311](https://cwe.mitre.org/data/definitions/311.html), [CWE-312](https://cwe.mitre.org/data/definitions/312.html), [CWE-319](https://cwe.mitre.org/data/definitions/319.html), [CWE-321](https://cwe.mitre.org/data/definitions/321.html), [CWE-322](https://cwe.mitre.org/data/definitions/322.html), [CWE-323](https://cwe.mitre.org/data/definitions/323.html), [CWE-324](https://cwe.mitre.org/data/definitions/324.html), [CWE-325](https://cwe.mitre.org/data/definitions/325.html), [CWE-326](https://cwe.mitre.org/data/definitions/326.html), [CWE-327](https://cwe.mitre.org/data/definitions/327.html), [CWE-328](https://cwe.mitre.org/data/definitions/328.html), [CWE-329](https://cwe.mitre.org/data/definitions/329.html), [CWE-330](https://cwe.mitre.org/data/definitions/330.html), [CWE-331](https://cwe.mitre.org/data/definitions/331.html), [CWE-334](https://cwe.mitre.org/data/definitions/334.html), [CWE-335](https://cwe.mitre.org/data/definitions/335.html), [CWE-336](https://cwe.mitre.org/data/definitions/336.html), [CWE-337](https://cwe.mitre.org/data/definitions/337.html), [CWE-338](https://cwe.mitre.org/data/definitions/338.html), [CWE-522](https://cwe.mitre.org/data/definitions/522.html), [CWE-759](https://cwe.mitre.org/data/definitions/759.html), [CWE-760](https://cwe.mitre.org/data/definitions/760.html), [CWE-916](https://cwe.mitre.org/data/definitions/916.html).
+- dependency: [CWE-829](https://cwe.mitre.org/data/definitions/829.html), [CWE-830](https://cwe.mitre.org/data/definitions/830.html), [CWE-1395](https://cwe.mitre.org/data/definitions/1395.html).
+
+Correlation policy 5 invalidates prior classifications through the existing background sweep;
+no storage format change or manual migration is required.
+
+CWE-922 maps to exposure (insecure storage); CWE-1275 maps to configuration (SameSite).

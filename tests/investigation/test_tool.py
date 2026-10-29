@@ -55,3 +55,17 @@ async def test_tool_is_registered_read_only_and_schema_is_optional():
     assert tools["find_investigation_targets"].annotations.read_only_hint
     assert tools["find_investigation_targets"].annotations.open_world_hint is False
     assert tools["save_finding"].input_schema["properties"]["metadata"]
+
+
+async def test_readable_javascript_guidance_is_exposed_to_clients():
+    from shyhurricane.mcp_server import mcp_instance
+
+    tools = {item.name: item for item in await mcp_instance.list_tools()}
+    for name in ("fetch_web_resource_content", "fetch_application_graph_evidence", "find_investigation_targets"):
+        description = tools[name].description
+        assert "normalized, deobfuscated, or reconstructed from source maps" in description
+        assert "analyzed artifact" in description
+        assert "deployed bundle" in description
+    instructions = tool.InvestigationResult().instructions
+    assert "normalized, deobfuscated, or reconstructed from source maps" in instructions
+    assert "do not apply them directly to the deployed bundle" in instructions

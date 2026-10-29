@@ -103,7 +103,7 @@ def test_script_consumers_are_separate_from_flow_and_have_evidence():
     assert result["context_urls"] == [URL, PAGE]
     assert result["anchor"] == "url"
     assert result["connectivity"] == "contextual_flow"
-    assert result["evidence_ids"] == ["load", "proof"]
+    assert result["evidence_ids"] == ["proof", "load"]
     assert result["vulnerability_types"] == ["xss"]
     assert {w["relation"] for w in result["witnesses"]} == {"consumer", "flow"}
     assert result["follow_up"][0]["arguments"]["url"] == URL
@@ -281,3 +281,53 @@ def test_compact_witness_omits_unbounded_context_arrays_but_keeps_proofs():
     assert compact["steps"][0]["evidence_id"] == "proof"
     assert compact["steps"][0]["context_capture_id"] == "document"
     assert compact["possible_path"]
+
+
+def test_analyzed_source_hash_matches_normalized_and_recovered_coordinates():
+    artifacts = SimpleNamespace(connection=Mock(), read=Mock())
+    verify = artifact_hash_verifier(artifacts)
+    digest = hashlib.sha256(b"readable code").hexdigest()
+    for path in (URL, "original.ts"):
+        operation = node("op", source_path=path, source_sha256=digest)
+        assert verify(operation, digest)
+        assert not verify(operation, "f" * 64)
+        assert not verify({**operation, "capture_id": None}, digest)
+    artifacts.read.assert_not_called()
+
+
+@pytest.mark.parametrize("changed,expected", [
+    ({}, "bound"),
+    ({"source_sha256": "b" * 64}, "hash_mismatch"),
+    ({"location": "99:0"}, "coordinate_mismatch"),
+])
+def test_binding_status(changed, expected):
+    metadata = location(capture_id=None, content_sha256="a" * 64)
+    operation = node("sink", **{"source_sha256": "a" * 64, **changed})
+    verify = artifact_hash_verifier(SimpleNamespace())
+    result = correlate(job(metadata), Query([operation]), 1, verify_hash=verify)
+    assert result["binding_status"] == expected
+    if expected == "bound":
+        assert any(w["evidence_basis"] == "operation_bound_flow" for w in result["witnesses"])
+
+
+def test_location_lookup_filters_before_hydration_and_reports_limits(monkeypatch):
+    reader = Mock()
+    reader.nodes = {}
+    reader.metadata = {"retrieval_truncated": False}
+    reader.candidate_filter.return_value = "visible"
+    reader.lookup_pages.return_value = [[{"seed": {"id": "operation"}}]]
+    def cache(records, **kwargs):
+        reader.nodes.update({str(i): record for i, record in enumerate(list(records) * 1000)})
+    reader.cache_nodes.side_effect = cache
+    monkeypatch.setattr("shyhurricane.graph.traversal.TraversalSnapshot", lambda *args: reader)
+    query = RevisionQuery(Mock(), 5, QueryBudget())
+    result = query.location_elements("example.com", URL, {"source_path": "source.js", "start_line": 12})
+    assert len(result["results"]) == 1000
+    reader.limit.assert_called_once()
+    arguments = reader.lookup_pages.call_args.kwargs
+    assert "n.source_path" in arguments["filters"]
+    assert arguments["parameters"]["first_line"] == 12
+    assert arguments["parameters"]["last_line"] == 12
+    reader.lookup_pages.return_value = []
+    reader.nodes = {}
+    assert query.location_elements("example.com", URL, {})["results"] == []

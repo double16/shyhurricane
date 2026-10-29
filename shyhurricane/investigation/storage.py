@@ -375,6 +375,9 @@ class CorrelationStore(JobStore):
                     item["contexts_limited"] = True
                     if gap not in item["analysis_gaps"]:
                         item["analysis_gaps"] = [*item["analysis_gaps"], gap]
+                if "association_reason" in item:
+                    reason = item["association_reason"]
+                    reason["shared_contexts"] = [url for url in reason["shared_contexts"] if contains(url)]
                 retained_contexts = [url for url in item["context_urls"] if contains(url)]
                 witnesses = [
                     w
@@ -396,9 +399,9 @@ class CorrelationStore(JobStore):
                 item["witnesses"] = list(
                     {json.dumps(witness, sort_keys=True): witness for witness in witnesses}.values()
                 )
-                item["evidence_ids"] = sorted(
-                    {step["evidence_id"] for w in witnesses for step in w.get("steps", []) if step.get("evidence_id")}
-                )
+                item["evidence_ids"] = list(dict.fromkeys(
+                    step["evidence_id"] for w in witnesses for step in w.get("steps", []) if step.get("evidence_id")
+                ))
                 item["follow_up"] = [
                     {**call, "arguments": {**call["arguments"], "scope": scope}}
                     for call in item["follow_up"]
@@ -432,6 +435,7 @@ class CorrelationStore(JobStore):
         contributor_ids = {key for item in results for key in item["finding_ids"]}
         finding_context = {}
         coverage = {"categorized": 0, "unknown": 0, "without_metadata": 0}
+        unknown = {}
         for key, title, target, metadata, conflicts, source_revision in self.connection.execute(
             "SELECT f.id,f.title,f.target,f.metadata,f.conflicts,f.source_revision FROM findings f "
             "JOIN selected_findings s ON s.id=f.id"
@@ -439,6 +443,13 @@ class CorrelationStore(JobStore):
             metadata = json.loads(metadata)
             coverage["unknown" if categories(metadata) == ["unknown"] else "categorized"] += 1
             coverage["without_metadata"] += not metadata
+            if categories(metadata) == ["unknown"]:
+                group = (metadata.get("source", ""), metadata.get("rule_id", ""))
+                entry = unknown.setdefault(group, {
+                    "source": group[0], "rule_id": group[1], "count": 0, "example_finding_ids": [],
+                })
+                entry["count"] += 1
+                entry["example_finding_ids"] = sorted([*entry["example_finding_ids"], key])[:3]
             if key in contributor_ids:
                 finding_context[key] = {
                     "title": title,
@@ -451,6 +462,8 @@ class CorrelationStore(JobStore):
         return {
             "findings": finding_context,
             "category_coverage": coverage,
+            "unknown_categories": [unknown[key] for key in sorted(unknown)[:100]],
+            "unknown_categories_truncated": len(unknown) > 100,
             "results": results,
             "status": statuses,
             "graph_revision": revision,

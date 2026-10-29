@@ -14,7 +14,7 @@ def candidate(finding_id="a", metadata=None):
 
 def test_score_is_explainable_capped_and_not_multiplied_by_finding_count():
     value = candidate(metadata={"severity": "critical", "confidence": "high", "verification_status": "confirmed"})
-    value.update(anchor="operation", connectivity="anchored_flow", context_urls=[str(i) for i in range(15)])
+    value.update(anchor="operation", connectivity="anchored_flow", affected_urls=[str(i) for i in range(15)])
     assert score(value)["priority"] == 100
     value["finding_ids"] *= 10
     assert score(value)["priority"] == 100
@@ -150,3 +150,15 @@ def test_hotspot_selects_key_witnesses_and_reports_distinct_omissions():
     assert value == aggregate_hotspot("url:" + URL, [right, left])
     left["operation_ids"] = right["operation_ids"] = ["shared-operation"]
     assert aggregate_hotspot("node:shared-operation", [left, right])["association_basis"] == "direct"
+
+
+def test_protection_gap_retains_explicit_unproven_association():
+    left = candidate(metadata={"vulnerability_types": ["configuration"], "severity": "high"})
+    right = candidate("b", {"vulnerability_types": ["injection"], "severity": "critical"})
+    chain = next(item for item in derive(left, [right]) if item.get("rule_id") == "protection_gap")
+    assert chain["hypothesis"]
+    assert chain["applicability_status"] == "unproven"
+    assert chain["association_reason"]["configuration_finding_ids"] == ["a"]
+    assert chain["association_reason"]["related_finding_ids"] == ["b"]
+    assert chain["priority"] <= 20
+    assert chain["score_contributions"]["affected_contexts"] == 0

@@ -117,3 +117,40 @@ def test_every_allowlisted_rule_is_source_specific():
     for (source, rule), category in SCANNER_CATEGORIES.items():
         assert categories({"source": source, "rule_id": rule}) == [category]
         assert categories({"source": "custom", "rule_id": rule}) == ["unknown"]
+
+
+@pytest.mark.parametrize("rule,category", [
+    ("1049600", "injection"), ("2097664", "injection"), ("2097942", "injection"),
+    ("5243392", "configuration"), ("5243008", "dependency"),
+])
+def test_additional_reviewed_burp_rules(rule, category):
+    from shyhurricane.finding_metadata import categories
+    assert categories({"source": "burp", "rule_id": rule}) == [category]
+    assert categories({"source": "zap", "rule_id": rule}) == ["unknown"]
+    assert categories({"source": "burp", "rule_id": rule, "vulnerability_types": ["xss"]}) == ["xss"]
+
+
+@pytest.mark.parametrize("cwe,expected", [
+    ("CWE-80", "xss"), ("CWE-90", "injection"), ("CWE-502", "injection"),
+    ("CWE-22", "access_control"), ("CWE-352", "access_control"),
+    ("CWE-307", "authentication"), ("CWE-1004", "configuration"),
+    ("CWE-532", "exposure"), ("CWE-327", "cryptography"), ("CWE-1395", "dependency"),
+])
+def test_expanded_web_cwe_categories(cwe, expected):
+    from shyhurricane.finding_metadata import category_basis
+    assert category_basis({"cwe_ids": [cwe]}) == [
+        {"category": expected, "basis": "cwe", "value": cwe}
+    ]
+
+
+@pytest.mark.parametrize("cwe", ["CWE-119", "CWE-400", "CWE-1344", "CWE-937", "CWE-99999"])
+def test_unclassified_weaknesses_and_views(cwe):
+    assert categories({"cwe_ids": [cwe]}) == ["unknown"]
+
+
+def test_catalog_categories_are_valid():
+    from shyhurricane.finding_metadata import CWE_TYPES, SCANNER_CATEGORIES, VULNERABILITY_TYPES
+    assert set(CWE_TYPES.values()) <= set(VULNERABILITY_TYPES) - {"unknown"}
+    assert set(SCANNER_CATEGORIES.values()) <= set(VULNERABILITY_TYPES) - {"unknown"}
+    for cwe, expected in CWE_TYPES.items():
+        assert categories({"cwe_ids": [cwe]}) == [expected]

@@ -20,6 +20,32 @@ class RevisionQuery(GraphQuery):
         super().__init__(store, budget=budget)
         self.revision = revision
 
+    def location_elements(self, scope, url, location):
+        """Filter coordinates before the 1,000-node hydration bound at one revision."""
+        from shyhurricane.graph.traversal import TraversalSnapshot
+
+        reader = TraversalSnapshot(self, scope)
+        parameters = {
+            "url": url, "kinds": None, "role": None, "method": None,
+            "source_path": location.get("source_path"),
+            "first_line": location.get("start_line", 1),
+            "last_line": location.get("end_line", location.get("start_line", 1)),
+        }
+        predicate = (
+            reader.candidate_filter()
+            + " AND (n.source_path=$source_path OR ($source_path='source.js' AND n.source_path=$url))"
+            + " AND toInteger(split(split(n.location,'-')[0],':')[0]) <= $last_line"
+            + " AND toInteger(split(last(split(n.location,'-')),':')[0]) >= $first_line"
+        )
+        for batch in reader.lookup_pages(
+            "GraphEntity", "url", url, exact=True, filters=predicate, parameters=parameters,
+        ):
+            reader.cache_nodes((row["seed"] for row in batch), accept=reader.inside)
+            if len(reader.nodes) >= 1000:
+                reader.limit("result_limit", "Code location lookup limited to 1000 nodes")
+                break
+        return {**reader.metadata, "results": list(reader.nodes.values())[:1000]}
+
     def snapshot(self, scope, **arguments):
         raise TimeoutError("Investigation requires revision-aware graph lookup indexes")
 
@@ -31,7 +57,7 @@ class RevisionQuery(GraphQuery):
 
 def compact_witness(witness, context_url=None):
     """Retain proofs and coordinates without duplicating unbounded script-context arrays."""
-    fields = {"id", "kind", "name", "role", "url", "method", "source_path", "location", "capture_id"}
+    fields = {"id", "kind", "name", "role", "url", "method", "source_path", "location", "capture_id", "source_sha256"}
     nodes = []
     for node in witness.get("nodes", []):
         compact = {key: value for key, value in node.items() if key in fields}
@@ -100,7 +126,11 @@ def artifact_hash_verifier(artifacts):
 
     def verify(node, digest):
         capture_id = node.get("capture_id")
-        if not capture_id or node.get("source_path") != node.get("url"):
+        if not capture_id:
+            return False
+        if node.get("source_sha256"):
+            return node["source_sha256"] == digest
+        if node.get("source_path") != node.get("url"):
             return False
         if capture_id not in cache:
             row = artifacts.connection.execute("SELECT path FROM captures WHERE id=?", (capture_id,)).fetchone()
@@ -155,6 +185,7 @@ def correlate(job, query, graph_revision, *, verify_hash=lambda node, digest: Fa
         "analysis_gaps": [],
         "missing_prerequisites": [],
         "follow_up": [],
+        "binding_status": "conflicting_metadata" if anchor_conflict else "not_requested",
         "anchor_conflict": anchor_conflict,
         "incomplete_path": False,
         "contexts_limited": False,
@@ -199,14 +230,27 @@ def correlate(job, query, graph_revision, *, verify_hash=lambda node, digest: Fa
         candidate["anchor"] = "method"
     elif len(candidate["affected_methods"]) > 1:
         gaps.add("Affected method is unknown; multiple resource methods match")
-    elements = collect(query.elements(scope, url=url, detail="full")) if resources else []
+    if resources and metadata.get("code_location") and isinstance(query, RevisionQuery):
+        elements = collect(query.location_elements(scope, url, metadata["code_location"]))
+    else:
+        elements = collect(query.elements(scope, url=url, detail="full")) if resources else []
     operations = [
         node for node in elements if not anchor_conflict and operation_matches(node, metadata, url, verify_hash)
     ]
     if operations:
+        candidate["binding_status"] = "bound"
         candidate["anchor"] = "operation"
         candidate["operation_ids"] = sorted({node["id"] for node in operations})
     elif metadata.get("code_location"):
+        candidate["binding_status"] = (
+            "conflicting_metadata" if anchor_conflict else
+            "bounded_lookup" if candidate["contexts_limited"] else
+            "missing_artifact" if not resources else
+            "hash_mismatch" if metadata.get("content_sha256") and any(
+                node.get("source_sha256") and node["source_sha256"] != metadata["content_sha256"]
+                for node in elements
+            ) else "coordinate_mismatch"
+        )
         gaps.add("Code location could not be bound to compatible artifact identity and coordinates")
     consumers = (
         collect(
@@ -294,6 +338,16 @@ def correlate(job, query, graph_revision, *, verify_hash=lambda node, digest: Fa
             query.paths(scope, source_id, mode="relationships", kinds=["RESPONSE_FROM"], max_depth=1, detail="full"),
             "response",
         )
+    for witness in candidate["witnesses"]:
+        witness["evidence_basis"] = (
+            "operation_bound_flow" if witness["relation"] == "flow" and
+            set(candidate["operation_ids"]) & {node["id"] for node in witness["nodes"]} else
+            "contextual_flow" if witness["relation"] == "flow" else "resource_association"
+        )
+    candidate["witnesses"].sort(key=lambda witness: (
+        {"operation_bound_flow": 0, "contextual_flow": 1, "resource_association": 2}[witness["evidence_basis"]],
+        identity(witness),
+    ))
     if flows:
         candidate["connectivity"] = "contextual_flow"
         if any(set(candidate["operation_ids"]) & {node["id"] for node in w["nodes"]} for w in flows):
@@ -310,9 +364,9 @@ def correlate(job, query, graph_revision, *, verify_hash=lambda node, digest: Fa
             "arguments": {"scope": scope, "url": url, "detail": "summary", "method": metadata.get("affected_method")},
         }
     ]
-    evidence_ids = sorted(
-        {step["evidence_id"] for w in candidate["witnesses"] for step in w.get("steps", []) if step.get("evidence_id")}
-    )
+    evidence_ids = list(dict.fromkeys(
+        step["evidence_id"] for w in candidate["witnesses"] for step in w.get("steps", []) if step.get("evidence_id")
+    ))
     candidate["evidence_ids"] = evidence_ids
     candidate["follow_up"].extend(
         {"tool": "fetch_application_graph_evidence", "arguments": {"evidence_id": key}} for key in evidence_ids[:3]

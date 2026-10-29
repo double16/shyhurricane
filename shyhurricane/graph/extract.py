@@ -1,5 +1,6 @@
 """Passive HTML, HTTP, structured-resource, and JavaScript relationship extraction."""
 
+import hashlib
 import json
 import logging
 import os
@@ -465,6 +466,10 @@ def extract(
                 if artifacts
                 else runner(source, filename)
             )
+            source_digest = hashlib.sha256(source.encode()).hexdigest()
+            result = {**result, "source_sha256": source_digest}
+            if "archive" in result:
+                result["archive"] = {**result["archive"], "source_sha256": source_digest}
             contexts = []
             if "html" in mime or is_svg(mime):
                 contexts.append({"url": graph.url, "base": base, "id": event["id"]})
@@ -587,6 +592,7 @@ def _apply_javascript(graph, page, filename, result, reference, contexts):
             persistent_storage=(item.get("kind") == "storage" and len(origins) == 1
                                 and item.get("name", "").startswith("localStorage:")),
             source_path=filename,
+            source_sha256=result.get("source_sha256"),
             location=item.get("location", ""),
             module_key=module_key,
             import_key=import_key,

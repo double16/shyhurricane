@@ -103,3 +103,29 @@ def test_read_deduplicates_identical_witnesses_and_calls():
         assert len(result["witnesses"]) == len(candidate["witnesses"]) // 2
         calls = [json.dumps(call, sort_keys=True) for call in result["follow_up"]]
         assert len(calls) == len(set(calls))
+
+
+def test_unknown_category_diagnostics_are_scoped_and_independent_of_filter():
+    with closing(CorrelationStore("test")) as store:
+        publish(store)
+        value = store.read("example.com", "xss")
+        assert value["unknown_categories"] == [
+            {"source": "", "rule_id": "", "count": 1, "example_finding_ids": ["a"]}
+        ]
+        assert not value["unknown_categories_truncated"]
+        assert store.read("other.example.com")["unknown_categories"] == []
+
+
+def test_unknown_category_diagnostics_bound_groups_and_examples():
+    with closing(CorrelationStore("test")) as store:
+        for index in range(104):
+            store.submit(str(index), "https://example.com/app.js", {"source": "custom", "rule_id": str(index)})
+        for index in range(4):
+            store.submit(f"repeat-{index}", "https://example.com/app.js", {"source": "custom", "rule_id": "0"})
+        result = store.read("example.com")
+        assert len(result["unknown_categories"]) == 100
+        assert result["unknown_categories_truncated"]
+        assert result["unknown_categories"][0] == {
+            "source": "custom", "rule_id": "0", "count": 5,
+            "example_finding_ids": ["0", "repeat-0", "repeat-1"],
+        }

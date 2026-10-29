@@ -1,5 +1,5 @@
-import json
 import io
+import json
 import tarfile
 from types import SimpleNamespace
 
@@ -282,3 +282,18 @@ def test_scanner_metadata_retains_rule_coordinates_and_verifiable_source_hash(mo
     assert metadata["content_sha256"] == hashlib.sha256(b"eval(input)").hexdigest()
     assert analysis._finding("https://example.com/app.js", matched["results"][0], True).metadata[
         "code_location"]["coordinate_space"] == "recovered"
+
+
+def test_recovered_findings_hash_the_readable_source(monkeypatch):
+    import hashlib
+    source = "eval(readableInput)"
+    mapping = json.dumps({"version": 3, "sources": ["original.js"], "sourcesContent": [source]})
+    monkeypatch.setattr(analysis, "_run_opengrep", lambda *args: result("/work/scan/original.js"))
+    queue = Queue()
+    assert analysis.analyze_document(document(), False, Store(mapping), queue) == 1
+    assert queue.items[0].metadata["content_sha256"] == hashlib.sha256(source.encode()).hexdigest()
+    assert queue.items[0].metadata["code_location"]["coordinate_space"] == "recovered"
+    monkeypatch.setattr(analysis, "_run_opengrep", lambda *args: result("/work/scan/missing.js"))
+    queue = Queue()
+    assert analysis.analyze_document(document(), False, Store(mapping), queue) == 1
+    assert "content_sha256" not in queue.items[0].metadata
