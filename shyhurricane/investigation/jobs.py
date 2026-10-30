@@ -3,7 +3,7 @@
 import json
 import time
 
-POLICY_VERSION = 5
+POLICY_VERSION = 6
 BATCH_SIZE = 100
 KINDS = ("correlate", "derive", "hotspot")
 

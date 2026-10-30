@@ -169,8 +169,9 @@ content retrieval, and indexing-status fields.
 `find_investigation_targets(scope="example.com")` reads background-ranked finding/graph correlations,
 shared hotspots, and possible vulnerability chains. Results include supporting paths, evidence IDs,
 priority contributions, missing prerequisites, and freshness/coverage limits. Scores rank investigation
-work, not exploit probability. The tool works without model calls or target requests, including in
-low-power mode. Pending results fall back to the existing scoped finding and graph tools.
+work, not exploit probability. Demonstrated UI origins add 10 priority points when supported
+by a complete operation-bound flow; library code along that flow is allowed. The tool works without
+model calls or target requests, including in low-power mode. Pending results fall back to the existing scoped finding and graph tools.
 
 Ranked investigation responses include a contributor `findings` dictionary with original titles,
 submitted targets, structured metadata, and category provenance. `category_coverage` reports scoped
@@ -179,8 +180,7 @@ are capped at priority 20; inspect association basis before inferring compositio
 does not establish complete evidence. Correlation storage format 4 requires rebuilding assessment storage.
 Page-level `follow_up` calls are deduplicated and reference their recommending result IDs.
 `binding_status` explains operation matches, and `unknown_categories` groups remaining classification gaps.
-Normalized JavaScript and recovered sources retain analyzed-source hashes for coordinate binding;
-these graph changes require fresh assessment storage.
+Normalized JavaScript and recovered sources retain analyzed-source hashes for coordinate binding.
 Assessment prompts and evidence tools explain that readable JavaScript may differ from deployed
 bundles. Source coordinates and hashes identify the analyzed artifact; correlate artifact identity
 when validating behavior rather than transferring its line numbers directly to deployed code.
@@ -190,11 +190,8 @@ HTTP `/findings` and MCP `save_finding` accept optional structured `metadata`, i
 severity, confidence, verification status, affected request method, parameter, CWE, and code location.
 Sources can omit unavailable fields. `query_findings` exposes stable finding IDs and this metadata.
 Resubmissions fill missing metadata and record conflicts while preserving the original finding.
-Use fresh assessment storage for finding version 3; existing payloads remain valid.
 
-See [finding correlation and operations](docs/investigation-targets.md), including the exact contract,
-scoring rules, and ready-to-send Codex prompts for [Burp](docs/codex-burp-findings.md) and
-[ZAP](docs/codex-zap-findings.md) extension updates.
+See [finding correlation and operations](docs/investigation-targets.md), including the exact contract and scoring rules.
 
 ## Application Relationship Graph
 
@@ -228,10 +225,8 @@ exploration continuations and `expand_application_graph_analysis` for offline de
 Graph state uses immutable, compressed SQLite artifacts, normalized discovery indexes, and
 incremental storage accounting. Cleanup commits bounded batches and resumes unfinished work.
 Recomputable analysis caches have a 256 MiB default budget; captured evidence and offline expansion
-artifacts are retained independently. This storage version requires a fresh assessment directory;
-existing layouts are rejected without migration. Preserve existing assessment directories.
-Graph paths are investigation candidates;
-inspect their evidence before treating them as confirmed vulnerabilities.
+artifacts are retained independently.
+Graph paths are investigation candidates; inspect their evidence before treating them as confirmed vulnerabilities.
 
 See the [application graph guide](docs/application-graph.md) for tool arguments and examples,
 analysis coverage, architecture, Neo4j configuration, and backfill/rebuild procedures.

@@ -624,3 +624,58 @@ def test_opengrep_binding_uses_readable_graph_source(graph_paths, event, monkeyp
         assert not operation_matches(operation, finding.metadata, url, verify)
     finally:
         artifacts.close()
+
+
+@pytest.mark.parametrize("markup", [
+    '<input id="field"><script>eval(document.querySelector("#field").value)</script>',
+    '<textarea id="field"></textarea><script>eval(document.querySelector("#field").value)</script>',
+    '<select id="field"></select><script>eval(document.querySelector("#field").value)</script>',
+    '<div id="field" contenteditable>text</div><script>eval(document.querySelector("#field").textContent)</script>',
+    '<button id="field"></button><script>document.querySelector("#field").addEventListener("keydown",'
+    'e=>eval(e.key))</script>',
+    '<form id="field"></form><script>document.querySelector("#field").addEventListener("submit",'
+    'e=>eval(e.currentTarget.action))</script>',
+    '<input oninput="eval(event.target.value)">',
+    '<button onclick="eval(this.textContent)">go</button>',
+])
+def test_ui_origins_connect_captured_elements_to_sinks(event, javascript_runner, markup):
+    from unittest.mock import MagicMock
+
+    from shyhurricane.graph.links import LinkPlanner
+    from shyhurricane.investigation.engine import compact_witness
+    from shyhurricane.investigation.ranking import score
+
+    graph = extract(event(body=markup), javascript_runner=javascript_runner)
+    store = MagicMock()
+    store.read.return_value = []
+    planner = LinkPlanner(store, graph)
+    assert planner.plan_slice()
+    links = planner.links
+    edges = list(graph.edges.values()) + list(links.values())
+    sources = [node for node in graph.nodes.values() if node.get("ui_origin")]
+    pending = [([source], []) for source in sources]
+    result = None
+    while pending:
+        nodes, steps = pending.pop()
+        last = nodes[-1]
+        if last.get("role") == "sink":
+            witness = compact_witness({"nodes": nodes, "steps": steps}) | {"relation": "flow"}
+            result = score({"anchor": "operation", "connectivity": "anchored_flow",
+                            "operation_ids": [last["id"]], "witnesses": [witness]})
+            if result["ui_origins"]:
+                break
+        if len(steps) >= 16:
+            continue
+        for edge in edges:
+            if edge["source"] == last["id"] and edge["kind"] != "CONTAINS":
+                target = graph.nodes[edge["target"]]
+                if target not in nodes:
+                    pending.append((nodes + [target], steps + [edge]))
+    assert result and result["score_contributions"]["ui_origin"] == 10
+    assert result["ui_origins"][0]["location"]
+    assert result["ui_origins"][0]["evidence_ids"]
+
+
+def test_ui_origin_attributes_exclude_static_content(event):
+    graph = extract(event(body='<div id="static">text</div><div contenteditable="false">no</div>'))
+    assert not any(node.get("ui_origin") for node in graph.nodes.values())

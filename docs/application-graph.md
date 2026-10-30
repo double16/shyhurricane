@@ -81,11 +81,6 @@ failure stops the epoch visibly; newer inputs remain durable.
 
 ### Graph-state storage
 
-Use a fresh assessment directory for storage version 2. Version 1 compact directories and older
-layouts are not supported. Existing storage versions are
-rejected before schema initialization; there is no migration or legacy file reader. Preserve old
-assessment directories and rebuild deployments into new directories.
-
 `graph_state/artifacts.sqlite` holds captures, shared response/source text, complete IR, detail
 shards, manifest facts, and restart checkpoints. Artifacts use compact JSON encoded as Zstandard
 level 1 BLOBs, or raw bytes when compression would enlarge them. SHA-256 content addresses share

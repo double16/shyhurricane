@@ -105,7 +105,7 @@ A script consumer is an association; only flow relationships establish a flow wi
 Source/sink labels alone do not prove attacker control or exploitation. Unknown methods, uncaptured
 resources, missing imports, deferred detail, mismatched versions, and disconnected paths remain gaps.
 
-### Priority scoring version 3
+### Priority scoring version 4
 
 | Contribution | Points |
 |--------------|--------|
@@ -115,6 +115,7 @@ resources, missing imports, deferred detail, mismatched versions, and disconnect
 | Verification: unverified/unknown, suspected, confirmed | 0, 4, 10 |
 | Distinct directly affected URLs | 1 each, capped at 10 |
 | Producer confidence: low/unknown, medium, high | 0, 2, 5 |
+| Demonstrated UI origin on a complete operation-bound flow | 10 once |
 | Anchor-critical metadata conflict | -10 |
 | Incomplete or summarized supporting path | -10 |
 
@@ -123,6 +124,21 @@ False-positive findings are excluded. Chains use the strongest metadata contribu
 multiplying points by finding count. Ties sort by stronger anchor and then stable candidate ID.
 The contribution breakdown and policy version are returned. Reach describes retained bounded
 materialization; it is not a complete application inventory or a probability estimate.
+
+### UI-origin evidence
+
+The `ui_origin` contribution requires a captured control, editable element, or interactive element
+with an evidenced, capture-compatible flow through a finding operation to a sink.
+`ui_origins` identifies the element, capture, location, evidence IDs, and witness node IDs.
+Library code along the path does not disqualify it. Contextual hotspots, broad hypotheses,
+and summarized paths receive no bonus. UI origin does not prove attacker control.
+Scoring version 4 and correlation policy 6 recompute existing correlations.
+
+Resolved `addEventListener` callbacks and inline HTML handlers support input, change, submit, click,
+keydown, and keyup events. The flow must use a value from the element or event payload; registration
+alone earns no points. Inline handlers retain their original source coordinates. Unresolved receivers,
+ambiguous callback receivers, and delegated selectors remain gaps and receive no origin bonus.
+Analyzer policy 9 invalidates reusable JavaScript caches. Runtime-only elements remain unsupported.
 
 ### Chain rules
 
@@ -169,14 +185,6 @@ and stale counts, observed graph revision, policy version, last successful refre
 worker errors. Stale counts measure findings behind the last observed publication revision; they are
 not elapsed-time estimates. Query `status` is scoped. Check both freshness and analysis gaps before
 using a score. Empty or complete saved pages never establish assessment completeness or safety.
-
-This finding metadata version is 3. Use a fresh assessment directory and replay captures/findings;
-old findings are not migrated. Preserve existing directories. Readable-source hash provenance requires rebuilding graph analysis.
-New server deployments accept old extension payloads, so extensions can be upgraded independently.
-See the [Burp handoff](codex-burp-findings.md) and [ZAP handoff](codex-zap-findings.md) for ready-to-send prompts.
-
-Correlation policy 4 uses storage format 4 and requires rebuilt assessment storage. Older correlation
-files are rejected without migration or automatic deletion. Finding metadata remains version 3.
 
 ### Scheduling and bounded reads
 

@@ -162,3 +162,26 @@ def test_protection_gap_retains_explicit_unproven_association():
     assert chain["association_reason"]["related_finding_ids"] == ["b"]
     assert chain["priority"] <= 20
     assert chain["score_contributions"]["affected_contexts"] == 0
+
+
+def test_ui_bonus_uses_retained_chain_proof_and_survives_hotspot_truncation():
+    from shyhurricane.investigation.rules import aggregate_hotspot, pair_candidate
+    from tests.investigation.test_ranking import candidate as ui_candidate
+
+    left, right = candidate(), candidate("b")
+    proof = ui_candidate()["witnesses"][0]
+    left["operation_ids"] = ["sink"]
+    right["operation_ids"] = ["sink"]
+    unrelated = {"relation": "consumer", "nodes": [], "steps": []}
+    witnesses = [unrelated] * 12 + [proof]
+    chain = pair_candidate(left, right, "shared_flow", witnesses)
+    assert chain["score_contributions"]["ui_origin"] == 10
+    assert proof in chain["witnesses"]
+    assert chain["ui_origins"][0]["evidence_ids"] == ["proof"]
+    left["witnesses"] = witnesses
+    right["witnesses"] = []
+    hotspot = aggregate_hotspot("node:sink", [left, right])
+    assert hotspot["score_contributions"]["ui_origin"] == 10
+    assert proof in hotspot["witnesses"]
+    unrelated_chain = pair_candidate(left, right, "shared_flow", [unrelated])
+    assert unrelated_chain["score_contributions"]["ui_origin"] == 0

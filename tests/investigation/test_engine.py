@@ -331,3 +331,14 @@ def test_location_lookup_filters_before_hydration_and_reports_limits(monkeypatch
     reader.lookup_pages.return_value = []
     reader.nodes = {}
     assert query.location_elements("example.com", URL, {})["results"] == []
+
+
+def test_ui_evidence_survives_correlation_compaction():
+    operation = node("sink", "sink")
+    source = node("input", "source", kind="element", ui_origin=True, capture_id="page", location="3:0")
+    witness = flow([source, operation])
+    witness["steps"][0]["context_capture_id"] = "page"
+    result = correlate(job(location()), Query([operation], paths=[witness]), 3)
+    assert result["score_contributions"]["ui_origin"] == 10
+    assert result["ui_origins"][0]["location"] == "3:0"
+    assert result["ui_origins"][0]["evidence_ids"] == ["proof"]

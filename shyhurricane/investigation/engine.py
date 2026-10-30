@@ -57,7 +57,8 @@ class RevisionQuery(GraphQuery):
 
 def compact_witness(witness, context_url=None):
     """Retain proofs and coordinates without duplicating unbounded script-context arrays."""
-    fields = {"id", "kind", "name", "role", "url", "method", "source_path", "location", "capture_id", "source_sha256"}
+    fields = {"id", "kind", "name", "role", "url", "method", "source_path", "location", "capture_id", "source_sha256",
+              "ui_origin"}
     nodes = []
     for node in witness.get("nodes", []):
         compact = {key: value for key, value in node.items() if key in fields}

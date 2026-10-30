@@ -58,6 +58,8 @@ async def test_tool_is_registered_read_only_and_schema_is_optional():
 
 
 async def test_readable_javascript_guidance_is_exposed_to_clients():
+    from shyhurricane.mcp_server.tools import fetch_web_resource_content  # noqa: F401
+
     from shyhurricane.mcp_server import mcp_instance
 
     tools = {item.name: item for item in await mcp_instance.list_tools()}

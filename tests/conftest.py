@@ -13,7 +13,7 @@ import requests
 from tldextract import tldextract as tldextract_module
 from tldextract.tldextract import TLDExtract
 
-tldextract_module.TLD_EXTRACTOR = TLDExtract(cache_dir=None)
+tldextract_module.TLD_EXTRACTOR = TLDExtract(cache_dir=None, suffix_list_urls=())
 
 from shyhurricane.generator_config import GeneratorConfig
 

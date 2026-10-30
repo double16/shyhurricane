@@ -1,7 +1,7 @@
 """Explicit chain prerequisites; navigation and protection gaps remain hypotheses."""
 
 from shyhurricane.graph.model import identity
-from shyhurricane.investigation.ranking import score
+from shyhurricane.investigation.ranking import score, ui_origins
 
 RULES = {
     "shared_flow": {"hypothesis": False, "requires": "both anchored operations on one flow witness"},
@@ -36,6 +36,7 @@ def pair_candidate(left, right, rule, witnesses, *, hotspot=False):
         "affected_urls": sorted(set(left["affected_urls"] + right["affected_urls"])),
         "context_urls": sorted(set(left["context_urls"] + right["context_urls"])),
         "vulnerability_types": sorted(set(left["vulnerability_types"] + right["vulnerability_types"])),
+        "operation_ids": sorted(set(left.get("operation_ids", []) + right.get("operation_ids", []))),
         "anchor": anchor,
         "metadata": metadata,
         "hypothesis": False if hotspot else RULES[rule]["hypothesis"],
@@ -50,6 +51,10 @@ def pair_candidate(left, right, rule, witnesses, *, hotspot=False):
         "follow_up": left["follow_up"] + right["follow_up"],
         "contexts_limited": left["contexts_limited"] or right["contexts_limited"],
     }
+    ordered = sorted(witnesses, key=lambda witness: not bool(ui_origins(
+        candidate | {"witnesses": [witness]}
+    )))
+    candidate["witnesses"] = ordered[:10]
     candidate.update(score(candidate))
     return candidate
 
@@ -202,6 +207,7 @@ def aggregate_hotspot(key, members, *, limited=False):
     ordered = sorted(
         witnesses.values(),
         key=lambda witness: (
+            not bool(ui_origins(candidate | {"witnesses": [witness]})),
             not any(node.get("id") == key[5:] or node.get("url") == key[4:] for node in witness.get("nodes", [])),
             identity(witness),
         ),

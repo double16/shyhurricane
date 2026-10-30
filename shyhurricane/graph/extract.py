@@ -287,6 +287,12 @@ def extract(
                     form_selectors.append(f"#{owner['id']}")
                 if owner.get("name"):
                     form_selectors.append(f'form[name="{owner["name"]}"]')
+            editable = tag.get("contenteditable", "false").lower() in {"", "true", "plaintext-only"}
+            inline_events = [name for name in tag.attrs if name in {
+                "oninput", "onchange", "onsubmit", "onclick", "onkeydown", "onkeyup"
+            }]
+            ui_origin = tag.name in {"input", "select", "textarea", "button", "form", "a"} or editable
+            ui_origin = ui_origin or bool(inline_events) or tag.has_attr("tabindex")
             element = graph.node(
                 "element",
                 identity(event["id"], locator),
@@ -294,10 +300,13 @@ def extract(
                 html_id=tag.get("id"),
                 field_name=tag.get("name"),
                 html_tag=tag.name,
+                ui_origin=ui_origin,
+                inline_selector=f"@inline:{locator}" if inline_events else None,
+                location=locator,
                 form_selectors=form_selectors,
                 disabled=tag.has_attr("disabled"),
                 form_successful=_successful_control(tag),
-                role="source" if tag.name in {"input", "select", "textarea"} else "",
+                role="source" if ui_origin else "",
                 capture_id=event["id"],
             )
             graph.fact(page, element, "CONTAINS", "html.element", location=locator)
@@ -603,6 +612,7 @@ def _apply_javascript(graph, page, filename, result, reference, contexts):
             return_value=item.get("return_value"),
             callback_boundary=item.get("callback_boundary"),
             selector=item.get("selector"),
+            ui_event=item.get("ui_event"),
             form_data=item.get("form_data"),
             form_field=item.get("form_field"),
             form_request=item.get("form_request"),

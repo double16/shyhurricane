@@ -226,3 +226,35 @@ test("module interfaces support namespace calls, lexical aliases, default functi
   const imported=analyze(`import {read} from './data.js'; export {read as load};`);
   assert(imported.nodes.some(n=>n.reexport_name==='load'&&n.imported_name==='read'));
 });
+
+test("UI event payloads bind only resolved DOM receivers and propagate used values", () => {
+  for (const event of ["input", "change", "submit", "click", "keydown", "keyup"]) {
+    const result = analyze(`const field=document.getElementById('field');
+      field.addEventListener('${event}', e=>eval(e.key || e.currentTarget.value));`);
+    assert(reachable(result, n=>n.ui_event === event && n.selector === '#field', n=>n.role === 'sink'));
+  }
+  const regular = analyze(`document.querySelector('#field').addEventListener('input',function(){eval(this.value)})`);
+  assert(reachable(regular, n=>n.ui_event === 'input', n=>n.role === 'sink'));
+  const safe = analyze(`document.querySelector('#field').addEventListener('input',e=>eval('constant'))`);
+  assert(!reachable(safe, n=>n.ui_event, n=>n.role === 'sink'));
+  const unresolved = analyze(`unknown.addEventListener('input',e=>eval(e.target.value));
+    source.subscribe(e=>eval(e.data));`);
+  assert(!unresolved.nodes.some(n=>n.ui_event));
+  assert(unresolved.gaps.some(g=>g.includes('Unresolved UI event')));
+  const ambiguous = analyze(`function handle(e){eval(e.key)}
+    document.querySelector('#a').addEventListener('keydown',handle);
+    document.querySelector('#b').addEventListener('keydown',handle);`);
+  assert(ambiguous.gaps.includes('Ambiguous UI callback receiver'));
+  assert(!ambiguous.nodes.some(n=>n.ui_event && n.selector));
+});
+
+test("inline handlers bind implicit event and this without executing or rewriting source", () => {
+  for (const source of ['eval(event.key)', 'eval(this.value)', 'return eval(event.currentTarget.value)']) {
+    const result = analyze(source, 'html:0:input:onkeydown');
+    assert(reachable(result, n=>n.selector === '@inline:html:0:input', n=>n.role === 'sink'));
+  }
+  const shadowed = analyze('function inner(event){eval(event.key); eval(this.value)}', 'html:0:input:oninput');
+  assert(!shadowed.nodes.some(n=>n.ui_event));
+  const unrelated = analyze('eval(event.key)', 'source.js');
+  assert(!unrelated.nodes.some(n=>n.ui_event));
+});
