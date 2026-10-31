@@ -1177,8 +1177,6 @@ def test_terminal_output_and_cleanup(monkeypatch):
     from pathlib import Path
     from unittest.mock import Mock
 
-    monkeypatch.setenv("TERM_PROGRAM", "iTerm.app")
-    monkeypatch.setattr("shyhurricane.monitor.sys.stdout.isatty", lambda: True)
     monkeypatch.setattr("shyhurricane.monitor.resolve_data_dir", lambda: Path("/tmp/assessment\x1b\n"))
     context = SimpleNamespace(health_monitor=SimpleNamespace(ready=SimpleNamespace(is_set=lambda: True)))
     app = MonitorApp(context, "127.0.0.1", 8000, SimpleNamespace(running_tools=[]))
