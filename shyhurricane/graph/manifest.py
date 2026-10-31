@@ -301,11 +301,13 @@ class ManifestStore:
         context_filter = ""
         if context_url is not None:
             context_filter = (
-                " AND (c.url=:context OR EXISTS (SELECT 1 FROM (" + memberships + ") WHERE url=:context))"
+                " AND (f.url=:context OR EXISTS (SELECT 1 FROM (" + memberships + ") WHERE url=:context))"
             )
         started = time.monotonic()
         rows = self.connection.execute(
-            "WITH documents AS MATERIALIZED (SELECT c.id,c.url FROM captures c WHERE "
+            # Inline temporal selection so bounded fact/context IDs seek captures directly.
+            # Materialization scans the whole capture catalog, including once per status lookup.
+            "WITH documents AS NOT MATERIALIZED (SELECT c.id,c.url FROM captures c WHERE "
             + CAPTURE_SELECTION + ") "
             "SELECT f.id,f.unit_id,f.capture_id,f.data,f.url,0 "
             "FROM graph_manifest_facts f JOIN documents c ON c.id=f.capture_id "
@@ -335,7 +337,7 @@ class ManifestStore:
                     resource = (target, record.get("method", "GET"))
                     if resource not in captured_status:
                         captured_status[resource] = self.connection.execute(
-                            "WITH documents AS MATERIALIZED (SELECT c.id FROM captures c WHERE "
+                            "WITH documents AS NOT MATERIALIZED (SELECT c.id FROM captures c WHERE "
                             + CAPTURE_SELECTION + ") SELECT EXISTS (SELECT 1 FROM graph_manifest_facts f "
                             "JOIN documents d ON d.id=f.capture_id WHERE f.url=:target "
                             "AND f.rowid<=:facts AND f.kind='resource' "

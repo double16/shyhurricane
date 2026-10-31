@@ -55,6 +55,133 @@ def test_selective_query_plan_and_continued_results(populated):
     reader.close()
 
 
+def test_focused_inventory_work_does_not_scale_with_unrelated_captures(graph_paths, event):
+    writer = ArtifactStore("db")
+    capture = writer.register(event())
+    unit = writer.manifest.unit(capture["id"], "inventory", discovery="complete", flow="complete")
+    for index in range(20):
+        writer.manifest.fact(unit, capture["id"], "resource", {
+            "id": str(index), "url": f"https://example.com/api/{index}", "capture_status": "referenced",
+        })
+
+    def measured_page():
+        instructions = 0
+
+        def count():
+            nonlocal instructions
+            instructions += 100
+            return 0
+
+        writer.connection.set_progress_handler(count, 100)
+        try:
+            rows, cursor = writer.manifest.page("example.com", kind="resource")
+        finally:
+            writer.connection.set_progress_handler(None, 0)
+        assert len(rows) == 21 and cursor is None
+        assert sum(row["capture_status"] == "referenced" for row in rows) == 20
+        return instructions
+
+    try:
+        baseline = measured_page()
+        with writer.connection:
+            writer.connection.executemany(
+                "INSERT INTO captures(id,url,stamp,path) VALUES (?,?,?,?)",
+                ((f"unrelated-{index}", f"https://target.local/{index}", 0, "unused") for index in range(2000)),
+            )
+        populated = measured_page()
+        print(f"Inventory SQLite VM instructions: baseline={baseline}, with unrelated captures={populated}")
+        # Count SQLite VM work, not wall time: a focused page must not repeatedly select
+        # the entire capture catalog for each resource's captured/referenced classification.
+        assert populated <= baseline * 2 + 10000, (baseline, populated)
+    finally:
+        writer.close()
+
+
+@pytest.mark.parametrize("matches", [True, False])
+def test_context_filter_includes_an_elements_own_url(graph_paths, event, matches):
+    writer = ArtifactStore("db")
+    capture = writer.register(event())
+    unit = writer.manifest.unit(capture["id"], "references")
+    target = "https://example.com/api"
+    writer.manifest.fact(unit, capture["id"], "resource", {"id": "endpoint", "url": target})
+    try:
+        rows, _ = writer.manifest.page(
+            "example.com", kind="resource", context_url=target if matches else "https://example.com/missing",
+        )
+        assert [row["id"] for row in rows] == (["endpoint"] if matches else [])
+    finally:
+        writer.close()
+
+
+@pytest.mark.parametrize("method,historical,cutoff,frozen,expected", [
+    ("GET", False, False, False, "captured"),
+    ("POST", False, False, False, "referenced"),
+    ("GET", False, True, False, "referenced"),
+    ("GET", True, False, False, "captured"),
+    ("GET", True, True, False, "referenced"),
+    ("GET", False, False, True, "referenced"),
+])
+def test_inventory_classification_respects_temporal_and_method_filters(
+    graph_paths, event, method, historical, cutoff, frozen, expected,
+):
+    writer = ArtifactStore("db")
+    capture = writer.register(event())
+    unit = writer.manifest.unit(capture["id"], "references")
+    target = "https://example.com/api"
+    writer.manifest.fact(unit, capture["id"], "resource", {
+        "id": "endpoint", "url": target, "method": "GET", "capture_status": "referenced",
+    })
+    watermark = writer.manifest.watermark()
+    writer.register(event(url=target, method=method, timestamp="2026-02-01T00:00:00Z"))
+    try:
+        rows, _ = writer.manifest.page(
+            "example.com", kind="resource", url=target, method="GET", historical=historical,
+            as_of=capture["observed_at"] if cutoff else None, watermark=watermark if frozen else None,
+        )
+        assert rows and all(row["capture_status"] == expected for row in rows)
+    finally:
+        writer.close()
+
+
+def test_manifest_element_detail_survives_continuation(graph_paths, event):
+    writer = ArtifactStore("db")
+    capture = writer.register(event())
+    unit = writer.manifest.unit(capture["id"], "elements", discovery="complete", flow="partial")
+    for index in range(3):
+        writer.manifest.fact(unit, capture["id"], "symbol", {
+            "id": str(index), "url": capture["data"]["url"], "name": str(index), "role": "source",
+            "import_key": "module", "context_urls": [capture["data"]["url"]] * 100,
+        })
+    writer.close()
+    reader = ArtifactStore("db", readonly=True, budget=QueryBudget())
+    service = GraphQuery(None, artifacts=reader)
+    try:
+        for detail in ("compact", "full"):
+            # Force discovery continuation so it must preserve the requested representation.
+            result = manifest_query(reader, "example.com", kinds=["symbol"], limit=1, detail=detail)
+            records = list(result["results"])
+            while result["continuation_token"]:
+                result = service.continue_query(result["continuation_token"], limit=1)
+                records.extend(result["results"])
+            assert len(records) == 3
+            for record in records:
+                assert record["analysis_unit_id"] == unit and record["capture_id"] == capture["id"]
+                assert record["manifest_id"]
+                assert ("import_key" in record) is (detail == "full")
+                assert ("context_urls" in record) is (detail == "full")
+            direct = service.elements("example.com", kinds=["symbol"], detail=detail)["results"]
+            assert {row["id"] for row in direct} == {row["id"] for row in records}
+            assert all(("import_key" in row) is (detail == "full") for row in direct)
+        units = service.elements("example.com", kinds=["analysis_unit"])["results"]
+        assert next(row for row in units if row["id"] == unit)["flow"] == "partial"
+        resources = service.elements("example.com", kinds=["resource"])["results"]
+        assert resources[0]["capture_status"] == "captured" and resources[0]["follow_up"]
+        with pytest.raises(ValueError, match="detail must"):
+            manifest_query(reader, "example.com", detail="invalid")
+    finally:
+        reader.close()
+
+
 @pytest.mark.parametrize("stage", ["page", "coverage"])
 def test_deadline_preserves_records_and_explicit_unknown_coverage(populated, monkeypatch, stage):
     reader = ArtifactStore("db", readonly=True, budget=QueryBudget())

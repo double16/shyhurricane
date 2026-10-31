@@ -448,7 +448,8 @@ class GraphQuery:
 
             result = manifest_query(self.artifacts, scope, kinds=kinds, role=role, url=url,
                                     context_url=normalized_context, historical=historical, as_of=as_of,
-                                    exclude_kinds=() if kinds else ("relationship", "reference", "candidate_source"))
+                                    exclude_kinds=() if kinds else ("relationship", "reference", "candidate_source"),
+                                    detail=detail)
             try:
                 result["omitted_regions"] = self.omitted_regions(scope)
             except TimeoutError:
@@ -559,6 +560,7 @@ class GraphQuery:
         pending = deque(_resume["pending"] if _resume and _resume.get("seeds_complete", True)
                         else (([key], [], None) for key in starts))
         reached = {tuple(item) for item in _resume["reached"]} if _resume else {(key, key, None) for key in starts}
+        reported = {tuple(item) for item in _resume.get("reported", [])} if _resume else set()
         result = []
         expansions = 0
         scope_boundary = False
@@ -572,16 +574,23 @@ class GraphQuery:
             and not reader.stopped
             and time.thread_time() - cpu_started < 10
         ):
-            # Prefetch only this breadth-first layer; repeated path states share adjacency.
-            depth = len(pending[0][1])
-            frontier = list(
-                dict.fromkeys(
-                    path[-1]
-                    for path, steps, _ in pending
-                    if len(steps) == depth and not (end and steps and path[-1] in targets)
-                )
-            )[:500]
-            reader.expand(frontier, direction, allowed, probe=depth >= max_depth, depth=depth)
+            # Resolve each bounded frontier once. Scanning the entire queue for every
+            # cached path state makes a wide breadth-first layer quadratic in Python.
+            first_path, first_steps, _ = pending[0]
+            current = first_path[-1]
+            depth = len(first_steps)
+            terminal = bool(end and first_steps and current in targets)
+            if not terminal and current not in adjacent and current not in reader.probes:
+                frontier = {}
+                for path, steps, _ in pending:
+                    if len(steps) != depth:
+                        break
+                    key = path[-1]
+                    if key not in adjacent and key not in reader.probes and not (end and steps and key in targets):
+                        frontier[key] = None
+                        if len(frontier) == 500:
+                            break
+                reader.expand(list(frontier), direction, allowed, probe=depth >= max_depth, depth=depth)
             if (metadata["retrieval_truncated"] and pending[0][0][-1] not in adjacent
                     and pending[0][0][-1] not in reader.probes):
                 metadata["analysis_gaps"].append("Frontier loading incomplete; unfinished work retained")
@@ -592,13 +601,16 @@ class GraphQuery:
                 (end and current in targets)
                 or (not end and (mode != "flow" or nodes[current].get("role") == ("source" if reverse else "sink")))
             ):
-                result.append(
-                    {
-                        "nodes": [present(nodes[key], detail) for key in visited],
-                        "steps": [present(step, detail, step=True) for step in steps],
-                        "possible_path": True,
-                    }
-                )
+                witness = tuple(step["id"] for step in steps)
+                if witness not in reported:
+                    reported.add(witness)
+                    result.append(
+                        {
+                            "nodes": [present(nodes[key], detail) for key in visited],
+                            "steps": [present(step, detail, step=True) for step in steps],
+                            "possible_path": True,
+                        }
+                    )
                 if end:
                     continue
             inside = contains(nodes[current]["url"]) or any(
@@ -633,9 +645,16 @@ class GraphQuery:
                     or (not end and mode == "flow" and nodes[visited[-1]].get("role") == end_role)
                 )
                 if terminal and len(result) < MAX_RESULTS:
-                    result.append({"nodes": [present(nodes[key], detail) for key in visited],
-                                   "steps": [present(step, detail, step=True) for step in steps],
-                                   "possible_path": True})
+                    witness = tuple(step["id"] for step in steps)
+                    if witness not in reported:
+                        reported.add(witness)
+                        result.append({"nodes": [present(nodes[key], detail) for key in visited],
+                                       "steps": [present(step, detail, step=True) for step in steps],
+                                       "possible_path": True})
+                    # Without an explicit destination a source/sink can also be an
+                    # intermediate operation. Keep its unexplored edges for continuation.
+                    if not end:
+                        unfinished.append((visited, steps, context))
                 else:
                     unfinished.append((visited, steps, context))
             pending = unfinished
@@ -730,6 +749,7 @@ class GraphQuery:
                                 "analysis_summaries": metadata["analysis_summaries"],
                                 "starts": starts, "targets": sorted(targets), "pending": list(pending),
                                 "reached": sorted(reached, key=str),
+                                "reported": sorted(reported),
                             },
                         }, expires=_expires)
                         self.pin_query(token, reader.parameters["revision"], expires=_expires)

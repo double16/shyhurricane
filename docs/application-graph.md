@@ -81,11 +81,6 @@ failure stops the epoch visibly; newer inputs remain durable.
 
 ### Graph-state storage
 
-Use a fresh assessment directory for storage version 2. Version 1 compact directories and older
-layouts are not supported. Existing storage versions are
-rejected before schema initialization; there is no migration or legacy file reader. Preserve old
-assessment directories and rebuild deployments into new directories.
-
 `graph_state/artifacts.sqlite` holds captures, shared response/source text, complete IR, detail
 shards, manifest facts, and restart checkpoints. Artifacts use compact JSON encoded as Zstandard
 level 1 BLOBs, or raw bytes when compression would enlarge them. SHA-256 content addresses share
@@ -239,6 +234,8 @@ Element discovery prioritizes resources, then fields/HTML elements, then code ar
 retain IDs, kinds, names, roles, URLs, methods, and source locations; steps retain IDs, kinds,
 source/target IDs, classifications, and evidence IDs. Use `detail="full"` for the previous public
 properties, including context lists and module details. Filtering and path membership are identical.
+Retained discovery applies the same detail choice on continuation. Compact records preserve manifest,
+analysis-unit and capture IDs, coverage statuses, and follow-up calls needed for offline expansion.
 IDs on saved pages have the same meaning as IDs on the first page (`get_result_page` wraps the producing response in `result`).
 
 | Argument | Tools | Type / default | Purpose and values |
@@ -436,6 +433,8 @@ execution remains read-only. Existing assessments need no rebuild or reingestion
 Endpoint inventory, element discovery, and their manifest continuations share a 120-second
 request budget, including coverage and deferred-unit metadata, after the indexing wait.
 Reads use existing indexes and finite candidate batches; exact URL filters start with URL lookups.
+Temporal selection seeks captures for the selected facts and contexts. Resource classification reuses
+those indexed lookups rather than materializing the full capture catalog for every endpoint.
 Deadline expiry retains completed records and returns `time_limit`. The final five seconds are
 reserved for checkpointing and page publication. A continuation is returned only after its state
 and revision pin have been saved; failed checkpoints report a restart-required analysis gap.
@@ -473,6 +472,10 @@ tokens; budget exhaustion requires a narrower query or waiting for expiry. These
 Flow and destination-directed searches visit reachable states breadth-first, returning shortest
 witnesses for reached context states. Relationship exploration can enumerate alternate routes
 within its bounds. Report truncation and omitted units alongside results.
+Frontier preparation examines only unresolved nodes in a bounded breadth-first batch; cached states
+do not rescan the pending queue. When a timed-out flow reports an intermediate source or sink, its
+unexplored edges remain in the continuation. Previously reported paths are not repeated on later
+continuations; retrying the same token still replays its saved response.
 
 Captured external source maps are selected at or before the bundle observation, with deterministic
 capture-ID tie breaking. An external map URL alone does not establish content association: its
@@ -803,3 +806,11 @@ To adopt them later, stop the server gracefully and restart with the updated cod
 directory. Retry failed queue work only after checking the recorded cause; completed work remains
 preserved. The dashboard `f` action retries failures across queues, so use it only when that broader
 retry is intended. Code installation alone does not restart workers or retry an assessment.
+
+## Finding correlation
+
+The background investigation worker consumes published graph revisions and saved findings to
+materialize exact URL/method anchors, compatible code operations, script consumers, flow witnesses,
+shared hotspots, and explicit chain candidates. `find_investigation_targets` reads these saved results;
+`graph.investigation` in `/status` reports progress, lag, and failures. Candidate scores are investigation
+priority and do not establish exploitation. See [finding correlation](investigation-targets.md).

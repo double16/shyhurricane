@@ -11,6 +11,8 @@ import httpx as httpx
 from haystack import Document
 
 from shyhurricane.doc_type_model_map import map_mime_to_type
+from shyhurricane.finding_metadata import scanner_metadata
+from shyhurricane.graph.artifacts import recovered_sources
 from shyhurricane.source_maps import MAX_SOURCE_MAP_BYTES as MAX_SOURCE_MAP_BYTES
 from shyhurricane.source_maps import _cached_map, _fetch_map, _valid_map, javascript_url_from_map, source_map_url
 from shyhurricane.task_queue.types import SaveFindingQueueItem
@@ -76,7 +78,13 @@ def _finding(url: str, match: dict, map_used: bool) -> SaveFindingQueueItem | No
         "## Fix\nReview the matched code and apply the rule's recommended remediation.\n\n"
         f"## References\nOpengrep rule `{rule}`.\n"
     )
-    return SaveFindingQueueItem(target=url, markdown=markdown, title=title, finding_id=key)
+    cwes = (extra.get("metadata") or {}).get("cwe") or []
+    metadata = scanner_metadata("opengrep", rule, severity, cwes=cwes if isinstance(cwes, list) else [cwes])
+    metadata["code_location"] = {
+        "source_path": source_path, "start_line": line,
+        "coordinate_space": "recovered" if map_used else "delivered",
+    }
+    return SaveFindingQueueItem(target=url, markdown=markdown, title=title, finding_id=key, metadata=metadata)
 
 
 def analyze_document(doc: Document, open_world: bool, content_store, finding_queue, artifacts=None) -> int:
@@ -111,10 +119,17 @@ def analyze_document(doc: Document, open_world: bool, content_store, finding_que
     result = _run_opengrep(source, source_map)
     if result is None:
         return 0
+    recovered = dict(recovered_sources(source_map)) if source_map else {}
     count = 0
     for match in result.get("results", []):
         finding = _finding(target_url, match, source_map is not None)
         if finding is not None:
+            if not source_map and source:
+                finding.metadata["content_sha256"] = hashlib.sha256(source.encode()).hexdigest()
+            elif source_map:
+                source_path = finding.metadata["code_location"]["source_path"]
+                if source_path in recovered:
+                    finding.metadata["content_sha256"] = hashlib.sha256(recovered[source_path].encode()).hexdigest()
             finding_queue.put(finding)
             count += 1
     return count

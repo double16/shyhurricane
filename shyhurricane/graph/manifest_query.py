@@ -3,7 +3,7 @@
 import sqlite3
 
 from shyhurricane.graph.cursors import QueryCursors
-from shyhurricane.graph.discovery import INTERPRETATION
+from shyhurricane.graph.discovery import INTERPRETATION, present_manifest
 from shyhurricane.graph.model import identity, optional_filter
 
 
@@ -28,9 +28,12 @@ def manifest_query(
     context_url=None,
     exclude_kinds=(),
     cursor_store=None,
+    detail=None,
 ):
     if not 1 <= limit <= 1000:
         raise ValueError("Graph page size must be between 1 and 1000")
+    if detail is not None:
+        present_manifest({}, detail)
     url, method, context_url = map(optional_filter, (url, method, context_url))
     watermark = artifacts.manifest.watermark() if watermark is None else watermark
     gaps = []
@@ -110,6 +113,7 @@ def manifest_query(
                     "kinds": kinds,
                     "context_url": context_url,
                     "exclude_kinds": exclude_kinds,
+                    "detail": detail,
                 },
                 expires=expires,
             )
@@ -120,7 +124,7 @@ def manifest_query(
             if cursor_store is None and store is not None:
                 store.close()
     return {
-        "results": records,
+        "results": records if detail is None else [present_manifest(record, detail) for record in records],
         "instructions": INTERPRETATION,
         "coverage": coverage,
         "omitted_regions": [],

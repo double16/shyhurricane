@@ -304,7 +304,7 @@ class LinkPlanner:
         )
 
     def dom(self, selector, element, selector_local, element_local, contexts):
-        candidates = []
+        candidates = [element["inline_selector"]] if element.get("inline_selector") else []
         if element.get("html_id"):
             candidates.append(f"#{element['html_id']}")
         if element.get("field_name"):
@@ -319,6 +319,8 @@ class LinkPlanner:
                 or (selector.get("form_field") is not None and selector["form_field"] != element.get("field_name"))
             ):
                 return
+        if selector.get("ui_event") and not element.get("ui_origin"):
+            return
         if element.get("capture_id") in contexts and selector.get("selector") in candidates:
             if selector.get("form_request"):
                 if element.get("html_tag") == "form" and element.get("form_target_url"):
@@ -378,7 +380,7 @@ class LinkPlanner:
                         if row["node"].get("kind") == "element":
                             self.dom(node, row["node"], True, False, self.contexts)
             if node.get("kind") == "element":
-                selectors = []
+                selectors = [node["inline_selector"]] if node.get("inline_selector") else []
                 if node.get("html_id"):
                     selectors.append(f"#{node['html_id']}")
                 if node.get("field_name"):
@@ -388,6 +390,7 @@ class LinkPlanner:
                     for row in self.candidates("selector", selector):
                         other = {**row["node"], "evidence_id": row["evidence_id"]}
                         self.dom(other, node, False, True, row["contexts"] or [])
+        self.ui_gaps()
         resolved_requests = {link["source"] for link in self.links.values() if link["kind"] == "REQUESTS"}
         for node in self.graph.nodes.values():
             if node.get("form_request") and node["id"] not in resolved_requests:
@@ -401,6 +404,15 @@ class LinkPlanner:
             time.monotonic() - started,
         )
         return self.links
+
+    def ui_gaps(self):
+        """Keep missing captured UI bindings explicit, even when scripts parse successfully."""
+        bound = {link["target"] for link in self.links.values() if link.get("rule") == "js.dom-selector"}
+        for node in self.graph.nodes.values():
+            if node.get("ui_event") and node.get("selector") and node["id"] not in bound:
+                gap = f"Unresolved UI origin: {node['selector']} requires a compatible captured interactive element"
+                if gap not in self.graph.gaps:
+                    self.graph.gaps.append(gap)
 
     def checkpoint(self):
         """JSON-only state; no generators, drivers, or executable queue payloads."""
@@ -441,6 +453,8 @@ class LinkPlanner:
     @staticmethod
     def element_selectors(element):
         result = list(element.get("form_selectors") or [])
+        if element.get("inline_selector"):
+            result.append(element["inline_selector"])
         if element.get("html_id"):
             result.append(f"#{element['html_id']}")
         if element.get("field_name"):
@@ -463,7 +477,7 @@ class LinkPlanner:
                         "WHERE other.kind='element' AND (context>$after_context OR other.id>$after_id) "
                         f"AND {visible_node('other')} "
                         "AND coalesce(other._owner_capture_id,other.capture_id,'')<>$capture "
-                        "AND (('#'+other.html_id) IN $selectors "
+                        "AND (other.inline_selector IN $selectors OR ('#'+other.html_id) IN $selectors "
                         "OR ('[name=\"'+other.field_name+'\"]') IN $selectors "
                         "OR ('input[name=\"'+other.field_name+'\"]') IN $selectors "
                         "OR any(selector IN coalesce(other.form_selectors,[]) WHERE selector IN $selectors)) "
@@ -533,6 +547,7 @@ class LinkPlanner:
                             self.dom(row["node"] | {"evidence_id": row["evidence_id"]}, node,
                                      False, True, row["contexts"] or [])
                 self.cursor["node"] += 1
+            self.ui_gaps()
             resolved = {link["source"] for link in self.links.values() if link["kind"] == "REQUESTS"}
             for node in self.graph.nodes.values():
                 if node.get("form_request") and node["id"] not in resolved:

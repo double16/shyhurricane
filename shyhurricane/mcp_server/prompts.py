@@ -23,6 +23,12 @@ HTTP(S) URL prefixes restrict scheme, host, and path. Do not broaden the user's 
 Discovered external destinations are boundaries, not authorization to test them.
 
 Begin with query_findings using the explicit site: predicate supplied below in its query argument.
+After that lookup, call find_investigation_targets(scope=target) for saved ranked targets, hotspots,
+and chain candidates. Use include_hypotheses=false when reviewing only supported relationships.
+The optional vulnerability_type accepts normalized categories, not free text; omit it if uncertain.
+Scores rank investigation work, not exploit probability. Inspect stale/pending status and evidence.
+If materialization is pending or incomplete, continue the endpoint-first graph workflow below.
+Never automatically save deterministic candidates as confirmed findings.
 For focused investigations, append vulnerability-specific natural-language text to the scoped query.
 For inventories or full reviews, retrieve all scoped findings with predicates only; follow pages.
 Semantic queries return a bounded ranked snapshot; page exhaustion does not establish completeness.
@@ -43,6 +49,12 @@ In low-power mode use predicate-only queries, then inspect captured content dire
 Read full relevant content with fetch_web_resource_content(url=resource.uri) when a returned
 resource.uri is available; otherwise supply an indexed HTTP(S) URL. When contents.has_more is true,
 advance output_start_position by contents.offset + len(contents.text).
+Indexed JavaScript may be normalized, deobfuscated, or reconstructed from source maps for readability.
+Formatting, variable names, file paths, and line numbers may differ from code served by the target.
+Finding coordinates and source hashes identify the analyzed source artifact; do not apply them
+directly to the deployed bundle. Prefer readable source for analysis, correlate artifact identity,
+and compare captured or live code when validating behavior, subject to the selected mode and scope.
+Transformation may be partial or fail; readable code is not proof of complete or faithful recovery.
 Follow pagination.next_page_token with get_result_page(page_token=pagination.next_page_token).
 Report retrieval_truncated,
 truncation_reasons, analysis_gaps, missing captures, and incomplete scan/indexing status.
@@ -136,7 +148,9 @@ provide manual steps rather than claiming those checks ran.
 """
 
 
-def _render(target: str, mode: str, workflow: str, finding_query: str | None = None) -> str:
+def _render(
+    target: str, mode: str, workflow: str, finding_query: str | None = None, *, investigation_first: bool = False
+) -> str:
     """Validate arguments without contacting any target or initializing server services."""
     if not isinstance(target, str) or not target or any(character.isspace() for character in target):
         raise MCPError(INVALID_PARAMS, "target must be a nonempty host, domain, IP, netloc, or HTTP(S) URL prefix")
@@ -156,11 +170,23 @@ def _render(target: str, mode: str, workflow: str, finding_query: str | None = N
     if finding_query:
         finding_expression += f" {finding_query}"
     finding_arguments = f"query={json.dumps(finding_expression)}"
+    common = COMMON_WORKFLOW
+    lookup = f"Scoped finding lookup: query_findings({finding_arguments})"
+    if investigation_first:
+        common = common[common.index("For focused investigations,") :]
+        common = common.replace(
+            "Use graph tools when they can substantiate a candidate. Start discovery with",
+            "Use graph tools only for identified missing links or incomplete ranked results. "
+            "When no suitable starting URL exists, start discovery with",
+        )
+        lookup = (
+            f"Initial ranked lookup: find_investigation_targets(scope={json.dumps(target)}, include_hypotheses=true)"
+        )
     return (
         f"Assess target: {json.dumps(target)}\n"
         f"Scoped search predicate: site:{target}\n"
-        f"Scoped finding lookup: query_findings({finding_arguments})\n"
-        f"\n{workflow}\n{mode_workflow}\n{COMMON_WORKFLOW}"
+        f"{lookup}\n"
+        f"\n{workflow}\n{mode_workflow}\n{common}"
     )
 
 
@@ -346,20 +372,40 @@ by supported risk and provide validation steps without labeling static paths as 
 
 @mcp_instance.prompt(title="Find vulnerability chains")
 def find_vulnerability_chains(target: Target, mode: Mode = "analysis") -> str:
-    """Correlate findings with graph evidence to investigate possible vulnerability chains."""
+    """Investigate ranked chain candidates, hotspots, and finding targets using focused evidence."""
     return _render(
         target,
         mode,
         """
-Start from the complete scoped finding lookup and evidence-backed candidates before narrowing
-by affected URL. URL filters can omit host-level findings and other endpoints needed for a chain.
+Begin with the initial ranked lookup above; do not require query_findings first.
+Use find_investigation_targets results as the primary worklist.
+Use the returned findings dictionary for titles, submitted targets, metadata and category provenance.
+Inspect category_coverage: unknown categories can prevent matches even after processing completes.
+For hotspots inspect association_basis and direct/contextual contributor counts; prefer direct
+support over consuming-page co-occurrence. Follow pagination.next_page_token
+with get_result_page(page_token=pagination.next_page_token); report truncation and coverage limits.
+For kind=chain validate the proposed linkage and rule prerequisites. For kind=hotspot examine
+contributing findings for a concrete capability transfer. For kind=target investigate missing links.
+Start in returned priority order, adjusting for freshness, evidence strength, and supported impact.
+Scores rank investigation work, not exploit probability. Inspect materialization_status, stale,
+witnesses, evidence_ids, missing_prerequisites, and analysis_gaps. Distinguish hypotheses from
+supported relationships; neither establishes exploitation. Never automatically save candidates.
+Use the page-level follow_up list and its result_ids to avoid repeated tool calls.
+Inspect binding_status and applicability_status before interpreting associations; inspect
+unknown_categories for classification gaps. Reuse evidence already retrieved in this investigation.
+Use returned tool names and arguments, retaining scope=target. Deduplicate repeated
+calls and evidence retrieval across candidates. Use scoped query_findings only for contributing
+finding details absent from ranked results; match finding_ids locally, without inventing ID filters.
+If results are empty, pending, failed, stale, or incomplete, use scoped findings and focused graph
+queries to resolve identified gaps. Do not repeatedly poll asynchronous materialization.
+Use known affected URLs first; enumerate endpoints only when no suitable starting point exists.
 Anchor find_application_endpoints
 queries with detail="summary" and exact url to their affected URLs; skip domain enumeration
 when findings already identify endpoints. Select focused candidates, then inspect specific relationships
 and data-flow evidence. Keep possible navigation journeys separate from data-flow paths. Investigate whether one
 weakness supplies the input, access, or capability required by another: for example, unsafe
 rendering plus token exposure, or exposed configuration plus a privileged endpoint.
-For each proposed chain show ordered steps, evidence IDs/URLs/source locations, attacker control,
+For each proposed chain show candidate ID, contributing finding IDs, freshness, ordered steps, evidence IDs/URLs/source locations, attacker control,
 required privileges, trust boundaries, controls, missing prerequisites, and final supported impact.
 Separate verified steps from inferred links; co-occurrence and graph connectivity do not establish
 exploitability. Check capture compatibility and do not join unrelated browser sessions or storage.
@@ -367,4 +413,5 @@ Rank chains by evidence strength and impact. Provide per-step validation and way
 chain. Save a distinct chain finding only when evidence supports the linkage, avoiding duplicates;
 keep speculative chains in the report with explicit missing evidence.
 """,
+        investigation_first=True,
     )

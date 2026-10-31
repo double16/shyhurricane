@@ -391,6 +391,19 @@ async def _paginate_result(source_tool, result, field, page_size, retrieval_trun
             }
         else:
             page = {**value, field: chunk}
+        if source_tool == "find_investigation_targets":
+            calls = {}
+            for item in chunk:
+                for call in item.get("follow_up", []):
+                    key = json.dumps(call, sort_keys=True)
+                    entry = calls.setdefault(key, {**call, "result_ids": []})
+                    if item["id"] not in entry["result_ids"]:
+                        entry["result_ids"].append(item["id"])
+            page["follow_up"] = list(calls.values())
+            contributors = {key for item in chunk for key in item["finding_ids"]}
+            page["findings"] = {
+                key: context for key, context in value.get("findings", {}).items() if key in contributors
+            }
         if "limit" in page:
             page["limit"] = page_size
         if isinstance(result, SavedTextResult):

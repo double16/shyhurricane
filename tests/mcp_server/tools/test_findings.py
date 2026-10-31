@@ -140,12 +140,18 @@ class FakeRequest:
         self.chunks = chunks or []
         self.form_data = form_data or {}
 
+    async def body(self):
+        return b"".join(self.chunks)
+
     async def stream(self):
         for chunk in self.chunks:
             yield chunk
 
     async def form(self):
-        return self.form_data
+        from starlette.datastructures import FormData
+
+        return FormData([(key, item) for key, value in self.form_data.items()
+                         for item in (value if isinstance(value, list) else [value])])
 
 
 @pytest.mark.asyncio
@@ -611,3 +617,56 @@ async def test_predicate_only_retrieval_is_not_subject_to_semantic_cap(monkeypat
     assert not result.retrieval_truncated
     assert "1000-finding limit" not in result.instructions
     ctx.finding_semantic_search.prepare.assert_not_called()
+
+
+@pytest.mark.parametrize("content_type", ["application/json", "application/x-www-form-urlencoded"])
+async def test_metadata_round_trips_and_affected_method_is_not_submission_method(monkeypatch, content_type):
+    ctx = ServerContext()
+    patch_context(monkeypatch, ctx)
+    payload = {"target": "https://example.com/search", "markdown": "issue", "metadata": {
+        "source": "zap", "affected_method": "get", "parameter": {"name": "q", "location": "query"},
+        "cwe_ids": ["CWE-79"], "severity": "medium", "confidence": "high",
+    }}
+    if content_type == "application/json":
+        request = FakeRequest(content_type, [json.dumps(payload).encode()])
+    else:
+        request = FakeRequest(content_type, form_data={**payload, "metadata": json.dumps(payload["metadata"])})
+    response = await findings.save_finding_api(request)
+    assert response.status_code == 201
+    assert ctx.finding_queue.items[0].metadata["affected_method"] == "GET"
+    assert "verification_status" not in ctx.finding_queue.items[0].metadata
+    await findings.save_finding(None, payload["target"], "second", "Title", findings.FindingMetadata(source="burp"))
+    assert ctx.finding_queue.items[1].metadata == {"source": "burp"}
+
+
+@pytest.mark.parametrize("record", [
+    {"target": "example.com", "markdown": "issue", "metadata": {"severity": "bad"}},
+    {"target": "example.com", "markdown": "issue", "metadata": {"affected_method": "GET /"}},
+    {"targets": ["example.com", "not a target"], "markdown": "issue"},
+    [], None, {"target": "example.com", "markdown": ""},
+])
+async def test_all_records_validated_before_any_queue_write(monkeypatch, record):
+    ctx = ServerContext()
+    patch_context(monkeypatch, ctx)
+    content = json.dumps({"target": "example.com", "markdown": "valid"}) + "\n" + json.dumps(record)
+    response = await findings.save_finding_api(FakeRequest("application/json", [content.encode()]))
+    assert response.status_code == 400
+    assert not ctx.finding_queue.items
+    assert json.loads(response.body)["errors"][0]["field"]
+
+
+async def test_empty_invalid_utf8_and_invalid_form_metadata(monkeypatch):
+    ctx = ServerContext()
+    patch_context(monkeypatch, ctx)
+    for request in [FakeRequest("application/json"), FakeRequest("application/json", [b"\xff"]),
+                    FakeRequest("application/x-www-form-urlencoded", form_data={"metadata": "{"})]:
+        assert (await findings.save_finding_api(request)).status_code == 400
+
+
+async def test_query_exposes_stable_finding_ids_and_structured_fields(monkeypatch):
+    doc = finding_doc()
+    doc.meta["finding_metadata"] = {"source": "burp", "severity": "high"}
+    patch_context(monkeypatch, ServerContext(Store([doc])))
+    result = await findings.query_findings(None, "example.com")
+    assert result.findings[0].finding_id
+    assert result.findings[0].metadata == {"source": "burp", "severity": "high"}

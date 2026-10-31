@@ -1,17 +1,21 @@
 import asyncio
 import logging
 import sqlite3
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
 from qdrant_client.http import models as qm
+from rich.errors import MarkupError
 from rich.markup import escape
+from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, VerticalScroll
 from textual.widgets import Footer, Header, Static
 
+from shyhurricane.data_paths import resolve_data_dir
 from shyhurricane.db import get_domain_and_host_counts
 from shyhurricane.disk_space import disk_status
 from shyhurricane.graph.status import graph_status
@@ -116,13 +120,27 @@ def format_database_panel(document_counts: dict[str, int]) -> str:
     return f"[b]Database statistics[/b]\n{counts}"
 
 
+def format_duration_since(timestamp: float | None, now: float | None = None) -> str:
+    if timestamp is None:
+        return "awaiting results"
+    seconds = max(0, int((time.time() if now is None else now) - timestamp))
+    if seconds < 60:
+        return f"{seconds}s ago"
+    if seconds < 3600:
+        return f"{seconds // 60}m ago"
+    if seconds < 86400:
+        return f"{seconds // 3600}h ago"
+    return f"{seconds // 86400}d ago"
+
+
 def format_graph_panel(graph: dict | None) -> str:
     graph = graph or {}
     revision = graph.get("publication_revision")
     delta = graph.get("publication_revision_delta")
     elapsed = graph.get("seconds_since_observed_progress")
     change = f"+{delta}" if delta is not None else "awaiting baseline"
-    progress = f"{elapsed:.0f}s ago" if elapsed is not None else "not yet observed"
+    now = time.time()
+    progress = format_duration_since(now - elapsed, now=now) if elapsed is not None else "not yet observed"
     analyses = graph.get("analyses", {})
     lines = [
         "[b]Graph activity[/b]",
@@ -134,6 +152,21 @@ def format_graph_panel(graph: dict | None) -> str:
         f"Queue depth: {graph.get('queue_depth', 0)}",
         f"Failed: {analyses.get('failed', 0)}",
     ]
+    investigation = graph.get("investigation")
+    if investigation:
+        lines.extend([
+            f"Investigations: {investigation.get('completed', 0)} completed / "
+            f"{investigation.get('pending', 0)} pending / {investigation.get('failed', 0)} failed",
+            f"Investigation lag: {investigation.get('stale', 0)} findings; "
+            f"policy {investigation.get('policy_version', 1)}",
+            "Investigation last refresh: "
+            f"{format_duration_since(investigation.get('last_successful_refresh'))}",
+        ])
+        for kind, counts in investigation.get("work", {}).items():
+            lines.append(f"Investigation {escape(kind)} work: {counts.get('pending', 0)} pending / "
+                         f"{counts.get('failed', 0)} failed")
+        if investigation.get("error"):
+            lines.append(f"Investigation error: {escape(str(investigation['error']))}")
     continuations = graph.get("continuations")
     if continuations:
         lines.extend([
@@ -326,6 +359,39 @@ def format_tools_panel(running_tools: list[str], recent_tools: list[tuple[str, s
     return f"[b]MCP tools[/b]\n{tools}"
 
 
+def terminal_status(data, ready, running_tools, previous=None):
+    """Summarize cached checks and work without performing probes."""
+    checks = [data.model_health, data.qdrant_health, (data.graph or {}).get("healthy")]
+    disk = data.disk or {}
+    checks.append({"healthy": True, "disabled": True, "paused": False}.get(disk.get("state")))
+    color = "#ff0000" if False in checks else "#ffa500" if None in checks else "#00ff00"
+    counts = list(data.queue_sizes.values())
+    graph = data.graph or {}
+    investigation = graph.get("investigation", {})
+    sections = [investigation, graph.get("continuations", {}), graph.get("analyses", {})]
+    sections.extend(investigation.get("work", {}).values())
+    counts.append(graph.get("queue_depth", 0))
+    if graph.get("error"):
+        counts.append(None)
+    for section in sections:
+        counts.extend(section.get(key, 0) for key in ("pending", "processing", "running"))
+    if running_tools:
+        activity = "working"
+    elif any(value is not None and value > 0 for value in counts):
+        activity = "working" if ready else "blocked"
+    elif None in counts:
+        activity = previous or "blocked"
+    else:
+        activity = "idle"
+    return color, activity
+
+
+def terminal_title():
+    """Keep filesystem names from injecting terminal control sequences."""
+    name = resolve_data_dir().name
+    return "shyhurricane - " + "".join(c for c in name if c.isprintable())
+
+
 class MonitorApp(App[None]):
     TITLE = "shyhurricane"
     CSS = """
@@ -353,6 +419,7 @@ class MonitorApp(App[None]):
         self.server = server
         self._retrying_failed = False
         self.qdrant_cache = MonitorQdrantCache()
+        self._tab_status = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -372,6 +439,35 @@ class MonitorApp(App[None]):
         await self.refresh_data()
         self.set_interval(30, self.refresh_data)
 
+    def update_panel(self, selector: str, content: str | Text) -> None:
+        if isinstance(content, str):
+            try:
+                Text.from_markup(content)
+            except MarkupError:
+                logger.warning("Invalid markup in monitor panel %s; displaying literal text", selector)
+                content = Text(content)
+        self.query_one(selector, Static).update(content)
+
+    def publish_terminal_status(self, data):
+        if self._driver is None or self.is_headless:
+            return
+        monitor = getattr(self.server_context, "health_monitor", None)
+        ready = monitor is not None and monitor.ready.is_set()
+        previous = self._tab_status[1] if self._tab_status else None
+        status = terminal_status(data, ready, self.server.running_tools, previous)
+        if status != self._tab_status:
+            color, activity = status
+            self._driver.write(f"\x1b]1;{terminal_title()}\x1b\\")
+            subtitle_color = {"working": "#ffa500", "blocked": "#ff0000"}.get(activity, "")
+            self._driver.write(
+                f"\x1b]21337;indicator={color};status={activity};status-color={subtitle_color}\x1b\\"
+            )
+            self._tab_status = status
+
+    def on_unmount(self):
+        if self._tab_status is not None and self._driver is not None:
+            self._driver.write("\x1b]21337;status=;indicator=;status-color=\x1b\\")
+
     async def refresh_data(self) -> None:
         data = await collect_monitor_data(
             self.server_context, self.host, self.port, self.server.running_tools, self.server.recent_tools,
@@ -379,19 +475,21 @@ class MonitorApp(App[None]):
         )
         if not self.is_running:
             return
-        self.query_one("#configuration-content", Static).update(format_configuration_panel(data))
+        self.publish_terminal_status(data)
+        self.update_panel("#configuration-content", format_configuration_panel(data))
         queues = format_queue_panel(data.queue_sizes, data.queue_failures)
-        self.query_one("#queues", Static).update(f"[b]Queue status[/b]\n{queues}")
-        self.query_one("#database", Static).update(format_monitor_database_panel(data))
-        self.query_one("#graph", Static).update(format_graph_panel(data.graph))
-        self.query_one("#domains", Static).update(format_domain_and_host_panel(data))
+        self.update_panel("#queues", f"[b]Queue status[/b]\n{queues}")
+        self.update_panel("#database", format_monitor_database_panel(data))
+        self.update_panel("#graph", format_graph_panel(data.graph))
+        self.update_panel("#domains", format_domain_and_host_panel(data))
         freshness = data.qdrant_freshness.get("urls", {})
         urls = ("Unavailable" if freshness.get("status") == "unavailable"
                 else "\n".join(data.recent_urls) or "No URLs indexed")
-        self.query_one("#urls", Static).update(
-            f"[b]Last five URLs indexed[/b]{format_qdrant_freshness(freshness)}\n{urls}"
-        )
-        self.query_one("#tools", Static).update(format_tools_panel(data.running_tools, data.recent_tools))
+        url_content = Text()
+        url_content.append("Last five URLs indexed", style="bold")
+        url_content.append(f"{format_qdrant_freshness(freshness)}\n{urls}", style="")
+        self.update_panel("#urls", url_content)
+        self.update_panel("#tools", format_tools_panel(data.running_tools, data.recent_tools))
 
     async def action_refresh(self) -> None:
         await self.refresh_data()

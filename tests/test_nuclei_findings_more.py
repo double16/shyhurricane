@@ -143,3 +143,15 @@ def test_extract_targets_from_parts_headers_and_empty_cases():
     assert nf._hostport(None, "80") is None
     assert nf.is_nuclei_finding({"template-id": "x", "info": {}, "host": "example.com"}) is True
     assert nf.is_nuclei_finding({"template-id": "x"}) is False
+
+
+def test_conversion_preserves_structured_metadata_without_confirming_issue():
+    converted = nf.nuclei_finding_to_markdown(finding(info={
+        "severity": "high", "classification": {"cwe-id": ["CWE-79", "CWE-200"]},
+    }))
+    assert converted["metadata"]["source"] == "nuclei"
+    assert converted["metadata"]["severity"] == "high"
+    assert converted["metadata"]["cwe_ids"] == ["CWE-200", "CWE-79"]
+    assert converted["metadata"]["verification_status"] == "unverified"
+    converted = nf.nuclei_finding_to_markdown(finding(info={"classification": "invalid"}))
+    assert converted["metadata"]["cwe_ids"] == []

@@ -122,6 +122,7 @@ def _archive_ir(artifacts, event, url, filename, result, *, contexts=()):
                 **node,
                 "url": url,
                 "source_path": filename,
+                "source_sha256": raw.get("source_sha256"),
                 "id": identity(node.get("kind", "symbol"), identity(event["id"], filename, node["id"])),
             },
         )
