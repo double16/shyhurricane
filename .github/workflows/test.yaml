@@ -47,12 +47,6 @@ jobs:
             pyproject.toml
             uv.lock
 
-      - name: Set up Go
-        uses: actions/setup-go@v7
-        with:
-          go-version: '1.22.x'
-          cache: false
-
       - name: Install and test JavaScript graph analyzer
         working-directory: src/docker/unix_command/graph-analysis
         run: |

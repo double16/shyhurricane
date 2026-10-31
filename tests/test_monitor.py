@@ -1209,10 +1209,6 @@ def test_terminal_output_and_cleanup(monkeypatch):
     app.on_unmount()
     assert driver.write.call_args.args == ("\x1b]21337;status=;indicator=;status-color=\x1b\\",)
     driver.reset_mock()
-    app._iterm_enabled = False
-    app.publish_terminal_status(data)
-    driver.write.assert_not_called()
-    app._iterm_enabled = True
     driver.is_headless = True
     app.publish_terminal_status(data)
     driver.write.assert_not_called()

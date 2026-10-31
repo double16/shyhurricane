@@ -422,7 +422,6 @@ class MonitorApp(App[None]):
         self._retrying_failed = False
         self.qdrant_cache = MonitorQdrantCache()
         self._tab_status = None
-        self._iterm_enabled = os.environ.get("TERM_PROGRAM") == "iTerm.app" and sys.stdout.isatty()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -452,7 +451,7 @@ class MonitorApp(App[None]):
         self.query_one(selector, Static).update(content)
 
     def publish_terminal_status(self, data):
-        if not self._iterm_enabled or self._driver is None or self.is_headless:
+        if self._driver is None or self.is_headless:
             return
         monitor = getattr(self.server_context, "health_monitor", None)
         ready = monitor is not None and monitor.ready.is_set()
