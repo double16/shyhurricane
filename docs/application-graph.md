@@ -150,7 +150,7 @@ atomic snapshot across SQLite, filesystem allocation, and Neo4j.
 For an isolated artifact-format comparison, install development dependencies and run:
 
 ```shell
-UV_CACHE_DIR="$PWD/.uv-cache" uv run python .github/scripts/benchmark-graph-storage.py \
+uv run python .github/scripts/benchmark-graph-storage.py \
   --corpus /path/to/artifacts-or-index.jsonl --output /tmp/graph-storage-benchmark.json
 ```
 
@@ -177,14 +177,14 @@ URLs must be absolute HTTP(S) URLs with valid hosts and ports and no credentials
 For example, `find_application_endpoints(url="https://app.example.com:8443/api/items?id=1")`
 uses scope `app.example.com:8443`. Existing hostname scope semantics include subdomains.
 
-| Tool | Purpose |
-|------|---------|
-| `find_application_endpoints` | Discover URL/method inventories quickly; request focused summaries for inputs, scripts, and flow candidates |
-| `find_application_elements` | Discover resources, elements, fields, source reads, and sink operations; filter by `kinds`, `role`, or exact `url` |
-| `find_application_relationships` | Inspect incoming or outgoing relationships around a returned element ID |
-| `trace_application_data_flow` | Follow possible data flow forward to sinks or backward to sources |
-| `find_user_journey_paths` | Find possible navigation, form-submission, and redirect paths between exact URLs or resource IDs |
-| `fetch_application_graph_evidence` | Read the evidence, capture identity, source location, and inference rule behind a path step |
+| Tool                               | Purpose                                                                                                            |
+|------------------------------------|--------------------------------------------------------------------------------------------------------------------|
+| `find_application_endpoints`       | Discover URL/method inventories quickly; request focused summaries for inputs, scripts, and flow candidates        |
+| `find_application_elements`        | Discover resources, elements, fields, source reads, and sink operations; filter by `kinds`, `role`, or exact `url` |
+| `find_application_relationships`   | Inspect incoming or outgoing relationships around a returned element ID                                            |
+| `trace_application_data_flow`      | Follow possible data flow forward to sinks or backward to sources                                                  |
+| `find_user_journey_paths`          | Find possible navigation, form-submission, and redirect paths between exact URLs or resource IDs                   |
+| `fetch_application_graph_evidence` | Read the evidence, capture identity, source location, and inference rule behind a path step                        |
 
 ### Graph tool arguments
 
@@ -193,11 +193,13 @@ also accept `null`. IDs are opaque strings: copy them unchanged from the indicat
 All graph string arguments, including each `kinds` entry, ignore leading and trailing whitespace.
 Case, internal whitespace, and URL escaping remain unchanged. Blank strings are not converted to `null`;
 use `null` to omit a nullable filter.
+
 Use the same application scope when passing element/resource IDs between discovery and traversal tools.
 Evidence retrieval accepts only `evidence_id` and reads published evidence without waiting for indexing.
 Possession of an evidence ID permits retrieval regardless of its URL or consuming-document context.
 It returns the evidence object or `null` for missing or unpublished evidence, without an `indexing` field.
 Begin domain/host discovery with `find_application_endpoints(detail="inventory")` (the default).
+
 Each record includes a resource ID, URL, method, `capture_status`, and focused `follow_up` calls.
 Inventory includes resources whose own URL matches scope, including assets; external dependencies
 remain discoverable through focused relationship tools. Uncomputed inputs, scripts, sources, and
@@ -343,6 +345,7 @@ Hydration loads immutable relationships, entities, metadata, and shared contexts
 most 500 input records. Shared dependencies and adjacency are cached per request. Resource-limit
 failures subdivide batches; completed records remain available and results report time, memory,
 and missing-generation limits. Repeat the query when a generation is unavailable.
+
 Cancellation stops new batches and attempts to terminate only database reads tagged for that request;
 external Neo4j users need permission to inspect and terminate their own transactions. If termination
 is unavailable, the transaction timeout remains the bound for an already running read.
@@ -435,11 +438,13 @@ request budget, including coverage and deferred-unit metadata, after the indexin
 Reads use existing indexes and finite candidate batches; exact URL filters start with URL lookups.
 Temporal selection seeks captures for the selected facts and contexts. Resource classification reuses
 those indexed lookups rather than materializing the full capture catalog for every endpoint.
+
 Deadline expiry retains completed records and returns `time_limit`. The final five seconds are
 reserved for checkpointing and page publication. A continuation is returned only after its state
 and revision pin have been saved; failed checkpoints report a restart-required analysis gap.
 Continuation lock waits check cancellation at least every 50 milliseconds. Progress updates retain
 the established five-second interval, including continuations and offline expansion submission.
+
 Saved-page maintenance runs in the background every 60 seconds, inspecting at most 100 entries
 or one second per pass. Requested pages retain integrity checks; explicit full cleanup remains available.
 Unfinished coverage is reported as `unknown`, with no unit count and an explicit analysis gap.
@@ -472,6 +477,7 @@ tokens; budget exhaustion requires a narrower query or waiting for expiry. These
 Flow and destination-directed searches visit reachable states breadth-first, returning shortest
 witnesses for reached context states. Relationship exploration can enumerate alternate routes
 within its bounds. Report truncation and omitted units alongside results.
+
 Frontier preparation examines only unresolved nodes in a bounded breadth-first batch; cached states
 do not rescan the pending queue. When a timed-out flow reports an intermediate source or sink, its
 unexplored edges remain in the continuation. Previously reported paths are not repeated on later
@@ -493,7 +499,9 @@ detailed-analysis limits; the variable keeps its existing name for compatibility
 Summaries prioritize security sources/sinks, import/export and resolved callback boundaries, DOM
 bindings, then reference origins. Selection reserves space across source, sink, boundary, DOM,
 and reference classes so a large sink population cannot displace every source. Summaries retain at
-most 500 endpoints and 500 flow relationships. All resource references remain in the discovery manifest. Direct endpoint edges retain their original evidence. Internal directed
+most 500 endpoints and 500 flow relationships. All resource references remain in the discovery manifest.
+
+Direct endpoint edges retain their original evidence. Internal directed
 flow paths become `SUMMARIZED_FLOW` edges with original hop counts, endpoint locations, and samples
 of the first four and last four edges. Paths have no fixed depth cutoff; traversal stops at the next
 retained endpoint and is bounded to 100,000 edge visits per script. Summary edges participate in flow
@@ -534,6 +542,7 @@ without count summaries. Existing API fields `entities` and `relationships` alia
 retained-history counts; `current` and `retained_history` expose `entity_estimate`,
 `relationship_estimate`, capture/resource counts, and coverage. Status also includes refresh time
 and age. Empty graphs report zero; wholly uncovered graphs report unavailable estimates.
+
 Neo4j connection health and its address are reported independently of statistics refreshes.
 If a refresh fails, status includes the error type or Neo4j error code, and the diagnostic log
 contains the full exception. A green Neo4j indicator confirms connectivity, not successful statistics.
@@ -782,12 +791,12 @@ result limits. Captured source and deferred analysis units remain available when
 
 The additive `graph.epoch` status fields distinguish reference discovery from publication:
 
-| Field | Meaning |
-|-------|---------|
-| `discovery_total` | Current epoch membership; may increase while dependencies are discovered |
-| `discovery_completed` | Members past reference discovery, excluding failed and blocked members |
-| `current_job` | Capture ID, stage, start timestamp, and interrupted flag; null between jobs |
-| `last_progress_at` | Unix timestamp of the last successfully completed work step, or null |
+| Field                 | Meaning                                                                     |
+|-----------------------|-----------------------------------------------------------------------------|
+| `discovery_total`     | Current epoch membership; may increase while dependencies are discovered    |
+| `discovery_completed` | Members past reference discovery, excluding failed and blocked members      |
+| `current_job`         | Capture ID, stage, start timestamp, and interrupted flag; null between jobs |
+| `last_progress_at`    | Unix timestamp of the last successfully completed work step, or null        |
 
 Context discovery and structural/link publication follow reference discovery. Existing `stages`,
 `failed`, `blocked`, and publication fields remain available. A successful step can checkpoint

@@ -11,11 +11,11 @@ Paths that escape that default through `..` or symbolic links are rejected.
 
 When `/data` exists as a directory, it is automatically the default. Otherwise, defaults are:
 
-| Platform | Default data directory |
-|----------|------------------------|
-| Linux | `${XDG_STATE_HOME:-~/.local/state}/shyhurricane` |
-| macOS | `~/Library/Application Support/shyhurricane` |
-| Windows | `%LOCALAPPDATA%\shyhurricane`, falling back to `~/AppData/Local/shyhurricane` |
+| Platform | Default data directory                                                        |
+|----------|-------------------------------------------------------------------------------|
+| Linux    | `${XDG_STATE_HOME:-~/.local/state}/shyhurricane`                              |
+| macOS    | `~/Library/Application Support/shyhurricane`                                  |
+| Windows  | `%LOCALAPPDATA%\shyhurricane`, falling back to `~/AppData/Local/shyhurricane` |
 
 ```shell
 # Separate assessment beneath the detected default, shared by all three commands:

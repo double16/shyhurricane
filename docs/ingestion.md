@@ -34,12 +34,12 @@ free space in the terminal monitor and `/status`, and controls indexing pause an
 The monitor does not force reclamation. If the macOS query is unavailable or fails, it falls
 back to ordinary filesystem free space. Other platforms use ordinary free space.
 
-| Environment variable | Default | Description |
-|----------------------|---------|-------------|
-| `DISK_MIN_FREE_PERCENT` | `3` | Pause below this free percentage; `0` disables this limit |
-| `DISK_MIN_FREE_BYTES` | `2147483648` | Pause below this free byte count (2 GiB); `0` disables this limit |
-| `DISK_RESUME_MARGIN_PERCENT` | `1` | Additional percentage points required after a disk pause |
-| `DISK_RESUME_MARGIN_BYTES` | `536870912` | Additional bytes required after a disk pause (512 MiB) |
+| Environment variable         | Default      | Description                                                       |
+|------------------------------|--------------|-------------------------------------------------------------------|
+| `DISK_MIN_FREE_PERCENT`      | `3`          | Pause below this free percentage; `0` disables this limit         |
+| `DISK_MIN_FREE_BYTES`        | `2147483648` | Pause below this free byte count (2 GiB); `0` disables this limit |
+| `DISK_RESUME_MARGIN_PERCENT` | `1`          | Additional percentage points required after a disk pause          |
+| `DISK_RESUME_MARGIN_BYTES`   | `536870912`  | Additional bytes required after a disk pause (512 MiB)            |
 
 Matching CLI flags (`--disk-min-free-percent`, `--disk-min-free-bytes`,
 `--disk-resume-margin-percent`, `--disk-resume-margin-bytes`) override environment values.

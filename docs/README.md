@@ -13,6 +13,5 @@ Start with the [project README](../README.md) for installation and everyday usag
 | [Ingestion operations](ingestion.md) | JavaScript scanning, readiness, disk guards, persistent queues, and status fields |
 | [Ingestion recovery](ingestion-recovery.md) | Export surviving captures and findings and replay them into a fresh server |
 | [Graph hydration measurements](graph_hydration.md) | Performance measurements and reproduction steps |
-| [Other projects](other_projects.md) | Related projects |
 
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for development setup and quality checks.

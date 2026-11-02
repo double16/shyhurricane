@@ -124,10 +124,3 @@ to allow this. It will only return indexed data. Missing data will result in a p
 Any tools that do link discovery are expected to use this list to continue processing.
 
 The proxy server has CA certificate generation. The `/status` endpoint include the CA certificate.
-
-# channels
-
-Channels are used to keep persistent TCP connections open. Connections are kept in the server process memory.
-
-Reverse channels attempt to find the correct network interface for the target IP address. The purpose is to bind to
-a VPN IP address, if one is used.

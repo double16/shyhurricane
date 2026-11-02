@@ -107,7 +107,7 @@ UV_CACHE_DIR="$PWD/.uv-cache" uv run python .github/scripts/check-python-coverag
 Tests marked `ollama` are skipped unless `--ollama` is supplied and Ollama is reachable. Proxy integration tests skip
 only when the environment prohibits loopback socket binding.
 
-## Queries that benefit from longer context
+## Queries that benefit from a longer context
 
 - End-to-end data/taint flow
   “Where does user input from /signup end up being eval’ed?” (requires following variables across multiple
