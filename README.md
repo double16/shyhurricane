@@ -529,3 +529,18 @@ nuclei -proxy http://127.0.0.1:8010 -target https://example.com -j | curl http:/
 
 If a URL or domain isn't indexed, the 404 page will include links to URLs that have been indexed. A tool that spiders
 links may use this to find the indexed content.
+
+### Managed database networking
+
+Managed Qdrant and Neo4j prefer Docker's default bridge. If that bridge is absent or explicitly
+disabled, local native Linux Docker Engine installations automatically use host networking.
+Select a mode explicitly with:
+
+```shell
+uv run python3 mcp_service.py --data-dir ~/Data --managed-database-network host
+```
+
+The same option is available on graph maintenance commands. Host mode uses dynamically selected
+loopback listeners. Compose and external database endpoints retain their existing networking.
+Stop the service and recreate its managed database containers, preserving their storage directories,
+when changing network modes. See [configuration](docs/configuration.md) for the environment setting.

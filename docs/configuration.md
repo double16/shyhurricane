@@ -165,3 +165,16 @@ Graph storage settings complement the analyzer settings in the
 | Environment variable | Default | Description |
 |----------------------|---------|-------------|
 | `GRAPH_ARTIFACT_CACHE_MAX_BYTES` | `268435456` | Non-negative compressed-content budget per assessment for recomputable graph caches; `0` disables retention. Captured evidence, retained analysis, and active checkpoints are excluded. Reclamation runs asynchronously in bounded batches. |
+
+## Managed database networking
+
+| Environment variable | Default | Description |
+|----------------------|---------|-------------|
+| `MANAGED_DATABASE_NETWORK` | `auto` | `auto`, `bridge`, or `host`; overridden by `--managed-database-network`. Applies to managed Qdrant and Neo4j and is inherited by workers. |
+
+Auto mode uses bridge unless Docker reports the default bridge absent or its interface configured
+as `none`. Host networking requires a local native Linux Docker Engine; remote engines and Docker
+Desktop are not supported by this option. Docker inspection errors do not trigger fallback.
+External database endpoints bypass this selection. Host listeners bind to loopback on available
+ports recorded in container configuration; published port mappings are not used.
+Existing containers are never automatically deleted to change networking modes.

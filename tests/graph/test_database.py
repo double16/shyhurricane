@@ -32,7 +32,7 @@ def test_memory_defaults_overrides_and_container_reuse_warning(monkeypatch, tmp_
         "Config": {"Env": environment},
     }
     monkeypatch.setattr(database, "_inspect_container", lambda name: info)
-    monkeypatch.setattr(database, "_get_published_port", lambda *args: ("127.0.0.1", 17687))
+    monkeypatch.setattr(database, "managed_endpoint", lambda *args: ("127.0.0.1", 17687))
     command = MagicMock()
     monkeypatch.setattr(database, "_run", command)
     assert resolve_uri(str(tmp_path)) == "bolt://127.0.0.1:17687"
@@ -66,7 +66,7 @@ def test_managed_container_create_reuse_start_and_validate(monkeypatch, tmp_path
     inspections = iter([None, info, info, {**info, "State": {"Running": False}}, info, None, None])
     monkeypatch.setattr(database, "_inspect_container", lambda name: next(inspections))
     monkeypatch.setattr(database, "_find_available_port", lambda host: 12345)
-    monkeypatch.setattr(database, "_get_published_port", lambda info, port: ("127.0.0.1", 12345))
+    monkeypatch.setattr(database, "managed_endpoint", lambda info, port, setting: ("127.0.0.1", 12345))
     monkeypatch.setattr(database, "_run", lambda command: commands.append(command))
     for _ in range(3):
         assert resolve_uri(str(storage)) == "bolt://127.0.0.1:12345"
@@ -181,3 +181,39 @@ def test_budget_read_metadata_and_cancellation_termination(monkeypatch):
     session.run.return_value = []
     store.terminate_read(request.request_id)
     assert "SHOW TRANSACTIONS" in str(session.run.call_args.args[0])
+
+
+@pytest.fixture(autouse=True)
+def managed_bridge_default(monkeypatch):
+    monkeypatch.setenv("MANAGED_DATABASE_NETWORK", "bridge")
+
+
+def test_managed_host_create_reuse_and_restart(monkeypatch, tmp_path):
+    monkeypatch.setattr(database, "managed_network", lambda: "host")
+    monkeypatch.setattr(database, "_find_available_port", lambda host: 12345)
+    commands = []
+    environment = database.memory_environment() + [
+        "NEO4J_server_bolt_listen__address=127.0.0.1:12345",
+    ]
+    info = {
+        "HostConfig": {"NetworkMode": "host"},
+        "Mounts": [{"Source": str(tmp_path), "Destination": "/data"}],
+        "Config": {"Env": environment},
+        "State": {"Running": True},
+    }
+    inspections = iter([None, info, info, {**info, "State": {"Running": False}}, info])
+    monkeypatch.setattr(database, "_inspect_container", lambda name: next(inspections))
+    monkeypatch.setattr(database, "_run", lambda command: commands.append(command))
+    ready = MagicMock()
+    monkeypatch.setattr(database, "wait_host_listener", ready)
+    for _ in range(3):
+        assert resolve_uri(str(tmp_path)) == "bolt://127.0.0.1:12345"
+    command = commands[0]
+    assert command[command.index("--network") + 1] == "host"
+    assert "-p" not in command
+    assert "NEO4J_server_default__listen__address=127.0.0.1" in command
+    assert "NEO4J_server_bolt_advertised__address=127.0.0.1:12345" in command
+    assert "NEO4J_server_http_enabled=false" in command
+    assert "NEO4J_server_https_enabled=false" in command
+    assert ready.call_count == 3
+    assert commands[1][1] == "start"

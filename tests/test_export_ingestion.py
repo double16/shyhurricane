@@ -687,3 +687,18 @@ def test_recovery_preserves_structured_finding_metadata(run_export):
     code, output, _, _ = run_export({"finding": [p]})
     assert code == 0
     assert lines(output / "findings.jsonl")[0]["metadata"] == metadata
+
+
+def test_host_endpoint_is_read_without_starting_container(tmp_path, monkeypatch):
+    monkeypatch.delenv("QDRANT", raising=False)
+    info = {
+        "State": {"Running": True},
+        "HostConfig": {"NetworkMode": "host"},
+        "Config": {"Env": ["QDRANT__SERVICE__HTTP_PORT=12345"]},
+        "NetworkSettings": {"Ports": {}},
+    }
+    runner = MagicMock(return_value=SimpleNamespace(stdout=json.dumps([info])))
+    monkeypatch.setattr(ex.subprocess, "run", runner)
+    assert ex.endpoint(tmp_path) == "http://127.0.0.1:12345"
+    assert runner.call_count == 1
+    assert runner.call_args.args[0][:2] == ["docker", "inspect"]
