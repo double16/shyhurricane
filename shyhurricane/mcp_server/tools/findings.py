@@ -2,16 +2,17 @@ import asyncio
 import json
 import logging
 import math
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, List, Optional
 
 from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from openai import BaseModel
-from pydantic import Field
+from pydantic import Field, ValidationError
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 
+from shyhurricane.finding_metadata import FindingMetadata, metadata_dict
 from shyhurricane.finding_search import (
     FINDING_SEMANTIC_LIMIT,
     finding_ids,
@@ -24,10 +25,9 @@ from shyhurricane.mcp_server.progress import progress_scope, report_progress
 from shyhurricane.nuclei_findings import is_nuclei_finding, nuclei_finding_to_markdown
 from shyhurricane.persistent_queue import get_persistent_queue
 from shyhurricane.result_pages import Pagination, paged_results
-from shyhurricane.target_info import filter_targets_str, parse_target_info
+from shyhurricane.target_info import parse_target_info
 from shyhurricane.task_queue import SaveFindingQueueItem
 from shyhurricane.task_queue.finding_worker import FINDING_VERSION
-from shyhurricane.utils import stream_lines
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +90,7 @@ async def save_finding(
 """)],
         title: Annotated[
             Optional[str], Field(description="""A short, descriptive summary of the issue (one line max).""")],
+        metadata: FindingMetadata | None = None,
 ) -> SaveFindingResult:
     """Save security finding associated with the current target.
 
@@ -115,6 +116,7 @@ async def save_finding(
         target=target,
         markdown=markdown,
         title=title,
+        metadata=metadata_dict(metadata),
     ))
 
     return SaveFindingResult(
@@ -125,6 +127,10 @@ async def save_finding(
 
 
 class Finding(BaseModel):
+    finding_id: str = ""
+    metadata_revision: int = 1
+    metadata: dict = Field(default_factory=dict)
+    metadata_conflicts: list[dict] = Field(default_factory=list)
     target: str = Field(description="Target of the finding")
     title: str = Field(description="Title of the finding")
     markdown: str = Field(description="Markdown of the finding")
@@ -229,6 +235,10 @@ async def query_findings(
     scope = next(p.value for p in predicates if p.operator == "site" and not p.exclude)
     for doc in docs:
         findings.append(Finding(
+            finding_id=str(doc.id),
+            metadata_revision=doc.meta.get("finding_metadata_revision", 1),
+            metadata=doc.meta.get("finding_metadata", {}),
+            metadata_conflicts=doc.meta.get("finding_metadata_conflicts", []),
             target=next((doc.meta[key] for key in ("url", "netloc", "host", "domain") if doc.meta.get(key)), scope),
             title=doc.meta.get("title", ""),
             markdown=doc.content,
@@ -264,89 +274,62 @@ async def query_findings(
 
 class FindingInput(BaseModel):
     targets: List[str]
-    title: str
+    title: str = ""
     markdown: str
+    metadata: FindingMetadata | None = None
 
 
-@mcp_instance.custom_route('/findings', methods=['POST'])
+@mcp_instance.custom_route("/findings", methods=["POST"])
 async def save_finding_api(request: Request) -> Response:
-    """
-    Saves a finding. Takes one of three inputs:
-    1. json document for one finding
-    2. jsonl for one or more findings
-    3. form post for one finding
-
-    In all cases, the json properties or form parameters are:
-    `title`: optional title for the finding (a title will be inferred if not provided)
-    `target`: URL, hostname, IP address with optional port
-    `targets`: list of targets or multiple parameter for forms
-    `markdown`: the body of the finding in markdown suitable for interpretation by LLMs and humans
-    """
-    findings: List[FindingInput] = []
-
+    """Validate all JSON/JSONL/form records before committing durable finding submissions."""
     content_type = request.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-    if content_type in ["application/json", "text/json"]:
-        jsonl: List[Dict[str, Any]] = []
-
-        # try to parse jsonl first
-        line_generator = stream_lines(request.stream())
-        first = await anext(line_generator, "")
-        try:
-            jsonl.append(json.loads(first))
-            async for line in line_generator:
-                jsonl.append(json.loads(line))
-        except json.decoder.JSONDecodeError:
-            # parse entire body
-            lines = [first]
-            async for line in line_generator:
-                lines.append(line)
+    try:
+        if content_type in {"application/json", "text/json"}:
+            body = (await request.body()).decode("utf-8")
             try:
-                jsonl.append(json.loads("\n".join(lines)))
-            except json.decoder.JSONDecodeError:
-                return Response(status_code=400)
-
-        for parsed_json in jsonl:
-            if is_nuclei_finding(parsed_json):
-                finding_json = nuclei_finding_to_markdown(parsed_json)
-                markdown = finding_json["markdown"]
-                targets = finding_json["targets"]
-                title = finding_json["title"]
-            else:
-                targets = parsed_json.get("targets", [parsed_json.get("target", "")])
-                markdown = parsed_json.get("markdown", "")
-                title = parsed_json.get("title", "")
-            findings.append(FindingInput(title=title.strip(), markdown=markdown.strip(), targets=targets))
-
-    elif content_type == "application/x-www-form-urlencoded":
-        try:
+                records = [json.loads(body)]
+            except json.JSONDecodeError:
+                records = [json.loads(line) for line in body.splitlines() if line.strip()]
+        elif content_type == "application/x-www-form-urlencoded":
             form = await request.form()
-            targets = form.get("targets", form.get("target", ""))
-            markdown = form.get("markdown", "")
-            title = form.get("title", "")
-            findings.append(FindingInput(title=title.strip(), markdown=markdown.strip(), targets=targets))
-        except Exception:
+            records = [dict(form)]
+            if "targets" in form:
+                records[0]["targets"] = form.getlist("targets")
+            if records[0].get("metadata"):
+                records[0]["metadata"] = json.loads(records[0]["metadata"])
+        else:
             return Response(status_code=400)
-    else:
-        return Response(status_code=400)
+        if not records:
+            raise ValueError("body: include at least one finding")
+        findings = []
+        for index, record in enumerate(records):
+            if not isinstance(record, dict):
+                raise ValueError(f"records.{index}: expected an object")
+            if is_nuclei_finding(record):
+                record = nuclei_finding_to_markdown(record)
+            targets = record.get("targets", record.get("target", []))
+            if isinstance(targets, str):
+                targets = [targets]
+            finding = FindingInput.model_validate({**record, "targets": targets})
+            if not finding.targets or not finding.markdown.strip():
+                raise ValueError(f"records.{index}: targets and markdown must not be empty")
+            # Do not partially accept a multi-target record containing invalid targets.
+            for target in finding.targets:
+                parse_target_info(target)
+            findings.append(finding)
+    except (ValueError, TypeError, UnicodeError, ValidationError) as error:
+        if isinstance(error, ValidationError):
+            details = [{"field": ".".join(map(str, item["loc"])), "message": item["msg"]}
+                       for item in error.errors()]
+        else:
+            details = [{"field": "body", "message": "Invalid finding body, targets, or metadata"}]
+        return JSONResponse({"errors": details}, status_code=400)
 
+    server_ctx = await get_server_context()
     for finding in findings:
-        title = finding.title
-        targets = finding.targets
-        markdown = finding.markdown
-
-        if isinstance(targets, str):
-            targets = [targets]
-
-        targets = filter_targets_str(targets)
-        if not targets or not markdown:
-            return Response(status_code=400)
-
-        server_ctx = await get_server_context()
-        for target in targets:
+        for target in finding.targets:
             await asyncio.to_thread(enqueue_finding, server_ctx.db, SaveFindingQueueItem(
-                target=target,
-                markdown=markdown,
-                title=title or None,
+                target=target, markdown=finding.markdown.strip(), title=finding.title.strip() or None,
+                metadata=metadata_dict(finding.metadata),
             ))
-
     return Response(status_code=201)

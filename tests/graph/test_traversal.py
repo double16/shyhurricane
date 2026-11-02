@@ -88,6 +88,30 @@ def test_frontier_matches_complete_snapshot_for_small_graphs(application, mode, 
     assert signatures(result) == expected
 
 
+def test_wide_frontiers_use_linear_queue_work(event, monkeypatch):
+    from shyhurricane.graph import query
+
+    graph = Projection(event())
+    source = graph.node("symbol", "source", role="source")
+    sinks = [graph.node("symbol", f"sink-{index}", role="sink") for index in range(800)]
+    for sink in sinks:
+        graph.fact(source, sink, "FLOWS_TO", "fixture")
+    examined = 0
+
+    class MeasuredQueue(deque):
+        def __iter__(self):
+            nonlocal examined
+            for state in super().__iter__():
+                examined += 1
+                yield state
+
+    monkeypatch.setattr(query, "deque", MeasuredQueue)
+    result = GraphQuery(Store(graph)).paths("example.com", source, mode="flow", max_depth=1)
+    assert len(result["results"]) == len(sinks)
+    assert not result["retrieval_truncated"]
+    assert examined <= len(sinks) * 3, examined
+
+
 def test_resource_flow_associations_are_not_path_evidence(application, monkeypatch):
     graph, page, source, sink, _ = application
     service = GraphQuery(Store(graph))
@@ -325,6 +349,58 @@ def test_real_continuations_match_reference_and_confirm_pins(application, graph_
             actual.extend(signatures(result))
         assert not result.get("continuation_token")
         assert actual == signatures(expected)
+    finally:
+        artifacts.close()
+
+
+@pytest.mark.parametrize("direction", ["forward", "backward"])
+@pytest.mark.parametrize("interruptions", [1, 2])
+def test_interrupted_flow_keeps_work_after_a_reported_sink(graph_paths, event, monkeypatch, direction, interruptions):
+    from shyhurricane.graph.artifacts import ArtifactStore
+
+    graph = Projection(event())
+    backward = direction == "backward"
+    start = graph.node("symbol", "start", role="sink" if backward else "source")
+    middle = graph.node("symbol", "middle", role="source" if backward else "sink")
+    end = graph.node("symbol", "end", role="source" if backward else "sink")
+    for left, right in ((start, middle), (middle, end)):
+        graph.fact(right if backward else left, left if backward else right, "FLOWS_TO", "fixture")
+
+    class PinnedStore(Store):
+        def read(self, statement, **parameters):
+            if "MERGE (p:GraphReadPin" in statement:
+                return [{"id": parameters["id"]}]
+            return super().read(statement, **parameters)
+
+    expected = signatures(GraphQuery(Store(graph)).paths("example.com", start, mode="flow", direction=direction))
+    expand = TraversalSnapshot.expand
+    interrupted = 0
+
+    def stop_after_first_frontier(reader, *args, **kwargs):
+        nonlocal interrupted
+        expand(reader, *args, **kwargs)
+        if interrupted < interruptions:
+            interrupted += 1
+            reader.limit("time_limit")
+
+    monkeypatch.setattr(TraversalSnapshot, "expand", stop_after_first_frontier)
+    artifacts = ArtifactStore("db")
+    artifacts.register(event())
+    service = GraphQuery(PinnedStore(graph), artifacts=artifacts)
+    try:
+        result = service.paths("example.com", start, mode="flow", direction=direction)
+        assert [path["nodes"][-1]["id"] for path in result["results"]] == [middle]
+        assert result.get("continuation_token"), "The reported intermediate still has unexplored flow edges"
+        actual = signatures(result)
+        for _ in range(4):
+            if not result.get("continuation_token"):
+                break
+            token = result["continuation_token"]
+            result = service.continue_query(token)
+            assert service.continue_query(token) == result
+            actual.extend(signatures(result))
+        assert actual == expected
+        assert not result.get("continuation_token")
     finally:
         artifacts.close()
 

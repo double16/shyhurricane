@@ -113,7 +113,9 @@ async def graph_status(server_context, *, include_estimates=True) -> dict:
     result["uri"] = getattr(store, "uri", None)
 
     def collect():
-        details = {}
+        from shyhurricane.investigation.storage import correlation_status
+
+        details = {"investigation": correlation_status(server_context.db)}
         path = persistent_queue_path(server_context.db, "graph_queue")
         if (path / "data.db").exists():
             details["queue_depth"] = read_active_queue_size(path)

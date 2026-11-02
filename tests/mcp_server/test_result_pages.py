@@ -515,3 +515,16 @@ async def test_graph_page_timeout_preserves_completed_results(result_store):
         assert budget.checkpointing == 0
     finally:
         page_budget.reset(token)
+
+
+@pytest.mark.asyncio
+async def test_investigation_page_followups_are_unique_and_page_local(result_store):
+    from shyhurricane.mcp_server.tools.investigation import InvestigationResult
+    call = {"tool": "fetch_application_graph_evidence", "arguments": {"evidence_id": "e"}}
+    rows = [{"id": name, "finding_ids": [], "follow_up": [call, call]} for name in ("a", "b", "c")]
+    first = await result_pages.paginate_result(
+        "find_investigation_targets", InvestigationResult(results=rows), "results", 2,
+    )
+    assert first.follow_up == [{**call, "result_ids": ["a", "b"]}]
+    second = result_store.read(first.pagination.next_page_token)["result"]
+    assert second["follow_up"] == [{**call, "result_ids": ["c"]}]

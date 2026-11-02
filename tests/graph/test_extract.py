@@ -413,8 +413,11 @@ def test_summary_source_map_recovery_is_not_skipped(graph_paths, event, monkeypa
         seen.append((source, filename))
         return {"nodes": [], "edges": [], "references": [], "analysis": {"mode": "full"}}
 
-    graph = extract(event(url="https://example.com/vendor.js", mime="text/javascript", body="//# sourceMappingURL=data:application/json;base64,inline"),
-                    artifacts, javascript_runner=runner)
+    graph = extract(
+        event(url="https://example.com/vendor.js", mime="text/javascript",
+              body="//# sourceMappingURL=data:application/json;base64,inline"),
+        artifacts, javascript_runner=runner,
+    )
     assert [source for source, _ in seen] == ["export const React = {};", "eval(location.hash)"]
     assert len(graph.analysis) == 2
     artifacts.close()
@@ -574,3 +577,105 @@ def test_inline_svg_css_and_non_javascript_scripts(event):
     assert "LOADS" in kinds(graph)
     assert not graph.analysis
     assert any(node.get("url") == "https://example.com/paint.svg" for node in graph.nodes.values())
+
+
+def test_readable_source_digest_is_retained_with_operations(event):
+    import hashlib
+    source = "const readable = input;"
+    graph = extract(
+        event(url="https://example.com/app.js", body=source, mime="text/javascript"),
+        javascript_runner=lambda *args: {
+            "nodes": [{"id": "input", "kind": "value", "name": "input", "location": "1:0"}],
+            "edges": [], "references": [],
+        },
+    )
+    operation = next(n for n in graph.nodes.values() if n.get("name") == "input")
+    assert operation["source_sha256"] == hashlib.sha256(source.encode()).hexdigest()
+
+
+@pytest.mark.parametrize("recovered", [False, True])
+def test_opengrep_binding_uses_readable_graph_source(graph_paths, event, monkeypatch, recovered):
+    import hashlib
+
+    from shyhurricane.index.javascript_analysis import _finding
+    from shyhurricane.investigation.engine import artifact_hash_verifier, operation_matches
+
+    readable = "const readable = input;"
+    monkeypatch.setattr("shyhurricane.javascript_deobfuscation.deobfuscate_javascript", lambda source: readable)
+    mapping = json.dumps({"version": 3, "sources": ["original.js"], "sourcesContent": [readable]})
+    body = ("//# sourceMappingURL=data:application/json;base64," + base64.b64encode(mapping.encode()).decode()
+            if recovered else "const r=input;")
+    url = "https://example.com/app.js"
+    capture = event(url=url, body=body, mime="text/javascript")
+    artifacts = ArtifactStore("db")
+    try:
+        artifacts.register(capture)
+        graph = extract(capture, artifacts, javascript_runner=lambda *args: {
+            "nodes": [{"id": "input", "kind": "value", "name": "input", "location": "1:0"}],
+            "edges": [], "references": [],
+        })
+        operation = next(n for n in graph.nodes.values() if n.get("name") == "input")
+        path = "original.js" if recovered else "source.js"
+        finding = _finding(url, {"check_id": "rule", "path": path, "start": {"line": 1}}, recovered)
+        finding.metadata["content_sha256"] = hashlib.sha256(readable.encode()).hexdigest()
+        verify = artifact_hash_verifier(artifacts)
+        assert operation_matches(operation, finding.metadata, url, verify)
+        finding.metadata["content_sha256"] = hashlib.sha256(body.encode()).hexdigest()
+        assert not operation_matches(operation, finding.metadata, url, verify)
+    finally:
+        artifacts.close()
+
+
+@pytest.mark.parametrize("markup", [
+    '<input id="field"><script>eval(document.querySelector("#field").value)</script>',
+    '<textarea id="field"></textarea><script>eval(document.querySelector("#field").value)</script>',
+    '<select id="field"></select><script>eval(document.querySelector("#field").value)</script>',
+    '<div id="field" contenteditable>text</div><script>eval(document.querySelector("#field").textContent)</script>',
+    '<button id="field"></button><script>document.querySelector("#field").addEventListener("keydown",'
+    'e=>eval(e.key))</script>',
+    '<form id="field"></form><script>document.querySelector("#field").addEventListener("submit",'
+    'e=>eval(e.currentTarget.action))</script>',
+    '<input oninput="eval(event.target.value)">',
+    '<button onclick="eval(this.textContent)">go</button>',
+])
+def test_ui_origins_connect_captured_elements_to_sinks(event, javascript_runner, markup):
+    from unittest.mock import MagicMock
+
+    from shyhurricane.graph.links import LinkPlanner
+    from shyhurricane.investigation.engine import compact_witness
+    from shyhurricane.investigation.ranking import score
+
+    graph = extract(event(body=markup), javascript_runner=javascript_runner)
+    store = MagicMock()
+    store.read.return_value = []
+    planner = LinkPlanner(store, graph)
+    assert planner.plan_slice()
+    links = planner.links
+    edges = list(graph.edges.values()) + list(links.values())
+    sources = [node for node in graph.nodes.values() if node.get("ui_origin")]
+    pending = [([source], []) for source in sources]
+    result = None
+    while pending:
+        nodes, steps = pending.pop()
+        last = nodes[-1]
+        if last.get("role") == "sink":
+            witness = compact_witness({"nodes": nodes, "steps": steps}) | {"relation": "flow"}
+            result = score({"anchor": "operation", "connectivity": "anchored_flow",
+                            "operation_ids": [last["id"]], "witnesses": [witness]})
+            if result["ui_origins"]:
+                break
+        if len(steps) >= 16:
+            continue
+        for edge in edges:
+            if edge["source"] == last["id"] and edge["kind"] != "CONTAINS":
+                target = graph.nodes[edge["target"]]
+                if target not in nodes:
+                    pending.append((nodes + [target], steps + [edge]))
+    assert result and result["score_contributions"]["ui_origin"] == 10
+    assert result["ui_origins"][0]["location"]
+    assert result["ui_origins"][0]["evidence_ids"]
+
+
+def test_ui_origin_attributes_exclude_static_content(event):
+    graph = extract(event(body='<div id="static">text</div><div contenteditable="false">no</div>'))
+    assert not any(node.get("ui_origin") for node in graph.nodes.values())

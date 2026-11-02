@@ -1,5 +1,6 @@
 """Passive HTML, HTTP, structured-resource, and JavaScript relationship extraction."""
 
+import hashlib
 import json
 import logging
 import os
@@ -286,6 +287,12 @@ def extract(
                     form_selectors.append(f"#{owner['id']}")
                 if owner.get("name"):
                     form_selectors.append(f'form[name="{owner["name"]}"]')
+            editable = tag.get("contenteditable", "false").lower() in {"", "true", "plaintext-only"}
+            inline_events = [name for name in tag.attrs if name in {
+                "oninput", "onchange", "onsubmit", "onclick", "onkeydown", "onkeyup"
+            }]
+            ui_origin = tag.name in {"input", "select", "textarea", "button", "form", "a"} or editable
+            ui_origin = ui_origin or bool(inline_events) or tag.has_attr("tabindex")
             element = graph.node(
                 "element",
                 identity(event["id"], locator),
@@ -293,10 +300,13 @@ def extract(
                 html_id=tag.get("id"),
                 field_name=tag.get("name"),
                 html_tag=tag.name,
+                ui_origin=ui_origin,
+                inline_selector=f"@inline:{locator}" if inline_events else None,
+                location=locator,
                 form_selectors=form_selectors,
                 disabled=tag.has_attr("disabled"),
                 form_successful=_successful_control(tag),
-                role="source" if tag.name in {"input", "select", "textarea"} else "",
+                role="source" if ui_origin else "",
                 capture_id=event["id"],
             )
             graph.fact(page, element, "CONTAINS", "html.element", location=locator)
@@ -465,6 +475,10 @@ def extract(
                 if artifacts
                 else runner(source, filename)
             )
+            source_digest = hashlib.sha256(source.encode()).hexdigest()
+            result = {**result, "source_sha256": source_digest}
+            if "archive" in result:
+                result["archive"] = {**result["archive"], "source_sha256": source_digest}
             contexts = []
             if "html" in mime or is_svg(mime):
                 contexts.append({"url": graph.url, "base": base, "id": event["id"]})
@@ -587,6 +601,7 @@ def _apply_javascript(graph, page, filename, result, reference, contexts):
             persistent_storage=(item.get("kind") == "storage" and len(origins) == 1
                                 and item.get("name", "").startswith("localStorage:")),
             source_path=filename,
+            source_sha256=result.get("source_sha256"),
             location=item.get("location", ""),
             module_key=module_key,
             import_key=import_key,
@@ -597,6 +612,7 @@ def _apply_javascript(graph, page, filename, result, reference, contexts):
             return_value=item.get("return_value"),
             callback_boundary=item.get("callback_boundary"),
             selector=item.get("selector"),
+            ui_event=item.get("ui_event"),
             form_data=item.get("form_data"),
             form_field=item.get("form_field"),
             form_request=item.get("form_request"),

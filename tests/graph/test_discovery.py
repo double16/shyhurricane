@@ -76,7 +76,10 @@ def test_overview_resources_methods_contexts_and_scope(application):
     assert endpoint["id"] == page and endpoint["capture_status"] == "captured"
     assert endpoint["inputs"]["count"] >= 1
     assert endpoint["scripts"]["examples"][0]["id"] == script
-    assert source in {item["id"] for item in endpoint["sources"]["examples"]}
+    # Captured interactive elements now join script operations as source candidates;
+    # the bounded examples need not include every script source.
+    assert endpoint["sources"]["count"] >= 1
+    assert all(graph.nodes[item["id"]]["role"] == "source" for item in endpoint["sources"]["examples"])
     assert sink in {item["id"] for item in endpoint["sinks"]["examples"]}
     assert separate not in {item["id"] for item in endpoint["sources"]["examples"]}
     assert endpoint["sinks"]["examples"][0]["association"] == "script_context"

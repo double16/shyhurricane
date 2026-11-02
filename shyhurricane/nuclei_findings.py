@@ -524,7 +524,14 @@ def nuclei_finding_to_markdown(
     title = to_title(finding)
     targets = extract_targets(finding)
     md = finding_to_markdown(finding, max_chars=max_chars, show_binary=show_binary)
-    return {"title": title, "targets": targets, "markdown": md}
+    from shyhurricane.finding_metadata import scanner_metadata
+
+    info = finding.get("info") or {}
+    classification = info.get("classification")
+    cwes = classification.get("cwe-id") or [] if isinstance(classification, dict) else []
+    metadata = scanner_metadata("nuclei", finding.get("template-id", ""), info.get("severity", ""),
+                                cwes=cwes if isinstance(cwes, list) else [cwes])
+    return {"title": title, "targets": targets, "markdown": md, "metadata": metadata}
 
 
 def is_nuclei_finding(d: Dict[str, Any]) -> bool:

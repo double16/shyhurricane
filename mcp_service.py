@@ -22,6 +22,7 @@ import shyhurricane.mcp_server.tools.find_indexed_metadata  # noqa: F401
 import shyhurricane.mcp_server.tools.find_web_resources  # noqa: F401
 import shyhurricane.mcp_server.tools.find_wordlists  # noqa: F401
 import shyhurricane.mcp_server.tools.findings  # noqa: F401
+import shyhurricane.mcp_server.tools.investigation  # noqa: F401
 import shyhurricane.mcp_server.tools.get_result_page  # noqa: F401
 import shyhurricane.mcp_server.tools.indexers  # noqa: F401
 import shyhurricane.mcp_server.tools.port_scan  # noqa: F401

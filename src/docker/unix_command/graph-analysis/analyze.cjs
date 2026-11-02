@@ -18,6 +18,16 @@ function analyze(source, filename = "source.js", mode = "summary") {
   const exports = [];
   const aliases = [];
   const templates = [];
+  const uiEvents = new Set(["input", "change", "submit", "click", "keydown", "keyup"]);
+  const inlineHandler = filename.match(/^(.*):on(input|change|submit|click|keydown|keyup)$/);
+  const inlineValue = (id, scope, event = false) => {
+    let enclosing = scope?.getFunctionParent();
+    while (enclosing?.path.isArrowFunctionExpression()) enclosing = enclosing.parent?.getFunctionParent();
+    if (inlineHandler && !enclosing) Object.assign(nodes.get(id), {
+      selector: `@inline:${inlineHandler[1]}`, ui_event: event ? inlineHandler[2] : "element",
+    });
+    return id;
+  };
   const cleanFilename = filename.split(/[?#]/)[0];
   if (/\.(?:vue|svelte)$/.test(cleanFilename) && source.trimStart().startsWith("<")) {
     templates.push(source);
@@ -92,8 +102,12 @@ function analyze(source, filename = "source.js", mode = "summary") {
   const values = (node, scope) => {
     if (!node) return [];
     if (node.type === "AwaitExpression") return values(node.argument, scope);
-    if (node.type === "ThisExpression") return [make(node, "this", "value")];
-    if (node.type === "Identifier") return [bindingId(node, scope)];
+    if (node.type === "ThisExpression") return [inlineValue(make(node, "this", "value"), scope)];
+    if (node.type === "Identifier") {
+      const id = bindingId(node, scope);
+      if (node.name === "event" && !scope?.getBinding("event")) inlineValue(id, scope, true);
+      return [id];
+    }
     if (["CallExpression", "NewExpression", "OptionalCallExpression"].includes(node.type)) {
       return [make(node, nameOf(node.callee) || "call", "result")];
     }
@@ -134,7 +148,7 @@ function analyze(source, filename = "source.js", mode = "summary") {
   try {
     const plugins = ["jsx", "decorators-legacy", "importAttributes"];
     if (/\.(?:ts|tsx)$/.test(cleanFilename) || /(?:lang[.=]|lang=)ts/.test(filename) || /<script[^>]+lang=["']ts["']/.test(templates[0] || "")) plugins.push("typescript");
-    ast = parser.parse(source, { sourceType: "unambiguous", errorRecovery: true, plugins });
+    ast = parser.parse(source, { sourceType: "unambiguous", errorRecovery: true, allowReturnOutsideFunction: Boolean(inlineHandler), plugins });
     for (const error of ast.errors) gaps.add(`Parse recovery: ${error.reasonCode}`);
   } catch (error) {
     return { nodes: [], edges: [], references: [], exports: [], gaps: [`Parse failed: ${error.reasonCode || error.name}`] };
@@ -537,6 +551,35 @@ function analyze(source, filename = "source.js", mode = "summary") {
     }
     return undefined;
   };
+  const uiBindings = new Map();
+  const receiverValues = new Map();
+  traverse(ast, { ThisExpression(path) {
+    const fn = path.getFunctionParent()?.node;
+    if (!fn || fn.type === "ArrowFunctionExpression") return;
+    if (!receiverValues.has(fn)) receiverValues.set(fn, []);
+    receiverValues.get(fn).push(make(path.node, "this", "value"));
+  } });
+  for (const call of calls) {
+    if (method(call.node.callee) !== "addEventListener") continue;
+    const event = constant(call.node.arguments[0], call.scope);
+    if (!uiEvents.has(event)) continue;
+    const selector = formSelector(call.node.callee.object, call.scope);
+    const fn = fnFor(call.node.arguments[1], call.scope);
+    if (!selector || !fn) {
+      gaps.add(`Unresolved UI event receiver or callback at ${location(call.node)}`);
+      continue;
+    }
+    const seeds = new Set([...fn.params.slice(0, 1), ...(receiverValues.get(fn.node) || [])]);
+    for (const id of seeds) {
+      if (!uiBindings.has(id)) uiBindings.set(id, new Set());
+      uiBindings.get(id).add(selector);
+      Object.assign(nodes.get(id), { selector, ui_event: event });
+    }
+  }
+  for (const [id, selectors] of uiBindings) if (selectors.size > 1) {
+    delete nodes.get(id).selector;
+    gaps.add("Ambiguous UI callback receiver");
+  }
   for (const call of calls) {
     const { node, scope } = call;
     const member = method(node.callee);

@@ -8,11 +8,11 @@
 Only non-negative integers or `null` are accepted; booleans, strings, fractions, and negative
 values are rejected before work is queued.
 
-| Input | Public target | Non-public target |
-|-------|---------------|-------------------|
-| Omitted or `null` | 5 requests/second | Preserve scanner defaults |
-| Positive integer | Use supplied requests/second | Use supplied requests/second |
-| `0` | Katana 3000 requests/second; directory busting unlimited | Katana 3000 requests/second; directory busting unlimited |
+| Input             | Public target                                            | Non-public target                                        |
+|-------------------|----------------------------------------------------------|----------------------------------------------------------|
+| Omitted or `null` | 5 requests/second                                        | Preserve scanner defaults                                |
+| Positive integer  | Use supplied requests/second                             | Use supplied requests/second                             |
+| `0`               | Katana 3000 requests/second; directory busting unlimited | Katana 3000 requests/second; directory busting unlimited |
 
 The budget applies independently to each scan. Public targets are registrable public domains
 or globally routable IP literals, including IPv6. Detection uses the URL hostname/IP without
@@ -40,19 +40,19 @@ The paging tool returns `{ "source_tool": "...", "result": { ... } }`; `result` 
 tool's response schema. Tokens are opaque bearer capabilities: anyone holding a token can read its
 saved page through this server. Keep tokens private.
 
-| Tool                                        | Default page size   | Saved result                                               |
-|---------------------------------------------|---------------------|------------------------------------------------------------|
-| `find_web_resources`                        | 20 resources        | Up to `retrieval_limit` matches (default 1,000)            |
+| Tool                                        | Default page size   | Saved result                                                |
+|---------------------------------------------|---------------------|-------------------------------------------------------------|
+| `find_web_resources`                        | 20 resources        | Up to `retrieval_limit` matches (default 1,000)             |
 | `query_findings`                            | 10 full findings    | All scoped findings, or up to 1,000 ranked semantic matches |
-| `find_urls`                                 | 100 URLs            | All matching unique URLs                                   |
-| `find_wordlists`                            | 20 paths            | All matching ranked paths                                  |
-| `find_domains`, `find_hosts`, `find_netloc` | 100 records         | All matching unique records                                |
-| `spider_website`                            | 50 resources        | Results collected before this call returns                 |
-| `directory_buster`                          | 100 URLs            | Results collected before this call returns                 |
-| `port_scan`                                 | 100 service records | Available structured scan results                          |
-| `index_http_url`                            | 16,384 characters   | Complete textual response, after JavaScript transformation |
-| `deobfuscate_javascript`                    | 8,192 characters    | Complete transformed script, or original script on failure |
-| `fetch_web_resource_content`                | 4,096 characters    | Existing offset-based retrieval                            |
+| `find_urls`                                 | 100 URLs            | All matching unique URLs                                    |
+| `find_wordlists`                            | 20 paths            | All matching ranked paths                                   |
+| `find_domains`, `find_hosts`, `find_netloc` | 100 records         | All matching unique records                                 |
+| `spider_website`                            | 50 resources        | Results collected before this call returns                  |
+| `directory_buster`                          | 100 URLs            | Results collected before this call returns                  |
+| `port_scan`                                 | 100 service records | Available structured scan results                           |
+| `index_http_url`                            | 16,384 characters   | Complete textual response, after JavaScript transformation  |
+| `deobfuscate_javascript`                    | 8,192 characters    | Complete transformed script, or original script on failure  |
+| `fetch_web_resource_content`                | 4,096 characters    | Existing offset-based retrieval                             |
 
 Predicate searches in `find_web_resources` use indexed derived metadata for HTTP methods,
 file extensions, response MIME types, schemes, and case-sensitive URL trigrams. Qdrant narrows
@@ -393,3 +393,20 @@ for investigations and use predicates only for an exhaustive scoped review.
 Semantic retrieval requires normal power mode. In low-power mode, use predicate-only queries to retrieve findings
 without embeddings. Search reports scope counts and embedding, ranking, and loading stages, with
 idle heartbeats after 20 seconds without updates. Clients need not support progress notifications.
+
+## Structured findings and investigation targets
+
+`save_finding(target, markdown, title, metadata=null)` accepts the optional structured finding object
+also accepted by HTTP `/findings`. `query_findings` returns stable `finding_id`, `metadata`, and
+`metadata_conflicts` fields. Metadata is optional for all producers; the affected request method is
+`metadata.affected_method`, independent of the HTTP POST used to submit findings.
+
+`find_investigation_targets(scope, vulnerability_type=null, include_hypotheses=true, limit=20)` reads
+background materialization. Scope uses graph hostname/port/URL-prefix semantics; category filters use
+normalized names rather than semantic text. Results include witnesses, evidence IDs, numeric priority
+contributions, coverage gaps, freshness/status, and focused follow-up calls. `limit` is saved-page size
+(1–1,000); follow page tokens with `get_result_page`. Queries never contact applications or start scans.
+
+See the [complete finding contract and investigation guide](investigation-targets.md#finding-submission-contract)
+for field types, normalization, adapter mappings, lifecycle, and scoring/chain policies. This is finding
+storage version 3: preserve existing assessments and replay into fresh storage; no automatic migration.

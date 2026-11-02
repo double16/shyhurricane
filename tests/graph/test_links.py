@@ -333,3 +333,24 @@ def test_hydration_subdivides_memory_failures_and_preserves_results(event):
     store.read.side_effect = Neo4jError._hydrate_neo4j(code="Neo.ClientError.Statement.SyntaxError", message="syntax")
     with pytest.raises(Neo4jError):
         planner.hydrate(["a"])
+
+
+def test_ui_listener_binding_requires_captured_interactive_element(event):
+    graph = Projection(event())
+    capture = graph.event["id"]
+    graph.contexts = [{"id": capture, "url": graph.url}]
+    page = graph.resource(graph.url)
+    selector = graph.node("symbol", "event", selector="#button", ui_event="click", capture_id=capture)
+    element = graph.node("element", "button", html_id="button", capture_id=capture, ui_origin=False)
+    graph.fact(page, selector, "CONTAINS", "test", location="1:0")
+    store = MagicMock()
+    store.read.return_value = []
+    planner = LinkPlanner(store, graph)
+    assert not planner.plan()
+    assert any("Unresolved UI origin" in gap for gap in graph.gaps)
+    count = len(graph.gaps)
+    planner.ui_gaps()
+    assert len(graph.gaps) == count
+    graph.nodes[element]["ui_origin"] = True
+    assert LinkPlanner(store, graph).plan_slice()
+    assert len(LinkPlanner.element_selectors(graph.nodes[element])) == 1

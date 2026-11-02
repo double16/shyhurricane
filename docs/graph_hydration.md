@@ -11,11 +11,11 @@ Measured locally on 2026-10-16 with Neo4j `2026.09.0-community`, a 512 MiB heap,
 128 MiB transaction budget, and a 2 GiB container memory limit. The existing reproduction fixture
 publishes 9,905 entities, 20,000 relationships, and 15,140 evidence records.
 
-| Trial | Initial state | Hydration seconds | Complete relationships | Truncated |
-|-------|---------------|------------------:|-----------------------:|-----------|
-| 1 | Fresh Neo4j container; first hydration after publishing fixture | 1.922 | 20,000 | No |
-| 2 | Same container; fixture rebuilt | 1.673 | 20,000 | No |
-| 3 | Same container; fixture rebuilt | 1.873 | 20,000 | No |
+| Trial | Initial state                                                   | Hydration seconds | Complete relationships | Truncated |
+|-------|-----------------------------------------------------------------|------------------:|-----------------------:|-----------|
+| 1     | Fresh Neo4j container; first hydration after publishing fixture |             1.922 |                 20,000 | No        |
+| 2     | Same container; fixture rebuilt                                 |             1.673 |                 20,000 | No        |
+| 3     | Same container; fixture rebuilt                                 |             1.873 |                 20,000 | No        |
 
 Timings measure hydration, excluding fixture publication and initial membership selection. Each trial
 also passed the existing snapshot assertions for all 9,905 entities and 20,000 relationships.
@@ -28,12 +28,12 @@ Current reads default to 30 seconds, configurable with `NEO4J_READ_TIMEOUT_SECON
 After the first trial, `PROFILE` compared the previous and new queries with the same 500 relationship
 IDs or 500 entity IDs. These samples had warm data; they do not establish worst-case latency.
 
-| Read | Query shape | Seconds | DB hits | Reported plan allocation, bytes |
-|------|-------------|--------:|--------:|--------------------------------:|
-| Relationships, previous | `UNWIND` with one indexed lookup per ID | 0.083 | 10,000 | 64 |
-| Relationships, new | Indexed `r.id IN $ids` | 0.032 | 10,000 | 64 |
-| Entities, previous | `UNWIND` with one indexed lookup per ID | 0.035 | 5,500 | 64 |
-| Entities, new | Indexed `n.id IN $ids` | 0.027 | 5,500 | 64 |
+| Read                    | Query shape                             | Seconds | DB hits | Reported plan allocation, bytes |
+|-------------------------|-----------------------------------------|--------:|--------:|--------------------------------:|
+| Relationships, previous | `UNWIND` with one indexed lookup per ID |   0.083 |  10,000 |                              64 |
+| Relationships, new      | Indexed `r.id IN $ids`                  |   0.032 |  10,000 |                              64 |
+| Entities, previous      | `UNWIND` with one indexed lookup per ID |   0.035 |   5,500 |                              64 |
+| Entities, new           | Indexed `n.id IN $ids`                  |   0.027 |   5,500 |                              64 |
 
 Neo4j's reported plan allocation is not total transaction or JVM memory usage.
 The relationship plan changed from `Unwind → Apply → DirectedRelationshipIndexSeek → Filter →
@@ -85,11 +85,11 @@ The frontier regression on the same restricted-memory Neo4j configuration publis
 and adds 22,001 disconnected relationships under the same hostname. Each trial resolves the source
 and destination and returns the complete path without a whole-scope snapshot or truncation.
 
-| Trial | Traversal seconds | Hydrated memberships |
-|-------|------------------:|---------------------:|
-| 1, first compilation; includes profiling overhead | 1.174 | 2 |
-| 2, warm | 0.050 | 2 |
-| 3, warm | 0.062 | 2 |
+| Trial                                             | Traversal seconds | Hydrated memberships |
+|---------------------------------------------------|------------------:|---------------------:|
+| 1, first compilation; includes profiling overhead |             1.174 |                    2 |
+| 2, warm                                           |             0.050 |                    2 |
+| 3, warm                                           |             0.062 |                    2 |
 
 The sampled first frontier query used an indexed `anchor.id IN $ids` lookup and recorded 147 total
 DB hits. Seed lookup plans used storage-ID, logical-ID, and URL indexes without `AllNodesScan`.

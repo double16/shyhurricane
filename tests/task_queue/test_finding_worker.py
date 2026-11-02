@@ -13,6 +13,11 @@ from shyhurricane.task_queue.finding_worker import FindingContext, save_finding_
 from shyhurricane.task_queue.types import SaveFindingQueueItem
 
 
+@pytest.fixture(autouse=True)
+def correlation_handoff(monkeypatch):
+    monkeypatch.setattr(finding_worker, "submit_document", Mock())
+
+
 class Embedder:
     def __init__(self):
         self.warmed = False
@@ -60,6 +65,7 @@ class TitleGenerator:
 
 def make_context(tmp_path, title_generator=None):
     ctx = object.__new__(FindingContext)
+    ctx.db = "test"
     ctx.stores = {"finding": Store()}
     ctx.embedders = {"finding": Embedder()}
     ctx.splitters = {"finding": Splitter()}
@@ -180,7 +186,7 @@ def test_saved_finding_search_metadata(tmp_path, target, port, scheme, suffixes)
     ctx = make_context(tmp_path)
     save_finding_worker(ctx, SaveFindingQueueItem(target, "# finding", "Title"))
     meta = ctx.stores["finding"].written[0][0][0].meta
-    assert meta["version"] == finding_worker.FINDING_VERSION == 2
+    assert meta["version"] == finding_worker.FINDING_VERSION == 3
     assert meta["port"] == port
     assert meta["search_scheme"] == scheme
     assert meta["search_host_suffixes"] == suffixes
@@ -362,4 +368,41 @@ async def test_mcp_http_and_scanner_submissions_share_deduplication(monkeypatch,
         save_finding_worker(ctx, item)
     assert len(ctx.stores["finding"].documents) == 1
     assert next(iter(ctx.stores["finding"].documents)) == scanner_item.finding_id
+    assert len(ctx.doc_type_queue.items) == 1
+
+
+def test_metadata_enrichment_is_durable_and_preserves_identity(tmp_path):
+    ctx = make_context(tmp_path)
+    first = SaveFindingQueueItem("https://example.com/app.js", "# issue", "Original", metadata={"severity": "high"})
+    save_finding_worker(ctx, first)
+    original = next(iter(ctx.stores["finding"].documents.values()))
+    save_finding_worker(ctx, SaveFindingQueueItem(first.target, first.markdown, "Changed", metadata={
+        "severity": "critical", "affected_method": "get", "parameter": {"name": "q"},
+    }))
+    enriched = ctx.stores["finding"].documents[original.id]
+    assert enriched.meta["title"] == "Original"
+    assert enriched.meta["timestamp"] == original.meta["timestamp"]
+    assert enriched.meta["finding_metadata"] == {"severity": "high", "affected_method": "GET", "parameter": {"name": "q"}}
+    assert enriched.meta["finding_metadata_conflicts"] == [
+        {"field": "severity", "retained": "high", "submitted": "critical"}]
+    assert finding_worker.submit_document.call_count == 2
+    assert finding_worker.submit_document.call_args.args[1].id == original.id
+    assert len(ctx.doc_type_queue.items) == 2
+    # A retry carrying the same conflict does not enqueue duplicate work.
+    save_finding_worker(ctx, SaveFindingQueueItem(first.target, first.markdown, "Changed", metadata={"severity": "critical"}))
+    assert finding_worker.submit_document.call_count == 2
+
+
+def test_failed_correlation_handoff_is_retried_before_acknowledgement(tmp_path):
+    ctx = make_context(tmp_path)
+    item = SaveFindingQueueItem("example.com", "finding", "Title", metadata={"source": "burp"})
+    finding_worker.submit_document.side_effect = RuntimeError("unavailable")
+    with pytest.raises(RuntimeError):
+        save_finding_worker(ctx, item)
+    doc = next(iter(ctx.stores["finding"].documents.values()))
+    assert doc.meta["finding_handoff_pending"]
+    assert not ctx.doc_type_queue.items
+    finding_worker.submit_document.side_effect = None
+    save_finding_worker(ctx, item)
+    assert not ctx.stores["finding"].documents[doc.id].meta["finding_handoff_pending"]
     assert len(ctx.doc_type_queue.items) == 1

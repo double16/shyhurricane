@@ -65,17 +65,25 @@ async def test_each_workflow_renders_without_running_tools(name, mode, monkeypat
     text = result.messages[0].content.text
     assert CATALOG[name] in text
     assert "site:app.example.com:8443" in text
-    assert "query_findings using the explicit site:" in text
+    if name != "find_vulnerability_chains":
+        assert "query_findings using the explicit site:" in text
     assert "retrieve all scoped findings" in text
     assert "after the scope predicates in query_findings" in text
     assert "page exhaustion does not establish completeness" in text
     assert "URL filters omit host-level findings" in text
     assert "fetch_web_resource_content" in text
     assert "contents.offset + len(contents.text)" in text
+    assert "normalized, deobfuscated, or reconstructed from source maps" in text
+    assert "variable names, file paths, and line numbers may differ" in text
+    assert "do not apply them\ndirectly to the deployed bundle" in text
+    assert "subject to the selected mode and scope" in text
+    assert "not proof of complete or faithful recovery" in text
     assert "get_result_page" in text
     assert "fetch_application_graph_evidence" in text
     assert "no scope is required and this lookup does not wait for indexing" in text
-    assert text.index('find_application_endpoints(scope=target, detail="inventory")') < text.index("context_url=<selected exact page URL>")
+    assert text.index('find_application_endpoints(scope=target, detail="inventory")') < text.index(
+        "context_url=<selected exact page URL>"
+    )
     assert "Avoid scope-wide symbol enumeration" in text
     assert 'detail="full"' in text
     assert "seed_ids_limited" in text
@@ -242,6 +250,9 @@ async def test_protocol_prompt_discovery_rendering_and_errors(mode):
 @pytest.mark.parametrize("name", CATALOG)
 def test_focused_prompts_render_semantic_call_and_inventory_remains_exhaustive(name):
     text = getattr(prompts, name)(**arguments(name))
+    if name == "find_vulnerability_chains":
+        assert "Scoped finding lookup:" not in text
+        return
     lookup = next(line for line in text.splitlines() if line.startswith("Scoped finding lookup:"))
     focused = name.startswith("hunt_") or name.startswith("review_")
     assert ("site:app.example.com:8443 " in lookup) == focused
@@ -325,9 +336,14 @@ async def test_prompt_call_examples_match_registered_tool_schemas(name, mode):
     "tool,values",
     [
         ("continue_application_graph_query", {"continuation_token": "opaque-token"}),
-        ("expand_application_graph_analysis", {
-            "scope": "example.com", "capture_id": "capture", "analysis_unit_id": "unit",
-        }),
+        (
+            "expand_application_graph_analysis",
+            {
+                "scope": "example.com",
+                "capture_id": "capture",
+                "analysis_unit_id": "unit",
+            },
+        ),
         ("find_web_resources", {"query": "site:example.com", "score_threshold": 0.5}),
         ("save_finding", {"target": "example.com", "markdown": "# Finding"}),
         ("find_user_journey_paths", {"start": "opaque-start"}),
@@ -341,3 +357,24 @@ async def test_inconsistent_example_arguments_are_rejected(tool, values):
     schema = tools[tool]
     unknown = set(values) - schema["properties"].keys()
     assert unknown or list(Draft202012Validator(schema).iter_errors(values))
+
+
+@pytest.mark.parametrize("mode", ["analysis", "active"])
+def test_chain_uses_ranked_worklist_first(mode):
+    text = prompts.find_vulnerability_chains("example.com", mode)
+    assert 'Initial ranked lookup: find_investigation_targets(scope="example.com"' in text
+    assert "Scoped finding lookup:" not in text
+    assert "Begin with query_findings" not in text
+    for instruction in (
+        "include_hypotheses=true",
+        "kind=chain",
+        "kind=hotspot",
+        "kind=target",
+        "materialization_status",
+        "follow_up",
+        "match finding_ids locally",
+        "Do not repeatedly poll",
+        "candidate ID, contributing finding IDs",
+        "only when no suitable starting point exists",
+    ):
+        assert instruction in text

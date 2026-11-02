@@ -6,7 +6,7 @@ from typing import Optional
 
 import requests
 
-from shyhurricane.http_burp_xml import http_burp_xml_generator
+from shyhurricane.burp_issues_xml import burp_xml_records
 from shyhurricane.http_csv import http_csv_generator
 
 
@@ -16,7 +16,8 @@ def _post(index_url: str, payload: str, url: str, content_type: Optional[str] = 
         if content_type:
             headers["Content-Type"] = content_type
         requests.post(index_url, data=payload, headers=headers).raise_for_status()
-        print(f"[✔] Queued for indexing: {url}", file=sys.stderr)
+        action = "finding" if index_url.endswith("/findings") else "indexing"
+        print(f"[✔] Queued for {action}: {url}", file=sys.stderr)
     except Exception as error:
         print(f"[✘] Error: {url}, {error}", file=sys.stderr)
 
@@ -30,7 +31,7 @@ def main(argv=None) -> int:
         "--csv", action="store_true",
         help="Read Burp Logger++ CSV (fields: Request.AsBase64, Request.Time, Request.URL, Response.AsBase64)",
     )
-    parser.add_argument("--burp-xml", action="store_true", help="Read Burp Suite request/response XML export")
+    parser.add_argument("--burp-xml", action="store_true", help="Read Burp Suite request/response or issues XML export")
     args = parser.parse_args(argv)
     if not args.katana and not args.csv and not args.burp_xml:
         parser.error("You need to specify --katana, --csv or --burp-xml")
@@ -59,10 +60,14 @@ def main(argv=None) -> int:
     else:
         try:
             records = (
-                http_burp_xml_generator(sys.stdin.buffer) if args.burp_xml else http_csv_generator(sys.stdin)
+                burp_xml_records(sys.stdin.buffer) if args.burp_xml else
+                (("exchange", record) for record in http_csv_generator(sys.stdin))
             )
-            for record in records:
-                _post(index_url, record.to_katana(), record.url)
+            for kind, record in records:
+                if kind == "finding":
+                    _post(findings_url, json.dumps(record), record["target"], "application/json")
+                else:
+                    _post(index_url, record.to_katana(), record.url)
         except Exception as error:
             print(f"[✘] Error reading input: {error}", file=sys.stderr)
             return 1

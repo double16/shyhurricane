@@ -463,6 +463,9 @@ async def fetch_application_graph_evidence(
     Supply results[].steps[].evidence_id from find_application_relationships,
     trace_application_data_flow, or find_user_journey_paths. Reads published evidence directly
     without waiting for indexing; possession of its ID permits retrieval.
+    JavaScript may be normalized, deobfuscated, or reconstructed from source maps for readability.
+    Formatting, variable names, file paths, and line numbers may differ from code served by the target.
+    Coordinates and source hashes identify the analyzed artifact; do not apply them directly to the deployed bundle.
     """
     evidence_id = trim_input(evidence_id)
     await log_tool_history(ctx, "fetch_application_graph_evidence", evidence_id=evidence_id)

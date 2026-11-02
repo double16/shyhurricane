@@ -290,7 +290,7 @@ def test_path_continuation_advances_frontier_and_replays_at_same_revision(graph_
             revisions.append(self.parameters["revision"])
 
         def finish(self, count):
-            pass
+            revisions.append(self.parameters["revision"])
 
     monkeypatch.setattr("shyhurricane.graph.traversal.TraversalSnapshot", Snapshot)
     monkeypatch.setattr(query, "MAX_ENTITIES", 1)

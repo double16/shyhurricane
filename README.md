@@ -24,24 +24,24 @@ See the [documentation index](docs/README.md) for detailed guides and architectu
 MCP clients can discover these reusable workflows with `prompts/list` and render them with
 `prompts/get`. Rendering produces assessment instructions without running tools or contacting targets.
 
-| Prompt | Purpose |
-|--------|---------|
-| `map_attack_surface` | Inventory captured endpoints, forms, scripts, services, and assessment opportunities |
-| `hunt_vulnerability` | Investigate the supplied `vulnerability_type` using captured content and graph evidence |
-| `hunt_xss` | Review reflected, stored, and DOM XSS candidates and source-to-sink paths |
-| `hunt_access_control` | Investigate IDOR/BOLA, privileged operations, and authorization boundaries |
-| `hunt_injection` | Review SQL, NoSQL, command, and template injection indicators |
-| `hunt_ssrf` | Investigate URL-consuming features and possible server-side request boundaries |
-| `review_authentication_sessions` | Review login, recovery, OAuth, JWTs, cookies, and session lifecycle |
-| `review_configuration_exposure` | Review secrets, sensitive resources, debug interfaces, CORS, and headers |
-| `trace_input_to_sink` | Trace graph sources and sinks and inspect supporting evidence |
-| `find_vulnerability_chains` | Correlate findings, graph flows, and possible journeys into evidence-supported chains |
+| Prompt                           | Purpose                                                                                 |
+|----------------------------------|-----------------------------------------------------------------------------------------|
+| `map_attack_surface`             | Inventory captured endpoints, forms, scripts, services, and assessment opportunities    |
+| `hunt_vulnerability`             | Investigate the supplied `vulnerability_type` using captured content and graph evidence |
+| `hunt_xss`                       | Review reflected, stored, and DOM XSS candidates and source-to-sink paths               |
+| `hunt_access_control`            | Investigate IDOR/BOLA, privileged operations, and authorization boundaries              |
+| `hunt_injection`                 | Review SQL, NoSQL, command, and template injection indicators                           |
+| `hunt_ssrf`                      | Investigate URL-consuming features and possible server-side request boundaries          |
+| `review_authentication_sessions` | Review login, recovery, OAuth, JWTs, cookies, and session lifecycle                     |
+| `review_configuration_exposure`  | Review secrets, sensitive resources, debug interfaces, CORS, and headers                |
+| `trace_input_to_sink`            | Trace graph sources and sinks and inspect supporting evidence                           |
+| `find_vulnerability_chains`      | Correlate findings, graph flows, and possible journeys into evidence-supported chains   |
 
-| Argument | Required | Meaning |
-|----------|----------|---------|
-| `target` | Yes, all prompts | Host, domain, IP, netloc such as `app.example.com:8443`, or HTTP(S) URL prefix |
-| `mode` | No | `analysis` (default) uses captured evidence; `active` also guides scoped live reconnaissance and validation |
-| `vulnerability_type` | Yes, `hunt_vulnerability` only | Free-text vulnerability class or classes to investigate |
+| Argument             | Required                       | Meaning                                                                                                     |
+|----------------------|--------------------------------|-------------------------------------------------------------------------------------------------------------|
+| `target`             | Yes, all prompts               | Host, domain, IP, netloc such as `app.example.com:8443`, or HTTP(S) URL prefix                              |
+| `mode`               | No                             | `analysis` (default) uses captured evidence; `active` also guides scoped live reconnaissance and validation |
+| `vulnerability_type` | Yes, `hunt_vulnerability` only | Free-text vulnerability class or classes to investigate                                                     |
 
 Use bracketed IPv6 targets, such as `[2001:db8::1]:8443`. Hostname scopes include subdomains;
 explicit ports are retained, and URL prefixes restrict scheme, host, and path. User-supplied narrower
@@ -101,6 +101,7 @@ The following tools are provided:
 | register_http_headers       | Register HTTP headers that should be sent on every request.                                         | No          |
 | save_finding                | Save findings as a markdown.                                                                        | No          |
 | query_findings              | Query for previous findings for a target.                                                           | No          |
+| find_investigation_targets  | Read ranked finding/graph targets, hotspots, and possible chains.                                   | No          |
 | deobfuscate_javascript      | De-obfuscate JavaScript content (automatically done during indexing)                                | No          |
 | get_result_page             | Retrieve a saved page using an opaque navigation token.                                             | No          |
 
@@ -163,6 +164,35 @@ indexing and reports when results may still be incomplete; avoid starting duplic
 See the [tool reference](docs/tool-reference.md) for search predicates, result limits, pagination,
 content retrieval, and indexing-status fields.
 
+## Ranked investigation targets
+
+`find_investigation_targets(scope="example.com")` reads background-ranked finding/graph correlations,
+shared hotspots, and possible vulnerability chains. Results include supporting paths, evidence IDs,
+priority contributions, missing prerequisites, and freshness/coverage limits. Scores rank investigation
+work, not exploit probability. Demonstrated UI origins add 10 priority points when supported
+by a complete operation-bound flow; library code along that flow is allowed. The tool works without
+model calls or target requests, including in low-power mode. Pending results fall back to the existing scoped finding and graph tools.
+
+Ranked investigation responses include a contributor `findings` dictionary with original titles,
+submitted targets, structured metadata, and category provenance. `category_coverage` reports scoped
+categorized, unknown, and metadata-free findings independently of category filters. Contextual hotspots
+are capped at priority 20; inspect association basis before inferring composition. Processing completion
+does not establish complete evidence.
+
+Page-level `follow_up` calls are deduplicated and reference their recommending result IDs.
+`binding_status` explains operation matches, and `unknown_categories` groups remaining classification gaps.
+Normalized JavaScript and recovered sources retain analyzed-source hashes for coordinate binding.
+Assessment prompts and evidence tools explain that readable JavaScript may differ from deployed
+bundles. Source coordinates and hashes identify the analyzed artifact; correlate artifact identity
+when validating behavior rather than transferring its line numbers directly to deployed code.
+
+HTTP `/findings` and MCP `save_finding` accept optional structured `metadata`, including scanner rule,
+severity, confidence, verification status, affected request method, parameter, CWE, and code location.
+Sources can omit unavailable fields. `query_findings` exposes stable finding IDs and this metadata.
+Resubmissions fill missing metadata and record conflicts while preserving the original finding.
+
+See [finding correlation and operations](docs/investigation-targets.md), including the exact contract and scoring rules.
+
 ## Application Relationship Graph
 
 Explore captured resources, forms, fields, scripts, routes, and possible data flows using the
@@ -173,32 +203,27 @@ The tools work in low-power mode and do not contact targets. Graph production ru
 restartable epochs: captured inputs are frozen, structural analysis finishes, then inferred links
 are published without replacing structural entities. New captures wait for the next epoch;
 duplicate deliveries do not restart completed work. Inspect `graph.epoch` in `/status` for progress
-and failures. Reference discovery and current-job fields show work before publication;
-unchanged Neo4j counts during discovery do not indicate a stall. Upgrading unfinished legacy graph work requires a fresh data directory.
-All graph tools share a 120-second request budget after the separately configured indexing wait.
-The final five seconds are reserved for continuation checkpoints and saved result pages.
+and failures.
+
 Interrupted queries preserve completed records and report analysis gaps and `time_limit`.
 Continuations retain unfinished work; failed checkpoints require restarting and publish no unusable token.
-Graph tools continue sending client progress at the established five-second interval.
+
 Blank optional URL, context URL, and method filters behave like omitted filters. Coverage describes
 retained analysis units, independently of queued work; proven stale capture-unit statuses are
 reconciled automatically in bounded background maintenance.
+
 Graph discovery and traversal tools infer omitted, null, or blank `scope` from a supplied HTTP(S)
 URL's hostname and explicit port. Endpoints use `url`; elements use `context_url` before `url`;
 relationships use URL-valued `element_id`; flow traces and journeys use URL-valued `start`.
 Explicit scope takes precedence. Opaque IDs require explicit scope, and `end` never supplies scope.
 For example, `find_application_endpoints(url="https://app.example.com:8443/api/items")` uses
 `app.example.com:8443` scope while retaining the exact URL filter.
+
 Discovery inventories and full IR are retained separately from bounded Neo4j summaries. Results report
 discovery/flow coverage and deferred analysis units. Use `continue_application_graph_query` for
 exploration continuations and `expand_application_graph_analysis` for offline detail expansion.
-Graph state uses immutable, compressed SQLite artifacts, normalized discovery indexes, and
-incremental storage accounting. Cleanup commits bounded batches and resumes unfinished work.
-Recomputable analysis caches have a 256 MiB default budget; captured evidence and offline expansion
-artifacts are retained independently. This storage version requires a fresh assessment directory;
-existing layouts are rejected without migration. Preserve existing assessment directories.
-Graph paths are investigation candidates;
-inspect their evidence before treating them as confirmed vulnerabilities.
+
+Graph paths are investigation candidates; inspect their evidence before treating them as confirmed vulnerabilities.
 
 See the [application graph guide](docs/application-graph.md) for tool arguments and examples,
 analysis coverage, architecture, Neo4j configuration, and backfill/rebuild procedures.
@@ -320,27 +345,18 @@ docker build -t ghcr.io/double16/shyhurricane_unix_command:main src/docker/unix_
 When started from an interactive terminal, the server displays a `shyhurricane` monitoring dashboard with
 configuration, queue, database, indexing, and MCP tool information. It refreshes immediately
 on startup and every 30 seconds afterward. Press `r` to refresh immediately. Press `q` to stop the
-dashboard and shut down the server. Press `f` to mark failed items pending across the ingest,
-type-specific indexing, scan-finding, and graph queues. The notification reports counts and any
-per-queue errors; successful queues are committed even if another queue fails. Retrying preserves
-payloads and leaves processing items untouched. Workers pick up pending work asynchronously and
-may fail again if the original problem remains. Repeated key presses do not overlap retry operations.
+dashboard and shut down the server. Press `f` to mark failed items pending across the various queues.
+The notification reports counts and any per-queue errors; successful queues are committed even if another
+queue fails. Retrying preserves payloads and leaves processing items untouched. Workers pick up pending work
+asynchronously and may fail again if the original problem remains.
 
 The **MCP tools** panel lists running tools followed by the last five completed calls, newest first.
 Yellow dots indicate running tools, green dots indicate completed calls, and red dots indicate
 failures (including cancelled calls). History is kept in memory until the server restarts.
 
-Queue status counts include pending and processing items. Each persistent queue row appends
-`, N failed` only when its failed count is greater than zero. Scan findings have their own row.
-Missing queue databases count as empty; read failures display unavailable. Database statistics always
-shows `Findings: <count>` first,
-using the primary Qdrant `finding` collection count, followed by the top five other collections.
-The finding count is read directly even when retrieval stores have not been initialized.
-After the dashboard closes, a log message reports that shutdown
-is waiting up to five minutes for current operations to finish. Shutdown stops claiming new work and
-allows current operations up to five minutes to finish before terminating remaining workers. Pending
-persistent queue items remain available for the next startup. SIGINT and SIGTERM use the same shutdown behavior.
-Non-interactive starts, including Docker Compose, continue to use normal logging output.
+Shutdown stops claiming new work and allows current operations up to five minutes to finish before terminating remaining
+workers. Pending persistent queue items remain available for the next startup. SIGINT and SIGTERM use the same
+shutdown behavior.
 
 Ollama with `llama3.2:3b`:
 ```shell
@@ -443,7 +459,7 @@ cat LoggerPlusPlus.csv | python3 ingest.py --mcp-url http://127.0.0.1:8000/ --cs
 tail -f LoggerPlusPlus.csv | python3 ingest.py --mcp-url http://127.0.0.1:8000/ --csv
 ```
 
-### Burp Suite request/response XML
+### Burp Suite request/response and issues XML
 
 Export requests and responses as XML from Burp Suite, then ingest the complete export:
 
@@ -455,6 +471,14 @@ Both base64 and plain-text HTTP messages are supported. Each valid exchange is c
 to `/index`. Invalid or incomplete items are reported to stderr and skipped. Malformed XML stops ingestion with a
 nonzero exit status; exchanges already queued remain queued. XML ingestion requires a complete export rather than
 a continuously appended stream. XML exports must be converted through `ingest.py` before submission to `/index`.
+
+Burp `--burp-xml` also detects `<issues>` exports. Findings go to `/findings`, one per evidence request,
+with extension-compatible summaries (1,024 characters per body). Complete exchanges also go to `/index`
+with full bodies. Both plain-text and base64 exports are accepted.
+
+Incomplete or invalid exchanges are skipped independently of findings. Export time is used for indexed
+exchange timestamps, falling back to ingestion time. Finding submission failures are reported and
+remaining records continue; malformed XML returns a nonzero exit status.
 
 ### Extensions
 

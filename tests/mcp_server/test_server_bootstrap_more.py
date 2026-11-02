@@ -285,6 +285,7 @@ async def test_get_server_context_low_power_builds_context(monkeypatch, tmp_path
     monkeypatch.setattr(web_resources, "start_ingest_worker", start_ingest_worker)
     monkeypatch.setattr(task_queue, "start_task_worker", start_task_worker)
     monkeypatch.setattr("shyhurricane.graph.worker.start_graph_worker", lambda *args: object())
+    monkeypatch.setattr("shyhurricane.investigation.worker.start_investigation_worker", lambda *args: object())
     monkeypatch.setattr(server_context, "GraphStore", lambda location: SimpleNamespace(
         location=location, ready=lambda: True, close=lambda: None, schema_ready=True))
     monkeypatch.setattr(server_context, "GraphMaintenance", MagicMock())

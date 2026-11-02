@@ -64,7 +64,11 @@ async def fetch_web_resource_content(
      - the user requests analysis of resource content that has already been indexed, spidered or scanned
      - the user requests content with a URL that starts with "web://"
 
-    Indexed JavaScript has undergone automatic transformation, which may fail or be partial.
+    Indexed JavaScript may be normalized, deobfuscated, or reconstructed from source maps for readability.
+    Formatting, variable names, file paths, and line numbers may differ from code served by the target.
+    Finding coordinates and source hashes refer to the analyzed artifact, not necessarily the deployed bundle.
+    Prefer readable source for analysis; correlate artifact identity when validating behavior.
+    Transformation may fail or be partial and does not guarantee faithful source recovery.
     Avoid repeating transformation unless the content warrants it.
     This waits briefly for relevant indexing, then reads the index without fetching the live URL.
     Null is a confirmed miss; a status-only indexing result means content may still be pending.

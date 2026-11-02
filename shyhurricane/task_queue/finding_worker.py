@@ -11,6 +11,7 @@ from haystack.document_stores.types import DuplicatePolicy
 
 from shyhurricane.embedder_cache import EmbedderCache
 from shyhurricane.finding_identity import finding_fingerprint, finding_save_lock
+from shyhurricane.finding_metadata import merge_metadata
 from shyhurricane.finding_search import finding_search_metadata
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.index.web_resources_pipeline import (
@@ -19,6 +20,7 @@ from shyhurricane.index.web_resources_pipeline import (
     build_splitters,
     build_stores,
 )
+from shyhurricane.investigation.storage import submit_document
 from shyhurricane.target_info import parse_target_info
 from shyhurricane.task_queue.types import SaveFindingQueueItem
 from shyhurricane.utils import get_log_path, get_log_timestamp, get_state_path
@@ -26,7 +28,7 @@ from shyhurricane.utils import get_log_path, get_log_timestamp, get_state_path
 logger = logging.getLogger(__name__)
 
 # Change this when previously indexed data becomes obsolete
-FINDING_VERSION = 2
+FINDING_VERSION = 3
 
 
 class FindingContext:
@@ -38,6 +40,7 @@ class FindingContext:
             doc_type_queue: persistqueue.SQLiteAckQueue,
             log_timestamp: str | None = None,
     ):
+        self.db = db
         self.stores = build_stores(db, {"finding"})
         # Recovery must retain the original vector when completing a pending handoff.
         self.stores["finding"].return_embedding = True
@@ -67,6 +70,18 @@ def save_finding_worker(ctx: FindingContext, item: SaveFindingQueueItem):
         })
         if existing:
             doc = existing[0]
+            metadata, conflicts = merge_metadata(
+                doc.meta.get("finding_metadata", {}), item.metadata,
+                doc.meta.get("finding_metadata_conflicts", []),
+            )
+            if (metadata != doc.meta.get("finding_metadata", {})
+                    or conflicts != doc.meta.get("finding_metadata_conflicts", [])):
+                doc = replace(doc, meta={**doc.meta, "finding_metadata": metadata,
+                                         "finding_metadata_conflicts": conflicts,
+                                         "finding_metadata_revision": doc.meta.get("finding_metadata_revision", 1) + 1,
+                                         "finding_handoff_pending": True})
+                ctx.stores["finding"].write_documents([doc], policy=DuplicatePolicy.OVERWRITE)
+                _log_finding(ctx, item)
             if doc.meta.get("finding_handoff_pending"):
                 _handoff_finding(ctx, doc)
             else:
@@ -78,9 +93,22 @@ def save_finding_worker(ctx: FindingContext, item: SaveFindingQueueItem):
 def _handoff_finding(ctx: FindingContext, doc: Document):
     metadata = {key: value for key, value in doc.meta.items() if key != "finding_handoff_pending"}
     downstream = replace(doc, meta=metadata)
+    submit_document(ctx.db, doc)
     ctx.doc_type_queue.put(downstream)
     completed = replace(doc, meta={**metadata, "finding_handoff_pending": False})
     ctx.stores["finding"].write_documents([completed], policy=DuplicatePolicy.OVERWRITE)
+
+
+def _log_finding(ctx, item):
+    if ctx.finding_log_path is not None:
+        try:
+            with open(ctx.finding_log_path, "a") as finding_log:
+                finding_log.write(json.dumps({"target": item.target, "title": item.title, "markdown": item.markdown,
+                                             **({"metadata": item.metadata} if item.metadata else {})}))
+                finding_log.write("\n")
+        except Exception as e:
+            logger.error("Failed to write finding log at %s: %s", ctx.finding_log_path, e)
+            ctx.finding_log_path = None
 
 
 def _save_new_finding(ctx: FindingContext, item: SaveFindingQueueItem, fingerprint: str):
@@ -89,19 +117,15 @@ def _save_new_finding(ctx: FindingContext, item: SaveFindingQueueItem, fingerpri
 
     target_info = parse_target_info(item.target)
 
-    if ctx.finding_log_path is not None:
-        try:
-            with open(ctx.finding_log_path, "a") as finding_log:
-                finding_log.write(json.dumps({"target": item.target, "title": item.title, "markdown": item.markdown}))
-                finding_log.write("\n")
-        except Exception as e:
-            logger.error("Failed to write finding log at %s: %s", ctx.finding_log_path, e)
-            ctx.finding_log_path = None
+    _log_finding(ctx, item)
 
     content_sha256 = hashlib.sha256(item.markdown.encode("utf-8", errors="ignore")).hexdigest()
 
     meta = {
         "version": FINDING_VERSION,
+        "finding_metadata": item.metadata,
+        "finding_metadata_conflicts": [],
+        "finding_metadata_revision": 1,
         **finding_search_metadata(target_info.url or "", target_info.host),
         "url": target_info.url or "",
         "netloc": target_info.netloc or "",

@@ -96,3 +96,23 @@ def test_script_entrypoint(monkeypatch, tmp_path, outside_repository):
     with pytest.raises(SystemExit) as error:
         runpy.run_path(str(script_path), run_name="__main__")
     assert error.value.code == 0
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_issues_routes_findings_and_exchanges_independently(monkeypatch, capsys, failure):
+    xml = (
+        '<issues exportTime="2026-06-02T00:00:00Z"><issue><name>Test</name>'
+        '<host>https://example.com</host><path>/</path><requestresponse>'
+        '<request><![CDATA[GET / HTTP/1.1\nHost: example.com\n\n]]></request>'
+        '<response><![CDATA[HTTP/1.1 200 OK\n\nhello]]></response>'
+        '</requestresponse></issue></issues>'
+    )
+    post = setup_cli(monkeypatch, xml)
+    post.side_effect = [Mock(), RuntimeError("unavailable") if failure else Mock(), Mock()]
+    assert ingest.main(["--mcp-url", "http://localhost", "--burp-xml"]) == 0
+    assert post.call_args_list[1].args == ("http://localhost/findings",)
+    assert post.call_args_list[1].kwargs["headers"] == {"Content-Type": "application/json"}
+    assert json.loads(post.call_args_list[1].kwargs["data"])["metadata"]["affected_method"] == "GET"
+    assert post.call_args_list[2].args == ("http://localhost/index",)
+    stderr = capsys.readouterr().err
+    assert ("unavailable" if failure else "Queued for finding") in stderr

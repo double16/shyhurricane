@@ -678,3 +678,12 @@ def test_graph_reference_resolution(tmp_path, reference):
     with closing(sqlite3.connect(directory / "artifacts.sqlite")) as db, db:
         db.execute("UPDATE captures SET path=?", (reference,))
     assert ex.export(root, tmp_path / "out", graph_only=True) == 2
+
+
+def test_recovery_preserves_structured_finding_metadata(run_export):
+    metadata = {"source": "zap", "affected_method": "GET", "cwe_ids": ["CWE-79"]}
+    p = point(kind="finding", meta={"url": "https://example.com/a", "title": "Finding",
+                                   "finding_metadata": metadata}, content="Evidence")
+    code, output, _, _ = run_export({"finding": [p]})
+    assert code == 0
+    assert lines(output / "findings.jsonl")[0]["metadata"] == metadata

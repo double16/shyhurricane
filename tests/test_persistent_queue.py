@@ -933,8 +933,8 @@ async def test_queue_counts_and_retry_preserve_records(monkeypatch, tmp_path):
                 ).fetchall()
         counts = await persistent_queue.persistent_queue_counts("db")
         assert all(value == {"pending": 2, "processing": 1, "failed": 2} for value in counts.values())
-        assert await persistent_queue.retry_failed_queue_items("db") == dict.fromkeys(counts, 2)
-        assert await persistent_queue.retry_failed_queue_items("db") == dict.fromkeys(counts, 0)
+        assert await persistent_queue.retry_failed_queue_items("db") == {**dict.fromkeys(counts, 2), "investigation": 0}
+        assert await persistent_queue.retry_failed_queue_items("db") == {**dict.fromkeys(counts, 0), "investigation": 0}
         counts = await persistent_queue.persistent_queue_counts("db")
         assert all(value == {"pending": 4, "processing": 1, "failed": 0} for value in counts.values())
         for directory, queue in zip(persistent_queue.PERSISTENT_QUEUES.values(), queues):
@@ -956,7 +956,7 @@ async def test_queue_counts_and_retry_missing_and_broken_database(monkeypatch, t
     monkeypatch.setattr(persistent_queue, "persistent_queue_path", lambda db, name: tmp_path / name)
     counts = await persistent_queue.persistent_queue_counts("db")
     assert all(value == {"pending": 0, "processing": 0, "failed": 0} for value in counts.values())
-    assert await persistent_queue.retry_failed_queue_items("db") == dict.fromkeys(counts, 0)
+    assert await persistent_queue.retry_failed_queue_items("db") == {**dict.fromkeys(counts, 0), "investigation": 0}
     assert list(tmp_path.iterdir()) == []
     path = tmp_path / "ingest_queue"
     path.mkdir()

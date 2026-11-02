@@ -12,7 +12,7 @@ uv run python -m shyhurricane.export_ingestion \
 ```
 
 The output directory must not already exist. It contains `index.jsonl` (Katana-compatible),
-`findings.jsonl` (`target`, `title`, `markdown` records), and `export-report.json` with source
+`findings.jsonl` (`target`, `title`, `markdown`, and optional structured `metadata` records), and `export-report.json` with source
 counts, skipped record identifiers, finding provenance, and recovery limitations. Files are private
 to the current user because captures may contain credentials or sensitive response bodies.
 Exit codes are `0` for a completed export, `2` for a completed export with skipped corrupt or

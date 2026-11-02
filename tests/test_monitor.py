@@ -1045,3 +1045,171 @@ def test_disk_status_rendering(state, error, minimums, expected):
     }
     assert expected in format_disk_status(snapshot)
     assert format_disk_status(None) == "Disk: unavailable"
+
+
+def test_graph_panel_reports_investigation_progress_and_errors(monkeypatch):
+    monkeypatch.setattr("shyhurricane.monitor.time.time", lambda: 220)
+    panel = format_graph_panel({"investigation": {
+        "completed": 3, "pending": 2, "failed": 1, "stale": 2, "policy_version": 1,
+        "last_successful_refresh": 100, "error": "ServiceUnavailable",
+    }})
+    assert "Investigations: 3 completed / 2 pending / 1 failed" in panel
+    assert "Investigation lag: 2 findings; policy 1" in panel
+    assert "Investigation last refresh: 2m ago" in panel
+    assert "Investigation error: ServiceUnavailable" in panel
+
+
+@pytest.mark.parametrize(("timestamp", "now", "expected"), [
+    (95, 100, "5s ago"),
+    (40, 100, "1m ago"),
+    (-3500, 100, "1h ago"),
+    (-86300, 100, "1d ago"),
+    (110, 100, "0s ago"),
+    (None, 100, "awaiting results"),
+])
+def test_investigation_refresh_duration(timestamp, now, expected):
+    from shyhurricane.monitor import format_duration_since
+
+    assert format_duration_since(timestamp, now) == expected
+
+
+@pytest.mark.parametrize(("elapsed", "expected"), [
+    (31.9, "31s ago"),
+    (60, "1m ago"),
+    (3600, "1h ago"),
+    (86400, "1d ago"),
+    (-10, "0s ago"),
+    (None, "not yet observed"),
+])
+def test_graph_last_advance_duration(monkeypatch, elapsed, expected):
+    monkeypatch.setattr("shyhurricane.monitor.time.time", lambda: 100000)
+    panel = format_graph_panel({"seconds_since_observed_progress": elapsed})
+    assert f"Last observed advance: {expected}" in panel
+
+
+def test_graph_panel_displays_derived_work_counts():
+    panel = format_graph_panel({"investigation": {"work": {
+        "derive": {"pending": 3, "failed": 1}, "hotspot": {"pending": 2, "failed": 0},
+    }}})
+    assert "Investigation derive work: 3 pending / 1 failed" in panel
+    assert "Investigation hotspot work: 2 pending / 0 failed" in panel
+
+
+@pytest.mark.asyncio
+async def test_monitor_literal_urls_and_markup_recovery(monkeypatch):
+    from rich.text import Text
+
+    data = MonitorData(
+        bound_address="localhost:8000", proxy_address="not started", model="model", model_health=True,
+        certificate_fingerprint=None, database="db", qdrant_host_bind="localhost", qdrant_http_port=6333,
+        qdrant_health=True, low_power=False, document_counts={}, domain_count=0, host_count=0,
+        top_domains=[], top_hosts=[], queue_sizes={}, running_tools=[],
+        recent_urls=["https://example.com/", "https://[::1]/", "https://example.com/[/bad]",
+                     "https://example.com/[bold]literal[/bold]"],
+    )
+    monkeypatch.setattr("shyhurricane.monitor.collect_monitor_data", AsyncMock(return_value=data))
+    monkeypatch.setattr("shyhurricane.monitor.format_configuration_panel", lambda data: "[/bad]")
+    app = MonitorApp(SimpleNamespace(), "localhost", 8000, SimpleNamespace(running_tools=[], recent_tools=[]))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        assert app.query_one("#configuration-content", Static).content.plain == "[/bad]"
+        assert app.query_one("#urls", Static).content.plain == (
+            "Last five URLs indexed\n" + "\n".join(data.recent_urls)
+        )
+        assert "No MCP tools run" in app.query_one("#tools", Static).content
+        app.update_panel("#configuration-content", "[b]Recovered[/b]")
+        assert app.query_one("#configuration-content", Static).content == "[b]Recovered[/b]"
+        await app.refresh_data()
+        assert app.is_running
+        data.recent_urls.clear()
+        await app.refresh_data()
+        assert "No URLs indexed" in app.query_one("#urls", Static).content.plain
+        data.qdrant_freshness["urls"] = {"status": "unavailable"}
+        await app.refresh_data()
+        assert "Unavailable" in app.query_one("#urls", Static).content.plain
+        assert isinstance(app.query_one("#urls", Static).content, Text)
+
+
+@pytest.mark.parametrize("ready,tools,count,expected", [
+    (True, [], 0, "idle"), (True, [], 1, "working"),
+    (False, [], 1, "blocked"), (False, ["tool"], 1, "working"),
+    (True, [], None, "blocked"),
+])
+def test_terminal_activity(ready, tools, count, expected):
+    from types import SimpleNamespace
+
+    from shyhurricane.monitor import terminal_status
+
+    data = SimpleNamespace(model_health=True, qdrant_health=True, graph={"healthy": True},
+                           disk={"state": "disabled"}, queue_sizes={"queue": count})
+    assert terminal_status(data, ready, tools) == ("#00ff00", expected)
+    data.model_health = None
+    assert terminal_status(data, ready, tools)[0] == "#ffa500"
+    data.qdrant_health = False
+    assert terminal_status(data, ready, tools)[0] == "#ff0000"
+
+
+@pytest.mark.parametrize("graph", [
+    {"investigation": {"work": {"reconcile": {"pending": 1}}}},
+    {"continuations": {"running": 1}}, {"analyses": {"processing": 1}},
+    {"queue_depth": 1},
+])
+def test_terminal_background_work(graph):
+    from shyhurricane.monitor import terminal_status
+
+    data = SimpleNamespace(model_health=True, qdrant_health=True, graph=graph,
+                           disk={"state": "healthy"}, queue_sizes={})
+    assert terminal_status(data, True, [])[1] == "working"
+    assert terminal_status(data, False, [])[1] == "blocked"
+
+
+def test_terminal_unknown_counts_preserve_previous_activity():
+    from shyhurricane.monitor import terminal_status
+
+    data = SimpleNamespace(model_health=True, qdrant_health=True, graph={"error": "unavailable"},
+                           disk={"state": "checking"}, queue_sizes={})
+    assert terminal_status(data, True, [], "working") == ("#ffa500", "working")
+    data.disk = {"state": "paused"}
+    assert terminal_status(data, True, [])[0] == "#ff0000"
+
+
+def test_terminal_output_and_cleanup(monkeypatch):
+    from pathlib import Path
+    from unittest.mock import Mock
+
+    monkeypatch.setattr("shyhurricane.monitor.resolve_data_dir", lambda: Path("/tmp/assessment\x1b\n"))
+    context = SimpleNamespace(health_monitor=SimpleNamespace(ready=SimpleNamespace(is_set=lambda: True)))
+    app = MonitorApp(context, "127.0.0.1", 8000, SimpleNamespace(running_tools=[]))
+    driver = Mock(is_headless=False)
+    app._driver = driver
+    data = SimpleNamespace(model_health=True, qdrant_health=True, graph={"healthy": True},
+                           disk={"state": "healthy"}, queue_sizes={})
+    app.publish_terminal_status(data)
+    assert driver.write.call_args_list[0].args == ("\x1b]1;shyhurricane - assessment\x1b\\",)
+    assert driver.write.call_args_list[1].args == ("\x1b]21337;indicator=#00ff00;status=idle;status-color=\x1b\\",)
+    app.publish_terminal_status(data)
+    assert driver.write.call_count == 2
+    data.queue_sizes = {"queue": 1}
+    app.publish_terminal_status(data)
+    assert driver.write.call_args.args == (
+        "\x1b]21337;indicator=#00ff00;status=working;status-color=#ffa500\x1b\\",
+    )
+    context.health_monitor.ready.is_set = lambda: False
+    app.publish_terminal_status(data)
+    assert driver.write.call_args.args == (
+        "\x1b]21337;indicator=#00ff00;status=blocked;status-color=#ff0000\x1b\\",
+    )
+    data.queue_sizes = {}
+    app.publish_terminal_status(data)
+    assert driver.write.call_args.args == (
+        "\x1b]21337;indicator=#00ff00;status=idle;status-color=\x1b\\",
+    )
+    app.on_unmount()
+    assert driver.write.call_args.args == ("\x1b]21337;status=;indicator=;status-color=\x1b\\",)
+    driver.reset_mock()
+    driver.is_headless = True
+    app.publish_terminal_status(data)
+    driver.write.assert_not_called()
+    app._driver = None
+    app.publish_terminal_status(data)
+    app.on_unmount()

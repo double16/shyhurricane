@@ -22,6 +22,7 @@ from shyhurricane.mcp_server.tools.find_indexed_metadata import (
 from shyhurricane.mcp_server.tools.find_web_resources import FindWebResourcesResult, SpiderResults
 from shyhurricane.mcp_server.tools.find_wordlists import FindWordlistsResult
 from shyhurricane.mcp_server.tools.findings import QueryFindingsResult
+from shyhurricane.mcp_server.tools.investigation import InvestigationResult
 from shyhurricane.mcp_server.tools.port_scan import PortScanToolResult
 from shyhurricane.result_pages import SavedTextResult
 from shyhurricane.utils import HttpResource
@@ -50,6 +51,11 @@ class FindUrlsPage(BaseModel):
 class QueryFindingsPage(BaseModel):
     source_tool: Literal["query_findings"]
     result: QueryFindingsResult
+
+
+class InvestigationPage(BaseModel):
+    source_tool: Literal["find_investigation_targets"]
+    result: InvestigationResult
 
 
 class FindWordlistsPage(BaseModel):
@@ -111,6 +117,7 @@ ResultPageValue = Annotated[
         FindNetlocPage,
         FindUrlsPage,
         QueryFindingsPage,
+        InvestigationPage,
         FindWordlistsPage,
         FindWebResourcesPage,
         SpiderWebsitePage,
