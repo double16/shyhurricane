@@ -39,6 +39,16 @@ def resolve_data_dir(value: str | os.PathLike | None = None) -> Path:
 
 
 def add_data_dir_argument(parser: argparse.ArgumentParser) -> None:
+    class NetworkAction(argparse.Action):
+        def __call__(self, parser, namespace, values, option_string=None):
+            os.environ["MANAGED_DATABASE_NETWORK"] = values
+            setattr(namespace, self.dest, values)
+
+    parser.add_argument(
+        "--managed-database-network", choices=("auto", "bridge", "host"),
+        action=NetworkAction, default=None,
+        help="Managed database networking (or MANAGED_DATABASE_NETWORK; default auto)",
+    )
     parser.add_argument(
         "--data-dir", default=None,
         help="Application data directory (or DATA_DIR); relative paths are beneath the detected default",

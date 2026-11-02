@@ -517,3 +517,8 @@ async def test_facets_propagate_index_creation_failure():
     with pytest.raises(PermissionError, match="read only"):
         await db.get_domain_and_host_counts(client, 1)
     assert client.facet.await_count == 2
+
+
+@pytest.fixture(autouse=True)
+def managed_bridge_default(monkeypatch):
+    monkeypatch.setenv("MANAGED_DATABASE_NETWORK", "bridge")

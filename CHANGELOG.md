@@ -4,6 +4,7 @@
 
 ### Features
 
+- Add managed database host networking and automatic fallback for disabled Docker bridges.
 - Show assessment title, aggregate health dot, and work status in interactive iTerm2 tabs.
 - Ingest Burp issues XML as findings and index complete evidence exchanges.
 - Accept optional structured finding metadata across HTTP, MCP, Opengrep, and Nuclei, expose stable

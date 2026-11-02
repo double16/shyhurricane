@@ -11,7 +11,8 @@ from urllib.parse import urlsplit
 
 from neo4j import GraphDatabase, Query, unit_of_work
 
-from shyhurricane.db import _find_available_port, _get_published_port, _inspect_container, _is_running, _run
+from shyhurricane.db import _find_available_port, _inspect_container, _is_running, _run
+from shyhurricane.db import managed_endpoint, managed_network, validate_network, wait_host_listener
 from shyhurricane.graph.budget import current_budget
 from shyhurricane.graph.config import graph_timeouts
 from shyhurricane.graph.statistics import summarize_captures
@@ -66,10 +67,23 @@ def resolve_uri(location: str) -> str:
     storage = Path(location).expanduser().resolve()
     storage.mkdir(parents=True, exist_ok=True)
     name = "neo4j-shyhurricane-" + hashlib.sha256(str(storage).encode()).hexdigest()[:12]
+    mode = managed_network()
     info = _inspect_container(name)
+    if info is not None:
+        validate_network(info, mode)
     environment = memory_environment()
     if info is None:
         port = _find_available_port("127.0.0.1")
+        network_args = ["-p", f"127.0.0.1:{port}:7687"]
+        if mode == "host":
+            network_args = ["--network", "host"]
+            environment.extend([
+                "NEO4J_server_default__listen__address=127.0.0.1",
+                f"NEO4J_server_bolt_listen__address=127.0.0.1:{port}",
+                f"NEO4J_server_bolt_advertised__address=127.0.0.1:{port}",
+                "NEO4J_server_http_enabled=false",
+                "NEO4J_server_https_enabled=false",
+            ])
         password = os.environ.get("NEO4J_PASSWORD")
         auth = f"neo4j/{password}" if password else "none"
         _run(
@@ -79,8 +93,7 @@ def resolve_uri(location: str) -> str:
                 "-d",
                 "--name",
                 name,
-                "-p",
-                f"127.0.0.1:{port}:7687",
+                *network_args,
                 "-v",
                 f"{storage}:/data:rw",
                 "-v",
@@ -110,7 +123,9 @@ def resolve_uri(location: str) -> str:
             "that container with the existing storage mounts to apply NEO4J memory overrides",
             name,
         )
-    host, port = _get_published_port(info, "7687/tcp")
+    host, port = managed_endpoint(info, "7687/tcp", "NEO4J_server_bolt_listen__address")
+    if mode == "host":
+        wait_host_listener(name, host, port)
     return f"bolt://{host}:{port}"
 
 

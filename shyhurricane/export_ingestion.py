@@ -100,6 +100,9 @@ def endpoint(root, explicit=None):
     container = json.loads(result.stdout)[0]
     if not container["State"]["Running"]:
         raise ValueError("Existing Qdrant container is stopped; start it separately or use --graph-only")
+    if container.get("HostConfig", {}).get("NetworkMode") == "host":
+        environment = dict(item.split("=", 1) for item in container["Config"]["Env"] if "=" in item)
+        return f"http://127.0.0.1:{int(environment['QDRANT__SERVICE__HTTP_PORT'])}"
     bindings = container["NetworkSettings"]["Ports"]["6333/tcp"]
     binding = next((item for item in bindings if item["HostIp"] == "127.0.0.1"), bindings[0])
     host = binding["HostIp"]

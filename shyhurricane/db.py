@@ -6,6 +6,8 @@ import os
 import re
 import socket
 import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import AsyncGenerator, List, Optional, Sequence, Tuple
@@ -62,7 +64,11 @@ def _get_published_port(inspect: dict, container_port: str) -> Tuple[str, int]:
     ports = inspect.get("NetworkSettings", {}).get("Ports", {})
     bindings = ports.get(container_port)
     if not bindings:
-        raise RuntimeError(f"Container has no published binding for {container_port}")
+        raise RuntimeError(
+            f"Container has no published binding for {container_port}; inspect Docker bridge networking. "
+            "On local Linux, select --managed-database-network host and recreate only the container, "
+            "preserving its storage directory"
+        )
 
     # Prefer 127.0.0.1 binding if present; otherwise take the first.
     chosen = None
@@ -86,6 +92,68 @@ def _find_available_port(host: str) -> int:
         return listener.getsockname()[1]
     finally:
         listener.close()
+
+
+def managed_network() -> str:
+    """Select networking without treating arbitrary Docker errors as bridge absence."""
+    mode = os.environ.get("MANAGED_DATABASE_NETWORK", "auto")
+    if mode not in {"auto", "bridge", "host"}:
+        raise ValueError("MANAGED_DATABASE_NETWORK must be auto, bridge, or host")
+    if mode == "bridge":
+        return mode
+    if mode == "auto":
+        result = _run(["docker", "network", "inspect", "bridge"], check=False)
+        if result.returncode:
+            if not any(message in result.stderr.lower() for message in (
+                "no such network: bridge", "network bridge not found",
+            )):
+                raise RuntimeError(f"Cannot inspect Docker bridge: {result.stderr}")
+        else:
+            network = json.loads(result.stdout)[0]
+            if network.get("Options", {}).get("com.docker.network.bridge.name") != "none":
+                return "bridge"
+    context = json.loads(_run(["docker", "context", "inspect"]).stdout)[0]
+    endpoint = context["Endpoints"]["docker"]["Host"]
+    if not os.environ.get("DOCKER_CONTEXT"):
+        endpoint = os.environ.get("DOCKER_HOST") or endpoint
+    info = json.loads(_run(["docker", "info", "--format", "{{json .}}"]).stdout)
+    if (sys.platform != "linux" or not endpoint.startswith("unix://")
+            or "desktop" in info.get("OperatingSystem", "").lower() or info.get("OSType") != "linux"):
+        raise RuntimeError("Managed host networking requires a local native Linux Docker Engine")
+    logger.info("Managed databases use host networking (requested mode: %s)", mode)
+    return "host"
+
+
+def managed_endpoint(info: dict, port: str, setting: str) -> Tuple[str, int]:
+    """Read host listeners from persisted container settings."""
+    if info.get("HostConfig", {}).get("NetworkMode") != "host":
+        return _get_published_port(info, port)
+    environment = dict(item.split("=", 1) for item in info["Config"]["Env"] if "=" in item)
+    value = environment[setting]
+    return "127.0.0.1", int(value.rsplit(":", 1)[-1])
+
+
+def wait_host_listener(name: str, host: str, port: int, timeout: float = 30) -> None:
+    """Bound host-mode startup and surface early container exits."""
+    deadline = time.monotonic() + timeout
+    while True:
+        info = _inspect_container(name)
+        if info is None or not _is_running(info):
+            raise RuntimeError(f"Managed database {name} stopped during startup; inspect docker logs {name}")
+        try:
+            with socket.create_connection((host, port), timeout=0.5):
+                return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"Managed database {name} listener timed out; inspect docker logs {name}")
+            time.sleep(0.2)
+
+
+def validate_network(info: dict, mode: str) -> None:
+    actual = info.get("HostConfig", {}).get("NetworkMode", "default")
+    if (actual == "host") != (mode == "host"):
+        raise RuntimeError("Managed database network mode changed; stop the service and recreate "
+                           "only this container, preserving its storage directory")
 
 
 def _start_qdrant_docker(
@@ -112,12 +180,23 @@ def _start_qdrant_docker(
     if pull:
         _run(["docker", "pull", image], check=True)
 
+    mode = managed_network()
     inspect = _inspect_container(name)
+    if inspect is not None:
+        validate_network(inspect, mode)
     if inspect is None:
         http_host_port = _find_available_port(host_bind)
         grpc_host_port = _find_available_port(host_bind)
         while grpc_host_port == http_host_port:
             grpc_host_port = _find_available_port(host_bind)
+        network_args = (
+            ["--network", "host", "-e", "QDRANT__SERVICE__HOST=127.0.0.1",
+             "-e", f"QDRANT__SERVICE__HTTP_PORT={http_host_port}",
+             "-e", f"QDRANT__SERVICE__GRPC_PORT={grpc_host_port}"]
+            if mode == "host" else
+            ["-p", f"{host_bind}:{http_host_port}:{http_container_port}",
+             "-p", f"{host_bind}:{grpc_host_port}:{grpc_container_port}"]
+        )
         _run(
             [
                 "docker",
@@ -125,10 +204,7 @@ def _start_qdrant_docker(
                 "-d",
                 "--name",
                 name,
-                "-p",
-                f"{host_bind}:{http_host_port}:{http_container_port}",
-                "-p",
-                f"{host_bind}:{grpc_host_port}:{grpc_container_port}",
+                *network_args,
                 "-v",
                 f"{str(storage)}:/qdrant/storage:rw",
                 image,
@@ -153,8 +229,11 @@ def _start_qdrant_docker(
                for mount in inspect.get("Mounts", [])):
         raise RuntimeError("Managed Qdrant storage mount does not match configured directory")
 
-    http_ip, http_port = _get_published_port(inspect, f"{http_container_port}/tcp")
-    grpc_ip, grpc_port = _get_published_port(inspect, f"{grpc_container_port}/tcp")
+    http_ip, http_port = managed_endpoint(inspect, f"{http_container_port}/tcp", "QDRANT__SERVICE__HTTP_PORT")
+    grpc_ip, grpc_port = managed_endpoint(inspect, f"{grpc_container_port}/tcp", "QDRANT__SERVICE__GRPC_PORT")
+
+    if mode == "host":
+        wait_host_listener(name, http_ip, http_port)
 
     return QdrantDockerInfo(
         name=name,
@@ -166,14 +245,15 @@ def _start_qdrant_docker(
     )
 
 
-_QDRANT_ENDPOINTS: dict[str, Tuple[str, int]] = {}
+_QDRANT_ENDPOINTS: dict[str | tuple[str, str], Tuple[str, int]] = {}
 
 
 def qdrant_host_port(db: str) -> Tuple[str, int]:
     remote = re.fullmatch(r"([^/\\\s]+):(\d+)", db)
     location = db if remote else str(Path(db).expanduser().resolve())
-    if location in _QDRANT_ENDPOINTS:
-        return _QDRANT_ENDPOINTS[location]
+    cache_key = location if remote else (location, os.environ.get("MANAGED_DATABASE_NETWORK", "auto"))
+    if cache_key in _QDRANT_ENDPOINTS:
+        return _QDRANT_ENDPOINTS[cache_key]
     if remote:
         host, port = remote.groups()
         endpoint = (host, int(port))
@@ -182,7 +262,7 @@ def qdrant_host_port(db: str) -> Tuple[str, int]:
         container_info = _start_qdrant_docker(name=container_name, storage_dir=location)
         logger.info("Qdrant database at %s", container_info.http_url)
         endpoint = (container_info.http_host, container_info.http_port)
-    _QDRANT_ENDPOINTS[location] = endpoint
+    _QDRANT_ENDPOINTS[cache_key] = endpoint
     return endpoint
 
 
