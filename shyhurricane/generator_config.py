@@ -30,7 +30,7 @@ from haystack_integrations.components.generators.litellm import LiteLLMChatGener
 from haystack_integrations.components.generators.ollama import OllamaChatGenerator
 from pydantic import BaseModel, Field
 
-from shyhurricane.doc_type_model_map import ModelConfig
+from shyhurricane.doc_type_model_map import ModelConfig, doc_type_to_model
 from shyhurricane.haystack_lifecycle import GeneratorLifecycle, managed_resource, warmed_generator
 from shyhurricane.utils import process_cpu_count
 
@@ -170,9 +170,34 @@ class GeneratorConfig(BaseModel):
         return "http://" + (self.ollama_host or OLLAMA_HOST_DEFAULT)
 
     def ollama_pull(self, model_id: str):
-        model, tag = model_id.rsplit(":", maxsplit=1)
-        r = requests.post(f"{self.ollama_url()}/api/pull", json={"model": model, "tag": tag, "force": False})
-        r.raise_for_status()
+        try:
+            with requests.post(
+                f"{self.ollama_url()}/api/pull",
+                json={"model": model_id, "stream": False},
+                timeout=(10, 600),
+            ) as response:
+                response.raise_for_status()
+                if error := response.json().get("error"):
+                    raise RuntimeError(error)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to pull Ollama model {model_id}: {exc}") from exc
+
+    def prepare_ollama_models(self):
+        """Pull every required Ollama model before workers or pipelines start."""
+        models = set()
+        if self.ollama_model and not (
+            self.openai_model or self.litellm_model or self.gemini_model or self.bedrock_model
+        ):
+            models.add(self.ollama_model)
+        if self.ollama_model and not (
+            self.openai_model or self.gemini_model or self.bedrock_model
+        ) and self._embedder_enable_ollama():
+            models.update(
+                self._embedder_model_name_to_path(config.model_config.model_name)
+                for config in doc_type_to_model().values()
+            )
+        for model in sorted(models):
+            self.ollama_pull(model)
 
     def apply_summarizing_default(self):
         self.ollama_host = self.ollama_host or OLLAMA_HOST_DEFAULT
@@ -260,7 +285,6 @@ class GeneratorConfig(BaseModel):
                 "temperature": temperature or self.temperature,
             }
             logger.info("Using Ollama generator with model %s at %s", self.ollama_model, self.ollama_host)
-            self.ollama_pull(self.ollama_model)
             return ChatGeneratorCompatibilityWrapper(
                 OllamaChatGenerator(
                     url=self.ollama_url(),
@@ -345,7 +369,6 @@ class GeneratorConfig(BaseModel):
             )
         elif self.ollama_model and self._embedder_enable_ollama():
             logger.info("Using Ollama document embedder with model %s at %s", model_path, self.ollama_host)
-            self.ollama_pull(model_path)
             return OllamaDocumentEmbedder(
                 model=model_path,
                 url=self.ollama_url(),
@@ -382,7 +405,6 @@ class GeneratorConfig(BaseModel):
             )
         elif self.ollama_model and self._embedder_enable_ollama():
             logger.info("Using Ollama text embedder with model %s at %s", model_path, self.ollama_host)
-            self.ollama_pull(model_path)
             return OllamaTextEmbedder(
                 model=model_path,
                 url=self.ollama_url(),

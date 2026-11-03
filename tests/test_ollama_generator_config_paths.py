@@ -106,11 +106,7 @@ def test_ollama_generator_and_embedders_use_ollama_components(monkeypatch):
         "model": "mahonzhan/all-MiniLM-L6-v2:latest",
         "url": "http://ollama:11434",
     }
-    assert pulls == [
-        "llama3.2:3b",
-        "mahonzhan/all-MiniLM-L6-v2:latest",
-        "mahonzhan/all-MiniLM-L6-v2:latest",
-    ]
+    assert pulls == []
 
 
 def test_embedder_model_mapping_and_local_fallbacks(monkeypatch):

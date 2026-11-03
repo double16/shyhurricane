@@ -1,6 +1,6 @@
 version = 1
 revision = 5
-requires-python = ">=3.12"
+requires-python = ">=3.12, <3.15"
 resolution-markers = [
     "python_full_version >= '3.14'",
     "python_full_version == '3.13.*'",
@@ -867,15 +867,15 @@ wheels = [
 
 [[package]]
 name = "fastembed-haystack"
-version = "2.7.0"
+version = "3.0.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "fastembed" },
     { name = "haystack-ai" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/73/f8/ddfcf03ea3cdddc17a0ad7c48f7d8fd4ccc7ef668598591d80042a001f33/fastembed_haystack-2.7.0.tar.gz", hash = "sha256:e3627dfafc55c98ac24dada64bf9099faa2c5fc7344b047a831dbbbc0a754dc0", size = 23949, upload-time = "2026-08-24T06:38:37.188Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/73/df/325a901b98a20b6d82b7191dd4972d4d1d82d7eb28e7d09e3f644c0b3913/fastembed_haystack-3.0.0.tar.gz", hash = "sha256:d1ff61e9629542a84e86329c7796a50d89d8ee9f2025532de74facd1ece4ff77", size = 23976, upload-time = "2026-10-19T07:17:51.223Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/3b/3e/8a198d57f01e548dc4256a2ab9bdb9da45a7209031d19860e1a30babd20c/fastembed_haystack-2.7.0-py3-none-any.whl", hash = "sha256:73969675ef5cdf75949c5589082a2eb07650cca5d216e82921a67f3058325f8d", size = 24274, upload-time = "2026-08-24T06:38:35.83Z" },
+    { url = "https://files.pythonhosted.org/packages/a1/6a/62830f842898cb28b3b16933ffb126890ec14f748bac7fbca9e92c77d6bb/fastembed_haystack-3.0.0-py3-none-any.whl", hash = "sha256:211f53cf854a75ab4aaf85ec854f0fba7899169da641c701adb22cb933eedd1c", size = 24274, upload-time = "2026-10-19T07:17:49.986Z" },
 ]
 
 [[package]]
@@ -3926,7 +3926,7 @@ requires-dist = [
     { name = "cachetools", specifier = ">=7.1.7,<7.3.0" },
     { name = "concurrent-log-handler", specifier = ">=0.9.31,<1" },
     { name = "einops", specifier = "~=0.8.1" },
-    { name = "fastembed-haystack", specifier = "~=2.7.0" },
+    { name = "fastembed-haystack", specifier = ">=2.7,<3.1" },
     { name = "flake8", marker = "extra == 'dev'" },
     { name = "google-genai-haystack", specifier = ">=7.0,<7.1" },
     { name = "guppy3", specifier = "~=3.1.6" },
