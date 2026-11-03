@@ -15,15 +15,6 @@ from tldextract.tldextract import TLDExtract
 
 tldextract_module.TLD_EXTRACTOR = TLDExtract(cache_dir=None, suffix_list_urls=())
 
-from shyhurricane.generator_config import GeneratorConfig
-
-
-def pytest_configure(config):
-    def noop(*args, **kwargs):
-        pass
-    GeneratorConfig.ollama_pull = noop
-
-
 def pytest_addoption(parser):
     parser.addoption(
         "--ollama",
@@ -51,3 +42,28 @@ def isolated_application_data(monkeypatch, tmp_path):
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "application_data"))
     for name in ("TOOL_CACHE", "MCP_SESSION_VOLUME", "QDRANT", "NEO4J"):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def offline_ollama_preparation(monkeypatch, request):
+    """Keep ordinary server startup tests independent of a running Ollama."""
+    if request.node.get_closest_marker("ollama") is None:
+        from shyhurricane.generator_config import GeneratorConfig
+
+        monkeypatch.setattr(GeneratorConfig, "prepare_ollama_models", lambda self: None)
+
+
+@pytest.fixture
+def bounded_ollama_generation(monkeypatch):
+    """Bound live integration output without changing production generation defaults."""
+    from shyhurricane.generator_config import GeneratorConfig
+
+    original = GeneratorConfig.create_generator
+
+    def create(self, temperature=None, generation_kwargs=None):
+        return original(
+            self, temperature=temperature,
+            generation_kwargs={"num_predict": 2048, "seed": 0} | (generation_kwargs or {}),
+        )
+
+    monkeypatch.setattr(GeneratorConfig, "create_generator", create)

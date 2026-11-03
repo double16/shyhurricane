@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixes
+
+- Preserve Ollama model tags when pulling and pull required models once at startup instead of
+  repeatedly during component creation. Failed required pulls stop startup.
+
 ### Features
 
 - Add managed database host networking and automatic fallback for disabled Docker bridges.
