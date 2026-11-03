@@ -332,7 +332,7 @@ def test_build_splitters_uses_token_lengths_and_suffix_splitter(monkeypatch):
     created = []
 
     class Splitter:
-        def __init__(self, **kwargs):
+        def __init__(self, *args, **kwargs):
             self.kwargs = kwargs
             self.warmed = False
             created.append(self)
@@ -340,13 +340,13 @@ def test_build_splitters_uses_token_lengths_and_suffix_splitter(monkeypatch):
         def warm_up(self):
             self.warmed = True
 
-    monkeypatch.setattr(wrp, "SuffixIdSplitter", Splitter)
+    monkeypatch.setattr(wrp, "TokenSplitter", Splitter)
 
     splitters = wrp.build_splitters({"html": object(), "network": object()})
 
     assert set(splitters)
     assert all(splitter.warmed for splitter in splitters.values())
-    assert all(splitter.kwargs["split_by"] == "word" for splitter in created)
+    assert len(created) == 4
 
 
 def test_suffix_id_splitter_sets_child_ids_and_serializes_overlap(monkeypatch):

@@ -28,7 +28,7 @@ services:
       timeout: 10s
 
   db:
-    image: qdrant/qdrant:latest
+    image: qdrant/qdrant:v1
     volumes:
       - data:/qdrant/storage
     healthcheck:

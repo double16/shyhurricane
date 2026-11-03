@@ -4,6 +4,8 @@
 
 ### Fixes
 
+- Pin Compose and managed Qdrant Docker images to major version 1 instead of `latest`.
+- Bound document embedding chunks and full-document previews to 2,048 tokens.
 - Preserve Ollama model tags when pulling and pull required models once at startup instead of
   repeatedly during component creation. Skip installed models, matching explicit tags exactly.
   Failed model inventory requests or required pulls stop startup.

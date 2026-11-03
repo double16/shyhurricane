@@ -469,7 +469,13 @@ def safe_embedder(embedder: Component, docs: List[Document]) -> List[Document]:
     embeddings are optional.
     """
     try:
-        return embedder.run(documents=docs)["documents"]
+        from dataclasses import replace
+
+        from shyhurricane.embedding_chunks import preview
+
+        inputs = [replace(doc, content=preview(doc.content, "jina-embeddings-v2-base-code")) for doc in docs]
+        embedded = embedder.run(documents=inputs)["documents"]
+        return [replace(doc, embedding=result.embedding) for doc, result in zip(docs, embedded, strict=True)]
     except Exception as e:
         logger.error("Embedding documents, continuing without embeddings: %s", e)
         return docs

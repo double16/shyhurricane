@@ -27,13 +27,14 @@ Relationship Graph for full defaults and semantics. Confirm behavior against dep
 
 | Artifact | Evidence and limitations |
 |---|---|
-| `<data-dir>/logs/shyhurricane.log` or log override | DEBUG+ application diagnostics, logged tracebacks, process/PID, access messages; no automatic rotation; raw subprocess output and unlogged exceptions may be absent |
+| `<data-dir>/logs/shyhurricane.log` or log override and rotated siblings | DEBUG+ application diagnostics, logged tracebacks, process/PID, access messages; inspect effective rotation settings and retained coverage; raw subprocess output and unlogged exceptions may be absent |
 | `<data-dir>/logs/index-*.jsonl`, `finding-*.jsonl` | Index/finding records grouped by startup UTC filename timestamp; inspect record shape before filtering |
 | `<cache-path>/history.jsonl` | Tool names, arguments, and timestamps; not proof of completion; serialization can fall back to repr, so handle malformed/non-JSON lines |
 | `<cache-path>/result_pages/` | Saved bounded result snapshots with original indexing status and expiration; reading a snapshot does not refresh indexing |
 | `<data-dir>/queues/<queue-name>/data.db` | Persistent queue status and encoded payloads; inspect using read-only SQLite |
 | `<data-dir>/graph_state/artifacts.sqlite` and referenced JSON files | Captures, references, work status/errors, analysis policies, bodies, and reanalysis scheduler state |
 | Managed Neo4j `graph/logs/` or Compose `neo4j-logs` | Database failures and memory/transaction diagnostics; inspect actual mount |
+| Ollama server/runner logs (locations below) | Embedding/generation failures, token/batch limits, model loading, memory errors, runner exits, and HTTP failures that application health checks may miss |
 | Qdrant and Neo4j | Vector documents versus versioned graph publications; counts are not interchangeable |
 | Existing `/status` and container metrics/logs | Current readiness, queues, counts, memory and CPU; samples are time-dependent and not an atomic cross-store snapshot |
 
@@ -77,6 +78,70 @@ can refresh cached monitoring information, but does not enqueue ingestion. Missi
 count as zero; read failures are errors. Unavailable counts are not zero. Graph counts may be
 cached, approximate, partial, or stale. Do not use broad graph scans to validate estimates.
 
+### Overall-health checklist
+
+For a running rebuild or general health request, cover these areas within the verified deployment
+and time window. Use the read-only queries below only after confirming the installed schema.
+
+| Area | Evidence and interpretation |
+|---|---|
+| Application | Search current and rotated logs across startup and ongoing work. Group recurring warnings by component; distinguish fatal failures, retries, and fallback behavior such as retaining original content after normalization fails. Preserve full exceptions for selected failures rather than printing every warning or captured body. |
+| Queues | Check pending, processing, and failed counts for ingest, type-specific indexing, findings, and graph. Compare timestamped samples; a drained findings queue does not mean other stages have finished. Verify installed queue status meanings, including successful acknowledgements. |
+| Graph | Inspect epoch phase, current job age, retries, failures, blocked jobs, and publication activity. Check `work` and epoch failure records separately. Completed earlier epochs do not clear a failure in the active epoch. |
+| Dependencies | Read Qdrant, Neo4j, and active model-provider logs, including startup and HTTP 4xx/5xx responses without error labels. Correlate startup timeouts with later successful operations; a healthy recent tail does not establish that earlier work recovered. |
+| Resources and storage | Check disk readiness/free space, container uptime/restarts, CPU/memory, and database filesystem warnings. Inspect only relevant mount fields to identify bind mounts or volumes. A filesystem compatibility warning is a risk to investigate, not proof of corruption; low memory usage alone does not prove database health. |
+| Progress | Compare queue samples with completion/publication events. For a long-running parser, inspect elapsed time, CPU activity, and configured timeout before calling it stuck. CPU activity supports liveness, not successful completion. Report growing downstream backlog independently of upstream progress. |
+
+Use `/status` freshness fields: cached graph statistics can be stale while publication activity is
+fresh. Investigation correlation work can remain pending after findings are stored. Do not treat
+these counts as interchangeable or promise a completion time from a short backlog sample.
+Summarize per-component health, outstanding work, actionable warnings, observation interval, and
+evidence gaps. Do not recommend a restart or interrupt a rebuild merely to obtain cleaner logs.
+
+For verified container names, inspect mount and restart fields without dumping credentials:
+
+```sh
+docker inspect --format '{{.RestartCount}} {{json .State}}' <verified-container-name>
+docker inspect --format '{{range .Mounts}}{{.Type}} {{.Source}} -> {{.Destination}}{{println}}{{end}}' <verified-container-name>
+```
+
+### Ollama logs
+
+Identify the Ollama instance used by the effective provider configuration first. Local files do
+not diagnose a remote Ollama server; use logs from that host or its container. Confirm the launch
+method and service user, then check applicable locations rather than scanning the whole filesystem:
+
+| Deployment | Log candidates or discovery |
+|---|---|
+| Homebrew | `/opt/homebrew/var/log/ollama.log` (Apple Silicon), `/usr/local/var/log/ollama.log` (Intel), or `<brew-prefix>/var/log/ollama.log`; inspect the service definition for stdout/stderr overrides |
+| macOS app / user installation | `~/.ollama/logs/server.log` and rotated siblings; resolve `~` for the account running Ollama |
+| Custom user launch | `~/ollama.log`, `~/.ollama/ollama.log`, or redirected stdout/stderr paths in launch configuration; these are candidates, not guaranteed defaults |
+| File-based system logging | `/var/log/ollama.log` or `/var/log/ollama/`; verify service configuration and rotation |
+| Linux systemd | `journalctl -u ollama --since '<start>' --until '<end>' --no-pager -n 200`; use `journalctl --user -u ollama` for a user service |
+| Container / manual launch | Bounded `docker logs` for the verified Ollama container, or the existing terminal/session output and configured redirection |
+| Windows app | `%LOCALAPPDATA%\Ollama\server.log` and rotated `server-*.log` files |
+
+Prefer configured output paths over candidate paths. Check rotated files covering the incident;
+record missing files, denied access, and journal retention limits as evidence gaps. Do not restart
+Ollama or enable debug logging merely to discover existing errors.
+
+For a verified file, start with a bounded case-insensitive search:
+
+```sh
+rg -n -i -m 40 -C 5 'error|failed|panic|too large|physical batch|out of memory|runner.*exit|/api/embed' '/verified/ollama.log'
+```
+
+Restrict excerpts to the relevant time window, establish timezone, and expand around selected
+matches to preserve the actual error. Include HTTP 4xx/5xx records even without an error label.
+Correlate model, endpoint, runner PID, token count, batch/context settings, and timestamps with
+application retries and failed queue work. Successful requests elsewhere do not clear a failing
+embedding path. An input exceeding physical batch capacity is a token-limit failure; it alone
+does not establish RAM exhaustion. Report other relevant errors discovered during this check,
+distinguishing corroborated impact from unrelated or historical events.
+
+See [Ollama troubleshooting](https://docs.ollama.com/troubleshooting) for upstream platform log
+locations; Homebrew and custom launch paths depend on the installed service definition.
+
 ## Read-only queue and artifact queries
 
 Queue directories are `ingest_queue`, `doc_type_queue`, `scan_finding_queue`, and `graph_queue`.
@@ -110,7 +175,7 @@ the connection timeout limits lock waiting. Report interruption as incomplete ev
 Even aggregation returning few rows may scan many records; prefer indexed predicates when possible.
 Do not add `immutable=1` to a live WAL database: it can hide recent committed records.
 
-Current queue states: 0/1 pending, 2 processing, 9 failed. Inspect other states separately and
+Current queue states: 0/1 pending, 2 processing, 5 acknowledged, 9 failed. Inspect other states separately and
 confirm installed persistqueue semantics before labeling them. Do not treat processing as stuck
 without elapsed-time and worker evidence. Successful acknowledgement history is pruned at startup
 and during maintenance; missing successful rows do not establish missing processing.
@@ -132,10 +197,15 @@ SELECT capture_id, state, generation, running_generation, delivered
 FROM reanalysis WHERE capture_id = ? LIMIT 1;
 SELECT capture_id, mode, completed_version, completed_mode
 FROM analysis_policies WHERE capture_id = ? LIMIT 1;
+SELECT id, phase, retries, error, structural_activations, link_activations
+FROM graph_epochs ORDER BY id DESC LIMIT 5;
+SELECT epoch_id, capture_id, stage, error FROM graph_epoch_failures LIMIT 20;
+SELECT epoch_id, stage, COUNT(*) FROM graph_epoch_jobs GROUP BY epoch_id, stage;
 ```
 
-Bind values, rather than interpolating URLs or IDs into SQL. Older databases may lack scheduler
-tables; report that instead of initializing them. `work.error` is truncated to 500 characters;
+Bind values, rather than interpolating URLs or IDs into SQL. Schema versions may have epoch tables,
+legacy reanalysis tables, or both; query only existing tables and report gaps without initializing
+them. `work.error` is truncated to 500 characters;
 read logs for the full exception. A scheduler row, delivery ticket, and queue item are different
 representations of an obligation: coalescing and obsolete tickets make raw counts differ.
 

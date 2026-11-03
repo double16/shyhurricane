@@ -314,9 +314,11 @@ def test_start_qdrant_docker_creates_starts_reuses_and_errors(monkeypatch, tmp_p
 
     assert created.http_port == 63330
     assert started.grpc_port == 63340
-    assert ["docker", "pull", "qdrant/qdrant:latest"] in commands
+    assert ["docker", "pull", "qdrant/qdrant:v1"] in commands
     assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in commands)
     create_command = next(cmd for cmd in commands if cmd[:3] == ["docker", "run", "-d"])
+    assert create_command[-1] == "qdrant/qdrant:v1"
+    assert "qdrant/qdrant:latest" not in create_command
     assert "127.0.0.1:49201:6333" in create_command
     assert "127.0.0.1:49202:6334" in create_command
     assert ["docker", "start", "qdrant-test"] in commands

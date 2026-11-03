@@ -460,7 +460,8 @@ def test_sparse_embedder_cache_dir_can_be_disabled(monkeypatch):
     assert GeneratorConfig()._fastembed_cache_dir() is None
 
 
-def test_safe_embedder_returns_embedded_docs_or_original_on_error():
+def test_safe_embedder_returns_embedded_docs_or_original_on_error(monkeypatch):
+    monkeypatch.setattr("shyhurricane.embedding_chunks.preview", lambda text, model: text)
     docs = [Document(content="doc")]
 
     class Working:
@@ -471,7 +472,7 @@ def test_safe_embedder_returns_embedded_docs_or_original_on_error():
         def run(self, documents):
             raise RuntimeError("failed")
 
-    assert safe_embedder(Working(), docs)[0].content == "embedded"
+    assert safe_embedder(Working(), docs)[0].content == "doc"
     assert safe_embedder(Broken(), docs) is docs
 
 
