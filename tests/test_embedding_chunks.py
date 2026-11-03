@@ -40,3 +40,32 @@ def test_errors(monkeypatch):
         splitter.run([Document(content="x")])
     with pytest.raises(ValueError):
         splitter.run([Document()])
+
+
+def test_recounts_chunks_when_sliced_text_uses_more_tokens(monkeypatch):
+    class ExpandingTokenizer(Tokenizer):
+        def encode(self, text, add_special_tokens=True):
+            return list(text) * 2 + ([0, 0] if add_special_tokens else [])
+
+    monkeypatch.setattr(chunks, "load_tokenizer", lambda name: ExpandingTokenizer())
+    splitter = chunks.TokenSplitter("test", 6)
+    splitter.warm_up()
+
+    result = splitter.run([Document(content="abcde", id="parent")])["documents"]
+
+    assert [doc.content for doc in result] == ["ab", "cd", "e"]
+    assert [doc.meta["split_idx_start"] for doc in result] == [0, 2, 4]
+    assert all(len(splitter.tokenizer.encode(doc.content)) <= 6 for doc in result)
+
+
+def test_rejects_character_that_exceeds_available_tokens(monkeypatch):
+    class ExpandingTokenizer(Tokenizer):
+        def encode(self, text, add_special_tokens=True):
+            return list(text) * 2 + ([0, 0] if add_special_tokens else [])
+
+    monkeypatch.setattr(chunks, "load_tokenizer", lambda name: ExpandingTokenizer())
+    splitter = chunks.TokenSplitter("test", 3)
+    splitter.warm_up()
+
+    with pytest.raises(ValueError, match="Cannot fit a character"):
+        splitter.run([Document(content="x")])
