@@ -183,7 +183,7 @@ class GeneratorConfig(BaseModel):
             raise RuntimeError(f"Failed to pull Ollama model {model_id}: {exc}") from exc
 
     def prepare_ollama_models(self):
-        """Pull every required Ollama model before workers or pipelines start."""
+        """Pull missing required Ollama models before workers or pipelines start."""
         models = set()
         if self.ollama_model and not (
             self.openai_model or self.litellm_model or self.gemini_model or self.bedrock_model
@@ -196,7 +196,20 @@ class GeneratorConfig(BaseModel):
                 self._embedder_model_name_to_path(config.model_config.model_name)
                 for config in doc_type_to_model().values()
             )
-        for model in sorted(models):
+        if not models:
+            return
+
+        def tagged(model):
+            return model if ":" in model.rsplit("/", 1)[-1] else f"{model}:latest"
+
+        try:
+            with requests.get(f"{self.ollama_url()}/api/tags", timeout=(10, 30)) as response:
+                response.raise_for_status()
+                installed = {tagged(item["name"]) for item in response.json()["models"]}
+        except Exception as exc:
+            raise RuntimeError(f"Failed to list installed Ollama models: {exc}") from exc
+        missing = {tagged(model) for model in models} - installed
+        for model in sorted(missing):
             self.ollama_pull(model)
 
     def apply_summarizing_default(self):

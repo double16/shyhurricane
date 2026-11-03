@@ -317,8 +317,9 @@ environment variables, Qdrant requirements, and migration guidance.
 
 #### Ollama
 
-Startup pulls each unique required Ollama chat and embedding model once, including installed
-models and models needed after leaving low-power mode. Explicit model tags are preserved.
+Startup checks installed Ollama models and pulls each missing required chat and embedding model
+once, including models needed after leaving low-power mode. Installed models are not refreshed.
+Explicit model tags are matched exactly; untagged names mean `latest`.
 Pulls finish before workers start; a failed pull aborts startup. Workers and pipeline rebuilds
 do not pull models. Standalone component callers must prepare or install models themselves.
 

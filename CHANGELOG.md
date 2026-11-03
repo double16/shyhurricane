@@ -5,7 +5,8 @@
 ### Fixes
 
 - Preserve Ollama model tags when pulling and pull required models once at startup instead of
-  repeatedly during component creation. Failed required pulls stop startup.
+  repeatedly during component creation. Skip installed models, matching explicit tags exactly.
+  Failed model inventory requests or required pulls stop startup.
 
 ### Features
 
