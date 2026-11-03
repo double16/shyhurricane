@@ -227,6 +227,7 @@ async def get_server_context() -> ServerContext:
     from shyhurricane.task_queue import start_task_worker
 
     log_timestamp = get_log_timestamp()
+    await asyncio.to_thread(get_generator_config().prepare_ollama_models)
     server_config = get_server_config()
 
     configure_data_dir(server_config.data_dir)

@@ -9,12 +9,13 @@ from shyhurricane.retrieval_pipeline import build_website_context_pipeline
 
 
 @pytest.mark.ollama
+@pytest.mark.usefixtures("bounded_ollama_generation")
 class WebsiteContextPipelineTest(unittest.TestCase):
 
-    def __init__(self, methodName: str = ...):
-        super().__init__(methodName)
+    def setUp(self):
         self.generator_config = GeneratorConfig().apply_summarizing_default()
         self.pipeline = build_website_context_pipeline(generator_config=self.generator_config)
+        self.addCleanup(self.pipeline.get_component("llm").close)
 
     def _run_pipeline(self, target_query: str) -> Tuple[List[str], List[str], List[str], List[str]]:
         doc_types: list[str] = []

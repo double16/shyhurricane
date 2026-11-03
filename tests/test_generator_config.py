@@ -495,3 +495,13 @@ def test_chat_generator_compatibility_wrapper_handles_empty_replies():
     result = wrapper.run(prompt="user")
 
     assert result == {"replies": []}
+
+
+def test_default_startup_preparation_is_offline(monkeypatch):
+    """The shared fixture must prevent default-provider startup network calls."""
+    def unexpected_request(*args, **kwargs):
+        pytest.fail("Ordinary startup tests must not contact Ollama")
+
+    monkeypatch.setattr(generator_config.requests, "get", unexpected_request)
+    monkeypatch.setattr(generator_config.requests, "post", unexpected_request)
+    GeneratorConfig(ollama_model="llama3.2:3b").prepare_ollama_models()
