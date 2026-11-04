@@ -138,3 +138,7 @@ and port-scan documents retain their content while embedding a bounded preview.
 Existing vectors remain readable. For consistent chunk boundaries, rebuild affected vector
 collections from retained source data rather than replaying over existing child IDs, which
 can leave stale chunks. Back up data and retain replayable inputs before rebuilding.
+
+Embedding chunking processes at most 8,192 characters per tokenizer call and stops full-document
+previews after the first chunk. Large-document chunk boundaries may change; the 2,048-token
+ceiling still includes special tokens.
