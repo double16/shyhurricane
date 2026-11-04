@@ -4,6 +4,10 @@
 
 ### Fixes
 
+- Focus vulnerability classification on directly supported candidates.
+- Validate query expansion as structured JSON and load static patterns from editable YAML assets.
+- Validate model-generated JSON against task schemas and bound output generation, with cached
+  compatibility fallback for providers that reject structured outputs.
 - Pin Compose and managed Qdrant Docker images to major version 1 instead of `latest`.
 - Bound document embedding chunks and full-document previews to 2,048 tokens.
 - Preserve Ollama model tags when pulling and pull required models once at startup instead of
@@ -12,6 +16,7 @@
 
 ### Features
 
+- Show the data directory beneath the dashboard configuration header, abbreviating the home directory as `~`.
 - Add managed database host networking and automatic fallback for disabled Docker bridges.
 - Show assessment title, aggregate health dot, and work status in interactive iTerm2 tabs.
 - Ingest Burp issues XML as findings and index complete evidence exchanges.

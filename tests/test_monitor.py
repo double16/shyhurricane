@@ -1,4 +1,5 @@
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -263,7 +264,19 @@ def test_format_domain_and_host_panel_includes_top_counts_and_empty_states():
     )
 
 
-def test_format_configuration_panel_orders_dependencies_and_shows_health_indicators():
+@pytest.mark.parametrize(
+    ("directory", "expected"),
+    [
+        ("/home/tester/data", "~/data"),
+        ("/home/tester", "~"),
+        ("/var/data", "/var/data"),
+        ("/home/tester-other/data", "/home/tester-other/data"),
+        ("/home/tester/[bold]data", r"~/\[bold]data"),
+    ],
+)
+def test_format_configuration_panel_orders_dependencies_and_shows_health_indicators(monkeypatch, directory, expected):
+    monkeypatch.setattr("shyhurricane.monitor.resolve_data_dir", lambda: Path(directory))
+    monkeypatch.setattr(Path, "home", lambda: Path("/home/tester"))
     data = MonitorData(
         bound_address="127.0.0.1:8000",
         proxy_address="not started",
@@ -287,6 +300,7 @@ def test_format_configuration_panel_orders_dependencies_and_shows_health_indicat
     )
 
     panel = format_configuration_panel(data)
+    assert panel.splitlines()[:2] == ["[b]Configuration[/b]", f"Data dir: {expected}"]
     assert panel.index("Model: model 🟢") < panel.index("Qdrant: 127.0.0.1:49201 🔴")
     assert "Qdrant: 127.0.0.1:49201 🔴" in panel
     assert data.database not in panel

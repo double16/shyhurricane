@@ -23,8 +23,9 @@ class QueryExpanderBase(unittest.TestCase):
 
     def setUp(self):
         self.generator_config = GeneratorConfig().apply_summarizing_default()
-        self.expander = QueryExpander(self.generator_config, **self.expander_options)
-        self.addCleanup(self.expander.pipeline.get_component("llm").close)
+        self.generator_config.temperature = 0
+        self.expander = QueryExpander(self.generator_config, temperature=0, **self.expander_options)
+        self.addCleanup(lambda: self.expander.pipeline.get_component("llm").close())
 
     def _run_pipeline(self, query: str, targets: Optional[Iterable[str]] = None,
                       vuln_types: Optional[Iterable[str]] = None) -> List[str]:
@@ -32,7 +33,7 @@ class QueryExpanderBase(unittest.TestCase):
         self.assertTrue(isinstance(result, list))
         return result
 
-    def _test_sanity(self, query: str, expanded: list[str]):
+    def _test_sanity(self, query: str, expanded: list[str], minimum: Optional[int] = None):
         print(query + ":\n" + "\n====\n".join(expanded))
         if self.expander.include_original_query:
             self.assertEqual(query, expanded[0])
@@ -41,7 +42,7 @@ class QueryExpanderBase(unittest.TestCase):
             self.assertNotEqual(query, expanded[0])
             unique_expanded = set(expanded)
         # Sometime queries may be difficult to generate the number of requested patterns
-        self.assertGreaterEqual(len(unique_expanded), self.expander.number - 2)
+        self.assertGreaterEqual(len(unique_expanded), self.expander.number - 2 if minimum is None else minimum)
         for expanded_query in unique_expanded:
             self.assertNotEqual(query, expanded_query)
             # Patterns may contain example IP-valued fields; they are search text,
@@ -56,15 +57,24 @@ class QueryExpanderBase(unittest.TestCase):
         self._test_sanity(query, expanded)
         return expanded
 
+    def test_multiple_vulnerabilities_share_total_budget(self):
+        query = "Find XSS, weak authentication, and access control weaknesses"
+        expanded = self._run_pipeline(query)
+        generated = expanded[1:] if self.expander.include_original_query else expanded
+        self.assertLessEqual(len(generated), self.expander.number)
+        self.assertEqual(len(generated), len(set(generated)))
+        self.assertTrue(all(isinstance(pattern, str) and pattern.strip() for pattern in generated))
+        self.assertNotIn(query, generated)
+
     def test_javascript_eval(self) -> List[str]:
-        return self._base_test("What javascript libraries call eval() on vulernablesite.net?")
+        return self._base_test("What javascript libraries call eval() on example.com?")
 
     def test_csp(self) -> List[str]:
-        return self._base_test("Examine the content security policy on notarealsite.com",
+        return self._base_test("Examine the content security policy on example.com",
                                vuln_types=["security_misconfiguration"])
 
     def test_cookie(self) -> List[str]:
-        return self._base_test("Look for vulnerable cookie settings on notarealsite.com",
+        return self._base_test("Look for vulnerable cookie settings on example.com",
                                vuln_types=["broken_access_control"])
 
     def test_idor(self) -> List[str]:
@@ -100,16 +110,16 @@ class TestQueryExpanderNaturalLanguage(QueryExpanderBase):
 
     def test_single_target(self):
         query = "Find everything on http://example.com"
-        expanded = self._run_pipeline(query, ["target1.co"])
-        self.assertIn("target1.co", expanded[0])
+        expanded = self._run_pipeline(query, ["target.local"])
+        self.assertIn("target.local", expanded[0])
         for exp in expanded:
             self.assertNotIn("example.com", exp)
 
     def test_two_targets(self):
         query = "Find everything on http://example.com"
-        expanded = self._run_pipeline(query, ["target1.co", "target2.co:8000"])
-        self.assertIn("target1.co", expanded[0])
-        self.assertIn("target2.co:8000", expanded[1])
+        expanded = self._run_pipeline(query, ["target.local", "target.local:8000"])
+        self.assertIn("target.local", expanded[0])
+        self.assertIn("target.local:8000", expanded[1])
         for exp in expanded:
             self.assertNotIn("example.com", exp)
 
@@ -139,12 +149,24 @@ class TestQueryExpanderCSS(QueryExpanderBase):
     def __init__(self, methodName: str = ...):
         super().__init__(query_expander_css, "css", 5, False, methodName)
 
+    def test_api(self):
+        query = "example.com api"
+        expanded = self._run_pipeline(query)
+        self.assertNotIn(query, expanded)
+        self.assertTrue(all(isinstance(pattern, str) and pattern.strip() for pattern in expanded))
+
 
 class TestQueryExpanderHTML(QueryExpanderBase):
     __test__ = True
 
     def __init__(self, methodName: str = ...):
         super().__init__(query_expander_html, "html", 10, False, methodName)
+
+    def test_javascript_eval(self):
+        query = "What javascript libraries call eval() on example.com?"
+        expanded = self._run_pipeline(query)
+        self._test_sanity(query, expanded, minimum=6)
+        self.assertLessEqual(len(expanded), self.expander.number)
 
 
 class TestQueryExpanderXML(QueryExpanderBase):

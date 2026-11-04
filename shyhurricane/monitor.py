@@ -249,12 +249,16 @@ def format_disk_status(disk: dict | None) -> str:
 
 
 def format_configuration_panel(data: MonitorData) -> str:
+    data_dir = resolve_data_dir()
+    home = Path.home()
+    display_path = str(Path("~") / data_dir.relative_to(home)) if data_dir.is_relative_to(home) else str(data_dir)
     fingerprint = data.certificate_fingerprint or "unavailable"
     qdrant_host_bind = data.qdrant_host_bind or "unavailable"
     qdrant_http_port = data.qdrant_http_port if data.qdrant_http_port is not None else "unavailable"
     low_power = "enabled" if data.low_power else "disabled"
     return (
         "[b]Configuration[/b]\n"
+        f"Data dir: {escape(display_path)}\n"
         f"Model: {data.model} {health_label(data.model_health)}\n"
         f"Qdrant: {qdrant_host_bind}:{qdrant_http_port} {health_label(data.qdrant_health)}\n"
         f"Neo4j: {(data.graph or {}).get('uri') or 'unavailable'} "

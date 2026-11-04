@@ -206,3 +206,25 @@ def test_storage_deferral_resets_failure_streak_and_retries(monkeypatch):
     worker.tick()
     assert worker.failures["storage"] == 1
     assert worker.next_attempt["storage"] == 60
+
+
+def test_storage_backoff_schedule_skips_early_attempts(monkeypatch):
+    monkeypatch.setattr(maintenance, "GraphStore", lambda location: MagicMock())
+    monkeypatch.setattr(maintenance, "CoverageRepair", lambda db: MagicMock())
+    storage = MagicMock()
+    storage.tick.return_value = {
+        "processed": 0, "pending": True, "deferred": True, "next_attempt_seconds": 30,
+    }
+    monkeypatch.setattr(maintenance, "StorageMaintenance", lambda db: storage)
+    now = [0]
+    monkeypatch.setattr(maintenance.time, "monotonic", lambda: now[0])
+    worker = GraphMaintenance("location", lambda: True, artifact_db="db")
+    worker.tick()
+    assert worker.next_attempt["storage"] == 30
+    now[0] = 29
+    worker.tick()
+    assert storage.tick.call_count == 1
+    now[0] = 30
+    worker.tick()
+    assert storage.tick.call_count == 2
+    assert worker.failures["storage"] == 0

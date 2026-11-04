@@ -142,3 +142,7 @@ can leave stale chunks. Back up data and retain replayable inputs before rebuild
 Embedding chunking processes at most 8,192 characters per tokenizer call and stops full-document
 previews after the first chunk. Large-document chunk boundaries may change; the 2,048-token
 ceiling still includes special tokens.
+
+Model-generated JSON uses task schemas and output-token limits. Providers that explicitly reject
+structured outputs fall back to locally validated JSON; the capability decision is cached per
+provider, endpoint, and model until the process restarts.

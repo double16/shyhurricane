@@ -243,7 +243,38 @@ class GeneratorConfig(BaseModel):
             return f"Ollama {self.ollama_model} at {self.ollama_host}"
 
     @warmed_generator
-    def create_generator(self,
+    def create_generator(self, temperature=None, generation_kwargs=None, response_schema=None,
+                         schema_name=None, max_output_tokens=None):
+        if response_schema is None:
+            return self._create_generator(temperature, generation_kwargs)
+        from shyhurricane.structured_generation import StructuredGenerator
+
+        provider = next(name for name in ("openai", "litellm", "gemini", "bedrock", "ollama")
+                        if getattr(self, f"{name}_model"))
+        model = getattr(self, f"{provider}_model")
+        schema = response_schema.model_json_schema()
+        name = schema_name or response_schema.__name__
+
+        def factory(structured):
+            options = dict(generation_kwargs or {})
+            budget_key = {"ollama": "num_predict", "gemini": "max_output_tokens",
+                          "bedrock": "maxTokens"}.get(provider, "max_tokens")
+            options[budget_key] = max_output_tokens or 1024
+            if structured and provider != "ollama":
+                options["response_format"] = (
+                    schema if provider == "gemini" else
+                    {"name": name, "schema": schema} if provider == "bedrock" else
+                    {"type": "json_schema", "json_schema": {"name": name, "schema": schema, "strict": True}}
+                )
+            generator = self._create_generator(temperature, options)
+            if provider == "ollama" and structured:
+                generator.chat_generator.response_format = schema
+            return generator
+
+        endpoint = self.ollama_host if provider == "ollama" else self.litellm_api_base if provider == "litellm" else None
+        return StructuredGenerator(factory, response_schema, (provider, endpoint, model))
+
+    def _create_generator(self,
                          temperature: Optional[float] = None,
                          generation_kwargs: Optional[Dict[str, Any]] = None):
         if self.openai_model:
@@ -251,7 +282,7 @@ class GeneratorConfig(BaseModel):
             if self.openai_model.startswith("o4-mini") or self.openai_model.startswith("gpt-5"):
                 temperature = 1.0
             _generation_kwargs = {
-                "temperature": temperature or self.temperature,
+                "temperature": self.temperature if temperature is None else temperature,
             }
             return ChatGeneratorCompatibilityWrapper(
                 OpenAIChatGenerator(
@@ -263,7 +294,7 @@ class GeneratorConfig(BaseModel):
         elif self.litellm_model:
             logger.info("Using LiteLLM generator with model %s", self.litellm_model)
             _generation_kwargs = {
-                "temperature": temperature or self.temperature,
+                "temperature": self.temperature if temperature is None else temperature,
             }
             return ChatGeneratorCompatibilityWrapper(
                 LiteLLMChatGenerator(
@@ -276,7 +307,7 @@ class GeneratorConfig(BaseModel):
         elif self.gemini_model:
             logger.info("Using Google Gemini generator with model %s", self.gemini_model)
             _generation_kwargs = {
-                "temperature": temperature or self.temperature,
+                "temperature": self.temperature if temperature is None else temperature,
             }
             return GoogleGenAIGeneratorWithRetry(
                 model=self.gemini_model,
@@ -285,7 +316,7 @@ class GeneratorConfig(BaseModel):
         elif self.bedrock_model:
             logger.info("Using AWS Bedrock generator with model %s", self.bedrock_model)
             _generation_kwargs = {
-                "temperature": temperature or self.temperature,
+                "temperature": self.temperature if temperature is None else temperature,
             }
             return ChatGeneratorCompatibilityWrapper(
                 AmazonBedrockChatGenerator(
@@ -295,7 +326,7 @@ class GeneratorConfig(BaseModel):
             )
         elif self.ollama_model:
             _generation_kwargs = {
-                "temperature": temperature or self.temperature,
+                "temperature": self.temperature if temperature is None else temperature,
             }
             logger.info("Using Ollama generator with model %s at %s", self.ollama_model, self.ollama_host)
             return ChatGeneratorCompatibilityWrapper(

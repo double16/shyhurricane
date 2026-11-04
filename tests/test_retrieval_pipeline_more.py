@@ -1,4 +1,4 @@
-import builtins
+import pytest
 
 from haystack import Document
 from haystack.dataclasses import ChatMessage, SparseEmbedding
@@ -53,7 +53,7 @@ def test_trace_docs_writes_debug_markdown(tmp_path):
 def test_vuln_type_parser_accepts_json_iterables_and_ignores_invalid():
     result = rp.VulnTypeParser().run(['["SQL Injection", "XSS"]', '{"bad": "object"}', "not-json"])
 
-    assert result["vuln_types"] == {"sql_injection", "xss", "bad"}
+    assert result["vuln_types"] == {"sql_injection", "xss"}
 
 
 def make_expander(pipeline):
@@ -77,41 +77,20 @@ class ExpanderPipeline:
         return {"llm": {"replies": [self.replies.pop(0) if self.replies else ""]}}
 
 
-def test_query_expander_splits_static_llm_results_and_applies_targets(monkeypatch):
-    files = {
-        "xss_nl.txt": "----\nstatic {NETLOC}\n----\nstatic two\n",
-    }
-    pipeline = ExpanderPipeline(["----\nllm example.com\n----\nllm two\n"])
-    expander = make_expander(pipeline)
+@pytest.mark.ollama
+@pytest.mark.usefixtures("bounded_ollama_generation")
+def test_query_expander_static_and_live_results_apply_targets():
+    from shyhurricane.generator_config import GeneratorConfig
 
-    monkeypatch.setattr(rp.os.path, "exists", lambda path: path.endswith("xss_nl.txt"))
+    expander = rp.QueryExpander(GeneratorConfig().apply_summarizing_default(), temperature=0)
+    try:
+        result = expander.run("Find XSS on example.com", targets=["target.local"], vuln_types=["xss"])
+        assert result["queries"][0] == "Find XSS on target.local"
+        assert all("example.com" not in query for query in result["queries"])
+        assert len(result["queries"]) > 1
+    finally:
+        expander.pipeline.get_component("llm").close()
 
-    def fake_open(path, *args, **kwargs):
-        return builtins.open(__file__, *args, **kwargs) if not path.endswith("xss_nl.txt") else _StringFile(
-            files["xss_nl.txt"])
-
-    monkeypatch.setattr(rp, "open", fake_open, raising=False)
-
-    result = expander.run("original", targets=["target.test"], vuln_types=["xss"])
-
-    assert result["queries"][0] == "original"
-    assert "static target.test" in result["queries"]
-    assert "llm target.test" in result["queries"]
-    assert len(pipeline.calls) >= 1
-
-
-class _StringFile:
-    def __init__(self, text):
-        self.text = text
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return None
-
-    def read(self):
-        return self.text
 
 
 class Warmable:

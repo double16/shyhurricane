@@ -18,8 +18,11 @@ COMMIT_ITEMS = 64
 class StorageMaintenance:
     def __init__(self, db):
         self.root = persistent_queue_path(db, "graph_state")
+        self.contention_streak = 0
 
     def tick(self, stop_event):
+        previous_streak = self.contention_streak
+        self.contention_streak = 0
         path = self.root / "artifacts.sqlite"
         if not path.exists():
             return {"processed": 0, "pending": False, "deferred": False}
@@ -75,11 +78,15 @@ class StorageMaintenance:
                 raise
             deferred = True
             waiting = True
+        delay = 1 if waiting or deferred else 60
+        if deferred and processed == 0:
+            self.contention_streak = min(previous_streak + 1, 6)
+            delay = min(30, 2 ** (self.contention_streak - 1))
         if deferred:
             logger.info(
                 "Graph storage maintenance deferred stage=%s sqlite_code=%s processed=%s "
-                "seconds=%.3f next_attempt_seconds=1",
-                stage, code, processed, time.monotonic() - started,
+                "seconds=%.3f next_attempt_seconds=%s",
+                stage, code, processed, time.monotonic() - started, delay,
             )
         else:
             logger.info(
@@ -88,7 +95,7 @@ class StorageMaintenance:
                 waiting,
                 time.monotonic() - started,
             )
-        return {"processed": processed, "pending": waiting, "deferred": deferred}
+        return {"processed": processed, "pending": waiting, "deferred": deferred, "next_attempt_seconds": delay}
 
     def statistics(self):
         path = self.root / "artifacts.sqlite"

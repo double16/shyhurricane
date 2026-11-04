@@ -1,5 +1,0 @@
-X-Frame-Options:
-----
-Content-Security-Policy: default-src 'self';
-----
-Content-Security-Policy: frame-ancestors *;

@@ -265,7 +265,7 @@ def test_generate_title_and_description_skips_uses_cache_and_parses_generator():
         def __init__(self):
             self.generator = Generator()
 
-        def create_generator(self):
+        def create_generator(self, **kwargs):
             return self.generator
 
     config = Config()
@@ -546,7 +546,7 @@ def test_build_stores_embedders_and_pipelines_are_wired(monkeypatch):
             self.sparse_calls += 1
             return "sparse"
 
-        def create_generator(self):
+        def create_generator(self, **kwargs):
             return type("Generator", (), {"run": lambda self, prompt: {"replies": ["{}"]}})()
 
     def create_store(**kwargs):
@@ -577,7 +577,7 @@ def test_build_stores_embedders_and_pipelines_are_wired(monkeypatch):
 
 def test_generate_title_and_description_ignores_invalid_generator_json():
     class Config:
-        def create_generator(self):
+        def create_generator(self, **kwargs):
             return type("Generator", (), {"run": lambda self, prompt: {"replies": ["not-json"]}})()
 
     doc = Document(content="body", meta={"status_code": 200, "type": "content"})

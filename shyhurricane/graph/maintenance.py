@@ -67,7 +67,7 @@ class GraphMaintenance:
                 elif operation == "storage":
                     result = self.storage_maintenance.tick(self.stop_event)
                     if result and (result["pending"] or result.get("deferred", False)):
-                        delay = 1
+                        delay = result.get("next_attempt_seconds", 1)
                 elif operation == "coverage":
                     self.coverage_repair.tick(self.stop_event)
                 else:

@@ -37,6 +37,11 @@ class TraversalSnapshot:
         self.lookup_ready = None
         self.hydration = {"started": self.started}
         self.parameters = {"historical": historical, "as_of": as_of}
+        self.read_attempts = 0
+        self.returned_rows = 0
+        self.empty_reads = 0
+        self.expansions = 0
+        self.maximum_depth = 0
         self.nodes = {}
         self.storage = defaultdict(set)
         self.representatives = {}
@@ -83,19 +88,13 @@ class TraversalSnapshot:
         key = identity(statement, json.dumps(parameters, sort_keys=True))
         if key in self.read_cache:
             return self.read_cache[key]
-        before = time.monotonic()
+        self.read_attempts += 1
         try:
             rows = self.service.read(
                 statement, timeout=min(graph_timeouts().read, remaining), **self.parameters, **parameters
             )
-            logger.debug(
-                "Graph frontier read stage=%s batch=%s rows=%s seconds=%.3f remaining_seconds=%.3f",
-                statement.split("*/", 1)[0].removeprefix("/* traversal:"),
-                len(parameters.get("ids", [])),
-                len(rows),
-                time.monotonic() - before,
-                max(0, self.started + 120 - time.monotonic()),
-            )
+            self.returned_rows += len(rows)
+            self.empty_reads += not rows
             self.read_cache[key] = rows
             return rows
         except TimeoutError:
@@ -565,7 +564,6 @@ class TraversalSnapshot:
         seeds = set()
         for key in selected:
             seeds.update(discovery.select(key, role))
-        logger.debug("Graph frontier resolved seeds=%s role=%s", len(seeds), role)
         return sorted(seeds)
 
     def probe(self, keys, direction, kinds):
@@ -596,6 +594,8 @@ class TraversalSnapshot:
                 self.probes[key] = any(found[anchor] for anchor in anchors)
 
     def expand(self, keys, direction, kinds, *, probe=False, depth=0):
+        self.expansions += 1
+        self.maximum_depth = max(self.maximum_depth, depth)
         if self.stopped:
             return
         missing = sorted(set(keys) - self.adjacent.keys() - self.probes.keys())
@@ -611,13 +611,6 @@ class TraversalSnapshot:
         if not self.metadata["retrieval_truncated"]:
             for key in missing:
                 self.adjacent[key] = grouped[key]
-        logger.debug(
-            "Graph frontier expanded depth=%s nodes=%s memberships=%s cached_nodes=%s",
-            depth,
-            len(missing),
-            len(edges),
-            len(self.nodes),
-        )
 
     def describe(self):
         owners = sorted({
@@ -644,10 +637,11 @@ class TraversalSnapshot:
     def finish(self, paths):
         self.metadata["truncation_reasons"] = sorted(set(self.metadata["truncation_reasons"]))
         logger.info(
-            "Graph frontier complete paths=%s memberships=%s cached_nodes=%s seconds=%.3f reasons=%s",
+            "Graph frontier complete paths=%s memberships=%s cached_nodes=%s seconds=%.3f reasons=%s reads=%s rows=%s empty_reads=%s expansions=%s max_depth=%s request=%s",
             paths,
             len(self.memberships),
             len(self.nodes),
             time.monotonic() - self.started,
-            self.metadata["truncation_reasons"],
+            self.metadata["truncation_reasons"], self.read_attempts, self.returned_rows, self.empty_reads,
+            self.expansions, self.maximum_depth, self.budget.request_id,
         )
