@@ -16,7 +16,7 @@ from shyhurricane.db import create_qdrant_document_store
 from shyhurricane.doc_type_model_map import SPARSE_EMBEDDING_MODEL, doc_type_to_model, get_qdrant_collections
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.structured_generation import (
-    SUPPORTED_VULNERABILITY_TYPES,
+    EvidenceClassification,
     QueryExpansion,
     Vulnerabilities,
     WebsiteContext,
@@ -101,105 +101,80 @@ class Query:
 
 
 vuln_type_prompt = """
-You are a cybersecurity assistant helping a security engineer identify web application vulnerability types from user queries. Given a query, produce a JSON object with a deduplicated vuln_types list of vulnerability types that are either:
- - Explicitly mentioned in the query (e.g., "Find potential XSS vulns" -> ["XSS"])
- - Logically inferred from the language used (e.g., "Is the authentication mechanism secure?" -> ["Weak Authentication"])
- - Select a focused set: every class needs an explicit term or a direct security implication.
- - The supported vocabulary is not a checklist. Never copy the list into the answer.
- - Generic inventory terms (forms, POST, GET, search, checkout, payment, booking) alone
-   do not imply injection, authorization, business logic, or other vulnerabilities.
- - Login suggests Weak Authentication; do not infer unrelated families from nearby inventory terms.
+Classify the CURRENT QUERY at the end of this message.
+Return JSON candidates, each with vuln_type and evidence copied from the CURRENT QUERY.
+Read the entire query. Include ALL explicitly named classes and directly supported inferences.
+Do not stop after the first candidate. Each candidate needs a supporting exact query substring.
+Do not copy evidence from these instructions or examples.
+Use the shortest relevant phrase. Preserve punctuation exactly; quote a class name alone
+rather than combining separated phrases and removing quotes or operators.
+Select each class once, even if multiple phrases support it.
+For an explicit list of vulnerability classes, return EVERY named class (including LDAP Injection).
+The schema enum defines valid vocabulary, not a checklist.
+An empty query or neutral inventory returns {"candidates": []}.
+Forms, inputs, parameters, POST, GET, search, checkout, payment and booking ALONE
+do not imply SQL Injection, NoSQL Injection, or any other vulnerability.
+Authentication or login suggests Weak Authentication.
+Authentication bypass/session weaknesses also suggest Broken Access Control and
+Security Misconfiguration.
+Generic injection requires SQL Injection, NoSQL Injection, Command Injection,
+Code Injection and Template Injection, with the same evidence "injection".
+Outdated components imply Unpatched Software and Security Misconfiguration.
+Supply chain suggests Unpatched Software. Untrusted updates, software integrity and data
+integrity suggest Security Misconfiguration and Insecure Deserialization.
+DOM sinks innerHTML/document.write imply XSS. eval implies XSS and Code Injection.
+postMessage without origin check implies Insecure PostMessage.
+CSP implies CSP Misconfiguration and Security Misconfiguration.
+IDOR/access control implies IDOR and Broken Access Control.
+Vulnerable cookies imply Broken Access Control and Sensitive Data Exposure.
+Include no unrelated types.
+Checkout, payment, booking and search are inventory words, never evidence for
+Broken Access Control, Security Misconfiguration or injection.
+A query with login and inventory words needs only Weak Authentication.
+Use Broken Access Control/Security Misconfiguration for authentication bypass or
+session weaknesses, not for a simple login inventory.
+Keep evidence short (prefer one or two words) and return compact JSON.
+Do not repeat a vuln_type with different evidence.
 
-Inference guidance:
- - For supply-chain, dependency, vulnerable library, or auto-update security queries, consider
-   Unpatched Software: outdated or vulnerable components are relevant candidates to investigate.
- - For generic injection searches, consider SQL Injection, NoSQL Injection, Command Injection,
-   Code Injection, and Template Injection. Include specific additional injection types when named.
- - Software/data integrity and untrusted update configuration can suggest Security Misconfiguration
-   and Insecure Deserialization. Consider Unvalidated Redirects and Forwards when the query
-   describes redirect behavior; do not infer redirects solely from supply-chain or auto-update terms.
- - Use Software Supply Chain Failures for dependency/build/distribution compromise and
-   Software or Data Integrity Failures for unsigned or unverified software, updates, or data.
-   Unpatched Software remains a relevant candidate for vulnerable or outdated dependencies.
- - Prefer directly supported classes. Do not add unrelated labels just because they can coexist.
- - Use canonical supported labels, not input phrases such as "supply_chain" or "auto-update".
- - Include other supported vulnerability types when the input also supports them. A candidate
-   classification identifies what to investigate; it does not establish that a vulnerability exists.
+Examples (never use these evidence strings unless they occur in the CURRENT QUERY):
+Query: IDOR or access control
+Response: {"candidates": [
+{"vuln_type": "IDOR", "evidence": "IDOR"},
+{"vuln_type": "Broken Access Control", "evidence": "access control"}]}
+Query: authentication bypass
+Response: {"candidates": [
+{"vuln_type": "Weak Authentication", "evidence": "authentication bypass"},
+{"vuln_type": "Broken Access Control", "evidence": "authentication bypass"},
+{"vuln_type": "Security Misconfiguration", "evidence": "authentication bypass"}]}
+Query: supply chain software integrity
+Response: {"candidates": [
+{"vuln_type": "Unpatched Software", "evidence": "supply chain"},
+{"vuln_type": "Security Misconfiguration", "evidence": "software integrity"},
+{"vuln_type": "Insecure Deserialization", "evidence": "software integrity"}]}
+Query: forms inputs parameters POST GET search checkout payment booking
+Response: {"candidates": []}
+Query: XSS
+Response: {"candidates": [{"vuln_type": "XSS", "evidence": "XSS"}]}
+Query: SQL injection OR XSS
+Response: {"candidates": [
+{"vuln_type": "SQL Injection", "evidence": "SQL injection"},
+{"vuln_type": "XSS", "evidence": "XSS"}]}
+Query: Examine the authentication mechanism
+Response: {"candidates": [
+{"vuln_type": "Weak Authentication", "evidence": "authentication"}]}
+Query: POST form login checkout payment booking search
+Response: {"candidates": [
+{"vuln_type": "Weak Authentication", "evidence": "login"}]}
+Query: forms inputs parameters POST GET search checkout payment booking
+Response: {"candidates": []}
 
-The security engineer is helping customers secure their web applications.
-
-Output format:
- - JSON object with a vuln_types array of strings, where each string is the name of a supported vulnerability type.
- - Only output the JSON object.
- - Do not include any other text except the JSON object.
- - Do not include any explanation or commentary.
- - Do not format using markdown or other markup language.
- - Avoid duplicating patterns.
-
-The list must only include vulnerability types from this supported list:
-""" + "\n".join(f" - {label}" for label in SUPPORTED_VULNERABILITY_TYPES) + """
-
-If no vulnerabilities are found or inferred, return {"vuln_types": []}.
-
-Example Inputs and Outputs:
-
-Input: forms inputs parameters POST GET search checkout payment booking
-Output: {"vuln_types": []}
-
-Input: POST form login checkout payment booking search
-Output: {"vuln_types": ["Weak Authentication"]}
-
-Input: "eval(" "innerHTML" "document.write" Function DOM XSS constructor
-Output: {"vuln_types": ["XSS", "Code Injection"]}
-
-Input: Content-Security-Policy CSP header default-src
-Output: {"vuln_types": ["CSP Misconfiguration", "Security Misconfiguration"]}
-
-Input:
-Find potential XSS vulns on example.com
-Output:
-{"vuln_types": ["XSS"]}
-
-Input:
-Is the authentication mechanism secure?
-Output:
-{"vuln_types": ["Weak Authentication", "Broken Access Control"]}
-
-Input:
-Can users access other users' invoices?
-Output:
-{"vuln_types": ["IDOR", "Broken Access Control"]}
-
-Input:
-I think there’s sensitive info in the repo
-Output:
-{"vuln_types": ["Secrets Disclosure", "Sensitive Data Exposure"]}
-
-Input:
-Do we need CSRF protection on this POST form?
-Output:
-{"vuln_types": ["CSRF"]}
-
-Input:
-Are we protected from server-side request forgery?
-Output:
-{"vuln_types": ["SSRF"]}
-
-Input:
-Are there vulnerable cookies?
-Output:
-{"vuln_types": ["Broken Access Control", "Sensitive Data Exposure"]}
-
-Input:
-Scan for common web app issues
-Output:
-{"vuln_types": ["XSS", "CSRF", "SSRF", "IDOR", "XXE", "SQL Injection", "Weak Authentication", "Security Misconfiguration"]}
-
-Now, given the following query, output the JSON object.
-
-Query:
-\"{{ query }}\"
+CURRENT QUERY:
+{{ query }}
+END CURRENT QUERY
+Return all and only supported candidates with evidence copied from CURRENT QUERY.
 """
+
+
 
 query_expander_structure = """
 Structure:
@@ -399,12 +374,20 @@ Now, given a single unstructured user input string, infer the vulnerabilities an
 class VulnTypeParser:
 
     @component.output_types(vuln_types=Iterable[str])
-    def run(self, replies: List[str]):
-        logger.debug(f"VulnTypeParser: replies {replies}")
+    def run(self, replies: List[str], query: str = ""):
         vuln_types: Set[str] = set()
+        normalized_query = " ".join(query.casefold().split())
         for reply in replies:
             try:
                 parsed = json.loads(reply)
+                if isinstance(parsed, dict) and "candidates" in parsed:
+                    candidates = EvidenceClassification.model_validate(parsed).candidates
+                    retained = [c.vuln_type for c in candidates
+                                if c.evidence.strip()
+                                and " ".join(c.evidence.casefold().split()) in normalized_query]
+                    logger.debug("Classification evidence proposed=%s retained=%s rejected=%s",
+                                 len(candidates), len(set(retained)), len(candidates) - len(retained))
+                    parsed = {"vuln_types": retained}
                 if isinstance(parsed, dict):
                     parsed = parsed.get("vuln_types", [])
                 validated = Vulnerabilities.model_validate({"vuln_types": parsed})
@@ -646,12 +629,14 @@ async def build_document_pipeline(db: str, generator_config: GeneratorConfig) ->
     pipe.add_component("combine", comb)
     pipe.add_component("query", Query())
     pipe.add_component("vuln_type_prompt", PromptBuilder(vuln_type_prompt, required_variables=["query"]))
-    pipe.add_component("vuln_type_llm", generator_config.create_generator(temperature=0, response_schema=Vulnerabilities, max_output_tokens=512))
+    pipe.add_component("vuln_type_llm", generator_config.create_generator(temperature=0, response_schema=EvidenceClassification, max_output_tokens=1024))
     pipe.add_component("vuln_type_parser", VulnTypeParser())
     pipe.add_component("query_expander", QueryExpander(generator_config))
     pipe.connect("query.text", "vuln_type_prompt.query")
     pipe.connect("vuln_type_prompt", "vuln_type_llm")
     pipe.connect("vuln_type_llm", "vuln_type_parser")
+    pipe.connect("query.text", "vuln_type_parser.query")
+    pipe.connect("query.text", "vuln_type_llm.query")
     pipe.connect("query.text", "query_expander.query")
     pipe.connect("query.targets", "query_expander.targets")
     pipe.connect("vuln_type_parser", "query_expander")

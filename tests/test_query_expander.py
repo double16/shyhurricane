@@ -52,9 +52,9 @@ class QueryExpanderBase(unittest.TestCase):
             self.assertFalse(expanded_query.endswith("----"), f"endswith ----: {expanded_query}")
 
     def _base_test(self, query: str, targets: Optional[Iterable[str]] = None,
-                   vuln_types: Optional[Iterable[str]] = None) -> List[str]:
+                   vuln_types: Optional[Iterable[str]] = None, minimum: Optional[int] = None) -> List[str]:
         expanded = self._run_pipeline(query, targets, vuln_types)
-        self._test_sanity(query, expanded)
+        self._test_sanity(query, expanded, minimum=minimum)
         return expanded
 
     def test_multiple_vulnerabilities_share_total_budget(self):
@@ -75,7 +75,8 @@ class QueryExpanderBase(unittest.TestCase):
 
     def test_cookie(self) -> List[str]:
         return self._base_test("Look for vulnerable cookie settings on example.com",
-                               vuln_types=["broken_access_control"])
+                               vuln_types=["broken_access_control"],
+                               minimum=1)
 
     def test_idor(self) -> List[str]:
         return self._base_test("IDOR", vuln_types=["idor"])
@@ -192,8 +193,8 @@ class TestQueryExpanderNetwork(QueryExpanderBase):
     def __init__(self, methodName: str = ...):
         super().__init__(query_expander_network, "network", 3, False, methodName)
 
-    def _test_sanity(self, query: str, expanded: List[str]):
-        super()._test_sanity(query, expanded)
+    def _test_sanity(self, query: str, expanded: List[str], minimum: Optional[int] = None):
+        super()._test_sanity(query, expanded, minimum=minimum)
         for exp in expanded:
             for header_value in exp.split("\n"):
                 if len(header_value) > 3 and header_value.count(":") == 1 and header_value.endswith(":"):

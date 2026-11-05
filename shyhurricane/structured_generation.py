@@ -109,6 +109,17 @@ class Vulnerabilities(BaseModel):
     vuln_types: list[VulnerabilityType]
 
 
+class ClassificationCandidate(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    vuln_type: VulnerabilityType
+    evidence: str = Field(min_length=1, max_length=256)
+
+
+class EvidenceClassification(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    candidates: list[ClassificationCandidate]
+
+
 class WebsiteContext(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     target: list[str]
@@ -139,9 +150,14 @@ class StructuredGenerator:
             self.generator.close()
 
     @component.output_types(replies=list[str])
-    def run(self, prompt: str):
+    def run(self, prompt: str, query: str | None = None):
         started = monotonic()
-        prompt += "\nReturn only JSON matching this schema: " + json.dumps(self.schema.model_json_schema())
+        if self.schema is EvidenceClassification and query is not None and not query.strip():
+            logger.debug("Classification complete proposed=0 elapsed=0 provider/model=%s empty_input=True", self.key)
+            return {"replies": [EvidenceClassification(candidates=[]).model_dump_json()]}
+        schema_instruction = "Return only JSON matching this schema: " + json.dumps(self.schema.model_json_schema())
+        prompt = (schema_instruction + "\n" + prompt if self.schema is EvidenceClassification
+                  else prompt + "\n" + schema_instruction)
         with _LOCK:
             self.warm_up()
             try:
@@ -165,6 +181,9 @@ class StructuredGenerator:
             if not result.get("replies"):
                 raise ValueError("Empty structured response")
             validated = [self.schema.model_validate_json(reply) for reply in result["replies"]]
+            if self.schema is EvidenceClassification:
+                logger.debug("Classification complete proposed=%s elapsed=%.3f provider/model=%s",
+                             sum(len(reply.candidates) for reply in validated), monotonic() - started, self.key)
             if self.schema is Vulnerabilities:
                 logger.debug("Classification complete count=%s elapsed=%.3f",
                              sum(len(reply.vuln_types) for reply in validated), monotonic() - started)

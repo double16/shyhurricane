@@ -127,9 +127,12 @@ only when the environment prohibits loopback socket binding.
 
 ## Vulnerability classification
 
-Classifier responses use a `vuln_types` array constrained to supported labels by the structured
-schema. The classifier prompt uses the same supported-label list. Parser output normalizes labels
-to lowercase with underscores; malformed or unsupported responses are ignored.
+Classifier responses use an internal `candidates` array constrained to supported labels by the
+structured schema. Each candidate includes a `vuln_type` and a supporting `evidence` substring.
+The parser collapses whitespace in both evidence and query before checking a case-insensitive
+substring match, preserving punctuation and operators. It deduplicates
+retained classes, and returns the existing `vuln_types` set normalized to lowercase with underscores.
+Malformed or unsupported responses are ignored by the parser; provider responses are schema-validated.
 The enum retains existing labels and covers common web-app/API classes, including injection,
 authentication and authorization, sessions, uploads and file inclusion, HTTP parsing and caching,
 browser messaging, configuration, denial of service, and supply-chain/integrity failures.
@@ -203,3 +206,10 @@ It reuses existing indexes and reports elapsed search time without enforcing tim
 
 Classifier precision regressions reject unrelated candidates as well as requiring relevant classes.
 Production classification uses temperature zero and treats the enum as vocabulary, not a checklist.
+
+Classifier generation now returns internal candidates with a canonical vuln_type and an evidence
+substring of 1–256 characters. The parser retains case-insensitive substring matches and returns
+the existing normalized vuln_types set. Evidence matching does not prove semantic relevance.
+
+Classification uses a 1,024-token output budget; query expansion retains 4,096 tokens.
+Empty classification input bypasses generation and returns no candidates.
