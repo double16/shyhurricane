@@ -1,0 +1,3 @@
+queries:
+  - |-
+    Referer: https://example.com/login?next=https://evil.com

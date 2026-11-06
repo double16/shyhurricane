@@ -1,6 +1,7 @@
 """One cancellable wall-clock budget and progress channel per graph request."""
 
 import logging
+from functools import wraps
 import threading
 import time
 from contextlib import contextmanager
@@ -29,6 +30,9 @@ class QueryBudget:
         self.interrupts = set()
         self.terminate = None
         self.reads = 0
+        self.database_seconds = 0.0
+        self.slowest_seconds = 0.0
+        self.slowest_stage = ""
         self.checkpointing = 0
 
     def cancel(self):
@@ -75,6 +79,37 @@ class QueryBudget:
             raise TimeoutError("Graph connection-pool wait exceeded its budget") from error
         finally:
             current_budget.reset(token)
-            logger.debug("Graph query request=%s stage=%s read=%s seconds=%.3f remaining_seconds=%.3f",
-                         self.request_id, stage, self.reads,
-                         time.monotonic() - before, self.remaining())
+            elapsed = time.monotonic() - before
+            self.database_seconds += elapsed
+            if elapsed > self.slowest_seconds:
+                self.slowest_seconds = elapsed
+                self.slowest_stage = stage
+
+
+def summarize_reads(method):
+    """Report database work once per outer operation, including failed operations."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        budget = self.budget
+        nested = getattr(budget, "summarizing", False)
+        budget.summarizing = True
+        if not nested:
+            budget.slowest_seconds = 0.0
+            budget.slowest_stage = ""
+        before = budget.reads
+        seconds = budget.database_seconds
+        outcome = "failed"
+        try:
+            result = method(self, *args, **kwargs)
+            outcome = "cancelled" if budget.cancelled.is_set() else "complete"
+            return result
+        finally:
+            budget.summarizing = nested
+            if not nested:
+                logger.debug(
+                    "Graph query complete request=%s operation=%s outcome=%s reads=%s database_seconds=%.3f "
+                    "slowest_seconds=%.3f slowest_stage=%s",
+                    budget.request_id, method.__name__, outcome, budget.reads - before,
+                    budget.database_seconds - seconds, budget.slowest_seconds, budget.slowest_stage,
+                )
+    return wrapped

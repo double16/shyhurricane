@@ -14,6 +14,7 @@ from shyhurricane.graph.query import scope_predicate
 from shyhurricane.indexing_wait import IndexingStatus, indexing_scope, wait_for_indexing
 from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
 from shyhurricane.mcp_server.graph_execution import execute_graph
+from shyhurricane.mcp_server.input_validation import parse_json_string
 from shyhurricane.result_pages import Pagination, paged_results
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,7 @@ def trim_input(value):
 
 
 TrimmedString = Annotated[str, BeforeValidator(trim_input)]
+Kinds = Annotated[list[TrimmedString] | None, BeforeValidator(parse_json_string)]
 
 Scope = Annotated[
     TrimmedString,
@@ -258,7 +260,7 @@ async def find_application_elements(
     ctx: Context,
     scope: OptionalScope = None,
     kinds: Annotated[
-        list[TrimmedString] | None,
+        Kinds,
         Field(
             description="Filter by case-sensitive element kind strings, matching any listed kind; "
             "examples: resource, element, field, cookie, origin. Omitted, null, or [] means "
@@ -325,7 +327,7 @@ async def find_application_relationships(
     scope: OptionalScope = None,
     direction: Direction = "forward",
     kinds: Annotated[
-        list[TrimmedString] | None,
+        Kinds,
         Field(
             description="Filter by case-sensitive relationship kind strings, matching any listed kind; "
             "examples: CONTAINS, LOADS, NAVIGATES_TO, SUBMITS_TO, FLOWS_TO. Omitted, null, "

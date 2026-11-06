@@ -1,3 +1,4 @@
+from shyhurricane.graph.budget import summarize_reads
 """Bounded, deterministic semantic queries; no user-supplied Cypher."""
 
 import json
@@ -59,6 +60,7 @@ class GraphQuery:
     def read(self, statement, **parameters):
         return self.budget.read(self.store, statement, **parameters)
 
+    @summarize_reads
     def snapshot(self, scope, **arguments):
         try:
             return self._snapshot(scope, **arguments)
@@ -182,6 +184,7 @@ class GraphQuery:
             },
         )
 
+    @summarize_reads
     def hydrate(self, references, *, state=None):
         """Hydrate complete membership windows within the immutable-generation grace period."""
         state = {} if state is None else state
@@ -197,8 +200,11 @@ class GraphQuery:
         subdivisions = state.get("subdivisions", 0)
         result = []
 
+        batch_stats = {"attempts": 0, "rows": 0, "slowest": 0.0}
+
         def fetch(batch, statement, parameter, stage):
             nonlocal timed_out, memory_blocked, unavailable, subdivisions
+            batch_stats["attempts"] += 1
             read_started = time.monotonic()
             remaining = deadline - read_started
             if remaining < 0.001:
@@ -208,19 +214,15 @@ class GraphQuery:
                 rows = self.read(statement, timeout=min(graph_timeouts().read, remaining), **{parameter: list(batch)})
                 if len(rows) < len(batch):
                     unavailable = True
-                logger.debug(
-                    "Graph hydration stage=%s batch=%s returned=%s seconds=%.3f remaining_seconds=%.3f",
-                    stage,
-                    len(batch),
-                    len(rows),
-                    time.monotonic() - read_started,
-                    max(0, deadline - time.monotonic()),
-                )
+                batch_stats["slowest"] = max(batch_stats["slowest"], time.monotonic() - read_started)
+                batch_stats["rows"] += len(rows)
                 return rows
             except TimeoutError:
+                batch_stats["slowest"] = max(batch_stats["slowest"], time.monotonic() - read_started)
                 timed_out = True
                 return []
             except Neo4jError as error:
+                batch_stats["slowest"] = max(batch_stats["slowest"], time.monotonic() - read_started)
                 code = error.code or ""
                 if "TransactionTimedOut" in code and time.monotonic() >= deadline:
                     timed_out = True
@@ -358,18 +360,19 @@ class GraphQuery:
                     gaps.append(message)
         log = logger.warning if reasons else logger.info
         log(
-            "Graph hydration complete selected=%s completed=%s seconds=%.3f subdivisions=%s reasons=%s",
+            "Graph hydration complete selected=%s completed=%s seconds=%.3f subdivisions=%s reasons=%s batches=%s rows=%s slowest_batch_seconds=%.3f request=%s",
             len(references),
             len(result),
             time.monotonic() - started,
             subdivisions,
-            reasons,
+            reasons, batch_stats["attempts"], batch_stats["rows"], batch_stats["slowest"], self.budget.request_id,
         )
         state.update(
             timed_out=timed_out, memory_blocked=memory_blocked, unavailable=unavailable, subdivisions=subdivisions
         )
         return result, gaps, reasons
 
+    @summarize_reads
     def endpoints(self, scope, *, url=None, method=None, historical=False, as_of=None, detail="inventory"):
         url, method = map(optional_filter, (url, method))
         if detail == "inventory":
@@ -428,6 +431,7 @@ class GraphQuery:
         )
         return {**metadata, "results": [discovery.overview(node["id"], scope) for node in matches[:MAX_RESULTS]]}
 
+    @summarize_reads
     def elements(
         self,
         scope,
@@ -495,6 +499,7 @@ class GraphQuery:
             metadata["truncation_reasons"].append("result_limit")
         return {**metadata, "results": [present(node, detail) for node in matches[:MAX_RESULTS]]}
 
+    @summarize_reads
     def paths(
         self,
         scope,
@@ -790,6 +795,7 @@ class GraphQuery:
                 for row in records if row["expandable"] and
                 (row["flow"] != "complete" or row["materialization"] != "complete")]
 
+    @summarize_reads
     def continue_query(self, token, limit=1000):
         from shyhurricane.graph.cursors import QueryCursors
         from shyhurricane.graph.manifest_query import manifest_query
@@ -832,11 +838,13 @@ class GraphQuery:
             self.cursor_store = None
             cursors.close()
 
+    @summarize_reads
     def expansion(self, scope, capture_id, unit_id):
         from shyhurricane.graph.manifest_query import expand_analysis
 
         return expand_analysis(self.artifacts, None, scope, capture_id, unit_id)
 
+    @summarize_reads
     def evidence(self, evidence_id):
         rows = self.read(
             "MATCH (e:GraphEvidence {id:$id}) "

@@ -469,13 +469,18 @@ def test_writer_contention_defers_and_recovers(store, tmp_path, monkeypatch, cap
     store.connection.execute("BEGIN IMMEDIATE")
     caplog.set_level("INFO")
     started = time.monotonic()
-    result = StorageMaintenance("db").tick(threading.Event())
+    worker = StorageMaintenance("db")
+    result = worker.tick(threading.Event())
     assert time.monotonic() - started < 1
-    assert result == {"processed": 0, "pending": True, "deferred": True}
+    assert result == {"processed": 0, "pending": True, "deferred": True, "next_attempt_seconds": 1}
     assert "deferred stage=transaction" in caplog.text
     assert not any(record.levelno >= 30 or record.exc_info for record in caplog.records)
+    for delay in (2, 4, 8, 16, 30, 30):
+        assert worker.tick(threading.Event())["next_attempt_seconds"] == delay
+        assert f"next_attempt_seconds={delay}" in caplog.text
     store.connection.rollback()
-    assert not StorageMaintenance("db").tick(threading.Event())["deferred"]
+    assert not worker.tick(threading.Event())["deferred"]
+    assert worker.contention_streak == 0
     assert store.read(reference) == {"body": "evidence"}
 
 
@@ -502,7 +507,7 @@ def test_contention_preserves_committed_batch(store, tmp_path, monkeypatch, code
 
     monkeypatch.setattr(BlobStore, "maintain", partial)
     result = StorageMaintenance("db").tick(threading.Event())
-    assert result == {"processed": 64, "pending": True, "deferred": True}
+    assert result == {"processed": 64, "pending": True, "deferred": True, "next_attempt_seconds": 1}
     assert counts[1] < counts[0]
     assert store.connection.execute("SELECT count(*) FROM graph_cache").fetchone()[0] == counts[1]
     monkeypatch.setattr(BlobStore, "maintain", real_maintain)
@@ -586,5 +591,5 @@ def test_commit_contention_rolls_back_only_active_batch(store, tmp_path, monkeyp
         storage_maintenance.sqlite3, "connect", lambda *args, **kwargs: connect(*args, factory=Connection, **kwargs),
     )
     result = StorageMaintenance("db").tick(threading.Event())
-    assert result == {"processed": 64, "pending": True, "deferred": True}
+    assert result == {"processed": 64, "pending": True, "deferred": True, "next_attempt_seconds": 1}
     assert store.connection.execute("SELECT count(*) FROM graph_cache").fetchone()[0] == committed[0]

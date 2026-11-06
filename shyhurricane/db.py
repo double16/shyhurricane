@@ -160,7 +160,7 @@ def _start_qdrant_docker(
         *,
         name: str = "qdrant-shyhurricane-db",
         storage_dir: str = "./shyhurricane.db",
-        image: str = "qdrant/qdrant:latest",
+        image: str = "qdrant/qdrant:v1",
         host_bind: str = "127.0.0.1",
         http_container_port: int = 6333,
         grpc_container_port: int = 6334,

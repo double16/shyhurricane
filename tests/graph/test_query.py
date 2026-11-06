@@ -576,7 +576,8 @@ def test_hydration_completes_windows_in_order_and_reuses_dependencies(hydration_
     for marker in ("AS node", "AS publication_id", "AS context_urls"):
         assert sum(marker in query for query, _ in calls) == 1
     assert all(0 < values["timeout"] <= 30 for _, values in calls)
-    assert "stage=relationships batch=500 returned=500" in caplog.text
+    assert "stage=relationships batch=" not in caplog.text
+    assert "batches=5 rows=505" in caplog.text
     assert "selected=501 completed=501" in caplog.text
     assert "USING INDEX SEEK r:RELATES(id)" in calls[0][0]
     assert "WHERE r.id IN $ids" in calls[0][0]

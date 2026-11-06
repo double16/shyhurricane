@@ -47,3 +47,51 @@ def test_pool_exhaustion_is_a_bounded_timeout():
     with pytest.raises(TimeoutError, match="connection-pool"):
         request.read(store, "READ")
     assert budget.current_budget.get() is None
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_operation_summary_on_success_and_failure(caplog, failure):
+    class Service:
+        def __init__(self):
+            self.budget = budget.QueryBudget()
+
+        @budget.summarize_reads
+        def operation(self):
+            store = MagicMock()
+            store.read.return_value = []
+            self.budget.read(store, "/* test */ READ")
+            if failure:
+                raise ValueError("failed")
+            return 42
+
+    with caplog.at_level("DEBUG"):
+        if failure:
+            with pytest.raises(ValueError, match="failed"):
+                Service().operation()
+        else:
+            assert Service().operation() == 42
+    summaries = [r.message for r in caplog.records if "Graph query complete" in r.message]
+    assert len(summaries) == 1
+    assert "reads=1" in summaries[0]
+    assert f"outcome={'failed' if failure else 'complete'}" in summaries[0]
+    assert "slowest_stage=test" in summaries[0]
+
+
+def test_nested_summary_and_cancelled_outcome(caplog):
+    class Service:
+        def __init__(self):
+            self.budget = budget.QueryBudget()
+
+        @budget.summarize_reads
+        def inner(self):
+            self.budget.cancel()
+
+        @budget.summarize_reads
+        def outer(self):
+            self.inner()
+
+    with caplog.at_level("DEBUG"):
+        Service().outer()
+    summaries = [record.message for record in caplog.records if "Graph query complete" in record.message]
+    assert len(summaries) == 1
+    assert "operation=outer outcome=cancelled" in summaries[0]

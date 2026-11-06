@@ -128,3 +128,21 @@ Missing databases count as empty; database read failures return an error instead
 
 These fields replace `index_active` and `type_specific_index_active`. Other response fields remain
 available, including document/domain/host counts, graph details, and proxy configuration.
+
+Document embedding chunks are capped at 2,048 tokens, including special tokens, across
+providers. Smaller collection limits still apply. Tokenizer assets for the configured
+embedding models are downloaded through Transformers and cached in its standard cache;
+prepare this cache before offline operation. Complete stored response bodies, findings,
+and port-scan documents retain their content while embedding a bounded preview.
+
+Existing vectors remain readable. For consistent chunk boundaries, rebuild affected vector
+collections from retained source data rather than replaying over existing child IDs, which
+can leave stale chunks. Back up data and retain replayable inputs before rebuilding.
+
+Embedding chunking processes at most 8,192 characters per tokenizer call and stops full-document
+previews after the first chunk. Large-document chunk boundaries may change; the 2,048-token
+ceiling still includes special tokens.
+
+Model-generated JSON uses task schemas and output-token limits. Providers that explicitly reject
+structured outputs fall back to locally validated JSON; the capability decision is cached per
+provider, endpoint, and model until the process restarts.

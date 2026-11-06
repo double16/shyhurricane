@@ -5,20 +5,26 @@ from unittest.mock import Mock
 import pytest
 
 from shyhurricane.generator_config import GeneratorConfig
+from shyhurricane.structured_generation import WebsiteContext
 
 
 @pytest.mark.parametrize("overrides", [None, {"seed": 7, "num_predict": 128}])
-def test_live_generation_defaults_and_overrides(monkeypatch, request, overrides):
+@pytest.mark.parametrize("structured", [False, True])
+def test_live_generation_defaults_and_overrides(monkeypatch, request, overrides, structured):
     original = Mock()
     monkeypatch.setattr(GeneratorConfig, "create_generator", original)
     request.getfixturevalue("bounded_ollama_generation")
     config = GeneratorConfig(ollama_model="llama3.2:3b")
 
-    config.create_generator(temperature=0.1, generation_kwargs=overrides)
+    options = {
+        "response_schema": WebsiteContext, "schema_name": "website_context", "max_output_tokens": 1024,
+    } if structured else {}
+    config.create_generator(temperature=0.1, generation_kwargs=overrides, **options)
 
     original.assert_called_once_with(
         config, temperature=0.1,
         generation_kwargs={"num_predict": 2048, "seed": 0} | (overrides or {}),
+        **options,
     )
 
 

@@ -60,10 +60,11 @@ def bounded_ollama_generation(monkeypatch):
 
     original = GeneratorConfig.create_generator
 
-    def create(self, temperature=None, generation_kwargs=None):
+    def create(self, temperature=None, generation_kwargs=None, **kwargs):
         return original(
             self, temperature=temperature,
             generation_kwargs={"num_predict": 2048, "seed": 0} | (generation_kwargs or {}),
+            **kwargs,
         )
 
     monkeypatch.setattr(GeneratorConfig, "create_generator", create)

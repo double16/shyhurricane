@@ -550,3 +550,12 @@ The same option is available on graph maintenance commands. Host mode uses dynam
 loopback listeners. Compose and external database endpoints retain their existing networking.
 Stop the service and recreate its managed database containers, preserving their storage directories,
 when changing network modes. See [configuration](docs/configuration.md) for the environment setting.
+
+Document embedding chunks are capped at 2,048 tokens, including special tokens, across
+providers. Smaller collection limits still apply. Tokenizer assets for the configured
+embedding models are downloaded through Transformers and cached in its standard cache;
+prepare this cache before offline operation.
+
+Existing vectors remain readable. For consistent chunk boundaries, rebuild affected vector
+collections from retained source data rather than replaying over existing child IDs, which
+can leave stale chunks. Back up data and retain replayable inputs before rebuilding.

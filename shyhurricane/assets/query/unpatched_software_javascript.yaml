@@ -1,0 +1,7 @@
+queries:
+  - |-
+    var _version =
+  - |-
+    console.log("using version 2.5.13");
+  - |-
+    if (window.React && React.version.startsWith("16.8"))

@@ -125,53 +125,42 @@ only when the environment prohibits loopback socket binding.
 - Spec compliance checks
   “Does this payment flow meet PCI requirements?” Pulls from long policy docs + code.
 
+## Vulnerability classification
+
+Classifier responses use an internal `candidates` array constrained to supported labels by the
+structured schema. Each candidate includes a `vuln_type` and a supporting `evidence` substring.
+The parser collapses whitespace in both evidence and query before checking a case-insensitive
+substring match, preserving punctuation and operators. It deduplicates
+retained classes, and returns the existing `vuln_types` set normalized to lowercase with underscores.
+Malformed or unsupported responses are ignored by the parser; provider responses are schema-validated.
+The enum retains existing labels and covers common web-app/API classes, including injection,
+authentication and authorization, sessions, uploads and file inclusion, HTTP parsing and caching,
+browser messaging, configuration, denial of service, and supply-chain/integrity failures.
+Coverage references are the [OWASP Top 10](https://top10.owasp.org/2025/) and
+[Web Security Testing Guide](https://owasp.org/projects/web-security-testing-guide). Live classifier tests
+use the production schema with temperature zero and `--ollama`. Candidate assertions require
+relevant classes while allowing additional supported labels; empty input must still return no classes.
+
 ## Query Expander prompts
 
-The query expander prompts were generated using the following prompts and included the find_web_resources queries seen at runtime.
+Query expansion uses structured JSON with a `queries` array of strings.
+Each pattern is limited to 256 characters, including newlines; use focused snippets.
+The requested count is a total across all inferred vulnerabilities. The JSON schema enforces
+that count with `maxItems`, adjusted to the remaining count on each generation attempt. Prompts favor concise,
+complementary patterns that cover the input and allow an empty array when none are relevant.
+Static patterns in `shyhurricane/assets/query/*.yaml` use the same schema:
 
-### javascript
-
-```
-Generate a system prompt that takes common vulnerability types and emits 10 javascript code patterns likely to exhibit the vulnerability. The output format must be a JSON list with each pattern as a value.
-Refine to include multiple vulnerability types in a single request. In this case, there should be 10 patterns per type.
-Can you improve the prompt to infer vulnerabilities from the input, such as "What javascript libraries call eval()" ?
-The purpose is to query known javascript files to identify these vulnerabilities.
-```
-
-### HTML
-
-```
-Generate a system prompt that takes common vulnerability types and emits 10 HTML code patterns likely to exhibit the vulnerability.
-- The purpose is to query known HTML content to identify these vulnerabilities.
-- The HTML code must not be specific to a particular site, hostname or IP address.
-- Infer vulnerabilities from the input, such as "What calls eval()" ?
-- Handle multiple vulnerability types in a single input.
-- The inputs will not be given separately. The must be inferred from the user text.
-- Output the patterns as a list of strings delimitated with lines of "----". Only output the list. Do not include any other text except the list of patterns.
+```yaml
+queries:
+  - |-
+    eval(userInput);
+  - |-
+    element.innerHTML = userInput;
 ```
 
-### css
-
-```
-Generate a system prompt that takes common vulnerability types and emits 10 CSS patterns likely to exhibit the vulnerability.
-- The purpose is to query known CSS content to identify these vulnerabilities.
-- Infer vulnerabilities from the input
-- Handle multiple vulnerability types in a single input.
-- The inputs will not be given separately. The must be inferred from the user text.
-- Output the patterns as a list of strings delimitated with lines of "----". Only output the list. Do not include any other text except the list of patterns.
-```
-
-### network
-
-```
-Generate a system prompt that takes common vulnerability types and emits 10 HTTP header names and values likely to exhibit the vulnerability.
-- The purpose is to query known network requests and responses to identify these vulnerabilities.
-- Limit header names and values to those defined by RFC or seen in the wild.
-- Infer vulnerabilities from the input, such as "What enables XSS" ?
-- Handle multiple vulnerability types in a single input.
-- The inputs will not be given separately. The must be inferred from the user text.
-- Output the patterns as a list of strings delimitated with lines of "----". Only output the list. Do not include any other text except the list of patterns.
-```
+Use YAML block scalars for code to preserve newlines without quote escaping.
+Assets are loaded safely and validated; invalid assets report their filename.
+Run live expansion tests with `--ollama`; these tests use temperature zero.
 
 ### queries seen from gemini-2.5-flash
 
@@ -214,3 +203,17 @@ median version-only scan and indexed query latency without imposing timing-sensi
 The same Qdrant test module checks exact semantic ranking over 5,348 scoped findings and
 out-of-scope distractors using deterministic vectors, including thresholds and bounded hydration.
 It reuses existing indexes and reports elapsed search time without enforcing timing thresholds.
+
+Classifier precision regressions reject unrelated candidates as well as requiring relevant classes.
+Production classification uses temperature zero and treats the enum as vocabulary, not a checklist.
+
+Classifier generation now returns internal candidates with a canonical vuln_type and an evidence
+substring of 1–256 characters. The parser retains case-insensitive substring matches and returns
+the existing normalized vuln_types set. Evidence matching does not prove semantic relevance.
+
+Classification uses a 1,024-token output budget; query expansion retains 4,096 tokens.
+Empty classification input bypasses generation and returns no candidates.
+
+Classifier provider or validation failures continue expansion without classified labels or class-specific
+assets. Warnings report the fallback category. Expansion favors query relevance over filling counts;
+partial code snippets remain useful for vector comparisons.

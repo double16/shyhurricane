@@ -1,8 +1,0 @@
-Server:
-----
-X-Powered-By:
-----
-X-AspNet-Version:
-----
-X-Generator:
-
