@@ -151,6 +151,19 @@ class StructuredGenerator:
 
     @component.output_types(replies=list[str])
     def run(self, prompt: str, query: str | None = None):
+        if self.schema is not EvidenceClassification:
+            return self._run_validated(prompt, query)
+        started = monotonic()
+        try:
+            return self._run_validated(prompt, query)
+        except Exception as error:
+            logger.warning(
+                "Classification fallback category=%s provider/model=%s elapsed=%.3f action=expand_without_classes",
+                type(error).__name__, self.key, monotonic() - started,
+            )
+            return {"replies": [EvidenceClassification(candidates=[]).model_dump_json()]}
+
+    def _run_validated(self, prompt: str, query: str | None = None):
         started = monotonic()
         if self.schema is EvidenceClassification and query is not None and not query.strip():
             logger.debug("Classification complete proposed=0 elapsed=0 provider/model=%s empty_input=True", self.key)

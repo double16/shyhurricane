@@ -213,3 +213,7 @@ the existing normalized vuln_types set. Evidence matching does not prove semanti
 
 Classification uses a 1,024-token output budget; query expansion retains 4,096 tokens.
 Empty classification input bypasses generation and returns no candidates.
+
+Classifier provider or validation failures continue expansion without classified labels or class-specific
+assets. Warnings report the fallback category. Expansion favors query relevance over filling counts;
+partial code snippets remain useful for vector comparisons.

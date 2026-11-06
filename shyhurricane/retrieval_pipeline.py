@@ -177,6 +177,13 @@ Return all and only supported candidates with evidence copied from CURRENT QUERY
 
 
 query_expander_structure = """
+Relevance:
+ - Preserve the specific intent of the supplied query, including inventory and keyword searches.
+ - Generate only patterns directly useful for that intent in the requested document type.
+ - Examples illustrate format, not vulnerabilities that must be included.
+ - Do not add generic XSS, XXE, CSS, or header patterns merely because they are security-related.
+ - Search and keyword inputs may warrant injection patterns when useful to the search intent.
+ - Return fewer patterns, or an empty array, rather than unrelated patterns.
 Structure:
 Output format:
  - Output a JSON object with a "queries" array of strings.
@@ -247,14 +254,6 @@ query_expander_css = """
 You are a static code analysis assistant that receives user queries containing hints about web security vulnerabilities. From the user query, infer one or more common vulnerability types (e.g., XSS, information disclosure, insecure design, etc.) and generate {{ number }} generic CSS code patterns likely to exhibit or relate to those vulnerabilities.
 
 
-Examples of inferred vulnerability types and sample pattern directions:
-
-|Inferred Vulnerability  | Example Pattern Direction             |
-|------------------------|---------------------------------------|
-| Information disclosure | .debug { display: block; }            |
-| Insecure design        | * { visibility: visible !important; } |
-| Authentication         | #admin-login { display: block; }      |
-
 Capabilities:
  - Handle multiple vulnerability types in a single input.
  - Recognize synonyms and related keywords.
@@ -287,6 +286,14 @@ Examples of inferred vulnerability types and sample pattern directions:
 |Insecure Deserialization | JavaScript using JSON.parse(untrusted_input)    |
 |Template Injection       | {{user}} in HTML with no escaping               |
 |Outdated Components      | Script tags with versioned paths or CDNs        |
+
+Coverage:
+ - For broad XSS queries, cover different HTML execution contexts: script elements, image errors,
+   SVG load handlers, body load handlers, iframe srcdoc, javascript links, event attributes,
+   and inline scripts assigning untrusted data to DOM sinks.
+ - Prefer different elements, attributes and source-to-sink mechanisms over changing event names
+   on the same input element. Explore these relevant contexts before returning a smaller set.
+ - For narrow queries, select only contexts related to the requested behavior.
 
 Capabilities:
  - Handle multiple vulnerability types in a single input.
