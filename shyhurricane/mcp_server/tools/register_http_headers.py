@@ -2,9 +2,11 @@ from typing import Annotated, Dict
 
 from mcp.server.mcpserver import Context
 from mcp.types import ToolAnnotations
-from pydantic import Field
+from pydantic import BeforeValidator, Field
 
 from shyhurricane.mcp_server import log_tool_history, mcp_instance
+
+from shyhurricane.mcp_server.input_validation import parse_json_string
 
 #
 # For some models, returning the headers that were registered causes it to rethink its task. It sees
@@ -27,7 +29,7 @@ register_http_headers_instructions = (
 )
 async def register_http_headers(
         ctx: Context,
-        http_headers: Annotated[Dict[str, str], Field(description="HTTP name and value pairs")],
+        http_headers: Annotated[Dict[str, str], BeforeValidator(parse_json_string), Field(description="HTTP name and value pairs")],
 ) -> str:
     """Register HTTP headers to include with subsequent requests.
 

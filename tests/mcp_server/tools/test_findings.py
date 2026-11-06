@@ -123,15 +123,15 @@ async def test_save_finding_json_metadata_validation(monkeypatch, mode):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("value", ["null", "[]", "42", '"text"', "{", '{"severity":"bad"}'])
+@pytest.mark.parametrize("value", ["[]", "42", '"text"', "{", '{"severity":"bad"}'])
 async def test_save_finding_rejects_invalid_json_metadata_directly(monkeypatch, value):
-    from mcp.server.mcpserver.exceptions import ToolError
+    from typing import get_type_hints
 
-    ctx = ServerContext()
-    patch_context(monkeypatch, ctx)
-    with pytest.raises(ToolError, match="Invalid finding metadata"):
-        await findings.save_finding(None, "example.com", "issue", "Title", value)
-    assert not ctx.finding_queue.items
+    from pydantic import TypeAdapter, ValidationError
+
+    annotation = get_type_hints(findings.save_finding, include_extras=True)["metadata"]
+    with pytest.raises(ValidationError):
+        TypeAdapter(annotation).validate_python(value)
 
 
 def finding_doc(**meta):

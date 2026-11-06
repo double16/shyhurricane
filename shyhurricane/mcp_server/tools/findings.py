@@ -8,7 +8,7 @@ from mcp.server.mcpserver import Context
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 from openai import BaseModel
-from pydantic import Field, ValidationError
+from pydantic import BeforeValidator, Field, ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 
@@ -21,6 +21,7 @@ from shyhurricane.finding_search import (
     rank_findings,
 )
 from shyhurricane.mcp_server import get_server_context, log_tool_history, mcp_instance
+from shyhurricane.mcp_server.input_validation import parse_json_string
 from shyhurricane.mcp_server.progress import progress_scope, report_progress
 from shyhurricane.nuclei_findings import is_nuclei_finding, nuclei_finding_to_markdown
 from shyhurricane.persistent_queue import get_persistent_queue
@@ -90,9 +91,7 @@ async def save_finding(
 """)],
         title: Annotated[
             Optional[str], Field(description="""A short, descriptive summary of the issue (one line max).""")],
-        metadata: Annotated[FindingMetadata | str | None, Field(description=(
-            "Optional structured finding metadata as an object or a JSON-encoded object."
-        ))] = None,
+        metadata: Annotated[FindingMetadata | None, BeforeValidator(parse_json_string)] = None,
 ) -> SaveFindingResult:
     """Save security finding associated with the current target.
 
@@ -103,12 +102,6 @@ async def save_finding(
     Saving is asynchronous: success means queued, and immediate queries may not include it.
     """
     await log_tool_history(ctx, "save_finding", target=target, finding_title=title, markdown=len(markdown))
-
-    if isinstance(metadata, str):
-        try:
-            metadata = FindingMetadata.model_validate_json(metadata)
-        except ValidationError as error:
-            raise ToolError(f"Invalid finding metadata: {error}") from error
 
     try:
         parse_target_info(target)
