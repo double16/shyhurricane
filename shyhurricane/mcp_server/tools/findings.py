@@ -90,7 +90,9 @@ async def save_finding(
 """)],
         title: Annotated[
             Optional[str], Field(description="""A short, descriptive summary of the issue (one line max).""")],
-        metadata: FindingMetadata | None = None,
+        metadata: Annotated[FindingMetadata | str | None, Field(description=(
+            "Optional structured finding metadata as an object or a JSON-encoded object."
+        ))] = None,
 ) -> SaveFindingResult:
     """Save security finding associated with the current target.
 
@@ -101,6 +103,12 @@ async def save_finding(
     Saving is asynchronous: success means queued, and immediate queries may not include it.
     """
     await log_tool_history(ctx, "save_finding", target=target, finding_title=title, markdown=len(markdown))
+
+    if isinstance(metadata, str):
+        try:
+            metadata = FindingMetadata.model_validate_json(metadata)
+        except ValidationError as error:
+            raise ToolError(f"Invalid finding metadata: {error}") from error
 
     try:
         parse_target_info(target)

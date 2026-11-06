@@ -93,6 +93,47 @@ async def test_save_finding_enqueues_valid_target(monkeypatch):
     assert ctx.finding_queue.items[0].title == "Title"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["legacy", "2026-07-28"])
+async def test_save_finding_json_metadata_validation(monkeypatch, mode):
+    from mcp.client import Client
+    from mcp.server import MCPServer
+
+    ctx = ServerContext()
+    patch_context(monkeypatch, ctx)
+    server = MCPServer("finding-metadata-test")
+    server.add_tool(findings.save_finding)
+    async with Client(server, mode=mode) as client:
+        args = {"target": "example.com", "markdown": "issue", "title": "Title"}
+        metadata = {"severity": "high", "affected_method": "get",
+                    "parameter": {"name": "q", "location": "query"}}
+        for value in [metadata, json.dumps(metadata), "{}", None]:
+            result = await client.call_tool("save_finding", {**args, "metadata": value})
+            assert not result.is_error
+            expected = {**metadata, "affected_method": "GET"} if value not in ("{}", None) else {}
+            assert ctx.finding_queue.items[-1].metadata == expected
+        count = len(ctx.finding_queue.items)
+        for value in ["{", "", "[]", "42", '"text"',
+                      '{"severity":"bad"}', '{"parameter":{"location":"bad"}}',
+                      '{"unknown_field":true}']:
+            result = await client.call_tool("save_finding", {**args, "metadata": value})
+            assert result.is_error
+            assert "metadata" in result.content[0].text
+            assert len(ctx.finding_queue.items) == count
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["null", "[]", "42", '"text"', "{", '{"severity":"bad"}'])
+async def test_save_finding_rejects_invalid_json_metadata_directly(monkeypatch, value):
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    ctx = ServerContext()
+    patch_context(monkeypatch, ctx)
+    with pytest.raises(ToolError, match="Invalid finding metadata"):
+        await findings.save_finding(None, "example.com", "issue", "Title", value)
+    assert not ctx.finding_queue.items
+
+
 def finding_doc(**meta):
     base = {"title": "Finding", "url": "https://example.com/a", "host": "example.com", "domain": "example.com"}
     base.update(meta)

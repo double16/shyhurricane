@@ -189,6 +189,8 @@ when validating behavior rather than transferring its line numbers directly to d
 HTTP `/findings` and MCP `save_finding` accept optional structured `metadata`, including scanner rule,
 severity, confidence, verification status, affected request method, parameter, CWE, and code location.
 Sources can omit unavailable fields. `query_findings` exposes stable finding IDs and this metadata.
+MCP `save_finding` also accepts metadata as a JSON string; the decoded value must satisfy the
+same metadata object schema. Invalid JSON, non-object values, and invalid fields are rejected.
 Resubmissions fill missing metadata and record conflicts while preserving the original finding.
 
 See [finding correlation and operations](docs/investigation-targets.md), including the exact contract and scoring rules.
