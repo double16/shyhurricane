@@ -1,3 +1,6 @@
+import json
+from unittest.mock import Mock
+
 import pytest
 
 from haystack import Document
@@ -257,3 +260,84 @@ def test_build_document_and_website_context_pipelines_are_wired(monkeypatch):
     assert any(left == "query.max_results" and right.endswith(".top_k") for left, right in pipe.connections)
     assert {"builder", "llm"} == set(website.components)
     assert ("builder", "llm") in website.connections
+
+
+@pytest.fixture
+def expansion_factory(monkeypatch):
+    def create(replies, **options):
+        pipeline = Mock()
+        pipeline.run.side_effect = [{"llm": {"replies": reply}} for reply in replies]
+        config = Mock()
+        monkeypatch.setattr(rp, "Pipeline", lambda: pipeline)
+        expander = rp.QueryExpander(config, number=3, **options)
+        return expander, pipeline, config
+
+    return create
+
+
+def test_expansion_retries_with_remaining_budget_and_filters_echoes(expansion_factory):
+    expander, pipeline, config = expansion_factory([
+        [json.dumps({"queries": [" original ", " first ", "first", " "]})],
+        [json.dumps({"queries": ["second", "third"]})],
+    ])
+
+    result = expander.run("original", targets=[], vuln_types=[])
+
+    assert result["queries"][0] == "original"
+    assert set(result["queries"][1:]) == {"first", "second", "third"}
+    assert [call.args[0]["builder"]["number"] for call in pipeline.run.call_args_list] == [3, 2]
+    pipeline.remove_component.assert_called_once_with("llm")
+    pipeline.remove_component.return_value.close.assert_called_once_with()
+    assert config.create_generator.call_args.kwargs["response_schema"].model_json_schema()[
+        "properties"]["queries"]["maxItems"] == 2
+
+
+@pytest.mark.parametrize("replies", [[[], []], [[""], [""]], [['{"queries": []}'], ['{"queries": []}']]])
+def test_expansion_empty_replies_exhaust_retries(expansion_factory, replies):
+    expander, pipeline, _ = expansion_factory(replies, include_original_query=False)
+
+    assert expander.run("original", targets=[], vuln_types=[]) == {"queries": []}
+    assert pipeline.run.call_count == 2
+
+
+def test_expansion_static_assets_and_target_replacement(expansion_factory, monkeypatch, tmp_path):
+    asset_dir = tmp_path / "assets" / "query"
+    asset_dir.mkdir(parents=True)
+    (asset_dir / "xss_nl.yaml").write_text(
+        'queries:\n  - "example.com/path"\n  - "{NETLOC}/api"\n  - "unscoped"\n'
+    )
+    monkeypatch.setattr(rp, "__file__", str(tmp_path / "retrieval_pipeline.py"))
+    expander, pipeline, _ = expansion_factory([[], []], prompt="{{ query }} {{ number }}",
+                                             include_original_query=False)
+
+    result = expander.run("original", targets=["target.local", "example.com"], vuln_types=["missing", "xss"])
+
+    assert set(result["queries"]) == {
+        "target.local/path", "example.com/path", "target.local/api", "example.com/api", "unscoped",
+    }
+    assert [call.args[0]["builder"]["number"] for call in pipeline.run.call_args_list] == [3, 3]
+
+
+@pytest.mark.parametrize("asset", ['queries: [1]', 'queries: ['])
+def test_expansion_rejects_invalid_static_assets(expansion_factory, monkeypatch, tmp_path, asset):
+    asset_dir = tmp_path / "assets" / "query"
+    asset_dir.mkdir(parents=True)
+    path = asset_dir / "xss_nl.yaml"
+    path.write_text(asset)
+    monkeypatch.setattr(rp, "__file__", str(tmp_path / "retrieval_pipeline.py"))
+    expander, pipeline, _ = expansion_factory([])
+
+    with pytest.raises(ValueError, match="Invalid query asset") as error:
+        expander.run("original", targets=[], vuln_types=["xss"])
+
+    assert str(path) in str(error.value)
+    assert error.value.__cause__ is not None
+    pipeline.run.assert_not_called()
+
+
+def test_expansion_rejects_malformed_generated_response(expansion_factory):
+    expander, pipeline, _ = expansion_factory([["not JSON"]])
+
+    with pytest.raises(ValueError):
+        expander.run("original", targets=[], vuln_types=[])
+    assert pipeline.run.call_count == 1
