@@ -20,6 +20,7 @@ from shyhurricane.graph.artifacts import recovered_sources
 from shyhurricane.graph.discovery_manifest import archive_ir, markup_emitter
 from shyhurricane.graph.markup import scan_markup, scan_svg
 from shyhurricane.graph.model import MAX_BYTES, Projection, identity, web_url
+from shyhurricane.graph.parser_diagnostics import measured, remaining_seconds
 from shyhurricane.graph.policy import ANALYZER_VERSION, library_analysis
 from shyhurricane.graph.svg import extract_svg, is_svg, svg_root
 from shyhurricane.source_maps import javascript_url_from_map, source_map_url
@@ -42,7 +43,8 @@ def _successful_control(tag):
     )
 
 
-def run_javascript(source: str, filename: str, mode=None, *, capture_id=None) -> dict:
+@measured("javascript-analysis")
+def run_javascript(source: str, filename: str, mode=None, *, capture_id=None, action=None) -> dict:
     image = unix_command_image()
     mode = library_analysis(mode)
     started = time.monotonic()
@@ -63,10 +65,10 @@ def run_javascript(source: str, filename: str, mode=None, *, capture_id=None) ->
                 "--max-old-space-size=2048",
                 "/opt/graph-analysis/analyze.cjs",
             ],
-            input=json.dumps({"source": source, "filename": filename, "mode": mode}),
+            input=json.dumps({"source": source, "filename": filename, "mode": mode, "action": action}),
             text=True,
             capture_output=True,
-            timeout=240,
+            timeout=remaining_seconds(),
             check=True,
         )
     except (OSError, subprocess.SubprocessError) as error:
@@ -82,6 +84,11 @@ def run_javascript(source: str, filename: str, mode=None, *, capture_id=None) ->
         )
         raise
 
+    logger.info(
+        "Graph JavaScript stage capture=%s action=%s mode=%s source_bytes=%s output_bytes=%s seconds=%.3f",
+        capture_id, action or "analyze", mode, len(source.encode()), len(result.stdout.encode()),
+        time.monotonic() - started,
+    )
     return json.loads(result.stdout)
 
 
@@ -411,10 +418,27 @@ def extract(
                 "artifact": artifacts.write(identity("candidate-map", source_map), {"source_map": source_map}),
             })
             graph.gaps.append("External source map is unverified; delivered JavaScript remains authoritative")
+        if not sources and javascript_runner is run_javascript:
+            def prepare():
+                return run_javascript(body, graph.url, mode, capture_id=event["id"], action="prepare")
+            prepared = (
+                artifacts.cached(identity("encoding-v1", ANALYZER_VERSION, body), prepare)
+                if artifacts else prepare()
+            )
+            if prepared.get("transformation"):
+                original_digest = hashlib.sha256(body.encode()).hexdigest()
+                body = prepared["source"]
+                graph.gaps.append(
+                    "Inferred decoding repair: latin1-to-utf8-v1; captured source unchanged; "
+                    f"original_sha256={original_digest}; analyzed_sha256={hashlib.sha256(body.encode()).hexdigest()}"
+                )
         if not sources and artifacts:
             from shyhurricane.javascript_deobfuscation import deobfuscate_javascript
 
-            body = artifacts.deobfuscate(body, deobfuscate_javascript)
+            try:
+                body = artifacts.deobfuscate(body, deobfuscate_javascript)
+            except TimeoutError:
+                graph.gaps.append("JavaScript normalization deadline reached; analyzing original source")
         scripts = sources or [(graph.url, body)]
         if source_map and embedded_map and not sources:
             graph.gaps.append("Source map has no embedded sources; using delivered JavaScript")
@@ -531,6 +555,7 @@ def extract(
     return graph
 
 
+@measured("projection-construction")
 def apply_javascript(graph, page, filename, result, reference, contexts):
     limits = graph.node_limit, graph.edge_limit
     before = len(graph.nodes), len(graph.edges)

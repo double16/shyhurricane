@@ -138,21 +138,25 @@ class ManifestStore:
         value = json.dumps(payload, sort_keys=True)
         url = data.get("url") or data.get("owner_url") or ""
         with self.transaction():
-            if len(value.encode()) > PAGE_BYTES:
-                oversized = "a:" + identity("manifest-blob", key)
-                oversized = self.blobs.put(oversized, payload)
-                payload = {"id": key, "artifact": oversized, "oversized": True}
-            reference = "a:" + identity("manifest-payload", payload)
-            reference = self.blobs.put(reference, payload)
-            self.connection.execute(
-                "INSERT OR IGNORE INTO graph_facts(id,unit,capture,kind_key,url_key,host_key,role_key,data,method,captured) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (key, term(self.connection, unit), term(self.connection, capture), term(self.connection, kind),
-                 term(self.connection, url), term(self.connection, urlsplit(url).hostname or ""),
-                 term(self.connection, data.get("role") or ""), reference,
-                 str(data.get("method") or "GET").upper(), int(data.get("capture_status") == "captured")),
-            )
-            fact = self.connection.execute("SELECT seq FROM graph_facts WHERE id=?", (key,)).fetchone()[0]
+            existing = self.connection.execute("SELECT seq FROM graph_facts WHERE id=?", (key,)).fetchone()
+            if existing is None:
+                if len(value.encode()) > PAGE_BYTES:
+                    oversized = "a:" + identity("manifest-blob", key)
+                    oversized = self.blobs.put(oversized, payload)
+                    payload = {"id": key, "artifact": oversized, "oversized": True}
+                reference = "a:" + identity("manifest-payload", payload)
+                reference = self.blobs.put(reference, payload)
+                self.connection.execute(
+                    "INSERT OR IGNORE INTO graph_facts(id,unit,capture,kind_key,url_key,host_key,role_key,data,method,captured) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (key, term(self.connection, unit), term(self.connection, capture), term(self.connection, kind),
+                     term(self.connection, url), term(self.connection, urlsplit(url).hostname or ""),
+                     term(self.connection, data.get("role") or ""), reference,
+                     str(data.get("method") or "GET").upper(), int(data.get("capture_status") == "captured")),
+                )
+                fact = self.connection.execute("SELECT seq FROM graph_facts WHERE id=?", (key,)).fetchone()[0]
+            else:
+                fact = existing[0]
             for context in {*contexts, *([contextual] if contextual else [])}:
                 self.connection.execute("INSERT OR IGNORE INTO graph_fact_contexts(fact,context) VALUES (?,?)",
                                         (fact, term(self.connection, context)))

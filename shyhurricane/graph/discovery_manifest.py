@@ -1,5 +1,6 @@
 """Persist discovery before choosing a bounded Neo4j projection."""
 
+from shyhurricane.graph.parser_diagnostics import measured
 from shyhurricane.graph.model import identity, web_url
 
 
@@ -92,6 +93,7 @@ def markup_emitter(artifacts, event, url):
     return emit
 
 
+@measured("discovery-archive")
 def archive_ir(artifacts, event, url, filename, result, *, contexts=()):
     with artifacts.manifest.batch():
         return _archive_ir(artifacts, event, url, filename, result, contexts=contexts)

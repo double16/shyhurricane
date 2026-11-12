@@ -2,6 +2,8 @@
 const parser = require("@babel/parser");
 const traverse = require("@babel/traverse").default;
 
+const { prepareSource } = require("./encoding.cjs");
+
 const { compress } = require("./library.cjs");
 
 function analyze(source, filename = "source.js", mode = "summary") {
@@ -697,6 +699,19 @@ if (require.main === module) {
   process.stdin.on("data", (chunk) => { input += chunk; });
   process.stdin.on("end", () => {
     const request = JSON.parse(input);
-    process.stdout.write(JSON.stringify(analyze(request.source, request.filename, request.mode)));
+    if (request.action === "prepare") {
+      let result;
+      try {
+        const prepared = prepareSource(request.source, (text) => parser.parse(text, {
+          sourceType: "unambiguous", errorRecovery: true, plugins: ["jsx", "decorators-legacy", "importAttributes"],
+        }));
+        result = { source: prepared.source, transformation: prepared.transformation || null };
+      } catch {
+        result = { source: request.source, transformation: null };
+      }
+      process.stdout.write(JSON.stringify(result));
+    } else {
+      process.stdout.write(JSON.stringify(analyze(request.source, request.filename, request.mode)));
+    }
   });
 }

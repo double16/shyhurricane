@@ -823,3 +823,22 @@ materialize exact URL/method anchors, compatible code operations, script consume
 shared hotspots, and explicit chain candidates. `find_investigation_targets` reads these saved results;
 `graph.investigation` in `/status` reports progress, lag, and failures. Candidate scores are investigation
 priority and do not establish exploitation. See [finding correlation](investigation-targets.md).
+
+### Parser diagnostics and encoding recovery
+
+Parser diagnostics record source-map, normalization, JavaScript analysis, projection construction,
+and serialization stages without captured bodies. Time and RSS failures are distinguished.
+Supervised normalization receives half the remaining parser deadline, reserving time for original-source
+analysis after normalization times out. The overall parser deadline still applies.
+
+Before normalization, JavaScript syntax is checked. Only `InvalidOrUnexpectedToken` permits a strict
+Latin-1-to-UTF-8 reversal. The reversal must round-trip exactly and parse without recovery errors.
+Captured bodies remain unchanged; analysis gaps record the inferred transformation and source hashes.
+Analysis version 10 invalidates prior IR cache keys. Existing work is not automatically retried.
+Historical epoch failure records remain after a successful retry clears current work failures.
+
+Discovery archival is timed separately from projection construction. Retries reuse committed immutable
+fact payloads and still merge context memberships, reducing repeated storage work after interruption.
+Deploy the updated command image together with the Python worker: the encoding preparation protocol
+requires the new `/opt/graph-analysis/encoding.cjs` and analyzer entry point. Older command images do
+not implement this protocol. Validate isolated captures before retrying failed work.

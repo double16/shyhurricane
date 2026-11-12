@@ -298,11 +298,11 @@ def test_summary_policy_cache_separation_and_source_preparation(graph_paths, eve
     first = extract(capture, artifacts)
     assert first.analysis[0]["mode"] == "summary" and deobfuscated == [source]
     extract(capture, artifacts)
-    assert len(calls) == 1
+    assert len(calls) == 2
     full = extract({**capture, "library_analysis": "full"}, artifacts)
     assert full.analysis[0]["mode"] == "full" and deobfuscated == [source, source, source]
     assert "library" not in full.analysis[0]
-    assert len(calls) == 2 and calls[-1]["mode"] == "full"
+    assert len(calls) == 3 and calls[-1]["mode"] == "full"
     artifacts.close()
 
 
@@ -679,3 +679,64 @@ def test_ui_origins_connect_captured_elements_to_sinks(event, javascript_runner,
 def test_ui_origin_attributes_exclude_static_content(event):
     graph = extract(event(body='<div id="static">text</div><div contenteditable="false">no</div>'))
     assert not any(node.get("ui_origin") for node in graph.nodes.values())
+
+
+@pytest.mark.parametrize("repair", [False, True])
+def test_encoding_preparation_preserves_capture_and_records_hashes(event, monkeypatch, repair):
+    capture = event(url="https://example.com/app.js", mime="application/javascript", body="captured")
+    calls = []
+
+    def run(source, filename, mode=None, **kwargs):
+        calls.append((source, kwargs))
+        if kwargs.get("action") == "prepare":
+            return {"source": "repaired" if repair else source,
+                    "transformation": "latin1-to-utf8-v1" if repair else None}
+        return {"nodes": [], "edges": [], "references": [], "gaps": []}
+
+    monkeypatch.setattr("shyhurricane.graph.extract.run_javascript", run)
+    # The default runner identity is bound at function definition time.
+    result = extract(capture, javascript_runner=run)
+    assert capture["data"]["response_body"] == "captured"
+    assert calls[-1][0] == ("repaired" if repair else "captured")
+    assert any("original_sha256=" in gap for gap in result.gaps) is repair
+
+
+def test_manifest_replay_reuses_durable_payload_and_adds_contexts(graph_paths, monkeypatch):
+    artifacts = ArtifactStore("db")
+    manifest = artifacts.manifest
+    data = {"id": "source", "url": "https://example.com/", "role": "source"}
+    key = manifest.fact("unit", "capture", "symbol", data)
+    put = manifest.blobs.put
+    calls = []
+    monkeypatch.setattr(manifest.blobs, "put", lambda *args, **kwargs: calls.append(args) or put(*args, **kwargs))
+    assert manifest.fact("unit", "capture", "symbol", data, contexts=["context"]) == key
+    assert not calls
+    assert artifacts.connection.execute("SELECT count(*) FROM graph_fact_contexts").fetchone()[0] == 1
+    assert manifest.fact("unit", "capture", "symbol", {**data, "role": "sink"}) != key
+    assert len(calls) == 1
+    artifacts.close()
+
+
+def test_normalization_timeout_retains_repaired_source(graph_paths, event, monkeypatch):
+    artifacts = ArtifactStore("db")
+    monkeypatch.setattr(artifacts, "source_map", lambda *args, **kwargs: None)
+
+    def normalize(*args):
+        raise TimeoutError("deadline")
+
+    monkeypatch.setattr(artifacts, "deobfuscate", normalize)
+    calls = []
+
+    def run(source, filename, mode=None, **kwargs):
+        if kwargs.get("action") == "prepare":
+            return {"source": "repaired", "transformation": "latin1-to-utf8-v1"}
+        calls.append(source)
+        return {"nodes": [], "edges": [], "references": [], "gaps": []}
+
+    monkeypatch.setattr("shyhurricane.graph.extract.run_javascript", run)
+    capture = event(url="https://example.com/app.js", mime="application/javascript", body="captured")
+    result = extract(capture, artifacts, javascript_runner=run)
+    assert calls == ["repaired"]
+    assert capture["data"]["response_body"] == "captured"
+    assert any("normalization deadline" in gap for gap in result.gaps)
+    artifacts.close()

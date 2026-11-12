@@ -15,6 +15,9 @@ from uuid import uuid4
 
 import psutil
 
+from shyhurricane.graph.parser_diagnostics import stage as parser_stage
+
+
 logger = logging.getLogger(__name__)
 
 MAX_SECONDS = 240
@@ -49,7 +52,12 @@ def parse(event, artifacts, *, document_contexts=None, open_world=False, **extra
         "snapshot_path": str(marker) if marker else artifacts.snapshot_reference,
         "extract_options": extract_options,
     }
-    environment = {**os.environ, "_SHYHURRICANE_PARSE_CONTAINER": name}
+    diagnostics = output.with_suffix(".stages")
+    environment = {
+        **os.environ, "_SHYHURRICANE_PARSE_CONTAINER": name,
+        "_SHYHURRICANE_PARSE_DIAGNOSTICS": str(diagnostics),
+        "_SHYHURRICANE_PARSE_DEADLINE": str(time.monotonic() + MAX_SECONDS),
+    }
     started = time.monotonic()
     logger.debug("Graph parser started capture=%s epoch=%s", event["id"], artifacts.reference_epoch)
     with tempfile.TemporaryFile(mode="w+") as source:
@@ -76,7 +84,8 @@ def parse(event, artifacts, *, document_contexts=None, open_world=False, **extra
                 except psutil.NoSuchProcess:
                     continue
                 if time.monotonic() - started > MAX_SECONDS or rss > MAX_RSS:
-                    raise TimeoutError("Graph parser time or memory budget reached; retained source needs expansion")
+                    reason = "rss_limit" if rss > MAX_RSS else "time_limit"
+                    raise TimeoutError(f"Graph parser {reason}; retained source needs expansion")
                 time.sleep(0.1)
             if process.returncode != 0 or not output.exists():
                 raise ValueError("Graph parser failed; retained source remains available")
@@ -92,6 +101,9 @@ def parse(event, artifacts, *, document_contexts=None, open_world=False, **extra
                 raise ValueError(result["error"])
             return restore_projection(result)
         except Exception as error:
+            if diagnostics.exists():
+                logger.warning("Graph parser stages capture=%s epoch=%s records=%s",
+                               event["id"], artifacts.reference_epoch, diagnostics.read_text()[-8192:])
             logger.warning(
                 "Graph parser stopped capture=%s epoch=%s elapsed=%.3f exit=%s reason=%s",
                 event["id"], artifacts.reference_epoch, time.monotonic() - started,
@@ -118,6 +130,10 @@ def parse(event, artifacts, *, document_contexts=None, open_world=False, **extra
                     timeout=10,
                     check=False,
                 )
+            if diagnostics.exists():
+                logger.info("Graph parser stages capture=%s epoch=%s records=%s",
+                            event["id"], artifacts.reference_epoch, diagnostics.read_text()[-8192:])
+            diagnostics.unlink(missing_ok=True)
             output.unlink(missing_ok=True)
             output.with_suffix(".tmp").unlink(missing_ok=True)
             if marker:
@@ -165,7 +181,8 @@ def main():
     temporary = output.with_suffix(".tmp")
     with temporary.open("w") as stream:
         os.chmod(temporary, 0o600)
-        json.dump(result, stream)
+        with parser_stage("serialization"):
+            json.dump(result, stream)
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temporary, output)

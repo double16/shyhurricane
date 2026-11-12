@@ -17,6 +17,7 @@ from shyhurricane.graph.blob_store import BlobStore, cache_budget, initialize, o
 from shyhurricane.graph.cache_leases import cache_lease
 from shyhurricane.graph.manifest import ManifestStore
 from shyhurricane.graph.model import MAX_BYTES, capture_unit_path, identity
+from shyhurricane.graph.parser_diagnostics import measured
 from shyhurricane.graph.svg import is_svg
 
 logger = logging.getLogger(__name__)
@@ -215,6 +216,7 @@ class ArtifactStore:
     def counts(self) -> dict:
         return dict(self.connection.execute("SELECT status, count(*) FROM work GROUP BY status").fetchall())
 
+    @measured("source-map")
     def source_map(
         self,
         url: str,
