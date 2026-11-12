@@ -79,6 +79,13 @@ Summary sections contain bounded examples, not complete inventories. Inspect cou
 arguments, then get_result_page for more records in the same saved inventory or summary.
 Use find_application_elements with context_url=<selected exact page URL> and role=source or role=sink
 for focused candidates; kinds=["resource"] restricts discovery to resources.
+HTML controls may be kind="element"; fields also include HTTP data. Leave kinds unset for role
+queries; use kinds=["element", "field"] without role to include unlabeled controls. Discover other
+kinds from results. If input links stop, pivot through page-associated JavaScript with context_url
+or a known script's exact url; inspect calls/functions and trace sinks with direction="backward".
+Use captured HTML/JavaScript to investigate missing links; matching names/context are only leads.
+One disconnected node or filtered query cannot establish absence. Report missing graph links
+separately from incomplete analysis and code-supported behavior, within the inspected scope.
 Retain scope=target on endpoint, element, relationship, flow, journey, and expansion calls, including
 known-URL queries, to preserve URL-prefix and explicit-port restrictions. Opaque IDs require scope.
 Use find_application_relationships(scope=target, element_id=selected_id),

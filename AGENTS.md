@@ -5,7 +5,9 @@
 ## Testing and contribution
 - Always write unit tests and check that they pass for new and changed business logic.
 - Changed and new code should have at least 80% code and branch coverage per file.
-- Always run unit tests to verify changes.
+- Run unit tests for changes to executable behavior.
+- Static prompt text and documentation-only changes are exempt from unit tests and coverage requirements.
+  Do not add or run tests that merely assert prompt wording.
 - Test both positive and negative scenarios.
 - Keep tests in files based on component or functionality. Use existing test files if applicable.
 
@@ -71,5 +73,6 @@
 - Use template literals for string concatenation
 
 ## LLM Prompt Best Practices
+- Keep prompts concise: avoid repeating tool schemas or guidance already present in the workflow.
 - When providing to an LLM a list of data with two or more items that have the same shape, prefer TOON over JSON.
 - When an LLM is to return structured data, prefer JSON.

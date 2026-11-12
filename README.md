@@ -69,6 +69,10 @@ and report the limitation. Low-power workflows use predicate-only retrieval and 
 All assessment prompts use an endpoint-first graph workflow: overview, focused candidates,
 traces, then step evidence. They request full graph details only when needed, distinguish bounded
 examples from complete results, and keep navigation hypotheses separate from data-flow evidence.
+Focused discovery includes HTML elements and HTTP fields as well as JavaScript source/sink
+operations. When input links are missing, workflows pivot through associated scripts, trace backward
+from sinks, and inspect captured code. They distinguish missing graph links from incomplete analysis
+and do not infer application-wide absence from one disconnected field or filtered query.
 
 Prompt workflows name the tool arguments explicitly: continuation results map to `token`, deferred
 `analysis_unit_id` values map to `unit_id`, and saved-page tokens map to `page_token`.
