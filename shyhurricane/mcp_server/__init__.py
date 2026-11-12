@@ -4,6 +4,7 @@ import logging
 import os
 from collections import deque
 from datetime import datetime
+from importlib.metadata import version
 from typing import Annotated, Any, Dict, Optional, TypeAlias, Union
 
 import aiofiles
@@ -11,7 +12,7 @@ import validators
 from mcp import MCPError
 from mcp.server import MCPServer
 from mcp.server.mcpserver import Context
-from mcp.types import INVALID_REQUEST, CallToolResult, Tool
+from mcp.types import INVALID_REQUEST, CallToolResult, Icon, Tool
 from pydantic import Field, ValidationError
 
 from shyhurricane.mcp_server.server_context import ServerContext
@@ -147,7 +148,15 @@ This server assists penetration testers, red team operators and security auditor
 
 
 mcp_instance = ShyHurricaneMCPServer(
-    "shyhurricane",
+    name="shyhurricane",
+    title="ShyHurricane",
+    description="MCP server for AI-assisted web security testing using RAG and application graph analysis",
+    version=version("shyhurricane"),
+    website_url="https://github.com/double16/shyhurricane",
+    icons=[Icon(
+        src="https://raw.githubusercontent.com/double16/shyhurricane/main/shyhurricane/assets/shyhurricane.png",
+        mime_type="image/png",
+    )],
     lifespan=app_lifespan,
     instructions=mcp_server_instructions,
     middleware=[client_state_middleware],

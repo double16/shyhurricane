@@ -2,7 +2,7 @@
 
 <img src="shyhurricane/assets/shyhurricane.png" alt="Hurricane picking padlock logo" width="150" style="float: left; margin-right:10px;" />
 
-ShyHurricane is an MCP server to assist AI in offensive security testing of web applications.
+ShyHurricane is an MCP server to assist AI in offensive security testing of web applications using RAG and application graph analysis.
 
 Web application resources are stored in a vector database. Raw content may be retrieved by filters or embeddings. Relationships
 are mapped in a graph database for flow analysis. JavaScript is deobfuscated, reversed from source maps, graphed and
