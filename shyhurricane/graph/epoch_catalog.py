@@ -55,9 +55,9 @@ class SnapshotArtifacts(ArtifactStore):
                 if explicit:
                     self.connection.execute("INSERT INTO epoch_explicit_policies VALUES (?)", (capture,))
 
-    def source_map(self, url, source, headers, open_world, **kwargs):
+    def resolve_source_map(self, url, source, headers, open_world, **kwargs):
         key = identity(
-            url, source, headers, kwargs.get("original_hash"), kwargs.get("response_headers"), kwargs.get("observed_at")
+            "map-result-v2", url, source, headers, kwargs.get("original_hash"), kwargs.get("response_headers"), kwargs.get("observed_at")
         )
         self.map_reads.add(key)
         if self.map_owner is not None:
@@ -71,7 +71,7 @@ class SnapshotArtifacts(ArtifactStore):
         ).fetchone()
         if row:
             return self.read(row[0])
-        content = super().source_map(url, source, headers, open_world, **kwargs)
+        content = super().resolve_source_map(url, source, headers, open_world, **kwargs)
         with self.connection:
             self.connection.execute(
                 "INSERT INTO graph_pinned_source_maps VALUES (?,?,?)", (self.reference_epoch, key, self.write(identity("pinned-map", content), content))

@@ -23,7 +23,7 @@ from shyhurricane.graph.model import MAX_BYTES, Projection, identity, web_url
 from shyhurricane.graph.parser_diagnostics import measured, remaining_seconds
 from shyhurricane.graph.policy import ANALYZER_VERSION, library_analysis
 from shyhurricane.graph.svg import extract_svg, is_svg, svg_root
-from shyhurricane.source_maps import javascript_url_from_map, source_map_url
+from shyhurricane.source_maps import javascript_url_from_map, source_map_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -389,8 +389,8 @@ def extract(
         except etree.XMLSyntaxError:
             graph.gaps.append("Malformed SVG response")
     elif "javascript" in mime or urlsplit(graph.url).path.lower().endswith((".js", ".mjs", ".jsx", ".ts", ".tsx")):
-        source_map = (
-            artifacts.source_map(
+        map_result = (
+            artifacts.resolve_source_map(
                 graph.url,
                 body,
                 data.get("request_headers") or {},
@@ -401,9 +401,8 @@ def extract(
             if artifacts
             else None
         )
-        map_url = source_map_url(graph.url)
-        if map_url:
-            refs.append(map_url)
+        source_map = map_result["content"] if map_result else None
+        refs.extend(source_map_candidates(graph.url))
         hint = response_headers.get("sourcemap") or response_headers.get("x-sourcemap")
         match = re.search(r"[#@]\s*sourceMappingURL\s*=\s*(\S+)", body)
         hint = hint or (match[1].rstrip("*/") if match else None)
@@ -414,7 +413,7 @@ def extract(
         if source_map and not embedded_map:
             graph.candidate_sources.append({
                 "source_digest": identity(body), "map_digest": identity(source_map),
-                "association": "unverified_external",
+                "association": "unverified_external", "map_url": map_result["url"],
                 "artifact": artifacts.write(identity("candidate-map", source_map), {"source_map": source_map}),
             })
             graph.gaps.append("External source map is unverified; delivered JavaScript remains authoritative")

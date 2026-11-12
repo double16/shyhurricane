@@ -217,7 +217,7 @@ class ArtifactStore:
         return dict(self.connection.execute("SELECT status, count(*) FROM work GROUP BY status").fetchall())
 
     @measured("source-map")
-    def source_map(
+    def resolve_source_map(
         self,
         url: str,
         source: str,
@@ -228,7 +228,7 @@ class ArtifactStore:
         response_headers=None,
         observed_at=None,
     ):
-        from shyhurricane.source_maps import _cached_map, _fetch_map, _valid_map, source_map_url
+        from shyhurricane.source_maps import _cached_map, _fetch_map, _valid_map, source_map_candidates
 
         def valid(content):
             return isinstance(content, str) and len(content.encode()) <= MAX_BYTES and _valid_map(content)
@@ -249,7 +249,7 @@ class ArtifactStore:
                 meta, content = hint.split(",", 1)
                 candidate = base64.b64decode(content, validate=True).decode() if ";base64" in meta else unquote(content)
                 if valid(candidate):
-                    return candidate
+                    return {"content": candidate, "url": None}
             except (ValueError, UnicodeDecodeError):
                 pass
         elif hint:
@@ -259,28 +259,42 @@ class ArtifactStore:
             explicit = self.latest(explicit_url, as_of=observed_at) if explicit_url else None
             candidate = explicit["data"].get("response_body") if explicit else _cached_map(content_store, explicit_url)
             if valid(candidate):
-                return candidate
-        map_url = source_map_url(url)
-        if not map_url:
+                return {"content": candidate, "url": explicit_url}
+        candidates = source_map_candidates(url)
+        if not candidates:
             return None
-        local = self.latest(map_url, as_of=observed_at)
-        candidate = local["data"].get("response_body") if local else _cached_map(content_store, map_url)
-        if valid(candidate):
-            return candidate
-        key = identity("map-v1", url, original_hash or hashlib.sha256(source.encode()).hexdigest(), headers)
+        for map_url in candidates:
+            local = self.latest(map_url, as_of=observed_at)
+            candidate = local["data"].get("response_body") if local else _cached_map(content_store, map_url)
+            if valid(candidate):
+                return {"content": candidate, "url": map_url}
+        key = identity("map-v2", url, original_hash or hashlib.sha256(source.encode()).hexdigest(), headers)
         retained = self.connection.execute("SELECT path FROM graph_retained_maps WHERE key=?", (key,)).fetchone()
         if retained:
             return self.read(retained[0])
         if not open_world:
             return None
-        # Negative results are recomputable; successful target responses are retained evidence.
-        candidate = self.cached(key, lambda: _fetch_map(map_url, headers))
-        if not valid(candidate):
+
+        def fetch():
+            for map_url in candidates:
+                candidate = _fetch_map(map_url, headers)
+                if valid(candidate):
+                    return {"url": map_url, "content": candidate}
             return None
-        reference = self.write(identity("retained-map", key, candidate), candidate)
+
+        result = self.cached(key, fetch)
+        if result is None:
+            return None
+        candidate = result["content"]
+        reference = self.write(identity("retained-map", key, candidate), result)
         with self.connection:
             self.connection.execute("INSERT OR IGNORE INTO graph_retained_maps VALUES (?,?)", (key, reference))
-        return candidate
+        return result
+
+    def source_map(self, *args, **kwargs):
+        """Return map content for consumers that do not need its provenance."""
+        result = self.resolve_source_map(*args, **kwargs)
+        return result["content"] if result else None
 
     def deobfuscate(self, source: str, transform):
         return self.cached(identity("deobfuscate-v1", source), lambda: transform(source))

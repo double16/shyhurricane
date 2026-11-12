@@ -23,7 +23,7 @@ from shyhurricane.graph.model import (
 from shyhurricane.graph.policy import ANALYZER_VERSION, library_analysis
 from shyhurricane.graph.publication import GraphPublisher, PublicationConflict
 from shyhurricane.graph.retry_policy import transient_neo4j_error
-from shyhurricane.source_maps import javascript_url_from_map, source_map_url
+from shyhurricane.source_maps import javascript_url_from_map, source_map_candidates
 
 logger = logging.getLogger(__name__)
 EPOCH_VERSION = 3
@@ -459,7 +459,7 @@ class Epochs:
             headers = {key.lower(): value for key, value in event["data"].get("response_headers", {}).items()}
             match = re.search(r"[#@]\s*sourceMappingURL\s*=\s*(\S+)", event["data"].get("response_body") or "")
             hint = headers.get("sourcemap") or headers.get("x-sourcemap") or (match[1].rstrip("*/") if match else "")
-            urls = {source_map_url(event["data"]["url"]), web_url(hint, event["data"]["url"]) if hint else None}
+            urls = {*source_map_candidates(event["data"]["url"]), web_url(hint, event["data"]["url"]) if hint else None}
             maps = [artifacts.latest(url, as_of=event["observed_at"]) for url in sorted(url for url in urls if url)]
             maps = [item["id"] if item else None for item in maps]
             open_world = (
@@ -468,7 +468,7 @@ class Epochs:
                     "SELECT 1 FROM epoch_explicit_policies WHERE capture_id=?", (capture_id,)
                 ).fetchone()
             )
-            key = identity("epoch-reference-v2", capture_id, mode, ANALYZER_VERSION, maps, open_world)
+            key = identity("epoch-reference-v3", capture_id, mode, ANALYZER_VERSION, maps, open_world)
 
             def discover_references():
                 artifacts.map_reads.clear()

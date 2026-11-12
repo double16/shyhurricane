@@ -405,7 +405,7 @@ def test_summary_source_map_recovery_is_not_skipped(graph_paths, event, monkeypa
     artifacts = ArtifactStore("db")
     source_map = json.dumps({"version": 3, "sources": ["node_modules/react/index.js", "app.js"],
                              "sourcesContent": ["export const React = {};", "eval(location.hash)"]})
-    monkeypatch.setattr(artifacts, "source_map", lambda *args, **kwargs: source_map)
+    monkeypatch.setattr(artifacts, "resolve_source_map", lambda *args, **kwargs: {"content": source_map, "url": None})
     monkeypatch.setattr(artifacts, "deobfuscate", lambda *args: pytest.fail("Recovered sources need no deobfuscation"))
     seen = []
 

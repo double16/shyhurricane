@@ -396,13 +396,13 @@ def test_fetched_source_map_is_pinned_and_replayed_from_reference_cache(runtime,
 
     def fetch(self, url, source, headers, open_world, **kwargs):
         fetches.append(open_world)
-        return source_map
+        return {"content": source_map, "url": url + "%2Emap"}
 
     def runner(source, filename):
         analyses.append(filename)
         return {"nodes": [], "edges": [], "references": [], "gaps": []}
 
-    monkeypatch.setattr(ArtifactStore, "source_map", fetch)
+    monkeypatch.setattr(ArtifactStore, "resolve_source_map", fetch)
     monkeypatch.setattr(epochs, "extract", lambda *a, **kw: real_extract(*a, javascript_runner=runner, **kw))
     script = artifacts.register(event(url="https://example.com/app.js", mime="text/javascript", body="delivered();"))
     engine.accept(script, 1)
@@ -467,7 +467,7 @@ def test_explicit_rebuild_policy_does_not_fetch_source_maps(runtime, event, monk
         requests.append(open_world)
         return None
 
-    monkeypatch.setattr(ArtifactStore, "source_map", source_map)
+    monkeypatch.setattr(ArtifactStore, "resolve_source_map", source_map)
     monkeypatch.setattr("shyhurricane.javascript_deobfuscation.deobfuscate_javascript", lambda source: source)
     monkeypatch.setattr(epochs, "extract", lambda *a, **kw: real_extract(
         *a, javascript_runner=lambda *a: {"nodes": [], "edges": [], "references": [], "gaps": []}, **kw,

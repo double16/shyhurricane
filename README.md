@@ -563,3 +563,6 @@ prepare this cache before offline operation.
 Existing vectors remain readable. For consistent chunk boundaries, rebuild affected vector
 collections from retained source data rather than replaying over existing child IDs, which
 can leave stale chunks. Back up data and retain replayable inputs before rebuilding.
+
+Source-map discovery tries suffixes `.map`, `.MAP`, `%2Emap`, and `%2EMAP` in order,
+stopping at the first valid map. Network requests require open-world access.

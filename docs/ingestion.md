@@ -4,7 +4,7 @@
 
 JavaScript responses are deobfuscated with webcrack and scanned with Opengrep during ingestion, including in low power
 mode. If a source map is indexed, shuji recovers its source files for scanning. When `OPEN_WORLD=true`, indexing a
-`.js` URL also attempts to fetch its `.js.map` URL. When `OPEN_WORLD=false`, only maps already supplied through
+`.js` URL also attempts to fetch source-map URLs using `.map`, `.MAP`, `%2Emap`, and `%2EMAP` suffixes. When `OPEN_WORLD=false`, only maps already supplied through
 indexing are used; Opengrep rule updates are still allowed. Scan matches are saved as findings and can be retrieved
 with `query_findings`. The command image includes a snapshot of the
 [Opengrep rules repository](https://github.com/amplify-security/opengrep-rules); it checks for updates at runtime and

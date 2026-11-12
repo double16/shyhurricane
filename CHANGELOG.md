@@ -16,6 +16,7 @@
 
 ### Features
 
+- Discover source maps using uppercase and URL-encoded suffix variants.
 - Show the data directory beneath the dashboard configuration header, abbreviating the home directory as `~`.
 - Add managed database host networking and automatic fallback for disabled Docker bridges.
 - Show assessment title, aggregate health dot, and work status in interactive iTerm2 tabs.
