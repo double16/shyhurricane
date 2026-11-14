@@ -25,6 +25,25 @@
 - Keep general user documentation in README.md. In-depth documentation in docs/.
 - Environment variables used for configuration must be documented in a table along-side similar variables.
 
+## Storage architecture and expected load
+- Prefer Neo4j for graph operations: relationships, traversal, searchable graph inventory, document membership,
+  and graph coverage. Prefer SQLite for relational data: queues, scheduling, checkpoints, transactional ownership,
+  publication obligations, and artifact metadata. Choose exceptions using measured workloads and document the reason.
+- Keep payload storage separate from graph query semantics. Small compressed payloads may remain inline in SQLite;
+  larger payloads should share packed segments. Avoid a file per fact or small artifact: filesystem entry overhead
+  was a production bottleneck.
+- Use the retained production-derived JavaScript IR case as a minimum large-input performance fixture:
+  **171,175 nodes, 146,817 edges, and 70,862,815 bytes (approximately 67.6 MiB) of uncompressed JSON IR**.
+  These counts describe one analyzed input, not the entire assessment, original JavaScript size, or physical
+  Neo4j storage. An assessment can contain many such inputs, capture versions, contexts, and retained generations;
+  do not treat these figures as an assessment-wide upper bound. A verified whole-assessment estimate is unavailable.
+- Design writes, reads, retries, accounting, and cleanup for bounded batches and memory at this scale and above.
+  Validate indexes and query plans with unrelated data present; avoid per-fact payload bookkeeping and full-catalog
+  scans on normal request or maintenance paths. Include payload, index, WAL, transaction-log, and retention overhead
+  when estimating disk requirements; serialized IR size alone is not a capacity estimate.
+- See [graph storage implementation and validation](docs/graph-storage-implementation.md) for benchmark methodology,
+  storage boundaries, and measured performance tradeoffs. Keep deployment identifiers out of fixtures and guidance.
+
 ## Python Best Practices
 - Use the `uv` tool for python ecosystem, i.e `uv run ...`
 - Follow PEP 8 with a 120-character line limit

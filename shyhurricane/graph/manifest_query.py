@@ -4,7 +4,7 @@ import sqlite3
 
 from shyhurricane.graph.cursors import QueryCursors
 from shyhurricane.graph.discovery import INTERPRETATION, present_manifest
-from shyhurricane.graph.model import identity, optional_filter
+from shyhurricane.graph.model import compact_event, identity, optional_filter
 
 
 def manifest_query(
@@ -36,6 +36,8 @@ def manifest_query(
         present_manifest({}, detail)
     url, method, context_url = map(optional_filter, (url, method, context_url))
     watermark = artifacts.manifest.watermark() if watermark is None else watermark
+    if "expires" in watermark:
+        expires = min(expires or watermark["expires"], watermark["expires"])
     gaps = []
     timed_out = False
     records = []
@@ -136,28 +138,19 @@ def manifest_query(
 
 
 def expand_analysis(artifacts, queue, scope, capture_id, unit_id):
-    from shyhurricane.graph.query import scope_predicate
-
+    selected = artifacts.manifest.inventory_reader().lookup_unit(scope, unit_id, capture_id)
     row = artifacts.connection.execute(
-        "SELECT u.capture_id,u.source_path,c.url,c.path FROM graph_manifest_units u "
-        "JOIN captures c ON c.id=u.capture_id WHERE u.id=? AND u.capture_id=?",
-        (unit_id, capture_id),
+        "SELECT c.path FROM captures c WHERE c.id=?", (capture_id,),
     ).fetchone()
-    matches = scope_predicate(scope)
-    artifacts.connection.create_function("graph_expansion_scope", 1, matches, deterministic=True)
-    in_context = row is not None and artifacts.connection.execute(
-        "SELECT EXISTS (SELECT 1 FROM graph_unit_contexts WHERE unit_id IN "
-        "(SELECT ? UNION SELECT parent_id FROM graph_unit_parents WHERE unit_id=?) "
-        "AND graph_expansion_scope(url))", (unit_id, unit_id),
-    ).fetchone()[0]
-    if row is None or not (matches(row[2]) or in_context):
+    if selected is None or row is None or not selected["artifact"]:
         raise ValueError("Analysis unit is unavailable in the requested scope")
     budget = artifacts.budget
-    event = artifacts.read(row[3], limit=64 * 1024 * 1024)
+    event = artifacts.read(row[0], limit=64 * 1024 * 1024)
     if budget is not None:
         budget.check()
-    work_id = identity("expand", capture_id, unit_id)
-    item = {**event, "rebuild_token": work_id, "analysis_unit_id": unit_id, "offline_analysis": True}
+    work_id = identity("expand", capture_id, unit_id, selected["generation"])
+    item = {**compact_event(event), "rebuild_token": work_id, "analysis_unit_id": unit_id, "offline_analysis": True,
+            "inventory_generation": selected["generation"], "inventory_artifact": selected["artifact"]}
     result = {"work_id": work_id, "capture_id": capture_id, "analysis_unit_id": unit_id, "status": "pending"}
     if queue is None:
         return item, result

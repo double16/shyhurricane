@@ -11,8 +11,16 @@ from urllib.parse import urlsplit
 
 from neo4j import GraphDatabase, Query, unit_of_work
 
-from shyhurricane.db import _find_available_port, _inspect_container, _is_running, _run
-from shyhurricane.db import managed_endpoint, managed_network, validate_network, wait_host_listener
+from shyhurricane.db import (
+    _find_available_port,
+    _inspect_container,
+    _is_running,
+    _run,
+    managed_endpoint,
+    managed_network,
+    validate_network,
+    wait_host_listener,
+)
 from shyhurricane.graph.budget import current_budget
 from shyhurricane.graph.config import graph_timeouts
 from shyhurricane.graph.statistics import summarize_captures
@@ -227,6 +235,9 @@ class GraphStore:
         return True
 
     def initialize_schema(self, session):
+        from shyhurricane.graph.inventory_publication import initialize
+
+        initialize(session)
         def run(statement):
             return session.run(Query(statement, timeout=self.timeouts.schema))
 

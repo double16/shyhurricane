@@ -41,6 +41,28 @@ def signatures(result):
     ]
 
 
+def test_internal_path_checkpoint_resumes_frontier(application, monkeypatch):
+    graph, _, source, sink, _ = application
+    original = TraversalSnapshot.expand
+    captured = []
+
+    def expire(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        self.limit("time_limit")
+
+    query = GraphQuery(Store(graph))
+    query.path_checkpoint = lambda state, result: captured.append((state, result))
+    with monkeypatch.context() as patch:
+        patch.setattr(TraversalSnapshot, "expand", expire)
+        query.paths("example.com", source, end=sink, mode="flow")
+    assert captured and captured[0][0]["pending"]
+    resumed = GraphQuery(Store(graph)).paths(
+        "example.com", source, end=sink, mode="flow", _resume=captured[0][0],
+    )
+    expected = GraphQuery(Store(graph)).paths("example.com", source, end=sink, mode="flow")
+    assert signatures(resumed) == signatures(expected)
+
+
 def reference_paths(service, start, end, mode, direction, depth):
     """Small complete-snapshot oracle: independent of database frontier loading."""
     nodes, edges, _ = service.snapshot("example.com")

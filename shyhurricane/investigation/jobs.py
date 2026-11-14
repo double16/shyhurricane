@@ -3,7 +3,7 @@
 import json
 import time
 
-POLICY_VERSION = 6
+POLICY_VERSION = 7
 BATCH_SIZE = 100
 KINDS = ("correlate", "derive", "hotspot")
 
@@ -48,14 +48,25 @@ class JobStore:
                 self._setting("swept", [sweep["revision"], sweep["policy"]])
                 self._setting("sweep", None)
 
-    def _select_job(self, kinds):
-        placeholders = ",".join("?" for _ in kinds)
-        row = self.connection.execute(
-            "SELECT kind,key,generation,attempts FROM jobs INDEXED BY ready_jobs "
-            f"WHERE state='pending' AND due<=? AND kind IN ({placeholders}) "
-            "ORDER BY due,kind,key LIMIT 1",
-            (time.time(), *kinds),
-        ).fetchone()
+    def _select_job(self, kinds, finding_id=None):
+        if finding_id is not None:
+            row = self.connection.execute(
+                "SELECT kind,key,generation,attempts FROM jobs WHERE kind='correlate' AND key=? "
+                "AND state='pending' AND due<=?", (finding_id, time.time()),
+            ).fetchone()
+        else:
+            candidates = []
+            now = time.time()
+            for kind in kinds:
+                candidate = self.connection.execute(
+                    "SELECT kind,key,generation,attempts,due FROM jobs "
+                    "WHERE state='pending' AND kind=? AND due<=? ORDER BY due,key LIMIT 1",
+                    (kind, now),
+                ).fetchone()
+                if candidate is not None:
+                    candidates.append(candidate)
+            selected = min(candidates, key=lambda item: (item[4], item[0], item[1]), default=None)
+            row = selected[:4] if selected else None
         if row is None:
             return None
         job = dict(zip(("kind", "id", "generation", "attempts"), row))
@@ -74,7 +85,14 @@ class JobStore:
 
     def next_job(self, graph_revision):
         self.sweep(graph_revision)
-        return self._select_job(KINDS)
+        # Derived work remains eligible between correlation slices.
+        derived = self._select_job(("derive", "hotspot"))
+        if derived is not None:
+            return derived
+        active = self.connection.execute("SELECT finding_id FROM checkpoints LIMIT 1").fetchone()
+        if active is None:
+            return self._select_job(("correlate",))
+        return self._select_job(("correlate",), finding_id=active[0])
 
     def current_job(self, job):
         return (

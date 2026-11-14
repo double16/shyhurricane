@@ -256,7 +256,7 @@ async def test_query_errors_are_explicit_and_no_fetch_occurs(monkeypatch):
             await tools.query(None, "test", "elements", "example.com")
 
 
-async def test_continuation_and_offline_expansion_tools(graph_paths, event, monkeypatch):
+async def test_continuation_and_offline_expansion_tools(graph_paths, event, monkeypatch, publish_inventory):
     import inspect
 
     from shyhurricane.graph.artifacts import ArtifactStore
@@ -277,7 +277,10 @@ async def test_continuation_and_offline_expansion_tools(graph_paths, event, monk
 
     artifacts = ArtifactStore("db")
     capture = artifacts.register(event())
-    unit = artifacts.manifest.unit(capture["id"], "fixture")
+    unit = artifacts.manifest.unit(capture["id"], "fixture", discovery="complete",
+                                   artifact=artifacts.write("detail", {"nodes": [], "edges": []}))
+    publish_inventory(artifacts)
+    server.graph_store = publish_inventory.store
     artifacts.close()
     monkeypatch.setattr(tools, "execute_graph", graph_execution.execute_graph)
     server.enqueue_graph_expansion = AsyncMock()
@@ -292,6 +295,13 @@ async def test_graph_execution_decorates_manifest_coverage_and_closes_artifacts(
     ArtifactStore("db").close()
     service = SimpleNamespace(elements=lambda scope: {"results": []},
                               omitted_regions=lambda scope: [{"analysis_unit_id": "deferred"}])
+    def attach(artifacts):
+        service.artifacts = artifacts
+        artifacts.manifest.reader = SimpleNamespace(
+            coverage=lambda *args, **kwargs: {"discovery": "pending", "flow": "pending"}
+        )
+
+    service.attach_artifacts = attach
     monkeypatch.setattr(graph_execution, "GraphQuery", lambda *args, **kwargs: service)
     result = await graph_execution.execute_graph(None, object(), "elements", "example.com", artifact_db="db")
     assert result["coverage"]["discovery"] == "pending"

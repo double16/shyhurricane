@@ -146,3 +146,26 @@ ceiling still includes special tokens.
 Model-generated JSON uses task schemas and output-token limits. Providers that explicitly reject
 structured outputs fall back to locally validated JSON; the capability decision is cached per
 provider, endpoint, and model until the process restarts.
+
+
+### Retained queue failures
+
+Inspect failures without loading queued payloads:
+
+```shell
+uv run python -m shyhurricane.queue_failures /path/to/data --limit 20
+```
+
+Use `--queue type_specific_index` to filter, `--detail` for chained tracebacks, and
+`--resolved` to include retained errors after retry or success. Each queue item retains its latest
+error (up to 64 KiB), failure count, UTC Unix timestamp, PID, and stage until the queue row is deleted.
+Traceback locals and explicit payload dumps are excluded; exception messages may contain input data.
+Existing failures without recorded evidence report details unavailable. Inspection never retries work.
+
+### Temporary finding dependency failures
+
+Finding processing makes up to four attempts for transport failures, HTTP 429/502/503/504,
+and Ollama internal loopback runner connection timeouts. Delays are 1, 3, and 10 seconds.
+Backoff releases the finding lock and responds to shutdown. Successful retries acknowledge
+the item; exhausted retries retain a terminal failure for explicit retry. Fingerprint lookup
+and pending handoff recovery run on every attempt. Downstream delivery remains at least once.

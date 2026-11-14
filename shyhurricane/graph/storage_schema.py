@@ -1,6 +1,8 @@
 """Fresh immutable artifact storage with constant-time accounting triggers."""
 
-VERSION = 2
+from shyhurricane.graph.payload_store import SCHEMA as PAYLOAD_SCHEMA
+
+VERSION = 4
 
 
 def initialize(connection):
@@ -12,6 +14,8 @@ def initialize(connection):
     connection.execute("PRAGMA auto_vacuum=INCREMENTAL")
     connection.executescript(
         "BEGIN IMMEDIATE;"
+        "CREATE TABLE graph_dataset(id TEXT PRIMARY KEY);"
+        "INSERT INTO graph_dataset VALUES (lower(hex(randomblob(16))));"
         "CREATE TABLE graph_storage_totals (id INTEGER PRIMARY KEY CHECK(id=1),"
         "logical INTEGER NOT NULL DEFAULT 0,stored INTEGER NOT NULL DEFAULT 0,"
         "retained INTEGER NOT NULL DEFAULT 0,cached INTEGER NOT NULL DEFAULT 0,"
@@ -19,7 +23,7 @@ def initialize(connection):
         "last_progress REAL,next_kind INTEGER NOT NULL DEFAULT 0);"
         "INSERT INTO graph_storage_totals(id) VALUES (1);"
         "CREATE TABLE graph_blobs (digest TEXT PRIMARY KEY,codec TEXT NOT NULL,version INTEGER NOT NULL,"
-        "size INTEGER NOT NULL,payload BLOB NOT NULL);"
+        "size INTEGER NOT NULL,stored INTEGER NOT NULL,payload BLOB,segment TEXT,offset INTEGER);"
         "CREATE TABLE graph_blob_usage (digest TEXT PRIMARY KEY,size INTEGER NOT NULL,stored INTEGER NOT NULL,"
         "node_refs INTEGER NOT NULL DEFAULT 0 CHECK(node_refs>=0),"
         "retained_refs INTEGER NOT NULL DEFAULT 0 CHECK(retained_refs>=0),"
@@ -42,6 +46,8 @@ def initialize(connection):
         "CREATE INDEX graph_edge_child ON graph_edges(child);"
         "CREATE TABLE graph_object_owners (owner TEXT PRIMARY KEY,ref TEXT NOT NULL);"
         "CREATE INDEX graph_owner_ref ON graph_object_owners(ref);"
+        "CREATE TABLE graph_archive_progress (id TEXT PRIMARY KEY,artifact TEXT NOT NULL,phase INTEGER,offset INTEGER);"
+        "CREATE TABLE graph_archive_inputs (id TEXT PRIMARY KEY,artifact TEXT NOT NULL);"
         "CREATE TABLE graph_cache (key TEXT PRIMARY KEY,ref TEXT NOT NULL,accessed REAL NOT NULL);"
         "CREATE INDEX graph_cache_lru ON graph_cache(accessed,key);"
         "CREATE INDEX graph_cache_ref ON graph_cache(ref);"
@@ -53,7 +59,7 @@ def initialize(connection):
         "CREATE VIEW graph_blob_links AS SELECT substr(parent,3) AS parent,substr(child,3) AS child "
         "FROM graph_edges WHERE parent LIKE 'a:%' AND child LIKE 't:%';"
         "CREATE TRIGGER blob_insert AFTER INSERT ON graph_blobs BEGIN "
-        "INSERT INTO graph_blob_usage(digest,size,stored) VALUES (NEW.digest,NEW.size,length(NEW.payload)); END;"
+        "INSERT INTO graph_blob_usage(digest,size,stored) VALUES (NEW.digest,NEW.size,NEW.stored); END;"
         "CREATE TRIGGER usage_insert AFTER INSERT ON graph_blob_usage BEGIN "
         "UPDATE graph_storage_totals SET logical=logical+NEW.size,stored=stored+NEW.stored WHERE id=1; END;"
         "CREATE TRIGGER blob_delete AFTER DELETE ON graph_blobs BEGIN "
@@ -62,7 +68,9 @@ def initialize(connection):
         "UPDATE graph_storage_totals SET logical=logical-OLD.size,stored=stored-OLD.stored,"
         "retained=retained-(OLD.retained_refs>0)*OLD.stored,"
         "cached=cached-(OLD.retained_refs=0 AND OLD.cached_refs>0)*OLD.stored WHERE id=1; END;"
-        "CREATE TRIGGER blob_class AFTER UPDATE OF retained_refs,cached_refs ON graph_blob_usage BEGIN "
+        "CREATE TRIGGER blob_class AFTER UPDATE OF retained_refs,cached_refs ON graph_blob_usage "
+        "WHEN (NEW.retained_refs>0)<>(OLD.retained_refs>0) OR "
+        "(NEW.retained_refs=0 AND NEW.cached_refs>0)<>(OLD.retained_refs=0 AND OLD.cached_refs>0) BEGIN "
         "UPDATE graph_storage_totals SET retained=retained+"
         "((NEW.retained_refs>0)-(OLD.retained_refs>0))*NEW.stored,cached=cached+"
         "((NEW.retained_refs=0 AND NEW.cached_refs>0)-(OLD.retained_refs=0 AND OLD.cached_refs>0))"
@@ -76,7 +84,8 @@ def initialize(connection):
         "UPDATE graph_storage_totals SET retiring=retiring-OLD.retiring WHERE id=1; END;"
         "CREATE TRIGGER node_counts AFTER UPDATE OF owners,caches,retained_parents,cached_parents ON graph_nodes BEGIN "
         "UPDATE graph_nodes SET retained=(owners>0 OR retained_parents>0),"
-        "cached=(caches>0 OR cached_parents>0) WHERE id=NEW.id; END;"
+        "cached=(caches>0 OR cached_parents>0) WHERE id=NEW.id AND "
+        "(retained<>(owners>0 OR retained_parents>0) OR cached<>(caches>0 OR cached_parents>0)); END;"
         "CREATE TRIGGER node_class AFTER UPDATE OF retained,cached ON graph_nodes "
         "WHEN NEW.retained<>OLD.retained OR NEW.cached<>OLD.cached BEGIN "
         "UPDATE graph_blob_usage SET retained_refs=retained_refs+NEW.retained-OLD.retained,"
@@ -84,7 +93,8 @@ def initialize(connection):
         "INSERT INTO graph_storage_work(parent) SELECT NEW.id WHERE EXISTS "
         "(SELECT 1 FROM graph_edges WHERE parent=NEW.id) "
         "ON CONFLICT(parent) DO UPDATE SET after_child=''; END;"
-        "CREATE TRIGGER node_retiring AFTER UPDATE OF retiring ON graph_nodes BEGIN "
+        "CREATE TRIGGER node_retiring AFTER UPDATE OF retiring ON graph_nodes "
+        "WHEN NEW.retiring<>OLD.retiring BEGIN "
         "UPDATE graph_storage_totals SET retiring=retiring+NEW.retiring-OLD.retiring WHERE id=1; END;"
         "CREATE TRIGGER work_insert AFTER INSERT ON graph_storage_work BEGIN "
         "UPDATE graph_storage_totals SET pending=pending+1 WHERE id=1; END;"
@@ -103,6 +113,8 @@ def initialize(connection):
         "incoming=incoming-1,retained_parents=retained_parents-OLD.retained,"
         "cached_parents=cached_parents-OLD.cached WHERE id=OLD.child; END;"
         + _root_triggers()
+        + PAYLOAD_SCHEMA
+        + "CREATE INDEX graph_blob_segment ON graph_blobs(segment,digest);"
         + f"PRAGMA user_version={VERSION};COMMIT;"
     )
 

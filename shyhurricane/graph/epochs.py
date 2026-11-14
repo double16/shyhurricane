@@ -5,11 +5,13 @@ import re
 import time
 from uuid import uuid4
 
+from shyhurricane.graph.archive_checkpoint import ArchivePending
 from shyhurricane.graph.blob_store import owner_triggers
 from shyhurricane.graph.continuations import RETRY_DELAYS, SLICE_CONTEXTS, SLICE_SECONDS, Continuations
 from shyhurricane.graph.epoch_catalog import SnapshotArtifacts, affected_captures
 from shyhurricane.graph.expansion import Expansions
 from shyhurricane.graph.extract import extract
+from shyhurricane.graph.inventory_pipeline import InventoryPipeline
 from shyhurricane.graph.link_publication import LinkPublisher
 from shyhurricane.graph.links import LinkPlanner
 from shyhurricane.graph.model import (
@@ -23,6 +25,7 @@ from shyhurricane.graph.model import (
 from shyhurricane.graph.policy import ANALYZER_VERSION, library_analysis
 from shyhurricane.graph.publication import GraphPublisher, PublicationConflict
 from shyhurricane.graph.retry_policy import transient_neo4j_error
+from shyhurricane.queue_scopes import ScopedAckQueue
 from shyhurricane.source_maps import javascript_url_from_map, source_map_candidates
 
 logger = logging.getLogger(__name__)
@@ -39,6 +42,7 @@ class Epochs:
 
     def __init__(self, artifacts, store, *, open_world=False, isolate=False):
         self.artifacts = artifacts
+        self.inventory_pipeline = InventoryPipeline(artifacts, store)
         self.connection = artifacts.connection
         self.store = store
         self.open_world = open_world
@@ -90,11 +94,15 @@ class Epochs:
         owner_triggers(self.connection, "graph_epoch_jobs", "checkpoint")
         self.last_progress_log = 0
         row = self.connection.execute(
-            "SELECT version,analyzer_version FROM graph_epochs WHERE version<>? OR analyzer_version<>? LIMIT 1",
+            "SELECT version,analyzer_version FROM graph_epochs WHERE version<>? OR "
+            "(phase NOT IN ('done','failed') AND analyzer_version<>?) LIMIT 1",
             (EPOCH_VERSION, ANALYZER_VERSION),
         ).fetchone()
         if row and row != (EPOCH_VERSION, ANALYZER_VERSION):
-            raise ValueError("Unsupported graph epoch checkpoint version; rebuild graph state")
+            raise ValueError(
+                "Unsupported graph epoch checkpoint version or unfinished analyzer version; "
+                "resume unfinished work with its matching application version"
+            )
 
     def close(self):
         if self.snapshot is not None:
@@ -135,6 +143,10 @@ class Epochs:
                 )
             if row[1] == "failed":
                 self.connection.execute(
+                    "UPDATE graph_inventory_generations SET state='pending',error='' "
+                    "WHERE capture_id=? AND state='failed'", (event["id"],),
+                )
+                self.connection.execute(
                     "UPDATE graph_epoch_inputs SET state='waiting',epoch_id=NULL WHERE token=?", (token,)
                 )
         return token
@@ -142,15 +154,27 @@ class Epochs:
     def settle(self, queue):
         self.expansions.settle(queue)
         rows = self.connection.execute(
-            "SELECT r.queue_id,i.state FROM graph_epoch_receipts r "
+            "SELECT r.queue_id,i.state,i.capture_id,i.epoch_id FROM graph_epoch_receipts r "
             "JOIN graph_epoch_inputs i ON i.token=r.token WHERE i.state IN ('done','failed')"
         ).fetchall()
-        for queue_id, state in rows:
-            (queue.ack_failed if state == "failed" else queue.ack)(id=queue_id)
+        for queue_id, state, capture_id, epoch_id in rows:
+            if state == "failed" and isinstance(queue, ScopedAckQueue):
+                failure = self.connection.execute(
+                    "SELECT stage,error FROM graph_epoch_failures WHERE epoch_id=? AND capture_id=?",
+                    (epoch_id, capture_id),
+                ).fetchone()
+                queue.ack_failed(
+                    id=queue_id, stage=f"epoch={epoch_id} capture={capture_id}",
+                    error=RuntimeError(f"{failure[0]}: {failure[1]}" if failure else "Graph epoch failed"),
+                )
+            else:
+                (queue.ack_failed if state == "failed" else queue.ack)(id=queue_id)
             with self.connection:
                 self.connection.execute("DELETE FROM graph_epoch_receipts WHERE queue_id=?", (queue_id,))
 
     def available(self):
+        if self.inventory_pipeline.available():
+            return True
         active = self.connection.execute(
             "SELECT min(next_attempt) FROM graph_epochs WHERE phase NOT IN ('done','failed')"
         ).fetchone()[0]
@@ -242,6 +266,8 @@ class Epochs:
                 logger.warning("Graph epoch checkpoint cleanup deferred: %s", old, exc_info=True)
 
     def step(self):
+        if self.inventory_pipeline.step():
+            return
         self.expansion_turn = not self.expansion_turn
         if (
             self.expansion_turn
@@ -325,6 +351,13 @@ class Epochs:
                         self.connection.execute("DELETE FROM graph_pinned_source_maps WHERE epoch_id=?", (epoch,))
                         self.connection.execute("DELETE FROM graph_source_map_reads WHERE epoch_id=?", (epoch,))
                     self.artifacts.delete(path)
+        except ArchivePending:
+            with self.connection:
+                self.connection.execute(
+                    "UPDATE graph_epoch_activity SET capture_id=NULL,stage=NULL,started_at=NULL,"
+                    "last_progress_at=? WHERE id=1", (time.time(),)
+                )
+            logger.info("Graph epoch archive pending epoch=%s capture=%s", epoch, job[0])
         except Exception as error:
             with self.connection:
                 self.connection.execute(
@@ -449,6 +482,13 @@ class Epochs:
         self.artifacts.status(capture, "failed", str(error))
 
     def run_job(self, epoch, artifacts, capture_id, stage, checkpoint):
+        failure = self.connection.execute(
+            "SELECT error FROM graph_inventory_generations WHERE capture_id=? AND state='failed' "
+            "AND json_extract(metadata,'$.analyzer_version')=? LIMIT 1",
+            (capture_id, ANALYZER_VERSION),
+        ).fetchone()
+        if failure:
+            raise ValueError(f"Inventory publication failed: {failure[0]}")
         if stage == "references":
             path = artifacts.connection.execute("SELECT path FROM captures WHERE id=?", (capture_id,)).fetchone()[0]
             event = artifacts.read(path)
@@ -568,6 +608,12 @@ class Epochs:
                         "WHERE capture_id=? AND source_path=?",
                         (capture_id, capture_unit_path(projection.event)),
                     )
+                unit = self.connection.execute(
+                    "SELECT id FROM graph_manifest_units WHERE capture_id=? AND source_path=?",
+                    (capture_id, capture_unit_path(projection.event)),
+                ).fetchone()
+                if unit:
+                    self.artifacts.manifest.set_status(unit[0], materialization="complete")
                 self.count(epoch, "structural_activations" if activated else "noops")
                 self.save_job(epoch, capture_id, "planning", state)
             elif stage == "planning":

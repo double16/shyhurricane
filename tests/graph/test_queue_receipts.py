@@ -74,6 +74,9 @@ def test_payload_only_queue_adapter_and_no_receipts():
 def test_worker_marks_real_queue_rows_only_after_epoch_outcome(
     graph_paths, event, monkeypatch, script, stage, failure
 ):
+    inventory = MagicMock()
+    inventory.step.return_value = inventory.available.return_value = False
+    monkeypatch.setattr(epochs, "InventoryPipeline", lambda *args: inventory)
     capture = event(url="https://example.com/app.js" if script else "https://example.com/",
                     body="const x=1;" if script else "page",
                     mime="text/javascript" if script else "text/html")

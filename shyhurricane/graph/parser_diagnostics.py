@@ -22,6 +22,7 @@ def stage(name):
         if path:
             with Path(path).open("a") as stream:
                 stream.write(json.dumps({"stage": name, "state": state,
+                                         "timestamp": time.time(),
                                          "seconds": round(time.monotonic() - started, 3)}) + "\n")
 
     report("started")
@@ -39,3 +40,11 @@ def measured(name):
                 return function(*args, **kwargs)
         return wrapped
     return decorate
+
+
+def report_batch(values):
+    """Publish bounded batch measurements through the supervised child channel."""
+    path = os.environ.get("_SHYHURRICANE_PARSE_DIAGNOSTICS")
+    if path:
+        with Path(path).open("a") as stream:
+            stream.write(json.dumps({"stage": "archive-batch", "timestamp": time.time(), **values}) + "\n")

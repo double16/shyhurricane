@@ -96,12 +96,14 @@ class Neo4jPropertyWarningFilter(logging.Filter):
         if record.levelno != logging.WARNING:
             return True
         message = record.getMessage()
-        if "gql_status='01N52'" not in message:
+        if not any(code in message for code in ("gql_status='01N52'", "gql_status='01N51'")):
             return True
-        match = re.search(r"The property `([^`]+)` does not exist in database", message)
+        match = re.search(r"The (?:property|relationship type) `([^`]+)` does not exist in database", message)
         if match is None:
             return True
-        property_name = match[1]
+        property_name = match[0]
+        record.msg = property_name
+        record.args = ()
         with self.lock:
             if property_name in self.seen:
                 return False
@@ -141,10 +143,12 @@ def limit_http_client_logging() -> None:
 def configure_file_logging(
     filename: str | None, console_enabled: bool = True, *,
     max_bytes: int | None = None, backup_count: int | None = None,
+    debug: bool | None = None,
 ) -> None:
     """Append diagnostics while limiting noisy driver and HTTP client logs to warnings.
 
     Workers inherit the destination and rotation settings and create their own handlers.
+    INFO is the default; debug=None inherits the parent's internal debug selection.
     Files are opened before changing logging state so invalid destinations fail cleanly.
     """
     if not filename:
@@ -152,6 +156,8 @@ def configure_file_logging(
         limit_neo4j_logging()
         limit_qdrant_tracebacks()
         return
+    debug = os.environ.get("_SHYHURRICANE_DEBUG_LOGGING") == "1" if debug is None else debug
+    level = logging.DEBUG if debug else logging.INFO
     max_bytes = log_max_bytes(os.environ.get("LOG_MAX_BYTES", DEFAULT_LOG_MAX_BYTES) if max_bytes is None else max_bytes)
     backup_count = log_backup_count(
         os.environ.get("LOG_BACKUP_COUNT", DEFAULT_LOG_BACKUP_COUNT) if backup_count is None else backup_count
@@ -162,7 +168,7 @@ def configure_file_logging(
         str(path), mode="a", encoding="utf-8", maxBytes=max_bytes, backupCount=backup_count, use_gzip=False,
     )
     handler.verify_destination()
-    handler.setLevel(logging.DEBUG)
+    handler.setLevel(level)
     handler.setFormatter(
         logging.Formatter("%(asctime)s %(levelname)s %(name)s [%(processName)s:%(process)d] %(message)s")
     )
@@ -180,11 +186,11 @@ def configure_file_logging(
         console.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
         root.addHandler(console)
     root.addHandler(handler)
-    root.setLevel(logging.DEBUG)
+    root.setLevel(level)
     logging.disable(logging.NOTSET)
     loggers = [root, *[value for value in root.manager.loggerDict.values() if isinstance(value, logging.Logger)]]
     for logger in loggers:
-        logger.setLevel(logging.DEBUG)
+        logger.setLevel(level)
         logger.disabled = False
         logger.propagate = True
         for existing in logger.handlers:
@@ -195,5 +201,6 @@ def configure_file_logging(
     limit_qdrant_tracebacks()
     set_console_logging_enabled(console_enabled)
     os.environ["LOG_FILE"] = str(path)
+    os.environ["_SHYHURRICANE_DEBUG_LOGGING"] = "1" if debug else "0"
     os.environ["LOG_MAX_BYTES"] = str(max_bytes)
     os.environ["LOG_BACKUP_COUNT"] = str(backup_count)

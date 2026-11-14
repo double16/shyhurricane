@@ -33,6 +33,10 @@ def runtime(graph_paths, monkeypatch):
 
     monkeypatch.setattr(epochs.GraphPublisher, "publish", lambda self, p: publish("structural", p))
     monkeypatch.setattr(epochs.LinkPublisher, "publish", lambda self, p: publish("links", p))
+    inventory = MagicMock()
+    inventory.step.return_value = False
+    inventory.available.return_value = False
+    monkeypatch.setattr(epochs, "InventoryPipeline", lambda *args: inventory)
     engine = Epochs(artifacts, store)
     yield engine, artifacts, store, writes
     engine.close()
@@ -206,6 +210,47 @@ def test_legacy_work_and_unknown_checkpoint_versions_fail_before_publication(gra
     artifacts.close()
 
 
+@pytest.mark.parametrize("phase", ["done", "failed"])
+def test_finished_epochs_preserve_older_analyzer_history_and_accept_new_work(runtime, event, phase):
+    engine, artifacts, store, _ = runtime
+    engine.accept(artifacts.register(event(url="https://example.com/old")), 1)
+    drain(engine)
+    with artifacts.connection:
+        artifacts.connection.execute(
+            "UPDATE graph_epochs SET analyzer_version=?,phase=?", (epochs.ANALYZER_VERSION - 1, phase),
+        )
+    engine.close()
+    resumed = Epochs(artifacts, store)
+    try:
+        assert artifacts.connection.execute("SELECT analyzer_version,phase FROM graph_epochs").fetchone() == (
+            epochs.ANALYZER_VERSION - 1, phase,
+        )
+        resumed.accept(artifacts.register(event(url="https://example.com/new")), 2)
+        assert drain(resumed)["phase"] == "done"
+        assert artifacts.connection.execute(
+            "SELECT analyzer_version FROM graph_epochs ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0] == epochs.ANALYZER_VERSION
+    finally:
+        resumed.close()
+
+
+@pytest.mark.parametrize("phase", ["references", "structural", "done", "failed"])
+def test_incompatible_epochs_remain_rejected_without_rewriting_history(runtime, phase):
+    _, artifacts, store, _ = runtime
+    # A mismatched analyzer is unsafe only for unfinished work; an unknown format is always unsafe.
+    version = EPOCH_VERSION + 1 if phase in {"done", "failed"} else EPOCH_VERSION
+    with artifacts.connection:
+        artifacts.connection.execute(
+            "INSERT INTO graph_epochs(version,analyzer_version,phase,snapshot,created_at) VALUES (?,?,?,'old',0)",
+            (version, epochs.ANALYZER_VERSION - 1, phase),
+        )
+    with pytest.raises(ValueError, match="Unsupported"):
+        Epochs(artifacts, store)
+    assert artifacts.connection.execute("SELECT version,analyzer_version,phase FROM graph_epochs").fetchone() == (
+        version, epochs.ANALYZER_VERSION - 1, phase,
+    )
+
+
 def test_empty_status_legacy_delivery_and_corrupt_checkpoint(runtime, event):
     engine, artifacts, _, _ = runtime
     assert epoch_status(engine.connection) is None
@@ -225,6 +270,9 @@ def test_empty_status_legacy_delivery_and_corrupt_checkpoint(runtime, event):
 
 
 def test_worker_consumes_raw_receipts_and_closes_resources(graph_paths, event, monkeypatch):
+    inventory = MagicMock()
+    inventory.step.return_value = inventory.available.return_value = False
+    monkeypatch.setattr(epochs, "InventoryPipeline", lambda *args: inventory)
     queue = get_persistent_queue("db", "graph_queue", auto_resume=False)
     queue.put(event())
     store = MagicMock()
@@ -732,3 +780,26 @@ def test_failed_membership_commit_preserves_jobs_ownership_and_open_snapshot(run
     ).fetchone() is None
     assert engine.expand_membership(epoch)
     assert drain(engine)["phase"] == "done"
+
+
+def test_archive_yield_keeps_epoch_and_receipt_pending(runtime, event, monkeypatch):
+    from shyhurricane.graph.archive_checkpoint import ArchivePending
+
+    engine, artifacts, _, _ = runtime
+    capture = artifacts.register(event())
+    engine.accept(capture, 1)
+    engine.start()
+    original = engine.run_job
+    monkeypatch.setattr(engine, "run_job", MagicMock(side_effect=ArchivePending()))
+    engine.step()
+    status = epoch_status(engine.connection)
+    assert status["failed"] == status["blocked"] == status["retries"] == 0
+    assert status["current_job"] is None
+    queue = MagicMock()
+    engine.settle(queue)
+    queue.ack.assert_not_called()
+    queue.ack_failed.assert_not_called()
+    monkeypatch.setattr(engine, "run_job", original)
+    assert drain(engine)["phase"] == "done"
+    engine.settle(queue)
+    queue.ack.assert_called_once_with(id=1)

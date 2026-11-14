@@ -4,18 +4,21 @@ import sqlite3
 from collections import deque
 
 from shyhurricane.graph.artifacts import ArtifactStore
+from shyhurricane.graph.batch_timing import Connection
 from shyhurricane.graph.blob_store import BlobStore, owner_triggers, validate
 from shyhurricane.graph.manifest import ManifestStore
 from shyhurricane.graph.model import identity
+from shyhurricane.graph.storage_tuning import configure
 
 
 class SnapshotArtifacts(ArtifactStore):
     def __init__(self, root, path):
         self.root = root
-        self.connection = sqlite3.connect(root / "artifacts.sqlite", timeout=30)
+        self.connection = sqlite3.connect(root / "artifacts.sqlite", timeout=30, factory=Connection)
         self.budget = None
         self.snapshot_reference = path
         try:
+            configure(self.connection)
             validate(self.connection)
             self.blobs = BlobStore(self.connection)
             state = self.read(path)
@@ -25,7 +28,7 @@ class SnapshotArtifacts(ArtifactStore):
         self.reference_epoch = state["epoch"]
         self.map_reads = set()
         self.map_owner = None
-        self.manifest = ManifestStore(self.connection, self.root)
+        self.manifest = ManifestStore(self.connection, self.root, epoch=self.reference_epoch)
         self.connection.execute(
             "CREATE TABLE IF NOT EXISTS graph_pinned_source_maps (epoch_id INTEGER,id TEXT,content TEXT,"
             "PRIMARY KEY(epoch_id,id))"

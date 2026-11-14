@@ -102,6 +102,11 @@ def extract(
         if javascript_runner is run_javascript
         else javascript_runner
     )
+    if artifacts is not None:
+        artifacts.manifest.build_key = identity(
+            "inventory-analysis", event["id"], document_contexts, markup_offset, markup_limit,
+            event.get("library_analysis"), record_discovery,
+        )
     graph = Projection(event)
     graph.library_analysis = mode
     data = event["data"]
@@ -487,12 +492,14 @@ def extract(
                     reference(structured["start_url"], "NAVIGATES_TO", "manifest.start_url")
         except (ValueError, AttributeError, TypeError):
             graph.gaps.append("Malformed structured response")
+    analysis_keys = []
     for filename, source in scripts:
         started = time.monotonic()
         logger.debug("Graph capture %s JavaScript analysis starting", event["id"])
         try:
+            analysis_keys.append(identity("js-ir", ANALYZER_VERSION, mode, filename, source))
             result = (
-                artifacts.cached(
+                artifacts.archive_analysis(
                     identity("js-ir", ANALYZER_VERSION, mode, filename, source), lambda: runner(source, filename)
                 )
                 if artifacts
@@ -551,6 +558,9 @@ def extract(
     if artifacts and record_discovery:
         artifacts.references(event["id"], refs)
         artifacts.manifest.archive(graph, artifacts.write)
+    if artifacts:
+        for key in analysis_keys:
+            artifacts.release_archive_analysis(key)
     return graph
 
 

@@ -1,4 +1,3 @@
-from shyhurricane.graph.budget import summarize_reads
 """Bounded, deterministic semantic queries; no user-supplied Cypher."""
 
 import json
@@ -11,7 +10,7 @@ from urllib.parse import urlsplit
 
 from neo4j.exceptions import Neo4jError
 
-from shyhurricane.graph.budget import QueryBudget
+from shyhurricane.graph.budget import QueryBudget, summarize_reads
 from shyhurricane.graph.config import graph_timeouts
 from shyhurricane.graph.discovery import INTERPRETATION, ResourceDiscovery, in_context, present
 from shyhurricane.graph.model import FLOW_KINDS, JOURNEY_KINDS, identity, optional_filter, web_url
@@ -56,6 +55,21 @@ class GraphQuery:
         self.budget = budget or QueryBudget()
         self.cursor_store = None
         self.artifacts = artifacts
+        if artifacts is not None:
+            self.attach_artifacts(artifacts)
+        self.path_checkpoint = None
+
+    def attach_artifacts(self, artifacts):
+        from shyhurricane.graph.inventory_reader import InventoryReader
+
+        self.artifacts = artifacts
+        rows = self.read("MATCH (s:GraphState {id:'inventory_dataset'}) RETURN s.value AS id")
+        local = artifacts.connection.execute("SELECT id FROM graph_dataset").fetchone()[0]
+        if rows and rows[0]["id"] != local:
+            raise ValueError("Graph and artifact stores belong to different assessments")
+        artifacts.manifest.reader = InventoryReader(
+            self.read, artifacts.manifest.shards, check=self.budget.check, request_id=self.budget.request_id
+        )
 
     def read(self, statement, **parameters):
         return self.budget.read(self.store, statement, **parameters)
@@ -715,6 +729,18 @@ class GraphQuery:
                 for gap in metadata["analysis_gaps"]
             ]
         reader.finish(len(result))
+        if self.path_checkpoint is not None and (pending or not seeds_complete):
+            self.path_checkpoint({
+                "revision": reader.parameters["revision"], "nodes": nodes,
+                "storage": {key: sorted(values) for key, values in reader.storage.items()},
+                "resolved": sorted(reader.resolved), "reads": reader.read_cache,
+                "seeds_complete": seeds_complete, "memberships": reader.memberships,
+                "selected_memberships": sorted(reader.selected_memberships),
+                "association_edges": reader.association_edges, "associated": sorted(reader.associated),
+                "analysis_gaps": metadata["analysis_gaps"], "analysis_summaries": metadata["analysis_summaries"],
+                "starts": starts, "targets": sorted(targets), "pending": list(pending),
+                "reached": sorted(reached, key=str), "reported": sorted(reported),
+            }, {**metadata, "results": result})
         metadata_started = time.monotonic()
         if self.artifacts is not None:
             try:

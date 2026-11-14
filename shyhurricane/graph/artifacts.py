@@ -13,11 +13,13 @@ from contextlib import contextmanager, nullcontext
 from urllib.parse import unquote
 
 from shyhurricane.data_paths import persistent_queue_path
+from shyhurricane.graph.batch_timing import Connection
 from shyhurricane.graph.blob_store import BlobStore, cache_budget, initialize, owner_triggers, validate
 from shyhurricane.graph.cache_leases import cache_lease
 from shyhurricane.graph.manifest import ManifestStore
 from shyhurricane.graph.model import MAX_BYTES, capture_unit_path, identity
 from shyhurricane.graph.parser_diagnostics import measured
+from shyhurricane.graph.storage_tuning import configure
 from shyhurricane.graph.svg import is_svg
 
 logger = logging.getLogger(__name__)
@@ -45,8 +47,9 @@ class ArtifactStore:
         database = self.root / "artifacts.sqlite"
         if not database.exists() and next(self.root.glob("*.json"), None) is not None:
             raise ValueError("Unsupported graph storage version; use a fresh assessment directory")
-        self.connection = sqlite3.connect(database, timeout=30)
+        self.connection = sqlite3.connect(database, timeout=30, factory=Connection)
         try:
+            configure(self.connection)
             with self.lock("schema"):
                 initialize(self.connection)
         except BaseException:
@@ -78,6 +81,9 @@ class ArtifactStore:
         )
         self.reference_epoch = 0
         self.manifest = ManifestStore(self.connection, self.root)
+        from shyhurricane.graph.expansion_jobs import initialize_jobs
+
+        initialize_jobs(self.connection)
         for table in ("captures", "bodies", "graph_retained_maps"):
             owner_triggers(self.connection, table, "path")
 
@@ -93,6 +99,9 @@ class ArtifactStore:
     def read(self, reference, *, limit=None):
         if self.budget is not None:
             self.budget.check()
+        if isinstance(reference, str) and reference.startswith("s:"):
+            records = self.manifest.shards.read(reference, **({"limit": limit} if limit is not None else {}))
+            return records[0] if len(records) == 1 else records
         value = self.blobs.read(reference, **({"limit": limit} if limit is not None else {}))
         if self.budget is not None:
             self.budget.check()
@@ -103,6 +112,7 @@ class ArtifactStore:
             self.blobs.delete(reference)
 
     def close(self):
+        self.manifest.shards.close()
         self.connection.close()
 
     @contextmanager
@@ -135,13 +145,30 @@ class ArtifactStore:
                 self.blobs.put(reference, value, cache=True)
             return value
 
+    def archive_analysis(self, key, factory):
+        """Pin analysis across archive yields, independently of optional cache eviction."""
+        row = self.connection.execute(
+            "SELECT artifact FROM graph_archive_inputs WHERE id=?", (key,)
+        ).fetchone()
+        if row:
+            return self.read(row[0])
+        value = self.cached(key, factory)
+        with self.connection:
+            ref = self.write(key, value)
+            self.connection.execute("INSERT OR IGNORE INTO graph_archive_inputs VALUES (?,?)", (key, ref))
+        return value
+
+    def release_archive_analysis(self, key):
+        with self.connection:
+            self.connection.execute("DELETE FROM graph_archive_inputs WHERE id=?", (key,))
+
     def register(self, event: dict):
         with self.lock(event["id"]):
             existing = self.connection.execute("SELECT path FROM captures WHERE id=?", (event["id"],)).fetchone()
             if existing:
                 return self.read(existing[0])
-            path = self.write(event["id"], event)
-            with self.connection:
+            with self.manifest.batch(atomic=True):
+                path = self.blobs.put(event["id"], event, capture=True)
                 self.connection.execute(
                     "INSERT OR IGNORE INTO captures(id,url,stamp,path) VALUES (?,?,?,?)",
                     (event["id"], event["data"]["url"], event["observed_at"], path),
@@ -152,12 +179,16 @@ class ArtifactStore:
                 self.connection.execute(
                     "INSERT OR IGNORE INTO bodies VALUES (?,?,?)", (event["data"]["url"], digest, path)
                 )
-            unit = self.manifest.unit(event["id"], capture_unit_path(event))
-            self.manifest.fact(unit, event["id"], "resource", {
-                "id": identity("resource", f"{event['data']['method'].upper()} {event['data']['url']}"),
-                "url": event["data"]["url"], "method": event["data"]["method"].upper(),
-                "capture_status": "captured",
-            })
+                unit = self.manifest.unit(event["id"], capture_unit_path(event))
+                self.manifest.fact(unit, event["id"], "resource", {
+                    "id": identity("resource", f"{event['data']['method'].upper()} {event['data']['url']}"),
+                    "url": event["data"]["url"], "method": event["data"]["method"].upper(),
+                    "capture_status": "captured",
+                })
+                self.connection.execute(
+                    "UPDATE graph_inventory_generations SET metadata=json_set(metadata,'$.sealed',1) WHERE id=?",
+                    (self.manifest.generation(unit),),
+                )
             return event
 
     def latest(self, url: str, *, as_of=None) -> dict | None:

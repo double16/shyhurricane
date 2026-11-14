@@ -25,6 +25,7 @@ def test_stage_records_and_deadline(tmp_path, monkeypatch):
     records = [json.loads(line) for line in path.read_text().splitlines()]
     assert [row["state"] for row in records] == ["started", "finished"]
     assert all(row["stage"] == "example" for row in records)
+    assert all(row["timestamp"] > 0 for row in records)
 
 
 @pytest.mark.parametrize("outcome", ["success", "empty", "failed", "timeout"])

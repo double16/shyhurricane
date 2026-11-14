@@ -132,7 +132,7 @@ with an evidenced, capture-compatible flow through a finding operation to a sink
 `ui_origins` identifies the element, capture, location, evidence IDs, and witness node IDs.
 Library code along the path does not disqualify it. Contextual hotspots, broad hypotheses,
 and summarized paths receive no bonus. UI origin does not prove attacker control.
-Scoring version 4 and correlation policy 6 recompute existing correlations.
+Scoring version 4 and correlation policy 7 recompute existing correlations.
 
 Resolved `addEventListener` callbacks and inline HTML handlers support input, change, submit, click,
 keydown, and keyup events. The flow must use a value from the element or event payload; registration
@@ -164,15 +164,34 @@ its processing queue is acknowledged. The worker checks publication revisions an
 findings in bounded jobs, coalescing graph changes. Reconciliation reads at most 100 Qdrant records per
 slice, without vectors or Markdown, checkpoints its cursor, and repeats every 60 seconds.
 
-Each finding job shares a pinned graph revision across focused queries and uses the graph's existing
-120-second budget and traversal limits. It retains at most 100 witnesses per relation, considers at most
+Each finding job shares a pinned graph revision across focused queries. Work runs in 30-second
+slices with a five-second checkpoint reserve and individual reads capped at five seconds.
+Endpoint anchors use indexed resource selection without expanding summaries or script contexts.
+The worker retains at most 100 witnesses per relation, considers at most
 20 resource methods, 10 code operations, and 100 neighboring findings, and reports reached limits.
 Witnesses retain at most three consuming-context examples per node, prioritizing the affected URL,
 without copying unbounded shared-script context lists. Finding jobs atomically publish individual
 results. Separate durable jobs derive chains and rebuild hotspots without repeating graph analysis. Each job uses a generation guard so an older completion
 cannot acknowledge newer work. Derived publications also validate contributing result generations.
-Interrupted jobs restart at a fresh graph revision; incomplete work never overwrites a successful materialization. Successful
-bounded graph queries may publish partial witnesses with explicit gaps.
+Completed operations and successful database pages are checkpointed as bounded JSON. Interrupted
+selection stages reconstruct their state from these pages without repeating completed database reads;
+path searches also retain their frontier and collected witnesses. Each slice yields to other ready jobs.
+Time exhaustion defers the finding; only completion of every configured stage publishes a replacement.
+Existing depth, entity, and witness limits still apply and are reported as coverage gaps.
+Incomplete work never overwrites a successful materialization.
+
+Checkpoints are guarded by finding metadata, job generation, policy, and graph revision. A change
+invalidates the previous checkpoint. Revision pins renew for one hour on each slice; after a longer
+interruption, work restarts safely rather than mixing graph generations. Checkpoint storage is capped
+at 64 MiB per finding and 256 MiB per assessment. Only one correlation retains checkpoints at a
+time; derived work remains eligible between slices. Recovery retains the valid checkpoint with the
+most recent actual progress (finding ID breaks ties), discarding excess partial work for recomputation.
+Completed results remain intact. Completed operations and saved path frontiers atomically replace
+redundant cached reads. A finding exceeding capacity fails visibly as `CheckpointCapacityError`,
+releases its checkpoint, and can be retried manually. It never publishes unfinished analysis.
+`graph.investigation.checkpoint_storage` reports usage, limits, active finding, waiting admissions,
+and capacity failures. Byte counters track serialized payload sizes transactionally, rather than
+physical SQLite allocation. Scheduling uses indexed per-kind seeks and direct admitted-job lookup. Schema version 6 requires fresh investigation storage; older schemas are rejected without modification.
 
 The worker runs independently of model loading and supports low-power mode. It pauses while dependency
 health is unavailable and stops claiming work at shutdown. Transient failures retry with bounded backoff;
@@ -185,6 +204,11 @@ and stale counts, observed graph revision, policy version, last successful refre
 worker errors. Stale counts measure findings behind the last observed publication revision; they are
 not elapsed-time estimates. Query `status` is scoped. Check both freshness and analysis gaps before
 using a score. Empty or complete saved pages never establish assessment completeness or safety.
+
+`graph.investigation.refresh_progress` lists up to 100 checkpointed findings with their stage,
+checkpoint time, and last actual progress time. CPU use or repeated query attempts alone do not
+indicate progress; compare these timestamps with completed counts and successful refreshes.
+`graph.investigation.deferred` counts pending jobs currently backing off after unsuccessful attempts.
 
 ### Scheduling and bounded reads
 

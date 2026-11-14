@@ -8,6 +8,7 @@ from shyhurricane.finding_metadata import categories
 from shyhurricane.graph.budget import QueryBudget
 from shyhurricane.graph.model import identity
 from shyhurricane.graph.query import GraphQuery
+from shyhurricane.investigation.checkpoints import CheckpointQuery
 from shyhurricane.investigation.ranking import score
 from shyhurricane.investigation.storage import POLICY_VERSION
 from shyhurricane.investigation.targets import target_coordinates
@@ -19,6 +20,20 @@ class RevisionQuery(GraphQuery):
     def __init__(self, store, revision, budget):
         super().__init__(store, budget=budget)
         self.revision = revision
+
+    def endpoints(self, scope, *, url=None, method=None, detail="summary"):
+        """Resolve anchors without summary context expansion or relationship hydration."""
+        from shyhurricane.graph.model import web_url
+        from shyhurricane.graph.traversal import TraversalSnapshot
+
+        reader = TraversalSnapshot(self, scope)
+        if not reader.indexed():
+            raise TimeoutError("Investigation requires resource lookup indexes")
+        reader.candidates(scope, kinds=["resource"], url=web_url(url, fragment=True) if url else None, method=method)
+        return {**reader.metadata, "results": [
+            {key: node[key] for key in ("id", "url", "method") if key in node}
+            for node in sorted(reader.nodes.values(), key=lambda node: node["id"])[:1000]
+        ]}
 
     def location_elements(self, scope, url, location):
         """Filter coordinates before the 1,000-node hydration bound at one revision."""
@@ -231,7 +246,7 @@ def correlate(job, query, graph_revision, *, verify_hash=lambda node, digest: Fa
         candidate["anchor"] = "method"
     elif len(candidate["affected_methods"]) > 1:
         gaps.add("Affected method is unknown; multiple resource methods match")
-    if resources and metadata.get("code_location") and isinstance(query, RevisionQuery):
+    if resources and metadata.get("code_location") and isinstance(query, (RevisionQuery, CheckpointQuery)):
         elements = collect(query.location_elements(scope, url, metadata["code_location"]))
     else:
         elements = collect(query.elements(scope, url=url, detail="full")) if resources else []

@@ -89,6 +89,7 @@ def test_invalid_locations(location):
 def test_driver_read_schema_and_publication_handoff(monkeypatch, event):
     driver = MagicMock()
     session = driver.session.return_value.__enter__.return_value
+    session.run.return_value.single.return_value = None
     transaction = MagicMock()
     transaction.run.return_value = [{"value": 1}]
     session.execute_read.side_effect = lambda action: action(transaction)

@@ -3,8 +3,10 @@ import atexit
 import logging
 import multiprocessing
 import os
+import sqlite3
 import subprocess
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from multiprocessing import Queue
 from typing import TYPE_CHECKING, Dict, List, Optional
@@ -95,8 +97,22 @@ class ServerContext:
             from shyhurricane.data_paths import persistent_queue_path
 
             self._graph_expansion_writer = AsyncIngestWriter(str(persistent_queue_path(self.db, "graph_queue")))
-        async with asyncio.timeout(budget.remaining()):
-            await self._graph_expansion_writer.put(item, budget)
+        from shyhurricane.graph.expansion_request import reserve
+
+        reservation = asyncio.create_task(asyncio.to_thread(reserve, self.db, item, budget))
+        try:
+            await asyncio.shield(reservation)
+        except asyncio.CancelledError:
+            budget.cancel()
+            with suppress(Exception):
+                async with asyncio.timeout(5):
+                    await asyncio.shield(reservation)
+            raise
+        try:
+            async with asyncio.timeout(budget.remaining()):
+                await self._graph_expansion_writer.put(item, budget)
+        except (OSError, sqlite3.Error, TimeoutError):
+            logger.warning("Expansion accepted durably; queue wakeup will be recovered by idle polling", exc_info=True)
 
     def set_low_power(self, enabled: bool) -> None:
         self.low_power = enabled

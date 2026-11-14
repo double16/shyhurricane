@@ -15,6 +15,9 @@ from shyhurricane.persistent_queue import get_persistent_queue
 @pytest.fixture(autouse=True)
 def rebuild_paths(graph_paths, monkeypatch):
     monkeypatch.setattr(rebuild, "persistent_queue_path", lambda db, name: graph_paths / name)
+    inventory = MagicMock()
+    inventory.step.return_value = inventory.available.return_value = False
+    monkeypatch.setattr(epochs, "InventoryPipeline", lambda *args: inventory)
 
 
 def test_rebuild_dry_run_does_not_create_state_and_validates_scope(graph_paths, event):

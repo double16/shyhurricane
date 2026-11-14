@@ -223,7 +223,10 @@ Explicit scope takes precedence. Opaque IDs require explicit scope, and `end` ne
 For example, `find_application_endpoints(url="https://app.example.com:8443/api/items")` uses
 `app.example.com:8443` scope while retaining the exact URL filter.
 
-Discovery inventories and full IR are retained separately from bounded Neo4j summaries. Results report
+Neo4j discovery inventories and retained full IR are separate from bounded traversal summaries.
+Small compressed payloads stay in SQLite; larger payloads share packed files to bound filesystem
+entry counts. This storage redesign requires fresh SQLite and Neo4j graph stores; existing data
+is not migrated. Results report
 discovery/flow coverage and deferred analysis units. Use `continue_application_graph_query` for
 exploration continuations and `expand_application_graph_analysis` for offline detail expansion.
 
@@ -312,7 +315,8 @@ Use Qdrant 1.17 or newer and fresh collections for the tuned payload index setti
 including missing indexes repaired at startup, use the same tuning policy.
 
 Diagnostic logs default to `<data-dir>/logs/shyhurricane.log`. Override the destination with
-`--log-file` or `LOG_FILE`. Logs rotate at 10 MiB and retain five numbered backups by default.
+`--log-file` or `LOG_FILE`. Files record INFO and higher by default; pass `--debug` to include
+DEBUG diagnostics from the server and workers. Logs rotate at 10 MiB and retain five numbered backups by default.
 Use `--log-max-bytes`/`LOG_MAX_BYTES` and `--log-backup-count`/`LOG_BACKUP_COUNT` to configure
 rotation; a byte limit of `0` disables it.
 

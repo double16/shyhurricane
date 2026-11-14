@@ -711,9 +711,11 @@ def test_manifest_replay_reuses_durable_payload_and_adds_contexts(graph_paths, m
     monkeypatch.setattr(manifest.blobs, "put", lambda *args, **kwargs: calls.append(args) or put(*args, **kwargs))
     assert manifest.fact("unit", "capture", "symbol", data, contexts=["context"]) == key
     assert not calls
-    assert artifacts.connection.execute("SELECT count(*) FROM graph_fact_contexts").fetchone()[0] == 1
+    refs = artifacts.connection.execute("SELECT shard FROM graph_inventory_outbox ORDER BY rowid").fetchall()
+    records = [row for (ref,) in refs for row in manifest.shards.read(ref)]
+    assert records[-1]["_context_ids"] == ["context"]
     assert manifest.fact("unit", "capture", "symbol", {**data, "role": "sink"}) != key
-    assert len(calls) == 1
+    assert not calls  # Facts live in shared shards, without per-fact artifact objects.
     artifacts.close()
 
 

@@ -55,7 +55,7 @@ def test_content_deduplication_and_transactional_owners(storage, event):
     body = "<html>same response</html>" * 5000
     first = storage.register(event(body=body))
     second = storage.register(event(url="https://example.com/other", body=body))
-    digest = hashlib.sha256(body.encode()).hexdigest()
+    digest = hashlib.sha256(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
     assert storage.connection.execute("SELECT count(*) FROM graph_blobs WHERE digest=?", (digest,)).fetchone() == (1,)
     for capture in (first, second):
         assert storage.latest(capture["data"]["url"]) == capture
@@ -205,16 +205,11 @@ def test_normalized_context_versions_and_fact_payloads(storage, event):
     assert storage.connection.execute("SELECT count(*) FROM graph_context_members").fetchone() == (4,)
     for unit in units:
         storage.manifest.fact(unit, capture["id"], "field", {"name": "same", "url": context["url"]})
-    assert storage.connection.execute(
-        "SELECT count(DISTINCT data) FROM graph_facts f " "JOIN graph_terms t ON t.key=f.kind_key WHERE t.value='field'"
-    ).fetchone() == (1,)
-    plan = storage.connection.execute(
-        "EXPLAIN QUERY PLAN SELECT id FROM graph_facts WHERE url_key="
-        "(SELECT key FROM graph_terms WHERE value=?) ORDER BY id LIMIT 1000",
-        (context["url"],),
-    ).fetchall()
-    assert any("graph_manifest_url" in row[3] for row in plan)
-    assert all("SCAN graph_facts" not in row[3] for row in plan)
+    shards = storage.connection.execute("SELECT shard FROM graph_inventory_outbox").fetchall()
+    fields = [row for (ref,) in shards for row in storage.manifest.shards.read(ref) if row["kind"] == "field"]
+    assert len(fields) == 3
+    assert {row["name"] for row in fields} == {"same"}
+    assert storage.connection.execute("SELECT 1 FROM sqlite_master WHERE name='graph_facts'").fetchone() is None
 
 
 def test_storage_maintenance_statistics_and_busy_writer(storage):
@@ -389,9 +384,8 @@ def test_catalog_allocation_reduces_repeated_context_and_payload_data(storage, e
     assert compact_bytes < old_bytes * 0.7
     assert storage.connection.execute("SELECT count(*) FROM graph_context_documents").fetchone() == (10,)
     assert storage.connection.execute("SELECT count(*) FROM graph_context_members").fetchone() == (1000,)
-    assert storage.connection.execute(
-        "SELECT count(*) FROM graph_facts f JOIN graph_terms t " "ON t.key=f.kind_key WHERE t.value='field'"
-    ).fetchone() == (400,)
+    shards = storage.connection.execute("SELECT shard FROM graph_inventory_outbox").fetchall()
+    assert sum(row["kind"] == "field" for (ref,) in shards for row in storage.manifest.shards.read(ref)) == 400
 
 
 def test_fresh_store_initialization_is_safe_for_concurrent_openers(graph_paths):
@@ -434,12 +428,15 @@ def test_cached_nested_parser_does_not_hold_parent_bucket_lock(storage):
 import sqlite3
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from shyhurricane.graph.artifacts import ArtifactStore
 from shyhurricane.graph.blob_store import BlobStore
+from shyhurricane.graph.shard_store import ShardStore
 store = object.__new__(ArtifactStore)
 store.root, store.budget = Path(sys.argv[1]), None
 store.connection = sqlite3.connect(store.root / "artifacts.sqlite")
 store.blobs = BlobStore(store.connection)
+store.manifest = SimpleNamespace(shards=ShardStore(store.root, store.connection))
 assert store.cached("child-key", lambda: "value") == "value"
 store.close()
 """

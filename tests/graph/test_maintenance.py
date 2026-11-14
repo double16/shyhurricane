@@ -154,32 +154,36 @@ def test_thread_start_close_and_shutdown_deadline(monkeypatch, caplog):
     assert "shutdown deadline" in caplog.text
 
 
-def test_coverage_reconciliation_has_independent_schedule_and_retries(monkeypatch):
+def test_inventory_reclamation_has_independent_schedule_and_retries(monkeypatch):
     monkeypatch.setattr(maintenance, "GraphStore", lambda location: MagicMock())
     repair = MagicMock()
-    monkeypatch.setattr(maintenance, "CoverageRepair", lambda db: repair)
+    repair.step.return_value = False
+    monkeypatch.setattr(maintenance, "InventoryCleanup", lambda *args: repair)
     now = [0.0]
     monkeypatch.setattr(maintenance.time, "monotonic", lambda: now[0])
     worker = GraphMaintenance("location", lambda: True, artifact_db="db")
     worker.tick()
-    repair.tick.assert_called_once_with(worker.stop_event)
-    assert worker.next_attempt["coverage"] == 60
+    repair.step.assert_called_once_with(deadline=30)
+    assert worker.next_attempt["inventory"] == 60
     now[0] = 60
-    repair.tick.side_effect = RuntimeError("locked")
+    repair.step.side_effect = RuntimeError("locked")
     worker.tick()
-    assert worker.failures["coverage"] == 1
+    assert worker.failures["inventory"] == 1
     now[0] = 120
-    repair.tick.side_effect = None
+    repair.step.side_effect = None
+    repair.step.return_value = False
     worker.tick()
-    assert worker.failures["coverage"] == 0
+    assert worker.failures["inventory"] == 0
 
 
 def test_pending_storage_work_retries_promptly_without_failure_backoff(monkeypatch):
     monkeypatch.setattr(maintenance, "GraphStore", lambda location: MagicMock())
     repair = MagicMock()
+    repair.step.return_value = False
     storage = MagicMock()
+    storage.root = __import__("pathlib").Path("/tmp/test-graph")
     storage.tick.return_value = {"processed": 500, "pending": True}
-    monkeypatch.setattr(maintenance, "CoverageRepair", lambda db: repair)
+    monkeypatch.setattr(maintenance, "InventoryCleanup", lambda *args: repair)
     monkeypatch.setattr(maintenance, "StorageMaintenance", lambda db: storage)
     monkeypatch.setattr(maintenance.time, "monotonic", lambda: 0)
     worker = GraphMaintenance("location", lambda: True, artifact_db="db")
@@ -190,8 +194,9 @@ def test_pending_storage_work_retries_promptly_without_failure_backoff(monkeypat
 
 def test_storage_deferral_resets_failure_streak_and_retries(monkeypatch):
     monkeypatch.setattr(maintenance, "GraphStore", lambda location: MagicMock())
-    monkeypatch.setattr(maintenance, "CoverageRepair", lambda db: MagicMock())
+    monkeypatch.setattr(maintenance, "InventoryCleanup", lambda *args: MagicMock())
     storage = MagicMock()
+    storage.root = __import__("pathlib").Path("/tmp/test-graph")
     storage.tick.return_value = {"processed": 64, "pending": False, "deferred": True}
     monkeypatch.setattr(maintenance, "StorageMaintenance", lambda db: storage)
     monkeypatch.setattr(maintenance.time, "monotonic", lambda: 0)
@@ -210,8 +215,9 @@ def test_storage_deferral_resets_failure_streak_and_retries(monkeypatch):
 
 def test_storage_backoff_schedule_skips_early_attempts(monkeypatch):
     monkeypatch.setattr(maintenance, "GraphStore", lambda location: MagicMock())
-    monkeypatch.setattr(maintenance, "CoverageRepair", lambda db: MagicMock())
+    monkeypatch.setattr(maintenance, "InventoryCleanup", lambda *args: MagicMock())
     storage = MagicMock()
+    storage.root = __import__("pathlib").Path("/tmp/test-graph")
     storage.tick.return_value = {
         "processed": 0, "pending": True, "deferred": True, "next_attempt_seconds": 30,
     }

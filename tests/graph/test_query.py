@@ -14,6 +14,14 @@ class Store:
         self.graph = graph
 
     def read(self, statement, **parameters):
+        if "inventory_dataset" in statement:
+            return []
+        if "CREATE (p:GraphInventoryReadPin" in statement:
+            return [{"revision": 0}]
+        if "RETURN p.id AS id" in statement:
+            return [{"id": "pin"}]
+        if "GraphInventoryGeneration" in statement:
+            return []
         if "traversal:lookup-state" in statement:
             return [{"ready": False}]
         if "traversal:revision" in statement:

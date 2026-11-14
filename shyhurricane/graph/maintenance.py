@@ -6,8 +6,8 @@ import time
 
 from neo4j.exceptions import Neo4jError
 
-from shyhurricane.graph.coverage_repair import CoverageRepair
 from shyhurricane.graph.database import GraphStore
+from shyhurricane.graph.inventory_cleanup import InventoryCleanup
 from shyhurricane.graph.lookup import migrate_lookup
 from shyhurricane.graph.storage_maintenance import StorageMaintenance
 
@@ -25,11 +25,14 @@ class GraphMaintenance:
         self.thread = threading.Thread(target=self.run, name="graph-maintenance", daemon=True)
         self.failures = {"cleanup": 0, "lookup": 0}
         self.next_attempt = {"cleanup": 0.0, "lookup": 0.0}
-        self.coverage_repair = CoverageRepair(artifact_db) if artifact_db is not None else None
-        if self.coverage_repair is not None:
-            self.failures["coverage"] = 0
-            self.next_attempt["coverage"] = 0.0
         self.storage_maintenance = StorageMaintenance(artifact_db) if artifact_db is not None else None
+        self.inventory_cleanup = (
+            InventoryCleanup(self.store, self.storage_maintenance.root / "artifacts.sqlite")
+            if self.storage_maintenance is not None else None
+        )
+        if self.inventory_cleanup is not None:
+            self.failures["inventory"] = 0
+            self.next_attempt["inventory"] = 0
         if self.storage_maintenance is not None:
             self.failures["storage"] = 0
             self.next_attempt["storage"] = 0.0
@@ -64,12 +67,13 @@ class GraphMaintenance:
                         "next_attempt_seconds=60",
                         summary["selected"], summary["completed"], summary["deleted"], time.monotonic() - started,
                     )
+                elif operation == "inventory":
+                    if self.inventory_cleanup.step(deadline=deadline):
+                        delay = 1
                 elif operation == "storage":
                     result = self.storage_maintenance.tick(self.stop_event)
                     if result and (result["pending"] or result.get("deferred", False)):
                         delay = result.get("next_attempt_seconds", 1)
-                elif operation == "coverage":
-                    self.coverage_repair.tick(self.stop_event)
                 else:
                     migrated = migrate_lookup(
                         self.store, deadline, self.stop_event, batch_size=self.lookup_batch_size,
@@ -104,4 +108,6 @@ class GraphMaintenance:
                 delay = self.tick() if self.ready() else 1
                 self.stop_event.wait(delay)
         finally:
+            if self.storage_maintenance is not None:
+                self.storage_maintenance.close()
             self.store.close()
