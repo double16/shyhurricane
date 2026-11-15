@@ -67,3 +67,29 @@ def test_read_pin_protects_generation_until_remote_cleanup_confirms_release(grap
         assert not cleanup.step()
     finally:
         artifacts.close()
+
+
+@pytest.mark.parametrize("candidate_count", [0, 1, 100])
+def test_candidate_paging_rechecks_under_short_explicit_transaction(tmp_path, monkeypatch, candidate_count):
+    import sqlite3
+
+    from shyhurricane.graph import inventory_cleanup
+
+    path = tmp_path / "artifacts.sqlite"
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE graph_inventory_generations (id TEXT,state TEXT)")
+    monkeypatch.setattr(inventory_cleanup.time, "monotonic", lambda: 0)
+    store = MagicMock()
+    session = store.connect.return_value.session.return_value.__enter__.return_value
+    candidates = [{"id": str(index).zfill(3)} for index in range(candidate_count)]
+    session.run.side_effect = [MagicMock(), candidates] + ([[]] if not candidates else [])
+    tx = session.begin_transaction.return_value.__enter__.return_value
+    tx.run.return_value.single.return_value = None
+    cleanup = InventoryCleanup(store, path)
+    assert not cleanup.step(deadline=2)
+    assert cleanup.candidate_after == ("099" if candidate_count == 100 else "")
+    assert session.begin_transaction.call_count == candidate_count
+    for call in session.begin_transaction.call_args_list:
+        assert call.kwargs["timeout"] == 0.25
+    session.execute_write.assert_not_called()
+    assert tx.commit.call_count == candidate_count

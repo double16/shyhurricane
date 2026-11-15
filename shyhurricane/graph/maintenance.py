@@ -1,8 +1,10 @@
 """Independent, bounded maintenance of retired graph generations."""
 
 import logging
+import sqlite3
 import threading
 import time
+from contextlib import closing
 
 from neo4j.exceptions import Neo4jError
 
@@ -18,7 +20,7 @@ OPERATION_BUDGET_SECONDS = 30
 class GraphMaintenance:
     """One server-owned thread, driver, and retry schedule; never affects readiness."""
 
-    def __init__(self, location, ready, *, artifact_db=None):
+    def __init__(self, location, ready, *, artifact_db=None, disk_snapshot=None):
         self.store = GraphStore(location)
         self.ready = ready
         self.stop_event = threading.Event()
@@ -36,7 +38,42 @@ class GraphMaintenance:
         if self.storage_maintenance is not None:
             self.failures["storage"] = 0
             self.next_attempt["storage"] = 0.0
+        self.disk_snapshot = disk_snapshot or (lambda: {})
+        self.inventory_last_pass = None
+        self.inventory_reason = None
+        self.inventory_completed_epoch = None
         self.lookup_batch_size = 500
+
+    def inventory_schedule(self, now):
+        """Prefer idle reclamation, retaining bounded fallback and genuine pressure work."""
+        disk = self.disk_snapshot() or {}
+        pressure = disk.get("state") == "paused" and disk.get("error") is None
+        if pressure:
+            return "disk_pressure", 5
+        active = True
+        try:
+            path = self.storage_maintenance.root / "artifacts.sqlite"
+            with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=0.05)) as connection:
+                connection.execute("PRAGMA query_only=ON")
+                connection.set_progress_handler(lambda: 1, 100000)
+                completed = connection.execute(
+                    "SELECT coalesce(max(id),0) FROM graph_epochs WHERE phase='done'"
+                ).fetchone()[0]
+                changed = self.inventory_completed_epoch is not None and completed > self.inventory_completed_epoch
+                self.inventory_completed_epoch = completed
+                active = bool(connection.execute(
+                    "SELECT 1 FROM graph_epochs WHERE phase NOT IN ('done','failed') LIMIT 1"
+                ).fetchone())
+        except sqlite3.Error:
+            pass
+        else:
+            if changed:
+                return "epoch_complete", 1
+        if not active:
+            return "idle", 1
+        if self.inventory_last_pass is None or now - self.inventory_last_pass >= 1800:
+            return "fallback", 60
+        return "active_epoch", 60
 
     def start(self):
         self.thread.start()
@@ -68,8 +105,22 @@ class GraphMaintenance:
                         summary["selected"], summary["completed"], summary["deleted"], time.monotonic() - started,
                     )
                 elif operation == "inventory":
-                    if self.inventory_cleanup.step(deadline=deadline):
-                        delay = 1
+                    reason, cadence = self.inventory_schedule(started)
+                    if reason != self.inventory_reason:
+                        logger.info("Graph inventory cleanup scheduling reason=%s", reason)
+                        self.inventory_reason = reason
+                    if reason == "active_epoch":
+                        logger.debug("Graph inventory cleanup deferred reason=%s", reason)
+                    else:
+                        self.inventory_last_pass = started
+                        try:
+                            pending = self.inventory_cleanup.step(deadline=started + 2)
+                        except Neo4jError as error:
+                            if "TransactionTimedOut" not in (error.code or ""):
+                                raise
+                            logger.info("Graph inventory cleanup lock/budget deferred reason=%s", reason)
+                            pending = True
+                        delay = cadence if pending or reason == "disk_pressure" else 60
                 elif operation == "storage":
                     result = self.storage_maintenance.tick(self.stop_event)
                     if result and (result["pending"] or result.get("deferred", False)):

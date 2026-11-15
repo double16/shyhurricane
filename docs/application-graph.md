@@ -949,3 +949,27 @@ These are log records subject to the existing logging level and retention config
 no new metrics database or percentile exporter. Derive latency distributions and throughput from
 retained successful operation summaries; correlate publication IDs with existing epoch, archive,
 storage-maintenance, and WAL-checkpoint diagnostics.
+
+
+### Inventory cleanup scheduling
+
+Inventory generation cleanup prefers idle periods and completed epochs. While an epoch is active
+(including retry waits), it runs only a bounded fallback pass every 30 minutes. After restart,
+one fallback pass is permitted. Scheduling checks persisted epoch state on its normal 60-second
+cadence; other maintenance operations can add delay. Unavailable epoch state is treated as active. Idle passes continue once per second while
+work remains. A genuine low-disk pause from the existing disk guard permits passes every five
+seconds; disk measurement errors do not enable this override.
+
+Each inventory pass has a two-second operation budget and selects at most 100 candidates outside
+the publication lock. Marking a generation for deletion rechecks ownership and reader pins under
+a transaction timeout of at most 250 milliseconds. Individual deletion batches contain at most
+500 records. Candidate paging wraps to revisit protected generations. The five-minute retirement
+grace and remote cleanup confirmation before local artifact release remain in force. Driver and
+server cancellation can add overhead beyond operation deadlines.
+
+Other graph maintenance, payload segment reclamation, SQLite accounting, and passive checkpoints
+retain their independent schedules. INFO scheduling transitions and `inventory_cleanup` performance
+summaries expose policy, candidate counts, deletion counts, and operation time. Repeated active-epoch
+deferrals are DEBUG messages. These scheduling defaults are internal constants, with no new CLI or
+environment settings. Startup installs the additional generation state/ID index idempotently; no
+payload migration or database rebuild is required.

@@ -348,7 +348,7 @@ async def get_server_context() -> ServerContext:
     try:
         _server_context.graph_maintenance = GraphMaintenance(
             graph_store.location, lambda: graph_store.schema_ready and health_monitor.neo4j_healthy is True,
-            artifact_db=db,
+            artifact_db=db, disk_snapshot=health_monitor.disk_guard.snapshot,
         )
         _server_context.graph_maintenance.start()
         document_pipeline, _, stores = await build_document_pipeline(

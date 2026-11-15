@@ -63,6 +63,7 @@ def initialize(session):
         ("GraphInventoryContext", ("reverse_host",)),
         ("GraphInventoryGeneration", ("unit_id", "published_revision")),
         ("GraphInventoryGeneration", ("state", "retired_at", "id")),
+        ("GraphInventoryGeneration", ("state", "id")),
         ("GraphInventoryContext", ("generation", "capture_id")),
         ("GraphInventoryContext", ("url", "generation")),
         ("GraphInventoryContext", ("reverse_host", "generation")),
