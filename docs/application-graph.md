@@ -634,6 +634,8 @@ and policy changes are processed by a subsequent frozen epoch.
 
 Timeouts and memory failures split candidate/hydration batches. Transient Neo4j connection,
 transaction-timeout, read-only, and retryable server errors remain pending for automatic retry.
+Connection-pool acquisition timeouts also retain pending work. Graph drivers allow up to five
+seconds to acquire a connection before the normal bounded retry schedule applies.
 Epoch retries back off for 5, 30, then 120 seconds, capped at 120 seconds until recovery;
 their queue receipts remain processing without a success or failed acknowledgement.
 Terminal capture failures quarantine the affected job and block its dependent inputs; independent jobs
@@ -648,6 +650,10 @@ the publication revision. Retrieval indexing waits continue to include outstandi
 A phase-level failed epoch is terminal: its diagnostics and checkpoints remain retained, while
 unrelated waiting inputs can start a new epoch. Failed inputs require explicit redelivery; the
 failed-queue retry action submits them to a new finite epoch rather than resuming the failed one.
+When a failed prerequisite subsequently completes, idle epoch scheduling automatically submits
+retained dependency-blocked captures for real reprocessing, even without a remaining queue receipt.
+An indexed scan checks at most 100 failed records per pass and repeats after 60 seconds when caught
+up. Failure status remains until processing completes; unrelated terminal failures are not retried.
 Membership expansion commits its replacement snapshot and new jobs together, then reopens the
 snapshot before further work so parser subprocesses use the current retained reference and policies.
 A failed replacement commit leaves the prior snapshot usable. A matching explicit rebuild
@@ -924,7 +930,7 @@ URLs, captured bodies, headers, SQL parameters, and exception messages.
 | `inventory_publish` | INFO per bounded work step; idle/backoff polls are silent | Stage, generation/unit/capture IDs, batch/shard IDs, sequence, records/sec, metadata bytes, Neo4j attempt count, write versus receipt replay, reservation/write/acknowledgment/SQLite commit/activation timing |
 | `inventory_read` | INFO once per inventory page, including failed or partial reads | Request ID, returned/decoded record counts, distinct shards, actual bytes read, decoded bytes, segment-handle hits/opens, pin/query/I/O/decompression/verification/JSON timing |
 | `shard_write` | INFO once per logical shard write | Shard ID, records, decoded/stored bytes, reuse versus new storage, caller transaction flag, serialization/compression/persistence timing |
-| `artifact_write`, `artifact_read` | INFO for operations of at least 64 KiB decoded; DEBUG for smaller operations; errors at INFO | Artifact ID, byte counts, serialization/compression or payload-read/decompression/JSON timing |
+| `artifact_write`, `artifact_read` | INFO aggregates once per minute of activity per operation type; per-operation DEBUG; errors at WARNING | Aggregate operation count, bytes, total/max elapsed time and phase totals; detailed artifact IDs at DEBUG |
 | `segment_maintenance` | INFO per non-idle maintenance pass | Shards deleted, records/bytes copied, segments retired/deleted, orphan files removed, tail bytes trimmed, copy throughput, lock/lookup/GC/copy/retirement/directory-scan/commit timing |
 
 Start with the operation's `elapsed_seconds`, then compare `phase_seconds`. Delivery's `neo4j_write`

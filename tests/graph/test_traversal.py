@@ -41,6 +41,22 @@ def signatures(result):
     ]
 
 
+@pytest.mark.parametrize("level,reason,expected", [
+    ("INFO", None, False), ("DEBUG", None, True), ("WARNING", "time_limit", True),
+])
+def test_frontier_summary_level_preserves_incomplete_warnings(application, caplog, level, reason, expected):
+    graph, *_ = application
+    snapshot = TraversalSnapshot(GraphQuery(Store(graph)), "example.com")
+    if reason:
+        snapshot.metadata["truncation_reasons"].append(reason)
+    with caplog.at_level(level, logger="shyhurricane.graph.traversal"):
+        snapshot.finish(0)
+    records = [record for record in caplog.records if "Graph frontier complete" in record.getMessage()]
+    assert bool(records) is expected
+    if records:
+        assert records[0].levelname == ("WARNING" if reason else "DEBUG")
+
+
 def test_internal_path_checkpoint_resumes_frontier(application, monkeypatch):
     graph, _, source, sink, _ = application
     original = TraversalSnapshot.expand

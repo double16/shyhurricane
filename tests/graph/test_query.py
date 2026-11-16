@@ -564,7 +564,8 @@ def hydration_graph(event):
     return graph
 
 
-def test_hydration_completes_windows_in_order_and_reuses_dependencies(hydration_graph, caplog):
+@pytest.mark.parametrize("log_level", ["DEBUG", "INFO"])
+def test_hydration_completes_windows_in_order_and_reuses_dependencies(hydration_graph, caplog, log_level):
     graph = hydration_graph
     store = Store(graph)
     references = store.read("AS membership_id")
@@ -576,7 +577,7 @@ def test_hydration_completes_windows_in_order_and_reuses_dependencies(hydration_
         return list(reversed(original(statement, **parameters)))
 
     store.read = record
-    with caplog.at_level("DEBUG", logger="shyhurricane.graph.query"):
+    with caplog.at_level(log_level, logger="shyhurricane.graph.query"):
         rows, gaps, reasons = GraphQuery(store).hydrate(references)
     assert [row["relationship"]["id"] for row in rows] == [ref["membership_id"] for ref in references]
     assert not gaps and not reasons
@@ -585,8 +586,8 @@ def test_hydration_completes_windows_in_order_and_reuses_dependencies(hydration_
         assert sum(marker in query for query, _ in calls) == 1
     assert all(0 < values["timeout"] <= 30 for _, values in calls)
     assert "stage=relationships batch=" not in caplog.text
-    assert "batches=5 rows=505" in caplog.text
-    assert "selected=501 completed=501" in caplog.text
+    assert ("batches=5 rows=505" in caplog.text) == (log_level == "DEBUG")
+    assert ("selected=501 completed=501" in caplog.text) == (log_level == "DEBUG")
     assert "USING INDEX SEEK r:RELATES(id)" in calls[0][0]
     assert "WHERE r.id IN $ids" in calls[0][0]
 

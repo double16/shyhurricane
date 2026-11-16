@@ -14,6 +14,18 @@ def memory_settings(monkeypatch):
         monkeypatch.delenv(name, raising=False)
 
 
+def test_connection_acquisition_budget_and_driver_reuse(monkeypatch):
+    driver = MagicMock()
+    factory = MagicMock(return_value=driver)
+    monkeypatch.setattr(database.GraphDatabase, "driver", factory)
+    store = GraphStore("bolt://localhost:7687")
+    assert store.connect() is driver
+    assert store.connect() is driver
+    factory.assert_called_once()
+    assert factory.call_args.kwargs["connection_acquisition_timeout"] == 5
+    assert factory.call_args.kwargs["connection_timeout"] == 3
+
+
 def test_memory_defaults_overrides_and_container_reuse_warning(monkeypatch, tmp_path, caplog):
     assert database.memory_environment() == [
         "NEO4J_server_memory_heap_initial__size=1g",

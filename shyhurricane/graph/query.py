@@ -372,7 +372,7 @@ class GraphQuery:
                 if condition:
                     reasons.append(reason)
                     gaps.append(message)
-        log = logger.warning if reasons else logger.info
+        log = logger.warning if reasons else logger.debug
         log(
             "Graph hydration complete selected=%s completed=%s seconds=%.3f subdivisions=%s reasons=%s batches=%s rows=%s slowest_batch_seconds=%.3f request=%s",
             len(references),

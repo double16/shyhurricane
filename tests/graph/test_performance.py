@@ -21,6 +21,49 @@ from shyhurricane.graph.shard_store import ShardStore
 LOGGER = logging.getLogger("graph-metrics-test")
 
 
+def test_periodic_metrics_bound_info_volume_and_preserve_debug_and_errors(caplog, monkeypatch):
+    caplog.set_level(logging.INFO)
+    clock = [0.0]
+    monkeypatch.setattr(performance.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(performance.time, "perf_counter", lambda: clock[0])
+
+    @measured("busy", LOGGER, summary_interval=60)
+    def operation(fail=False):
+        count("logical_bytes", 10)
+        label(artifact_id="opaque-artifact")
+        with phase("io"):
+            if fail:
+                raise ValueError("private content")
+
+    for _ in range(1000):
+        operation()
+    assert summaries(caplog) == []
+    clock[0] = 60
+    operation()
+    result = summaries(caplog)[0]
+    assert result["aggregate"] and result["operations"] == 1001
+    assert result["counts"] == {"logical_bytes": 10010}
+    assert result["phase_seconds"] == {"io": 0}
+    assert result["window_seconds"] == 60
+    assert "opaque-artifact" not in caplog.text
+    operation()
+    assert len(summaries(caplog)) == 1
+    caplog.set_level(logging.WARNING)
+    with pytest.raises(ValueError):
+        operation(True)
+    assert caplog.records[-1].levelno == logging.WARNING
+    assert summaries(caplog)[-1]["outcome"] == "error"
+    assert "private content" not in caplog.text
+    caplog.set_level(logging.DEBUG)
+    operation()
+    assert caplog.records[-1].levelno == logging.DEBUG
+    assert summaries(caplog)[-1]["artifact_id"] == "opaque-artifact"
+    caplog.set_level(logging.INFO)
+    clock[0] = 120
+    operation()
+    assert summaries(caplog)[-1]["operations"] == 3
+
+
 def summaries(caplog, event=None):
     values = [json.loads(record.getMessage().removeprefix("Graph performance "))
               for record in caplog.records if record.getMessage().startswith("Graph performance ")]
@@ -185,7 +228,7 @@ def test_inventory_page_emits_one_summary_with_payload_splits(tmp_path, caplog):
 
 
 def test_compression_large_artifacts_and_deduplication_metrics(tmp_path, caplog):
-    caplog.set_level(logging.INFO)
+    caplog.set_level(logging.DEBUG)
     with closing(sqlite3.connect(tmp_path / "artifacts.sqlite")) as connection:
         initialize(connection)
         blobs = BlobStore(connection)

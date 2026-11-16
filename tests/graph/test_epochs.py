@@ -4,7 +4,7 @@ import sqlite3
 from unittest.mock import MagicMock
 
 import pytest
-from neo4j.exceptions import ServiceUnavailable
+from neo4j.exceptions import ConnectionAcquisitionTimeoutError, ServiceUnavailable
 
 from shyhurricane.graph import epochs, worker
 from shyhurricane.graph.artifacts import ArtifactStore
@@ -82,6 +82,27 @@ def test_failed_dependency_blocks_only_its_consumers(runtime, event):
     queue = MagicMock()
     engine.settle(queue)
     assert queue.ack_failed.call_count == 2 and queue.ack.call_count == 1
+
+
+def test_recovered_dependency_reprocesses_receiptless_failure_on_restart(runtime, event):
+    engine, artifacts, store, writes = runtime
+    dependency = artifacts.register(event(url="https://example.com/dependency.js"))
+    consumer = artifacts.register(event(url="https://example.com/consumer"))
+    # The dependency already recovered; the consumer has no queue receipt or retained epoch job.
+    artifacts.status(dependency["id"], "complete")
+    artifacts.status(consumer["id"], "failed", f"Dependency {dependency['id']} failed")
+    engine.close()
+    recovered = Epochs(artifacts, store)
+    try:
+        assert recovered.available()
+        assert drain(recovered)["phase"] == "done"
+        assert artifacts.connection.execute(
+            "SELECT status,error FROM work WHERE id=?", (consumer["id"],),
+        ).fetchone() == ("complete", "")
+        assert consumer["id"] in writes["structural"]
+        assert not recovered.available()
+    finally:
+        recovered.close()
 
 
 def test_dense_cycles_drain_with_one_publication_per_phase_and_no_replay(runtime, event):
@@ -175,12 +196,13 @@ def test_failure_is_visible_and_requires_explicit_queue_redelivery(runtime, even
     queue.ack.assert_called_once_with(id=1)
 
 
-def test_transient_retry_preserves_checkpoint_and_uses_backoff(runtime, event, monkeypatch):
+@pytest.mark.parametrize("error_type", [ServiceUnavailable, ConnectionAcquisitionTimeoutError])
+def test_transient_retry_preserves_checkpoint_and_uses_backoff(runtime, event, monkeypatch, error_type):
     engine, artifacts, _, _ = runtime
     capture = artifacts.register(event())
     engine.accept(capture, 1)
     original = epochs.GraphPublisher.publish
-    monkeypatch.setattr(epochs.GraphPublisher, "publish", MagicMock(side_effect=ServiceUnavailable("offline")))
+    monkeypatch.setattr(epochs.GraphPublisher, "publish", MagicMock(side_effect=error_type("offline")))
     status = drain(engine)
     assert status["retries"] == 1 and status["phase"] == "structural"
     assert status["next_attempt"] > epochs.time.time()

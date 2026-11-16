@@ -8,6 +8,7 @@ from uuid import uuid4
 from shyhurricane.graph.archive_checkpoint import ArchivePending
 from shyhurricane.graph.blob_store import owner_triggers
 from shyhurricane.graph.continuations import RETRY_DELAYS, SLICE_CONTEXTS, SLICE_SECONDS, Continuations
+from shyhurricane.graph.dependency_recovery import recover_dependents
 from shyhurricane.graph.epoch_catalog import SnapshotArtifacts, affected_captures
 from shyhurricane.graph.expansion import Expansions
 from shyhurricane.graph.extract import extract
@@ -73,6 +74,8 @@ class Epochs:
             "token TEXT PRIMARY KEY,capture_id TEXT NOT NULL,mode TEXT NOT NULL,"
             "epoch_id INTEGER,state TEXT NOT NULL,request_token TEXT);"
             "CREATE INDEX IF NOT EXISTS graph_epoch_input_request ON graph_epoch_inputs(request_token);"
+            "CREATE INDEX IF NOT EXISTS graph_epoch_input_capture_state ON graph_epoch_inputs(capture_id,state);"
+            "CREATE INDEX IF NOT EXISTS graph_work_status_id ON work(status,id);"
             "CREATE TABLE IF NOT EXISTS graph_epoch_receipts (queue_id INTEGER PRIMARY KEY,token TEXT NOT NULL);"
             "CREATE TABLE IF NOT EXISTS graph_epoch_jobs ("
             "epoch_id INTEGER NOT NULL,capture_id TEXT NOT NULL,stage TEXT NOT NULL,checkpoint TEXT NOT NULL,"
@@ -93,6 +96,8 @@ class Epochs:
         owner_triggers(self.connection, "graph_epochs", "snapshot", "id")
         owner_triggers(self.connection, "graph_epoch_jobs", "checkpoint")
         self.last_progress_log = 0
+        self.recovery_after = ""
+        self.next_recovery = 0
         row = self.connection.execute(
             "SELECT version,analyzer_version FROM graph_epochs WHERE version<>? OR "
             "(phase NOT IN ('done','failed') AND analyzer_version<>?) LIMIT 1",
@@ -180,6 +185,13 @@ class Epochs:
         ).fetchone()[0]
         if active is not None:
             return active <= time.time()
+        if time.monotonic() >= self.next_recovery:
+            self.recovery_after, scheduled = recover_dependents(self.connection, self.recovery_after)
+            self.next_recovery = time.monotonic() + (0 if self.recovery_after else 60)
+            if scheduled:
+                logger.info("Graph dependency recovery scheduled=%s", scheduled)
+            if self.recovery_after:
+                return True
         if self.expansions.available():
             return True
         return self.connection.execute(

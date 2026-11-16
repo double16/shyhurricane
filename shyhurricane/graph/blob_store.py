@@ -80,7 +80,7 @@ class BlobStore:
             raise ValueError("Corrupt graph artifact")
         return raw
 
-    @measured("artifact_write", logger, minimum_bytes=64 * 1024)
+    @measured("artifact_write", logger, summary_interval=60)
     def put(self, key, value, *, cache=False, capture=False):
         """Return an immutable content reference; keys identify optional cache entries only."""
         if capture:
@@ -165,7 +165,7 @@ class BlobStore:
             raise
         return (True, self.read(row[0])) if row else (False, None)
 
-    @measured("artifact_read", logger, minimum_bytes=64 * 1024)
+    @measured("artifact_read", logger, summary_interval=60)
     def read(self, ref, *, limit=MAX_DECODED_BYTES):
         with self.snapshot():
             return self._read(ref, limit=limit)

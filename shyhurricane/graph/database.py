@@ -162,7 +162,7 @@ class GraphStore:
                 auth = (os.environ.get("NEO4J_USERNAME", "neo4j"), password) if password else None
                 self.driver = GraphDatabase.driver(
                     self.uri, auth=auth, connection_timeout=3,
-                    max_transaction_retry_time=5, connection_acquisition_timeout=0.1,
+                    max_transaction_retry_time=5, connection_acquisition_timeout=5,
                 )
             return self.driver
         finally:

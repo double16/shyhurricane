@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import threading
 import time
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -110,17 +111,40 @@ def commit_timing(connection):
             elapsed("sqlite_commit", time.perf_counter() - committing)
 
 
-def measured(event, logger, *, level=logging.INFO, quiet=False, minimum_bytes=None):
+def measured(event, logger, *, level=logging.INFO, quiet=False, minimum_bytes=None, summary_interval=None):
     """Emit one summary per operation; idle polling can opt out of successful logs.
 
     Labels must be internal stage names, opaque IDs, or booleans, never request content.
     Counts describe attempted work when outcome is error; they are not durable totals.
     """
     def decorate(function):
+        totals = {}
+        totals_lock = threading.Lock()
+
+        def aggregate(state, seconds):
+            now = time.monotonic()
+            with totals_lock:
+                if not totals:
+                    totals.update(started=now, operations=0, total_seconds=0.0, max_seconds=0.0,
+                                  counts={}, phase_seconds={})
+                totals["operations"] += 1
+                totals["total_seconds"] += seconds
+                totals["max_seconds"] = max(totals["max_seconds"], seconds)
+                for destination, source in (("counts", "counts"), ("phase_seconds", "phases")):
+                    for name, value in state[source].items():
+                        totals[destination][name] = totals[destination].get(name, 0) + value
+                if now - totals["started"] >= summary_interval:
+                    result = {"event": event, "outcome": "complete", "aggregate": True,
+                              "window_seconds": now - totals["started"],
+                              **{key: value for key, value in totals.items() if key != "started"}}
+                    totals.clear()
+                    logger.info("Graph performance %s", json.dumps(result, sort_keys=True))
+
         @wraps(function)
         def wrapped(*args, **kwargs):
             child_channel = os.environ.get("_SHYHURRICANE_PARSE_DIAGNOSTICS")
-            if not logger.isEnabledFor(level) and not child_channel:
+            enabled_level = logging.WARNING if summary_interval is not None else level
+            if not logger.isEnabledFor(enabled_level) and not child_channel:
                 return function(*args, **kwargs)
             state = {"counts": {}, "phases": {}, "labels": {}, "work": False}
             token = _active.set(state)
@@ -135,6 +159,12 @@ def measured(event, logger, *, level=logging.INFO, quiet=False, minimum_bytes=No
                 _active.reset(token)
                 seconds = max(0.0, time.perf_counter() - started)
                 output_level = level
+                if summary_interval is not None and not child_channel:
+                    if error_type is None:
+                        aggregate(state, seconds)
+                        output_level = logging.DEBUG
+                    else:
+                        output_level = logging.WARNING
                 if minimum_bytes is not None and error_type is None and max(
                     state["counts"].get("logical_bytes", 0), state["counts"].get("decoded_bytes", 0)
                 ) < minimum_bytes:
