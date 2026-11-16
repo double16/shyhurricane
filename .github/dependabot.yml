@@ -3,7 +3,7 @@ updates:
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     groups:
       all:
         applies-to: version-updates
@@ -15,7 +15,7 @@ updates:
   - package-ecosystem: "uv"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     groups:
       minor:
         applies-to: version-updates
@@ -26,12 +26,12 @@ updates:
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
 
   - package-ecosystem: "npm"
     directory: "/src/docker/unix_command"
     schedule:
-      interval: "weekly"
+      interval: "monthly"
     groups:
       minor:
         applies-to: version-updates
