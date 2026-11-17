@@ -266,7 +266,7 @@ def test_pipeline_drains_catalog_batches_contexts_and_status(graph_paths, event,
         artifacts.close()
 
 
-@pytest.mark.parametrize("previous_state", [None, "waiting", "active"])
+@pytest.mark.parametrize("previous_state", [None, "waiting", "failed", "active"])
 def test_pipeline_reserves_replacement_and_waits_for_unsealed_generation(
     graph_paths, event, monkeypatch, previous_state
 ):
@@ -299,6 +299,8 @@ def test_pipeline_reserves_replacement_and_waits_for_unsealed_generation(
         store = MagicMock()
         session = store.connect.return_value.session.return_value.__enter__.return_value
         session.run.return_value.single.return_value = {"staging": "old"}
+        transaction = MagicMock()
+        session.execute_write.side_effect = lambda callback: callback(transaction)
         publisher = MagicMock()
         monkeypatch.setattr(inventory_pipeline, "InventoryPublisher", lambda session: publisher)
         pipeline = InventoryPipeline(artifacts, store)
@@ -308,9 +310,15 @@ def test_pipeline_reserves_replacement_and_waits_for_unsealed_generation(
             "SELECT state FROM graph_inventory_generations WHERE id=?", (generation,)
         ).fetchone() == ("waiting",)
         publisher.begin.assert_called_once()
+        if previous_state in {"waiting", "failed"}:
+            statements = [call.args[0] for call in transaction.run.call_args_list]
+            assert "SET u.lock=" in statements[0]
+            assert "u.staging=$old AND g.state='staging'" in statements[1]
+        else:
+            transaction.run.assert_not_called()
         if previous_state is not None:
             assert artifacts.connection.execute(
                 "SELECT state FROM graph_inventory_generations WHERE id='old'"
-            ).fetchone() == (("abandoned" if previous_state == "waiting" else previous_state),)
+            ).fetchone() == (("abandoned" if previous_state in {"waiting", "failed"} else previous_state),)
     finally:
         artifacts.close()

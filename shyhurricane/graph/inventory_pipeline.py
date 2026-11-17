@@ -4,6 +4,10 @@ import json
 import logging
 import time
 
+from neo4j import unit_of_work
+
+from shyhurricane.graph.config import graph_timeouts
+
 from shyhurricane.graph.retry_policy import transient_neo4j_error
 
 logger = logging.getLogger(__name__)
@@ -138,13 +142,21 @@ class InventoryPipeline:
                         state = self.connection.execute(
                             "SELECT state FROM graph_inventory_generations WHERE id=?", (old,),
                         ).fetchone()
-                        if state and state[0] == "waiting":
-                            session.execute_write(lambda tx: tx.run(
-                                "MATCH (u:GraphInventoryUnit {id:$unit}),(g:GraphInventoryGeneration {id:$old}) "
-                                "WHERE u.staging=$old AND g.state='staging' "
-                                "SET u.staging=null,g.state='abandoned',g.retired_at=timestamp()/1000.0",
-                                unit=unit, old=old,
-                            ).consume())
+                        if state and state[0] in {"waiting", "failed"}:
+                            @unit_of_work(timeout=graph_timeouts().control)
+                            def abandon(tx):
+                                tx.run(
+                                    "MATCH (u:GraphInventoryUnit {id:$unit}) "
+                                    "SET u.lock=coalesce(u.lock,0)+1", unit=unit,
+                                ).consume()
+                                return tx.run(
+                                    "MATCH (u:GraphInventoryUnit {id:$unit}),(g:GraphInventoryGeneration {id:$old}) "
+                                    "WHERE u.staging=$old AND g.state='staging' "
+                                    "SET u.staging=null,g.state='abandoned',g.retired_at=timestamp()/1000.0",
+                                    unit=unit, old=old,
+                                ).consume()
+
+                            session.execute_write(abandon)
                             with commit_timing(self.connection):
                                 self.connection.execute(
                                     "UPDATE graph_inventory_generations SET state='abandoned' WHERE id=?", (old,)

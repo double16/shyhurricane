@@ -97,7 +97,8 @@ def test_candidate_paging_rechecks_under_short_explicit_transaction(tmp_path, mo
 
 
 @pytest.mark.parametrize("deleted", [0, 1])
-def test_cleanup_releases_local_pins_only_after_remote_tombstone(tmp_path, monkeypatch, deleted):
+@pytest.mark.parametrize("local_state", ["active", "failed"])
+def test_cleanup_releases_local_pins_only_after_remote_tombstone(tmp_path, monkeypatch, deleted, local_state):
     import sqlite3
 
     from shyhurricane.graph import inventory_cleanup
@@ -110,6 +111,7 @@ def test_cleanup_releases_local_pins_only_after_remote_tombstone(tmp_path, monke
             "INSERT INTO graph_inventory_generations VALUES ('old','active','artifact');"
             "INSERT INTO graph_inventory_outbox VALUES ('old');"
         )
+        connection.execute("UPDATE graph_inventory_generations SET state=?", (local_state,))
     monkeypatch.setattr(inventory_cleanup.time, "monotonic", lambda: 0)
     store = MagicMock()
     session = store.connect.return_value.session.return_value.__enter__.return_value
@@ -120,7 +122,7 @@ def test_cleanup_releases_local_pins_only_after_remote_tombstone(tmp_path, monke
     assert cleanup.step(deadline=2)
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute("SELECT state,artifact FROM graph_inventory_generations").fetchone() == (
-            ("active", "artifact") if deleted else ("cleaned", None)
+            (local_state, "artifact") if deleted else ("cleaned", None)
         )
         assert connection.execute("SELECT count(*) FROM graph_inventory_outbox").fetchone() == (
             1 if deleted else 0,

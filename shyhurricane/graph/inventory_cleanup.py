@@ -108,7 +108,7 @@ class InventoryCleanup:
             # A remote tombstone must exist before local obligations/artifact pins are released.
             with closing(sqlite3.connect(self.database, timeout=0.05)) as connection:
                 rows = connection.execute(
-                    "SELECT id FROM graph_inventory_generations WHERE state IN ('active','abandoned') AND id>? "
+                    "SELECT id FROM graph_inventory_generations WHERE state IN ('active','abandoned','failed') AND id>? "
                     "ORDER BY id LIMIT 100", (self.after,),
                 ).fetchall()
                 self.after = rows[-1][0] if len(rows) == 100 else ""
