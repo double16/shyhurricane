@@ -1,4 +1,5 @@
 import json
+import sqlite3
 from unittest.mock import Mock
 
 import pytest
@@ -9,6 +10,7 @@ from haystack_integrations.components.retrievers.qdrant import QdrantHybridRetri
 from haystack_integrations.document_stores.qdrant import QdrantDocumentStore
 from haystack_integrations.document_stores.qdrant.converters import convert_id
 from qdrant_client.http import models as qm
+from qdrant_client.local.persistence import CollectionPersistence
 
 from shyhurricane import retrieval_pipeline as rp
 
@@ -158,7 +160,9 @@ def test_multi_query_retriever_applies_collection_candidate_filter_before_top_k(
     assert retriever.calls == []
 
 
-def test_candidate_id_filter_restricts_real_qdrant_hybrid_ranking(tmp_path):
+def test_candidate_id_filter_restricts_real_qdrant_hybrid_ranking(tmp_path, monkeypatch):
+    # Avoid Qdrant's unclosed fallback probe; Python 3.11+ exposes SQLite's thread-safety mode.
+    monkeypatch.setattr(CollectionPersistence, "CHECK_SAME_THREAD", sqlite3.threadsafety != 3)
     sparse = SparseEmbedding(indices=[1], values=[1.0])
     store = QdrantDocumentStore(
         path=str(tmp_path), index="html_256", embedding_dim=2, use_sparse_embeddings=True,

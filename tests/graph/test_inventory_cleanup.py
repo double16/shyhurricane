@@ -1,6 +1,7 @@
 """Remote cleanup respects revisions and confirms tombstones before releasing local pins."""
 
 import time
+from contextlib import closing
 from unittest.mock import MagicMock
 
 import pytest
@@ -76,7 +77,7 @@ def test_candidate_paging_rechecks_under_short_explicit_transaction(tmp_path, mo
     from shyhurricane.graph import inventory_cleanup
 
     path = tmp_path / "artifacts.sqlite"
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute("CREATE TABLE graph_inventory_generations (id TEXT,state TEXT)")
     monkeypatch.setattr(inventory_cleanup.time, "monotonic", lambda: 0)
     store = MagicMock()
@@ -93,3 +94,57 @@ def test_candidate_paging_rechecks_under_short_explicit_transaction(tmp_path, mo
         assert call.kwargs["timeout"] == 0.25
     session.execute_write.assert_not_called()
     assert tx.commit.call_count == candidate_count
+
+
+@pytest.mark.parametrize("deleted", [0, 1])
+def test_cleanup_releases_local_pins_only_after_remote_tombstone(tmp_path, monkeypatch, deleted):
+    import sqlite3
+
+    from shyhurricane.graph import inventory_cleanup
+
+    path = tmp_path / "artifacts.sqlite"
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.executescript(
+            "CREATE TABLE graph_inventory_generations(id TEXT,state TEXT,artifact TEXT);"
+            "CREATE TABLE graph_inventory_outbox(generation TEXT);"
+            "INSERT INTO graph_inventory_generations VALUES ('old','active','artifact');"
+            "INSERT INTO graph_inventory_outbox VALUES ('old');"
+        )
+    monkeypatch.setattr(inventory_cleanup.time, "monotonic", lambda: 0)
+    store = MagicMock()
+    session = store.connect.return_value.session.return_value.__enter__.return_value
+    session.run.side_effect = [MagicMock(), [{"id": "old"}], MagicMock(), [{"id": "old"}]]
+    tx = session.begin_transaction.return_value.__enter__.return_value
+    tx.run.return_value.single.side_effect = [{"id": "old"}] + [{"count": deleted}] * 7
+    cleanup = InventoryCleanup(store, path)
+    assert cleanup.step(deadline=2)
+    with closing(sqlite3.connect(path)) as connection:
+        assert connection.execute("SELECT state,artifact FROM graph_inventory_generations").fetchone() == (
+            ("active", "artifact") if deleted else ("cleaned", None)
+        )
+        assert connection.execute("SELECT count(*) FROM graph_inventory_outbox").fetchone() == (
+            1 if deleted else 0,
+        )
+    assert tx.commit.call_count == (2 if deleted else 8)
+
+
+@pytest.mark.parametrize("expire_at", [3, 4])
+def test_cleanup_deadline_preserves_work_for_next_pass(tmp_path, monkeypatch, expire_at):
+    from shyhurricane.graph import inventory_cleanup
+
+    path = tmp_path / "artifacts.sqlite"
+    path.touch()
+    calls = 0
+
+    def monotonic():
+        nonlocal calls
+        calls += 1
+        return 0 if calls <= expire_at else 3
+
+    monkeypatch.setattr(inventory_cleanup.time, "monotonic", monotonic)
+    store = MagicMock()
+    session = store.connect.return_value.session.return_value.__enter__.return_value
+    session.run.side_effect = [MagicMock(), [{"id": "old"}]]
+    tx = session.begin_transaction.return_value.__enter__.return_value
+    tx.run.return_value.single.return_value = {"id": "old"}
+    assert InventoryCleanup(store, path).step(deadline=2)

@@ -1,6 +1,7 @@
 """Bounded recovery of receiptless dependency failures."""
 
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -9,7 +10,7 @@ from shyhurricane.graph.dependency_recovery import recover_dependents
 
 @pytest.fixture
 def connection():
-    with sqlite3.connect(":memory:") as connection:
+    with closing(sqlite3.connect(":memory:")) as connection, connection:
         connection.executescript(
             "CREATE TABLE work(id TEXT PRIMARY KEY,status TEXT,error TEXT);"
             "CREATE INDEX graph_work_status_id ON work(status,id);"

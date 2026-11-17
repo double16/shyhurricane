@@ -1,3 +1,4 @@
+from contextlib import closing
 from unittest.mock import MagicMock
 
 import pytest
@@ -252,7 +253,7 @@ def test_inventory_policy(tmp_path, monkeypatch, phase, elapsed, disk, expected)
     monkeypatch.setattr(maintenance, "GraphStore", lambda location: MagicMock())
     worker = GraphMaintenance("location", lambda: True, disk_snapshot=lambda: disk)
     worker.storage_maintenance = SimpleNamespace(root=tmp_path)
-    with sqlite3.connect(tmp_path / "artifacts.sqlite") as connection:
+    with closing(sqlite3.connect(tmp_path / "artifacts.sqlite")) as connection, connection:
         connection.execute("CREATE TABLE graph_epochs (id INTEGER PRIMARY KEY,phase TEXT)")
         connection.execute("INSERT INTO graph_epochs (phase) VALUES (?)", (phase,))
     worker.inventory_last_pass = None if elapsed is None else 0
@@ -288,11 +289,11 @@ def test_completed_epoch_is_detected_even_if_next_epoch_is_active(tmp_path, monk
     worker = GraphMaintenance("location", lambda: True)
     worker.storage_maintenance = SimpleNamespace(root=tmp_path)
     worker.inventory_last_pass = 0
-    with sqlite3.connect(tmp_path / "artifacts.sqlite") as connection:
+    with closing(sqlite3.connect(tmp_path / "artifacts.sqlite")) as connection, connection:
         connection.execute("CREATE TABLE graph_epochs (id INTEGER PRIMARY KEY,phase TEXT)")
         connection.execute("INSERT INTO graph_epochs VALUES (1,'references')")
     assert worker.inventory_schedule(60)[0] == "active_epoch"
-    with sqlite3.connect(tmp_path / "artifacts.sqlite") as connection:
+    with closing(sqlite3.connect(tmp_path / "artifacts.sqlite")) as connection, connection:
         connection.execute("UPDATE graph_epochs SET phase='done'")
         connection.execute("INSERT INTO graph_epochs VALUES (2,'references')")
     assert worker.inventory_schedule(120)[0] == "epoch_complete"

@@ -180,6 +180,7 @@ def test_bulk_fact_sql_count_is_less_than_half_individual_writes(tmp_path):
     manifest.flush()
     references = connection.execute("SELECT shard FROM graph_inventory_outbox").fetchall()
     assert sum(len(manifest.shards.read(ref)) for (ref,) in references) == 1000
+    manifest.shards.close()
     connection.close()
 
 

@@ -10,8 +10,16 @@ from shyhurricane.graph import payload_store, shard_store
 from shyhurricane.graph.shard_store import ShardStore, batches
 
 
-def test_round_trip_determinism_and_bounds(tmp_path):
-    store = ShardStore(tmp_path)
+@pytest.fixture
+def store(tmp_path):
+    shards = ShardStore(tmp_path)
+    try:
+        yield shards
+    finally:
+        shards.close()
+
+
+def test_round_trip_determinism_and_bounds(store):
     records = [{"id": str(i), "value": "é"} for i in range(1001)]
     groups = list(batches(records))
     assert list(map(len, groups)) == [500, 500, 1]
@@ -29,12 +37,11 @@ def test_round_trip_determinism_and_bounds(tmp_path):
         store.read(ref, limit=1)
 
 
-def test_byte_bounds(monkeypatch, tmp_path):
+def test_byte_bounds(monkeypatch, store):
     monkeypatch.setattr(shard_store, "SHARD_BYTES", 32)
     monkeypatch.setattr(shard_store, "MAX_BYTES", 128)
     records = [{"value": "x" * 40}, {"value": "y" * 40}]
     assert list(batches(records)) == [[records[0]], [records[1]]]
-    store = ShardStore(tmp_path)
     ref = store.put([records[0]])
     assert store.read(ref) == [records[0]]
     with pytest.raises(ValueError):
@@ -141,8 +148,7 @@ def test_authenticated_frame_and_header_bounds(tmp_path):
     store.close()
 
 
-def test_failed_sync_cleans_temporary(tmp_path, monkeypatch):
-    store = ShardStore(tmp_path)
+def test_failed_sync_cleans_temporary(store, monkeypatch):
     monkeypatch.setattr(payload_store, "INLINE_BYTES", 0)
     monkeypatch.setattr(payload_store.os, "fsync", Mock(side_effect=OSError("disk failure")))
     with pytest.raises(OSError):

@@ -486,3 +486,77 @@ def test_markup_window_preserves_explicit_form_owners_outside_the_window(event, 
                for node in graph.nodes.values())
     ignored = next(node for node in graph.nodes.values() if node.get("field_name") == "ignored")
     assert ignored["form_selectors"] == []
+
+
+@pytest.mark.parametrize("coverage_timeout", [False, True])
+def test_manifest_timeout_preserves_completed_rows_and_checkpoint(tmp_path, coverage_timeout):
+    from types import SimpleNamespace
+
+    from shyhurricane.graph.budget import QueryBudget
+
+    manifest = MagicMock()
+    manifest.watermark.return_value = {"revision": 1, "expires": 9999999999}
+    manifest.page.side_effect = [
+        ([{"id": "one", "manifest_id": "first"}], "first"),
+        TimeoutError("read deadline"),
+    ]
+    manifest.coverage.side_effect = TimeoutError("coverage deadline") if coverage_timeout else None
+    manifest.coverage.return_value = {"discovery": "complete", "flow": "partial"}
+    artifacts = SimpleNamespace(root=tmp_path, manifest=manifest, budget=QueryBudget())
+    store = QueryCursors(tmp_path)
+    try:
+        result = manifest_query(artifacts, "example.com", limit=2, cursor_store=store)
+        assert result["results"] == [{"id": "one", "manifest_id": "first"}]
+        assert result["retrieval_truncated"] and "time_limit" in result["truncation_reasons"]
+        state, _ = store.load(result["continuation_token"])
+        assert state["after"] == "first" and state["seen"] == ["one"]
+        assert len(result["analysis_gaps"]) == (2 if coverage_timeout else 1)
+    finally:
+        store.close()
+
+
+def test_manifest_coverage_timeout_after_last_page_and_failed_checkpoint(tmp_path):
+    from types import SimpleNamespace
+
+    from shyhurricane.graph.budget import QueryBudget
+
+    manifest = MagicMock()
+    manifest.watermark.return_value = {"revision": 1}
+    manifest.page.return_value = ([], None)
+    manifest.coverage.side_effect = TimeoutError("coverage deadline")
+    artifacts = SimpleNamespace(root=tmp_path, manifest=manifest, budget=QueryBudget())
+    store = MagicMock()
+    store.save.side_effect = OSError("disk full")
+    result = manifest_query(artifacts, "example.com", cursor_store=store, detail="compact")
+    assert result["results"] == [] and result["continuation_token"] is None
+    assert result["coverage"] == {"discovery": "unknown", "flow": "unknown"}
+    assert result["truncation_reasons"] == ["time_limit"]
+    assert "restart required" in result["analysis_gaps"][-1]
+    store.close.assert_not_called()
+
+
+@pytest.mark.parametrize("with_queue", [False, True])
+def test_expand_analysis_validates_scope_and_retained_artifact(graph_paths, event, with_queue):
+    from shyhurricane.graph.budget import QueryBudget
+
+    artifacts = ArtifactStore("db")
+    try:
+        capture = artifacts.register(event())
+        reader = MagicMock()
+        reader.lookup_unit.return_value = {"artifact": "a:retained", "generation": "generation"}
+        artifacts.manifest.inventory_reader = lambda: reader
+        artifacts.budget = QueryBudget()
+        queue = MagicMock() if with_queue else None
+        result = expand_analysis(artifacts, queue, "example.com", capture["id"], "unit")
+        item, response = (queue.put.call_args.args[0], result) if with_queue else result
+        assert item["offline_analysis"] and item["inventory_generation"] == "generation"
+        assert response["analysis_unit_id"] == "unit" and response["status"] == "pending"
+        reader.lookup_unit.assert_called_once_with("example.com", "unit", capture["id"])
+        for selected, capture_id in [
+            (None, capture["id"]), ({"artifact": None}, capture["id"]), ({"artifact": "a:retained"}, "missing")
+        ]:
+            reader.lookup_unit.return_value = selected
+            with pytest.raises(ValueError, match="unavailable"):
+                expand_analysis(artifacts, queue, "example.com", capture_id, "unit")
+    finally:
+        artifacts.close()

@@ -351,7 +351,7 @@ def test_endpoint_resolution(tmp_path, monkeypatch):
 def test_graph_backup_deadline(tmp_path, monkeypatch):
     graph(tmp_path, [{"data": capture()}])
     times = iter([0, 301])
-    monkeypatch.setattr(ex.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(ex, "time", SimpleNamespace(monotonic=lambda: next(times), perf_counter=ex.time.perf_counter))
     with pytest.raises(TimeoutError):
         ex.export(tmp_path, tmp_path / "out", graph_only=True)
     assert not (tmp_path / "out").exists()
@@ -503,7 +503,7 @@ def test_client_closed_when_collection_read_fails(tmp_path, monkeypatch):
 def test_graph_backup_accepts_work_longer_than_old_deadline(tmp_path, monkeypatch):
     graph(tmp_path, [{"data": capture()}])
     times = iter([0, 31])
-    monkeypatch.setattr(ex.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(ex, "time", SimpleNamespace(monotonic=lambda: next(times), perf_counter=ex.time.perf_counter))
     assert ex.export(tmp_path, tmp_path / "out", graph_only=True) == 0
     assert len(lines(tmp_path / "out/index.jsonl")) == 1
     report = json.loads((tmp_path / "out/export-report.json").read_text())
@@ -513,14 +513,14 @@ def test_graph_backup_accepts_work_longer_than_old_deadline(tmp_path, monkeypatc
 def test_custom_graph_backup_deadline(tmp_path, monkeypatch):
     graph(tmp_path, [{"data": capture()}])
     times = iter([0, 301])
-    monkeypatch.setattr(ex.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(ex, "time", SimpleNamespace(monotonic=lambda: next(times), perf_counter=ex.time.perf_counter))
     assert ex.export(tmp_path, tmp_path / "out", graph_only=True, graph_backup_timeout_seconds=600) == 0
 
 
 def test_backup_timeout_cli_reports_actionable_progress(tmp_path, monkeypatch, capsys):
     graph(tmp_path, [{"data": capture()}])
     times = iter([0, 2])
-    monkeypatch.setattr(ex.time, "monotonic", lambda: next(times))
+    monkeypatch.setattr(ex, "time", SimpleNamespace(monotonic=lambda: next(times), perf_counter=ex.time.perf_counter))
     assert (
         ex.main(
             [

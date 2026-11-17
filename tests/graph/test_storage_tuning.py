@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -9,12 +10,12 @@ from shyhurricane.graph.storage_tuning import configure
 @pytest.mark.parametrize("value", ["0", "-1", "1048577", "invalid"])
 def test_invalid_cache(monkeypatch, value):
     monkeypatch.setenv("GRAPH_SQLITE_CACHE_KIB", value)
-    with sqlite3.connect(":memory:") as connection, pytest.raises(ValueError):
+    with closing(sqlite3.connect(":memory:")) as connection, connection, pytest.raises(ValueError):
         configure(connection)
 
 
 def test_default_and_override(monkeypatch):
-    with sqlite3.connect(":memory:") as connection:
+    with closing(sqlite3.connect(":memory:")) as connection, connection:
         monkeypatch.delenv("GRAPH_SQLITE_CACHE_KIB", raising=False)
         configure(connection)
         assert connection.execute("PRAGMA cache_size").fetchone()[0] == -65536

@@ -211,3 +211,106 @@ def test_detail_recipes_preserve_endpoints_ids_and_contexts():
     artifacts.read.side_effect = lambda key: {"ir_artifact": key}
     with pytest.raises(ValueError, match="recursive"):
         resolve(artifacts, {"ir_artifact": "loop"})
+
+
+def test_pipeline_drains_catalog_batches_contexts_and_status(graph_paths, event, monkeypatch):
+    from shyhurricane.graph import inventory_pipeline
+
+    artifacts = ArtifactStore("db")
+    try:
+        capture = artifacts.register(event())
+        unit = artifacts.manifest.unit(capture["id"], "fixture", discovery="complete", flow="partial")
+        artifacts.manifest.fact(unit, capture["id"], "field", {"id": "field", "url": capture["data"]["url"]})
+        artifacts.manifest.contexts(unit, [{"id": capture["id"], "url": capture["data"]["url"]}])
+        artifacts.manifest.flush()
+        artifacts.connection.commit()
+        generation = artifacts.manifest.generation(unit)
+        store = MagicMock()
+        session = store.connect.return_value.session.return_value.__enter__.return_value
+        session.run.return_value.single.return_value = {"staging": None, "count": 1}
+        publisher = MagicMock()
+        monkeypatch.setattr(inventory_pipeline, "InventoryPublisher", lambda session: publisher)
+        pipeline = InventoryPipeline(artifacts, store)
+        pipeline.ready = True
+
+        def acknowledge(session, row):
+            artifacts.connection.execute("UPDATE graph_inventory_outbox SET state='delivered' WHERE id=?", (row[0],))
+
+        monkeypatch.setattr(artifacts.manifest.outbox, "deliver", acknowledge)
+        for _ in range(20):
+            if not pipeline.step():
+                break
+        else:
+            pytest.fail("Publication did not drain")
+        assert publisher.register_captures.call_count == 1
+        batches = artifacts.connection.execute(
+            "SELECT count(*) FROM graph_inventory_outbox WHERE generation=?", (generation,)
+        ).fetchone()[0]
+        publisher.activate.assert_any_call(
+            unit, generation, batches=batches, facts=1, discovery="complete", flow="partial"
+        )
+        assert artifacts.connection.execute(
+            "SELECT state,context_after FROM graph_inventory_generations WHERE id=?", (generation,)
+        ).fetchone()[0] == "active"
+        assert session.execute_write.called
+        with artifacts.connection:
+            enqueue(artifacts.connection, unit, generation, "failed", "parser failed")
+
+        def acknowledge_status(session, connection, row):
+            connection.execute("UPDATE graph_inventory_updates SET delivered=version WHERE unit_id=?", (row[0],))
+
+        monkeypatch.setattr("shyhurricane.graph.inventory_updates.deliver", acknowledge_status)
+        assert pipeline.step()
+        assert not pipeline.available()
+    finally:
+        artifacts.close()
+
+
+@pytest.mark.parametrize("previous_state", [None, "waiting", "active"])
+def test_pipeline_reserves_replacement_and_waits_for_unsealed_generation(
+    graph_paths, event, monkeypatch, previous_state
+):
+    from shyhurricane.graph import inventory_pipeline
+
+    artifacts = ArtifactStore("db")
+    try:
+        capture = artifacts.register(event())
+        unit = artifacts.manifest.unit(capture["id"], "pending", discovery="pending")
+        generation = artifacts.manifest.generation(unit)
+        with artifacts.connection:
+            artifacts.connection.execute("UPDATE graph_inventory_catalog SET after_seq=(SELECT max(seq) FROM captures)")
+            artifacts.connection.execute("DELETE FROM graph_inventory_outbox")
+            artifacts.connection.execute(
+                "UPDATE graph_inventory_generations SET state='active' WHERE id<>?", (generation,)
+            )
+            metadata = json.loads(artifacts.connection.execute(
+                "SELECT metadata FROM graph_inventory_generations WHERE id=?", (generation,)
+            ).fetchone()[0])
+            metadata["sealed"] = False
+            artifacts.connection.execute(
+                "UPDATE graph_inventory_generations SET metadata=? WHERE id=?", (json.dumps(metadata), generation)
+            )
+            if previous_state is not None:
+                artifacts.connection.execute(
+                    "INSERT INTO graph_inventory_generations "
+                    "(id,unit_id,capture_id,epoch,state,metadata) VALUES ('old',?,?,0,?,'{}')",
+                    (unit, capture["id"], previous_state),
+                )
+        store = MagicMock()
+        session = store.connect.return_value.session.return_value.__enter__.return_value
+        session.run.return_value.single.return_value = {"staging": "old"}
+        publisher = MagicMock()
+        monkeypatch.setattr(inventory_pipeline, "InventoryPublisher", lambda session: publisher)
+        pipeline = InventoryPipeline(artifacts, store)
+        pipeline.ready = True
+        assert pipeline.step()
+        assert artifacts.connection.execute(
+            "SELECT state FROM graph_inventory_generations WHERE id=?", (generation,)
+        ).fetchone() == ("waiting",)
+        publisher.begin.assert_called_once()
+        if previous_state is not None:
+            assert artifacts.connection.execute(
+                "SELECT state FROM graph_inventory_generations WHERE id='old'"
+            ).fetchone() == (("abandoned" if previous_state == "waiting" else previous_state),)
+    finally:
+        artifacts.close()
