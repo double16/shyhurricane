@@ -136,7 +136,7 @@ def test_fetch_map_limits_response_and_forwards_selected_headers(monkeypatch):
 
     class Client:
         def __init__(self, **kwargs):
-            assert kwargs == {"timeout": 5, "follow_redirects": False}
+            assert kwargs == {"timeout": 5, "follow_redirects": False, "verify": False}
 
         def __enter__(self):
             return self
