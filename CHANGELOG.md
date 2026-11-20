@@ -16,6 +16,9 @@
 
 ### Features
 
+- Extract Next.js Flight module declarations, chunk dependencies, and observed Server Action requests.
+- Record explicit module registrations from captured Next.js Webpack and Turbopack bundles.
+
 - Discover source maps using uppercase and URL-encoded suffix variants.
 - Show the data directory beneath the dashboard configuration header, abbreviating the home directory as `~`.
 - Add managed database host networking and automatic fallback for disabled Docker bridges.

@@ -5,6 +5,7 @@ const traverse = require("@babel/traverse").default;
 const { prepareSource } = require("./encoding.cjs");
 
 const { compress } = require("./library.cjs");
+const { nextBundleModules } = require("./next-bundle.cjs");
 
 function analyze(source, filename = "source.js", mode = "summary") {
   if (!["summary", "full"].includes(mode)) throw new Error("Invalid library analysis mode");
@@ -687,7 +688,9 @@ function analyze(source, filename = "source.js", mode = "summary") {
   if (calls.some((item) => !item.callee || (!functions.has(item.callee) && !states.has(item.callee)))) {
     gaps.add("External/dynamic calls are conservative summaries; runtime dispatch is unproven");
   }
-  const result = { nodes: [...nodes.values()], edges: [...edges.values()], references,
+  const nextModules = source.includes("webpackChunk_N_E") || source.includes("TURBOPACK")
+    ? nextBundleModules(ast, gaps) : [];
+  const result = { ...(nextModules.length ? { next_modules: nextModules } : {}), nodes: [...nodes.values()], edges: [...edges.values()], references,
     gaps: [...gaps], analysis: { mode: "full" } };
   return compress(result, mode);
 }

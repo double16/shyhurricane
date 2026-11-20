@@ -20,6 +20,7 @@ from shyhurricane.graph.artifacts import recovered_sources
 from shyhurricane.graph.discovery_manifest import archive_ir, markup_emitter
 from shyhurricane.graph.markup import scan_markup, scan_svg
 from shyhurricane.graph.model import MAX_BYTES, Projection, identity, web_url
+from shyhurricane.graph.next_client import flight_assets, inline_flight
 from shyhurricane.graph.parser_diagnostics import measured, remaining_seconds
 from shyhurricane.graph.policy import ANALYZER_VERSION, library_analysis
 from shyhurricane.graph.svg import extract_svg, is_svg, svg_root
@@ -150,6 +151,27 @@ def extract(
         )
         return target
 
+    def flight_reference(path, module_id, export_name, location):
+        target = reference(path, "LOADS", "next.flight-import", location=location)
+        if not target or type(module_id) not in (str, int) or not isinstance(export_name, str):
+            return
+        module = graph.node(
+            "module_reference", identity(event["id"], location, module_id, export_name),
+            name=f"Flight module {str(module_id)[:120]}", capture_id=event["id"], location=location,
+            bundle_module_id=str(module_id)[:120], bundle_export=export_name[:120],
+        )
+        graph.fact(page, module, "IMPORTS", "next.flight-module", location=location)
+        graph.fact(module, target, "LOADS", "next.flight-module-chunk", location=location)
+
+    if data["method"] == "POST" and request_headers.get("next-action") and mime == "text/x-component":
+        boundary = graph.node(
+            "operation", identity(event["id"], "next.action"), name="Next.js Server Action request",
+            capture_id=event["id"],
+        )
+        graph.fact(boundary, page, "REQUESTS", "next.action", classification="observed",
+                   location="request.headers.Next-Action")
+        graph.gaps.append("Next.js action request has no verified client module attribution")
+
     referer = request_headers.get("referer")
     if referer:
         origin_only = urlsplit(referer).path in {"", "/"} and not urlsplit(referer).query
@@ -276,6 +298,7 @@ def extract(
         soup = BeautifulSoup(body, "html.parser")
         base_element = soup.find("base", href=True)
         base = web_url(base_element["href"], graph.url) if base_element else graph.url
+        flight_fragments = []
         tags = soup.find_all(True)
         locations = {id(tag): markup_locators[index] for index, tag in enumerate(tags) if index < len(markup_locators)}
         for index, tag in enumerate(tags):
@@ -373,7 +396,11 @@ def extract(
                         graph.fact(field, target, "SUBMITS_TO", "html.form-field", location=locator)
             if tag.name == "script" and not tag.get("src") and tag.string:
                 if tag.get("type", "").lower() in {"", "module", "text/javascript", "application/javascript"}:
-                    scripts.append((locator, tag.string))
+                    fragment = inline_flight(tag.string)
+                    if fragment is None:
+                        scripts.append((locator, tag.string))
+                    else:
+                        flight_fragments.append(fragment)
                 elif tag.get("type") == "importmap":
                     try:
                         for specifier, value in json.loads(tag.string).get("imports", {}).items():
@@ -383,6 +410,10 @@ def extract(
             for name, value in tag.attrs.items():
                 if name.startswith("on") and isinstance(value, str):
                     scripts.append((f"{locator}:{name}", value))
+        if flight_fragments:
+            flight_assets("".join(flight_fragments), flight_reference, graph.gaps, "html.next-flight")
+    elif mime == "text/x-component":
+        flight_assets(body, flight_reference, graph.gaps, "response.next-flight")
     elif is_svg(mime):
         base = graph.url
         try:
@@ -601,6 +632,16 @@ def _apply_javascript(graph, page, filename, result, reference, contexts):
     graph.contexts.extend(context for context in contexts if context not in graph.contexts)
     graph.nodes[page]["context_urls"] = [context["url"] for context in contexts]
     graph.nodes[page]["analysis_details"] = json.dumps(graph.analysis, sort_keys=True)
+    if not recovered and "/_next/static/chunks/" in urlsplit(graph.url).path:
+        for registration in result.get("next_modules", []):
+            location = f"{filename}:{registration['location']}"
+            module = graph.node(
+                "module_definition",
+                identity(graph.event["id"], registration["bundler"], registration["id"], location),
+                name=f"Compiled module {str(registration['id'])[:120]}", capture_id=graph.event["id"], location=location,
+                bundle_module_id=str(registration["id"])[:120], bundler=registration["bundler"],
+            )
+            graph.fact(page, module, "CONTAINS", "next.bundle-registration", location=location)
     origins = {f"{urlsplit(context['base']).scheme}://{urlsplit(context['base']).netloc}" for context in contexts}
     containments = []
     for item in result.get("nodes", []):

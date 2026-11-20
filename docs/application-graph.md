@@ -435,6 +435,19 @@ imports, and supplied build-manifest chunk/CSS/asset dependencies. An unexpanded
 files that were not supplied. Recovered source-map paths are virtual identifiers, not fetchable URLs
 or filesystem destinations.
 
+For Next.js, the graph can read explicit local chunk paths from supported Flight import rows in
+captured `text/x-component` responses and literal inline bootstrap fragments. Import rows with a
+module ID and export name also declare a capture-local module reference linked to the named
+chunk resources. The JavaScript analyzer records literal Webpack and Turbopack module factory
+registrations on delivered chunk captures, with source locations. The graph retains each
+definition with the capture that supplied it. A Flight module ID and chunk URL provide
+candidate matches across captures when the chunk contents have not been tied to the same build. A captured POST
+with a `Next-Action` header and a Flight response contributes an observed action request.
+Client module attribution remains unresolved. Flight records provide dependency evidence, and
+prefetch responses do not by themselves establish navigation. The Flight extractor processes
+at most 1 MiB of text and 10,000 rows per input. Unsupported length-prefixed records stop
+extraction at that point.
+
 This is bounded, conservative static analysis. Dynamic dispatch, runtime-generated URLs, aliases
 without explicit mappings, framework transformations, missing modules, and backend implementation
 can leave gaps. Source/sink classifications and paths are candidates for investigation, not confirmed
