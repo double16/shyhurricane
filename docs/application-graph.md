@@ -435,7 +435,28 @@ imports, and supplied build-manifest chunk/CSS/asset dependencies. An unexpanded
 files that were not supplied. Recovered source-map paths are virtual identifiers, not fetchable URLs
 or filesystem destinations.
 
-For Next.js, the graph can read explicit local chunk paths from supported Flight import rows in
+When open-world access is enabled, ingestion queues explicitly declared Next.js JavaScript
+chunks from captured Pages Router build manifests and App Router Flight references.
+Each request uses a five-second timeout and a 40 MiB decoded-body limit, without
+credentials or redirects. Existing successful captures are reused. Chunk references are
+resolved against the declaring capture's asset origin and base path. Inline Flight references
+use the unique Next.js asset base evidenced by script URLs in the same HTML response,
+including CDN origins. Conflicting asset bases leave those references unresolved.
+Standalone Flight responses retain their explicit origin-relative chunk interpretation. Sources larger than
+1 MiB are skipped for automatic collection. Open-world access is checked again when the
+queued request runs. Successful responses pass through ordinary ingestion and JavaScript
+analysis, with graph resource properties identifying the manifest fetch and declaring capture.
+Matching compiled module definitions retain declaring module-reference IDs, the declaring capture
+ID, and the analyzed source hash. These bind a retrieved response version to its declarations.
+Separate HTTP requests retain independent capture versions.
+
+Failed requests leave the declaring capture available and are reported in ingestion logs.
+Capture-local delivery records coalesce repeated submissions. Interrupted queue delivery
+can repeat a request, and ordinary capture ingestion handles repeated responses.
+
+For the Next.js Pages Router, captured build manifests with literal route mappings or literal Webpack string aliases
+contribute declared JavaScript dependencies relative to the captured manifest asset base.
+For the App Router, the graph can read explicit local chunk paths from supported Flight import rows in
 captured `text/x-component` responses and literal inline bootstrap fragments. Import rows with a
 module ID and export name also declare a capture-local module reference linked to the named
 chunk resources. The JavaScript analyzer records literal Webpack and Turbopack module factory

@@ -15,7 +15,21 @@ FIXTURE_CHROME=/path/to/chromium bash tests/fixtures/next-client/record-matrix.s
 |----------------------|---------|-------------|
 | `FIXTURE_CHROME` | Required | Path to a local Chromium executable |
 | `FIXTURE_PORT` | `3930` | Loopback port for the fixture server |
+| `FIXTURE_BASE_PATH` | Empty | Next.js base path for custom fixture builds |
+| `FIXTURE_ASSET_PREFIX` | Empty | Next.js asset prefix for custom fixture builds |
 | `FIXTURE_BROWSER_MAPS` | `0` | Build with browser source maps when set to `1`. The matrix runner sets both values. |
+
+For real HTTP retrieval through the durable ingestion queue and compiled-module attribution,
+run the integration verifier. It starts a loopback server for each build and uses isolated temporary
+stores that are removed afterward. It requires Node dependencies and the project's Python environment.
+
+```sh
+PYTHONPATH="$PWD" UV_CACHE_DIR="$PWD/.uv-cache" uv run python tests/fixtures/next-client/verify-retrieval.py
+```
+
+The verifier covers all four bundler/map combinations plus a Webpack build with a base path and
+a distinct loopback asset hostname. It checks open/closed-world retrieval, deduplication,
+Pages manifest chunks, inline Flight chunks, and matching module-reference provenance.
 
 The runner builds Webpack and Turbopack with browser source maps off and on. Each JSONL file
 contains browser observations in the graph capture format, with the fixture origin rewritten to

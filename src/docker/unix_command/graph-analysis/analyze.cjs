@@ -5,7 +5,7 @@ const traverse = require("@babel/traverse").default;
 const { prepareSource } = require("./encoding.cjs");
 
 const { compress } = require("./library.cjs");
-const { nextBundleModules } = require("./next-bundle.cjs");
+const { nextBundleModules, nextManifestChunks } = require("./next-bundle.cjs");
 
 function analyze(source, filename = "source.js", mode = "summary") {
   if (!["summary", "full"].includes(mode)) throw new Error("Invalid library analysis mode");
@@ -692,7 +692,12 @@ function analyze(source, filename = "source.js", mode = "summary") {
     ? nextBundleModules(ast, gaps) : [];
   const result = { ...(nextModules.length ? { next_modules: nextModules } : {}), nodes: [...nodes.values()], edges: [...edges.values()], references,
     gaps: [...gaps], analysis: { mode: "full" } };
-  return compress(result, mode);
+  const compressed = compress(result, mode);
+  if (source.includes("__BUILD_MANIFEST") || source.includes("__TURBOPACK_PAGE_BOOTSTRAP")) {
+    const chunks = nextManifestChunks(ast);
+    if (chunks.length) compressed.next_manifest_chunks = chunks;
+  }
+  return compressed;
 }
 
 module.exports = { analyze };

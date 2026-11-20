@@ -19,9 +19,15 @@ def test_candidates_round_trip_and_transport(suffix, monkeypatch):
         return httpx.Response(200, text='{"version":3,"sources":[]}')
 
     client = httpx.Client(transport=httpx.MockTransport(respond))
-    monkeypatch.setattr(source_maps.httpx, "Client", lambda **kwargs: client)
+    client_options = []
+    monkeypatch.setattr(
+        source_maps.httpx,
+        "Client",
+        lambda **kwargs: client_options.append(kwargs) or client,
+    )
     assert source_maps._valid_map(source_maps._fetch_map(url, {}))
     assert requests[0].url.raw_path == f"/a%20b.js{suffix}?v=1".encode()
+    assert client_options == [{"timeout": 5, "follow_redirects": False, "verify": False}]
 
 
 @pytest.mark.parametrize("url", ["https://example.com/a.css", "file:///a.js"])

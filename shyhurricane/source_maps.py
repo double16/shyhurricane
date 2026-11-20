@@ -45,7 +45,7 @@ def _fetch_map(map_url: str, request_headers: dict) -> str | None:
     headers = {key: value for key, value in request_headers.items()
                if key.lower() in {"authorization", "cookie", "user-agent"}}
     try:
-        with httpx.Client(timeout=5, follow_redirects=False) as client:
+        with httpx.Client(timeout=5, follow_redirects=False, verify=False) as client:
             with client.stream("GET", map_url, headers=headers) as response:
                 if response.status_code != 200:
                     return None

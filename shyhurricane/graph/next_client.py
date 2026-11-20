@@ -2,13 +2,14 @@
 
 import json
 import re
+from urllib.parse import quote
 
 _INLINE = re.compile(r"(?:self\.__next_f|\(self\.__next_f=self\.__next_f\|\|\[\]\))\.push\((.*)\);?\s*\Z", re.S)
 _LENGTH_PREFIX = re.compile(r"[0-9a-f]+:[TAOoUSsLlGgMmV][0-9a-f]+,")
 _ROW = re.compile(r"([0-9a-f]+):(.*)\Z")
 _OUTLINED = re.compile(r'"((?:/_next/)?static/chunks/[a-zA-Z0-9_./-]+\.js)"\s*\Z')
 _OUTLINED_ID = re.compile(r"\$([0-9a-f]+)\Z")
-_CHUNK = re.compile(r"(?:/_next/)?static/chunks/[a-zA-Z0-9_./%-]+\.js\Z")
+_CHUNK = re.compile(r"(?:/_next/)?static/chunks/[a-zA-Z0-9_./%\[\]-]+\.js\Z")
 _MAX_BYTES = 1024 * 1024
 _MAX_ROWS = 10_000
 
@@ -76,3 +77,35 @@ def flight_assets(body, emit, gaps, location):
                 emit(path, module_id, export_name, f"{location}:{index}")
     if unsupported:
         gaps.append("Unsupported Next.js Flight import record")
+
+
+_PAGES_MANIFEST = re.compile(r"((?!//).*/_next/)static/[^/]+/_buildManifest\.js\Z")
+_MANIFEST_ASSIGNMENT = re.compile(r"\s*self\.__BUILD_MANIFEST\s*=\s*")
+
+
+def pages_chunk_path(path, chunk):
+    asset_base = _PAGES_MANIFEST.fullmatch(path)
+    if asset_base and isinstance(chunk, str) and _CHUNK.fullmatch(chunk) and ".." not in chunk and "%" not in chunk:
+        return asset_base[1] + quote(chunk.removeprefix("/_next/"))
+    return None
+
+
+def pages_manifest_assets(path, body):
+    """Read literal Pages Router mappings relative to the captured manifest URL."""
+    asset_base = _PAGES_MANIFEST.fullmatch(path)
+    assignment = _MANIFEST_ASSIGNMENT.match(body)
+    if not asset_base or not assignment or len(body.encode(errors="surrogatepass")) > _MAX_BYTES:
+        return
+    try:
+        manifest, end = json.JSONDecoder().raw_decode(body, assignment.end())
+    except (ValueError, RecursionError):
+        return
+    if not isinstance(manifest, dict) or body[end:].lstrip()[:1] not in {"", ";"}:
+        return
+    for route, chunks in manifest.items():
+        if not route.startswith("/") or not isinstance(chunks, list):
+            continue
+        for chunk in chunks:
+            resolved = pages_chunk_path(path, chunk)
+            if resolved:
+                yield route, resolved

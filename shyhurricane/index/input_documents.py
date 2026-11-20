@@ -26,6 +26,8 @@ class IngestableRequestResponse(BaseModel):
     technologies: Optional[List[str]] = Field(description="Technologies")
     forms: Optional[List[Dict[str, Any]]] = Field(description="Forms")  # see katana response.forms "schema"
 
+    capture_provenance: Optional[Dict[str, str]] = Field(default=None, exclude=True)
+
     def to_katana(self) -> str:
         data: Dict[str, Any] = {
             "timestamp": self.timestamp,
@@ -41,6 +43,8 @@ class IngestableRequestResponse(BaseModel):
                 "body": self.response_body,
             }
         }
+        if self.capture_provenance is not None:
+            data["capture_provenance"] = self.capture_provenance
         if self.response_rtt is not None:
             data["response"]["rtt"] = self.response_rtt
         if self.technologies is not None:
@@ -281,6 +285,7 @@ class KatanaDocument:
                 response_rtt=response_rtt,
                 technologies=technologies,
                 forms=forms,
+                capture_provenance=entry.get("capture_provenance"),
             ))
         return {"request_responses": results}
 

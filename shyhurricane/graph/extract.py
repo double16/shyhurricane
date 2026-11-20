@@ -20,7 +20,7 @@ from shyhurricane.graph.artifacts import recovered_sources
 from shyhurricane.graph.discovery_manifest import archive_ir, markup_emitter
 from shyhurricane.graph.markup import scan_markup, scan_svg
 from shyhurricane.graph.model import MAX_BYTES, Projection, identity, web_url
-from shyhurricane.graph.next_client import flight_assets, inline_flight
+from shyhurricane.graph.next_client import flight_assets, inline_flight, pages_chunk_path, pages_manifest_assets
 from shyhurricane.graph.parser_diagnostics import measured, remaining_seconds
 from shyhurricane.graph.policy import ANALYZER_VERSION, library_analysis
 from shyhurricane.graph.svg import extract_svg, is_svg, svg_root
@@ -112,6 +112,10 @@ def extract(
     graph.library_analysis = mode
     data = event["data"]
     page = graph.resource(graph.url, data["method"])
+    provenance = data.get("capture_provenance")
+    if provenance and provenance.get("kind") == "next_manifest_fetch":
+        graph.nodes[page]["capture_source"] = "next_manifest_fetch"
+        graph.nodes[page]["declaring_capture_id"] = provenance["declaring_capture"]
     origin_url = f"{urlsplit(graph.url).scheme}://{urlsplit(graph.url).netloc}/"
     origin = graph.node("origin", origin_url, url=origin_url, name=origin_url)
     graph.fact(page, origin, "HOSTED_AT", "http.resource", classification="observed")
@@ -120,6 +124,7 @@ def extract(
     mime = response_headers.get("content-type", "").lower().split(";")[0]
     body = data.get("response_body") or ""
     refs = []
+    flight_asset_base = None
 
     def reference(
         value,
@@ -152,6 +157,10 @@ def extract(
         return target
 
     def flight_reference(path, module_id, export_name, location):
+        if flight_asset_base is False:
+            return
+        if flight_asset_base:
+            path = flight_asset_base + path.removeprefix("/_next/")
         target = reference(path, "LOADS", "next.flight-import", location=location)
         if not target or type(module_id) not in (str, int) or not isinstance(export_name, str):
             return
@@ -298,6 +307,16 @@ def extract(
         soup = BeautifulSoup(body, "html.parser")
         base_element = soup.find("base", href=True)
         base = web_url(base_element["href"], graph.url) if base_element else graph.url
+        asset_bases = set()
+        for script in soup.find_all("script", src=True):
+            script_url = web_url(script["src"], base)
+            if script_url and "/_next/static/chunks/" in script_url:
+                asset_bases.add(script_url.split("/_next/static/chunks/", 1)[0] + "/_next/")
+        if len(asset_bases) == 1:
+            flight_asset_base = next(iter(asset_bases))
+        elif len(asset_bases) > 1:
+            flight_asset_base = False
+            graph.gaps.append("Next.js Flight asset base is ambiguous")
         flight_fragments = []
         tags = soup.find_all(True)
         locations = {id(tag): markup_locators[index] for index, tag in enumerate(tags) if index < len(markup_locators)}
@@ -425,6 +444,8 @@ def extract(
         except etree.XMLSyntaxError:
             graph.gaps.append("Malformed SVG response")
     elif "javascript" in mime or urlsplit(graph.url).path.lower().endswith((".js", ".mjs", ".jsx", ".ts", ".tsx")):
+        for route, chunk in pages_manifest_assets(urlsplit(graph.url).path, body):
+            reference(chunk, "LOADS", "next.pages-manifest", location=route)
         map_result = (
             artifacts.resolve_source_map(
                 graph.url,
@@ -632,7 +653,20 @@ def _apply_javascript(graph, page, filename, result, reference, contexts):
     graph.contexts.extend(context for context in contexts if context not in graph.contexts)
     graph.nodes[page]["context_urls"] = [context["url"] for context in contexts]
     graph.nodes[page]["analysis_details"] = json.dumps(graph.analysis, sort_keys=True)
+    if not recovered:
+        for route, chunk in result.get("next_manifest_chunks", []):
+            path = pages_chunk_path(urlsplit(graph.url).path, chunk)
+            if path:
+                reference(path, "LOADS", "next.pages-manifest", location=route)
     if not recovered and "/_next/static/chunks/" in urlsplit(graph.url).path:
+        provenance = graph.event["data"].get("capture_provenance") or {}
+        declarations_by_module = {}
+        if provenance.get("kind") == "next_manifest_fetch":
+            try:
+                for item in json.loads(provenance.get("module_references", "[]")):
+                    declarations_by_module.setdefault(item["module_id"], set()).add(item["id"])
+            except (ValueError, KeyError, TypeError):
+                declarations_by_module = {}
         for registration in result.get("next_modules", []):
             location = f"{filename}:{registration['location']}"
             module = graph.node(
@@ -642,6 +676,11 @@ def _apply_javascript(graph, page, filename, result, reference, contexts):
                 bundle_module_id=str(registration["id"])[:120], bundler=registration["bundler"],
             )
             graph.fact(page, module, "CONTAINS", "next.bundle-registration", location=location)
+            reference_ids = sorted(declarations_by_module.get(str(registration["id"]), []))
+            if reference_ids:
+                graph.nodes[module]["declaring_reference_ids"] = reference_ids
+                graph.nodes[module]["declaring_capture_id"] = provenance["declaring_capture"]
+                graph.nodes[module]["source_sha256"] = result.get("source_sha256", "")
     origins = {f"{urlsplit(context['base']).scheme}://{urlsplit(context['base']).netloc}" for context in contexts}
     containments = []
     for item in result.get("nodes", []):

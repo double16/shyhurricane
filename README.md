@@ -568,5 +568,9 @@ Existing vectors remain readable. For consistent chunk boundaries, rebuild affec
 collections from retained source data rather than replaying over existing child IDs, which
 can leave stale chunks. Back up data and retain replayable inputs before rebuilding.
 
+With open-world access enabled, ingestion fetches JavaScript chunks explicitly declared in captured
+Next.js build manifests and Flight records. Fetched responses enter normal ingestion and retain
+their declaring capture as provenance. See the [application graph guide](docs/application-graph.md).
+
 Source-map discovery tries suffixes `.map`, `.MAP`, `%2Emap`, and `%2EMAP` in order,
 stopping at the first valid map. Network requests require open-world access.

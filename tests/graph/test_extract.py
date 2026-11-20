@@ -852,3 +852,128 @@ def test_next_compiled_module_registration_requires_delivered_chunk(event, javas
     ordinary = extract(event(url="https://example.com/app.js", body=body, mime="application/javascript"),
                        javascript_runner=javascript_runner)
     assert not any(e["rule"] == "next.bundle-registration" for e in ordinary.evidence.values())
+
+
+def test_next_pages_manifest_declares_chunk_at_captured_asset_base(event):
+    graph = extract(
+        event(
+            url="https://example.com/base/_next/static/build/_buildManifest.js",
+            body='self.__BUILD_MANIFEST = {"/items/[id]":["static/chunks/item.js",'
+                 '"static/chunks/../other.js","static/chunks/item.css"],"sortedPages":["/items/[id]"]};',
+            mime="application/javascript",
+        ),
+        javascript_runner=lambda *_: {},
+    )
+    assert {node["url"] for node in graph.nodes.values() if "/chunks/" in node["url"]} == {
+        "https://example.com/base/_next/static/chunks/item.js",
+    }
+    assert any(item["rule"] == "next.pages-manifest" for item in graph.evidence.values())
+
+
+@pytest.mark.parametrize("body", [
+    'self.__BUILD_MANIFEST = {',
+    'self.__BUILD_MANIFEST = {"/":["static/chunks/item.js"]} + dynamic',
+    'self.__BUILD_MANIFEST = ["/"]',
+    'self.__BUILD_MANIFEST = {"/":42}',
+    'self.__BUILD_MANIFEST = {"/":[null,"static/chunks/%2e/item.js"]}',
+    'differentGlobal = {"/":["static/chunks/item.js"]}',
+])
+def test_next_pages_manifest_ignores_unsupported_entries(event, body):
+    graph = extract(
+        event(url="https://example.com/_next/static/build/_buildManifest.js",
+              body=body, mime="application/javascript"),
+        javascript_runner=lambda *_: {},
+    )
+    assert not any(item["rule"] == "next.pages-manifest" for item in graph.evidence.values())
+
+
+def test_next_pages_manifest_projects_analyzer_results(event):
+    graph = extract(
+        event(
+            url="https://example.com/_next/static/build/_buildManifest.js",
+            body="self.__BUILD_MANIFEST = makeManifest();",
+            mime="application/javascript",
+        ),
+        javascript_runner=lambda *_: {
+            "next_manifest_chunks": [
+                ["/items/[id]", "static/chunks/pages/items/[id].js"],
+                ["/items/[id]", "https://example.com/outside.js"],
+            ],
+        },
+    )
+    assert {node["url"] for node in graph.nodes.values() if "/chunks/" in node["url"]} == {
+        "https://example.com/_next/static/chunks/pages/items/%5Bid%5D.js",
+    }
+
+
+@pytest.mark.parametrize("asset_base", [
+    "https://example.com/base/_next/",
+    "https://cdn.example.com/assets/_next/",
+])
+def test_inline_flight_uses_observed_script_asset_base(event, asset_base):
+    record = json.dumps([1, '1:I[42,["static/chunks/client.js"],"default"]' + chr(10)])
+    body = (
+        f'<html><script src="{asset_base}static/chunks/runtime.js"></script>'
+        f'<script>self.__next_f.push({record})</script></html>'
+    )
+    graph = extract(event(body=body), javascript_runner=lambda *_: {})
+    assert any(
+        node.get("url") == asset_base + "static/chunks/client.js"
+        for node in graph.nodes.values()
+    )
+
+
+def test_ambiguous_inline_flight_asset_base_is_not_resolved(event):
+    record = json.dumps([1, '1:I[42,["static/chunks/client.js"],"default"]' + chr(10)])
+    body = (
+        '<html><script src="https://cdn.example.com/_next/static/chunks/a.js"></script>'
+        '<script src="/_next/static/chunks/b.js"></script>'
+        f'<script>self.__next_f.push({record})</script></html>'
+    )
+    graph = extract(event(body=body), javascript_runner=lambda *_: {})
+    assert "Next.js Flight asset base is ambiguous" in graph.gaps
+    assert not any(item["rule"] == "next.flight-import" for item in graph.evidence.values())
+
+
+@pytest.mark.parametrize("declared_module", ["42", "99", None])
+def test_fetched_module_binds_only_matching_declarations(event, declared_module):
+    references = [{"id": "reference-id", "module_id": declared_module}]
+    graph = extract(
+        event(
+            url="https://example.com/_next/static/chunks/client.js",
+            body="delivered source",
+            mime="application/javascript",
+            capture_provenance={
+                "kind": "next_manifest_fetch", "declaring_capture": "declaring-capture",
+                "module_references": json.dumps(references),
+            },
+        ),
+        javascript_runner=lambda *_: {
+            "next_modules": [{"id": 42, "bundler": "webpack", "location": "1:0"}],
+        },
+    )
+    module = next(node for node in graph.nodes.values() if node["kind"] == "module_definition")
+    if declared_module == "42":
+        assert module["declaring_reference_ids"] == ["reference-id"]
+        assert module["declaring_capture_id"] == "declaring-capture"
+        assert len(module["source_sha256"]) == 64
+    else:
+        assert "declaring_reference_ids" not in module
+
+
+def test_fetched_module_ignores_malformed_declaration_metadata(event):
+    graph = extract(
+        event(
+            url="https://example.com/_next/static/chunks/client.js",
+            body="delivered source", mime="application/javascript",
+            capture_provenance={
+                "kind": "next_manifest_fetch", "declaring_capture": "declaring-capture",
+                "module_references": "invalid",
+            },
+        ),
+        javascript_runner=lambda *_: {
+            "next_modules": [{"id": 42, "bundler": "webpack", "location": "1:0"}],
+        },
+    )
+    module = next(node for node in graph.nodes.values() if node["kind"] == "module_definition")
+    assert "declaring_reference_ids" not in module
