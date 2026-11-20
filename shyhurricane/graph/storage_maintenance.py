@@ -8,6 +8,8 @@ from contextlib import closing
 from shyhurricane.data_paths import persistent_queue_path
 from shyhurricane.graph import storage_accounting
 from shyhurricane.graph.blob_store import BlobStore, cache_budget, validate
+from shyhurricane.graph.segment_maintenance import SegmentMaintenance
+from shyhurricane.graph.storage_tuning import configure
 
 logger = logging.getLogger(__name__)
 PASS_SECONDS = 2
@@ -19,6 +21,7 @@ class StorageMaintenance:
     def __init__(self, db):
         self.root = persistent_queue_path(db, "graph_state")
         self.contention_streak = 0
+        self.segments = SegmentMaintenance(self.root)
 
     def tick(self, stop_event):
         previous_streak = self.contention_streak
@@ -31,6 +34,7 @@ class StorageMaintenance:
         deferred, code, stage = False, None, "connect"
         try:
             with closing(sqlite3.connect(path.as_uri() + "?mode=rw", uri=True, timeout=0.05)) as connection:
+                configure(connection)
                 try:
                     stage = "validate"
                     validate(connection)
@@ -53,8 +57,13 @@ class StorageMaintenance:
                                 raise
                             break
                     connection.set_progress_handler(None, 0)
+                    stage = "files"
+                    self.segments.tick(connection, deadline=deadline)
                     stage = "pending"
-                    waiting = storage_accounting.pending(connection, cache_budget())
+                    waiting = (
+                        storage_accounting.pending(connection, cache_budget()) or self.segments.pending
+                        or connection.execute("PRAGMA freelist_count").fetchone()[0] > 128
+                    )
                     # Space reclamation gets its own short slice even if accounting yielded.
                     if not stop_event.is_set():
                         reclaim_deadline = time.monotonic() + 0.2
@@ -63,7 +72,10 @@ class StorageMaintenance:
                             stage = "vacuum"
                             connection.execute("PRAGMA incremental_vacuum(128)").fetchall()
                             stage = "checkpoint"
+                            checkpoint_started = time.monotonic()
                             checkpoint = connection.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+                            logger.info("Graph checkpoint seconds=%.3f busy=%s frames=%s checkpointed=%s",
+                                        time.monotonic() - checkpoint_started, *checkpoint)
                             deferred = bool(checkpoint[0])
                             if deferred:
                                 code = sqlite3.SQLITE_BUSY
@@ -106,5 +118,10 @@ class StorageMaintenance:
                 result = BlobStore(connection).statistics()
             wal = path.with_name(path.name + "-wal")
             result["wal_bytes"] = wal.stat().st_size if wal.exists() else 0
-            result["allocated_bytes"] = sum(file.stat().st_blocks * 512 for file in (path, wal) if file.exists())
+            result["allocated_bytes"] = result["segment_allocated_bytes"] + sum(
+                file.stat().st_blocks * 512 for file in (path, wal) if file.exists()
+            )
             return result
+
+    def close(self):
+        self.segments.close()

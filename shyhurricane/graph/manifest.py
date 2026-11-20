@@ -1,4 +1,4 @@
-"""Durable paged discovery facts and addressable analysis units, independent of Neo4j limits."""
+"""Coarse execution metadata and durable shard-level discovery publication obligations."""
 
 import json
 import logging
@@ -9,31 +9,30 @@ from pathlib import Path
 from shyhurricane.graph.blob_store import BlobStore
 from shyhurricane.graph.compact_manifest import initialize as initialize_manifest
 from shyhurricane.graph.compact_manifest import term
-from shyhurricane.graph.model import capture_unit_path, identity, optional_filter, projection_snapshot
+from shyhurricane.graph.model import capture_unit_path, identity, projection_snapshot
 
 logger = logging.getLogger(__name__)
 
 STATUSES = {"complete", "partial", "pending", "blocked", "failed"}
-PAGE_BYTES = 4 * 1024 * 1024
-
-
-CAPTURE_SELECTION = (
-    "c.rowid<=:captures AND (:as_of IS NULL OR c.stamp<=:as_of) AND (:historical OR NOT EXISTS ("
-    "SELECT 1 FROM captures newer LEFT JOIN graph_capture_metadata nm ON nm.capture_id=newer.id "
-    "LEFT JOIN graph_capture_metadata cm ON cm.capture_id=c.id "
-    "WHERE newer.rowid<=:captures AND newer.url=c.url "
-    "AND coalesce(nm.method,'GET')=coalesce(cm.method,'GET') "
-    "AND (:as_of IS NULL OR newer.stamp<=:as_of) "
-    "AND (newer.stamp>c.stamp OR (newer.stamp=c.stamp AND newer.id<c.id))))"
-)
 
 
 class ManifestStore:
-    def __init__(self, connection, root, *, initialize=True):
+    def __init__(self, connection, root, *, initialize=True, epoch=0):
         self.connection = connection
         self.root = Path(root)
+        self.build_key = "capture"
+        self.epoch = epoch
+        self.pending = []
+        self.reader = None
+        from shyhurricane.graph.inventory_outbox import InventoryOutbox
+        from shyhurricane.graph.shard_store import ShardStore
+
+        self.shards = ShardStore(root, connection)
+        self.outbox = InventoryOutbox(connection, self.shards)
         self.batching = False
+        self.atomic = False
         self.writes = 0
+        self.term_cache = {}
         self.blobs = BlobStore(connection)
         if not initialize:
             return
@@ -51,39 +50,105 @@ class ManifestStore:
         )
 
         initialize_manifest(self.connection)
+        from shyhurricane.graph.inventory_outbox import initialize as initialize_outbox
+
+        initialize_outbox(self.connection)
+        self.connection.executescript(
+            "CREATE TABLE IF NOT EXISTS graph_inventory_updates("
+            "unit_id TEXT,generation TEXT,version INTEGER,delivered INTEGER,metadata TEXT,"
+            "PRIMARY KEY(unit_id,generation));"
+            "CREATE TABLE IF NOT EXISTS graph_inventory_catalog(id INTEGER PRIMARY KEY,after_seq INTEGER NOT NULL);"
+            "INSERT OR IGNORE INTO graph_inventory_catalog VALUES (1,0);"
+            "CREATE TABLE IF NOT EXISTS graph_inventory_generations("
+            "id TEXT PRIMARY KEY,unit_id TEXT,capture_id TEXT,epoch INTEGER,"
+            "metadata TEXT NOT NULL,artifact TEXT,state TEXT NOT NULL DEFAULT 'pending',error TEXT NOT NULL DEFAULT '',"
+            "context_after INTEGER NOT NULL DEFAULT 0);"
+            "CREATE INDEX IF NOT EXISTS graph_inventory_generation_unit "
+            "ON graph_inventory_generations(unit_id,epoch);"
+            "CREATE INDEX IF NOT EXISTS graph_inventory_generation_work "
+            "ON graph_inventory_generations(state,epoch);"
+            "CREATE INDEX IF NOT EXISTS graph_inventory_update_pending "
+            "ON graph_inventory_updates(unit_id,generation) WHERE version>delivered;"
+        )
+        from shyhurricane.graph.blob_store import owner_triggers
+
+        owner_triggers(self.connection, "graph_inventory_generations", "artifact", "id")
+        for table in ("graph_archive_progress", "graph_archive_inputs"):
+            owner_triggers(self.connection, table, "artifact", "id")
 
     @contextmanager
-    def batch(self):
+    def batch(self, *, atomic=False):
         """Commit discovery in finite chunks, retaining progress if a parser is killed."""
+        previous_atomic = self.atomic
+        self.atomic = atomic
         previous = self.batching
+        if not previous:
+            self.writes = 0
+        previous_cache = self.term_cache
+        self.term_cache = {}
         self.batching = True
         try:
+            if atomic and not self.connection.in_transaction:
+                self.connection.execute("BEGIN IMMEDIATE")
             yield
+            self.flush()
             self.connection.commit()
         except BaseException:
+            previous_cache.clear()
             self.connection.rollback()
+            self.pending.clear()
             raise
         finally:
+            self.atomic = previous_atomic
             self.batching = previous
+            self.term_cache = previous_cache
 
     @contextmanager
     def transaction(self):
         if not self.batching:
-            with self.connection:
-                yield
+            try:
+                with self.connection:
+                    yield
+                    self.flush()
+            except BaseException:
+                self.pending.clear()
+                raise
         else:
             yield
             self.writes += 1
-            if self.writes >= 500:
+            if self.writes >= 500 and not self.atomic:
+                self.flush()
                 self.connection.commit()
                 self.writes = 0
+                self.term_cache.clear()
+
+    def _term(self, value):
+        """Reuse interned identifiers within a bounded write transaction."""
+        if not self.batching:
+            return term(self.connection, value)
+        if value not in self.term_cache:
+            self.term_cache[value] = term(self.connection, value)
+        return self.term_cache[value]
 
     def unit(self, capture_id, source_path, *, discovery="pending", flow="pending", artifact=None, error=""):
         if discovery not in STATUSES or flow not in STATUSES:
             raise ValueError("Invalid graph coverage status")
+        if not self.batching:
+            with self.batch(atomic=True):
+                return self.unit(capture_id, source_path, discovery=discovery, flow=flow,
+                                 artifact=artifact, error=error)
         from shyhurricane.graph.policy import ANALYZER_VERSION
 
         key = identity("analysis-unit-v2", ANALYZER_VERSION, capture_id, source_path)
+        published = self.connection.execute(
+            "SELECT artifact FROM graph_inventory_generations WHERE id=? AND state IN ('active','cleaned')",
+            (self.generation(key),),
+        ).fetchone()
+        if published:
+            if artifact is not None and published[0] != artifact:
+                raise ValueError("Published inventory is immutable; reserve a new analysis generation")
+            self.set_status(key, discovery=discovery, flow=flow, error=error)
+            return key
         with self.transaction():
             self.connection.execute(
                 "INSERT INTO graph_manifest_units(id,capture_id,source_path,discovery,flow,artifact,error,updated_at) "
@@ -95,20 +160,65 @@ class ManifestStore:
         row = self.connection.execute("SELECT url FROM captures WHERE id=?", (capture_id,)).fetchone()
         if row:
             self.fact(key, capture_id, "analysis_unit", {"id": key, "url": row[0], "source_path": source_path})
+        self.describe_generation(key)
         return key
+
+    def set_status(self, unit, *, discovery=None, flow=None, materialization=None, error=""):
+        from shyhurricane.graph.inventory_updates import enqueue
+
+        row = self.connection.execute(
+            "SELECT discovery,flow,materialization FROM graph_manifest_units WHERE id=?", (unit,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("Analysis unit is unavailable")
+        discovery, flow, materialization = discovery or row[0], flow or row[1], materialization or row[2]
+        if discovery not in STATUSES or flow not in STATUSES:
+            raise ValueError("Invalid graph coverage status")
+        with self.transaction():
+            self.connection.execute(
+                "UPDATE graph_manifest_units SET discovery=?,flow=?,materialization=?,error=?,updated_at=? WHERE id=?",
+                (discovery, flow, materialization, error[:1000], time.time(), unit),
+            )
+            generation = self.connection.execute(
+                "SELECT id FROM graph_inventory_generations WHERE unit_id=? AND state<>'cleaned' "
+                "ORDER BY epoch DESC,rowid DESC LIMIT 1", (unit,),
+            ).fetchone()
+            if generation:
+                enqueue(self.connection, unit, generation[0], materialization, error, flow=flow, discovery=discovery)
+
+    def describe_generation(self, unit):
+        row = self.connection.execute(
+            "SELECT u.capture_id,c.url,c.stamp,m.method,u.source_path,u.discovery,u.flow,u.artifact,"
+            "u.error,u.materialization FROM graph_manifest_units u JOIN captures c ON c.id=u.capture_id "
+            "JOIN graph_capture_metadata m ON m.capture_id=c.id WHERE u.id=?", (unit,),
+        ).fetchone()
+        if row:
+            names = ("capture_id", "url", "observed_at", "method", "source_path", "discovery",
+                     "flow", "artifact", "error", "materialization")
+            metadata = dict(zip(names, row, strict=True))
+            from shyhurricane.graph.policy import ANALYZER_VERSION
+
+            metadata["analyzer_version"] = ANALYZER_VERSION
+            with self.transaction():
+                self.connection.execute(
+                    "INSERT INTO graph_inventory_generations(id,unit_id,capture_id,epoch,metadata,artifact) "
+                    "VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET metadata=excluded.metadata,artifact=excluded.artifact,"
+                    "state=CASE WHEN state='waiting' THEN 'pending' ELSE state END",
+                    (self.generation(unit), unit, row[0], self.epoch, json.dumps(metadata), metadata["artifact"]),
+                )
 
     def contexts(self, unit, contexts):
         from urllib.parse import urlsplit
 
         with self.transaction():
-            unit_key = term(self.connection, unit)
+            unit_key = self._term(unit)
             for context in contexts:
                 ref = "a:" + identity("context", context)
                 ref = self.blobs.put(ref, context)
                 self.connection.execute(
                     "INSERT OR IGNORE INTO graph_context_documents(context,url_key,host_key,data) VALUES (?,?,?,?)",
-                    (term(self.connection, context["id"]), term(self.connection, context["url"]),
-                     term(self.connection, urlsplit(context["url"]).hostname or ""), ref),
+                    (self._term(context["id"]), self._term(context["url"]),
+                     self._term(urlsplit(context["url"]).hostname or ""), ref),
                 )
                 document = self.connection.execute(
                     "SELECT key FROM graph_context_documents WHERE data=?", (ref,)
@@ -119,7 +229,7 @@ class ManifestStore:
     def parent(self, unit, parent):
         with self.transaction():
             self.connection.execute("INSERT OR IGNORE INTO graph_parents(unit,parent) VALUES (?,?)",
-                                    (term(self.connection, unit), term(self.connection, parent)))
+                                    (self._term(unit), self._term(parent)))
 
     def dependency(self, capture, url, kind):
         if kind in {"LOADS", "IMPORTS", "SOURCE_MAP"}:
@@ -128,35 +238,54 @@ class ManifestStore:
                     "INSERT OR IGNORE INTO graph_manifest_dependencies VALUES (?,?,?)", (capture, url, kind)
                 )
 
-    def fact(self, unit, capture, kind, data, *, contexts=()):
-        from urllib.parse import urlsplit
+    def generation(self, unit):
+        return identity("inventory-generation", unit, self.epoch, self.build_key)
 
-        # Context membership is normalized; neither membership nor IDs depend on visitation order.
+    def fact(self, unit, capture, kind, data, *, contexts=()):
         payload = {"kind": kind, **data}
-        contextual = payload.pop("context_capture_id", None)
+        context = payload.pop("context_capture_id", None)
         key = identity("manifest-fact-v1", unit, kind, payload)
-        value = json.dumps(payload, sort_keys=True)
-        url = data.get("url") or data.get("owner_url") or ""
+        record = {**payload, "manifest_id": key, "analysis_unit_id": unit, "capture_id": capture}
+        memberships = sorted({*contexts, *([context] if context else [])})
+        if memberships:
+            record["_context_ids"] = memberships
         with self.transaction():
-            if len(value.encode()) > PAGE_BYTES:
-                oversized = "a:" + identity("manifest-blob", key)
-                oversized = self.blobs.put(oversized, payload)
-                payload = {"id": key, "artifact": oversized, "oversized": True}
-            reference = "a:" + identity("manifest-payload", payload)
-            reference = self.blobs.put(reference, payload)
-            self.connection.execute(
-                "INSERT OR IGNORE INTO graph_facts(id,unit,capture,kind_key,url_key,host_key,role_key,data,method,captured) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (key, term(self.connection, unit), term(self.connection, capture), term(self.connection, kind),
-                 term(self.connection, url), term(self.connection, urlsplit(url).hostname or ""),
-                 term(self.connection, data.get("role") or ""), reference,
-                 str(data.get("method") or "GET").upper(), int(data.get("capture_status") == "captured")),
-            )
-            fact = self.connection.execute("SELECT seq FROM graph_facts WHERE id=?", (key,)).fetchone()[0]
-            for context in {*contexts, *([contextual] if contextual else [])}:
-                self.connection.execute("INSERT OR IGNORE INTO graph_fact_contexts(fact,context) VALUES (?,?)",
-                                        (fact, term(self.connection, context)))
+            self.pending.append(record)
+            if len(self.pending) >= 500:
+                self.flush()
         return key
+
+    def facts(self, unit, capture, records):
+        if len(records) > 500:
+            raise ValueError("Graph fact batches must contain at most 500 records")
+        if not self.batching:
+            with self.batch(atomic=True):
+                return self.facts(unit, capture, records)
+        return [self.fact(unit, capture, kind, data) for kind, data in records]
+
+    def flush(self):
+        if not self.pending:
+            return
+        groups = {}
+        for record in self.pending:
+            groups.setdefault(record["analysis_unit_id"], []).append(record)
+        for unit, records in groups.items():
+            generation = self.generation(unit)
+            sequence = self.connection.execute(
+                "SELECT coalesce(max(sequence)+1,0) FROM graph_inventory_outbox WHERE generation=?",
+                (generation,),
+            ).fetchone()[0]
+            self.outbox.enqueue(generation, records, start=sequence)
+        self.connection.execute(
+            "UPDATE graph_inventory_generations SET state='pending' WHERE state='waiting' AND id IN "
+            "(SELECT generation FROM graph_inventory_outbox WHERE state='pending')"
+        )
+        self.pending.clear()
+
+    def inventory_reader(self):
+        if self.reader is None:
+            raise RuntimeError("Inventory queries require a bound graph service")
+        return self.reader
 
     def archive(self, projection, writer):
         with self.batch():
@@ -188,207 +317,11 @@ class ManifestStore:
         return unit
 
     def watermark(self):
-        return {
-            name: self.connection.execute(f"SELECT coalesce(max({sequence}),0) FROM {table}").fetchone()[0]
-            for name, table, sequence in (
-                ("facts", "graph_facts", "seq"),
-                ("captures", "captures", "seq"),
-                ("memberships", "graph_fact_contexts", "seq"),
-                ("units", "graph_context_members", "seq"),
-                ("parents", "graph_parents", "seq"),
-            )
-        }
+        return self.inventory_reader().watermark()
 
-    def page(
-        self,
-        scope,
-        *,
-        kind=None,
-        role=None,
-        capture_id=None,
-        after="",
-        limit=1000,
-        url=None,
-        method=None,
-        historical=False,
-        as_of=None,
-        watermark=None,
-        kinds=None,
-        context_url=None,
-        exclude_kinds=(),
-    ):
-        from urllib.parse import urlsplit
+    def page(self, scope, **arguments):
+        with self.blobs.snapshot():
+            return self.inventory_reader().page(scope, **arguments)
 
-        from shyhurricane.graph.query import scope_predicate
-
-        if not 1 <= limit <= 1000:
-            raise ValueError("Manifest page size must be between 1 and 1000")
-        url, method, context_url = map(optional_filter, (url, method, context_url))
-        matches = scope_predicate(scope)
-        self.connection.create_function("graph_in_scope", 1, matches, deterministic=True)
-        host = urlsplit(scope if "://" in scope else "https://" + scope).hostname
-        watermark = self.watermark() if watermark is None else watermark
-        # Select a finite physical batch first. Optional predicates must not hide equality
-        # lookups behind ORs: SQLite otherwise prefers the global ID index even for one URL.
-        parameters = {
-            **watermark, "host": host, "after": after, "kind": kind, "role": role,
-            "capture": capture_id, "url": url, "method": method.upper() if method else None,
-            "as_of": as_of, "historical": historical, "context": context_url,
-        }
-        filters = ["f.id>:after", "f.rowid<=:facts"]
-        candidate_filters = list(filters)
-        for column, value in (("kind", kind), ("role", role), ("capture_id", capture_id), ("url", url)):
-            if value is not None:
-                filters.append(f"f.{column}=:{'capture' if column == 'capture_id' else column}")
-        if kinds:
-            filters.append("f.kind IN (SELECT value FROM json_each(:kinds))")
-            parameters["kinds"] = json.dumps(kinds)
-        if exclude_kinds:
-            filters.append("f.kind NOT IN (SELECT value FROM json_each(:excluded))")
-            parameters["excluded"] = json.dumps(exclude_kinds)
-        if method is not None:
-            filters.append("f.method=:method")
-        # Kind predicates use the existing host/kind index when no exact URL is supplied.
-        # Roles, methods, and capture IDs are checked after the finite physical batch.
-        if kind is not None:
-            candidate_filters.append("f.kind=:kind")
-        if kinds:
-            candidate_filters.append("f.kind IN (SELECT value FROM json_each(:kinds))")
-        if exclude_kinds:
-            candidate_filters.append("f.kind NOT IN (SELECT value FROM json_each(:excluded))")
-        # Resolve interned keys before seeking compact indexes; no payload decoding here.
-        candidates_where = ["f.id>:after", "f.seq<=:facts"]
-        if kind is not None:
-            candidates_where.append("f.kind_key=(SELECT key FROM graph_terms WHERE value=:kind)")
-        if kinds:
-            candidates_where.append("f.kind_key IN (SELECT key FROM graph_terms "
-                                    "WHERE value IN (SELECT value FROM json_each(:kinds)))")
-        if exclude_kinds:
-            candidates_where.append("f.kind_key NOT IN (SELECT key FROM graph_terms "
-                                    "WHERE value IN (SELECT value FROM json_each(:excluded)))")
-        if url is not None:
-            candidates_where.append("f.url_key=(SELECT key FROM graph_terms WHERE value=:url)")
-        if kind == "resource" and url is None:
-            candidates_where.append("f.host_key IN (SELECT key FROM graph_terms "
-                                    "WHERE value=:host OR value LIKE :subdomains)")
-            parameters["subdomains"] = "%." + host
-        started = time.monotonic()
-        candidates = self.connection.execute(
-            "SELECT f.id FROM graph_facts f WHERE " + " AND ".join(candidates_where)
-            + " ORDER BY f.id LIMIT 1001", parameters,
-        ).fetchall()
-        logger.debug("Graph manifest stage=candidates count=%s seconds=%.3f", len(candidates),
-                     time.monotonic() - started)
-        selected = [row[0] for row in candidates[:1000]]
-        if not selected:
-            return [], None
-        parameters["selected"] = json.dumps(selected)
-        # Each context lookup starts from a unit or fact key. Never construct the global
-        # memberships union (which can contain millions of rows) for a small result page.
-        memberships = (
-            "SELECT m.url FROM graph_unit_contexts m JOIN documents d ON d.id=m.context_id "
-            "WHERE m.unit_id=f.unit_id AND m.rowid<=:units "
-            "UNION ALL SELECT d.url FROM graph_manifest_contexts m "
-            "JOIN documents d ON d.id=m.context_id WHERE m.fact_id=f.id AND m.rowid<=:memberships "
-            "UNION ALL SELECT m.url FROM graph_unit_parents parent "
-            "JOIN graph_unit_contexts m ON m.unit_id=parent.parent_id "
-            "JOIN documents d ON d.id=m.context_id WHERE parent.unit_id=f.unit_id "
-            "AND parent.rowid<=:parents AND m.rowid<=:units"
-        )
-        scope_filter = "graph_in_scope(f.url)"
-        if kind != "resource":
-            scope_filter += " OR EXISTS (SELECT 1 FROM (" + memberships + ") WHERE graph_in_scope(url))"
-        context_filter = ""
-        if context_url is not None:
-            context_filter = (
-                " AND (f.url=:context OR EXISTS (SELECT 1 FROM (" + memberships + ") WHERE url=:context))"
-            )
-        started = time.monotonic()
-        rows = self.connection.execute(
-            # Inline temporal selection so bounded fact/context IDs seek captures directly.
-            # Materialization scans the whole capture catalog, including once per status lookup.
-            "WITH documents AS NOT MATERIALIZED (SELECT c.id,c.url FROM captures c WHERE "
-            + CAPTURE_SELECTION + ") "
-            "SELECT f.id,f.unit_id,f.capture_id,f.data,f.url,0 "
-            "FROM graph_manifest_facts f JOIN documents c ON c.id=f.capture_id "
-            "WHERE f.id IN (SELECT value FROM json_each(:selected)) AND " + " AND ".join(filters)
-            + " AND (" + scope_filter + ")" + context_filter + " ORDER BY f.id", parameters,
-        ).fetchall()
-        logger.debug("Graph manifest stage=selection candidates=%s matched=%s seconds=%.3f",
-                     len(selected), len(rows), time.monotonic() - started)
-        records, used, cursor = [], 0, after
-        captured_status = {}
-        try:
-            for key, unit, capture, data, target, captured in rows[:limit]:
-                payload = self.blobs.read(data)
-                size = len(json.dumps(payload).encode())
-                if records and used + size > PAGE_BYTES:
-                    break
-                used += size
-                record = {**payload, "manifest_id": key, "analysis_unit_id": unit, "capture_id": capture}
-                if record.get("kind") == "analysis_unit":
-                    state = self.connection.execute(
-                        "SELECT discovery,flow,materialization,error,artifact IS NOT NULL "
-                        "FROM graph_manifest_units WHERE id=?",
-                        (unit,),
-                    ).fetchone()
-                    record.update(zip(("discovery", "flow", "materialization", "error", "expandable"), state))
-                if "capture_status" in record:
-                    resource = (target, record.get("method", "GET"))
-                    if resource not in captured_status:
-                        captured_status[resource] = self.connection.execute(
-                            "WITH documents AS NOT MATERIALIZED (SELECT c.id FROM captures c WHERE "
-                            + CAPTURE_SELECTION + ") SELECT EXISTS (SELECT 1 FROM graph_manifest_facts f "
-                            "JOIN documents d ON d.id=f.capture_id WHERE f.url=:target "
-                            "AND f.rowid<=:facts AND f.kind='resource' "
-                            "AND f.captured=1 "
-                            "AND f.method=:resource_method)",
-                            {**parameters, "target": target, "resource_method": str(resource[1]).upper()},
-                        ).fetchone()[0]
-                    record["capture_status"] = "captured" if captured_status[resource] else "referenced"
-                    record["follow_up"] = {
-                        "tool": "find_application_endpoints",
-                        "arguments": {
-                            "scope": scope,
-                            "url": target,
-                            "method": record.get("method", "GET"),
-                            "detail": "summary",
-                        },
-                    }
-                records.append(record)
-                cursor = key
-        except TimeoutError:
-            if not records:
-                raise
-            return records, cursor
-        if len(records) < len(rows):
-            # Output/byte bounds must not consume a matching record that was not returned.
-            return records, cursor
-        return records, selected[-1] if len(candidates) > 1000 else None
-
-    def coverage(self, capture_id=None, *, scope=None, historical=False, as_of=None, watermark=None):
-        from shyhurricane.graph.query import scope_predicate
-
-        matches = scope_predicate(scope) if scope else lambda value: True
-        self.connection.create_function("graph_in_scope", 1, matches, deterministic=True)
-        watermark = self.watermark() if watermark is None else watermark
-        rows = self.connection.execute(
-            "WITH documents AS (SELECT c.id,c.url FROM captures c WHERE " + CAPTURE_SELECTION + ") "
-            "SELECT u.discovery,u.flow FROM graph_manifest_units u JOIN documents c ON c.id=u.capture_id "
-            "WHERE (:capture IS NULL OR u.capture_id=:capture) AND "
-            "(graph_in_scope(c.url) OR EXISTS (SELECT 1 FROM graph_unit_contexts member "
-            "JOIN documents context ON context.id=member.context_id "
-            "WHERE (member.unit_id=u.id OR member.unit_id IN (SELECT parent_id FROM graph_unit_parents "
-            "WHERE unit_id=u.id AND rowid<=:parents)) "
-            "AND member.rowid<=:units AND graph_in_scope(context.url)))",
-            {**watermark, "as_of": as_of, "historical": historical, "capture": capture_id},
-        ).fetchall()
-
-        def status(index):
-            found = {row[index] for row in rows}
-            return next(
-                (value for value in ("failed", "blocked", "pending", "partial") if value in found),
-                "complete" if rows else "pending",
-            )
-
-        return {"discovery": status(0), "flow": status(1), "units": len(rows)}
+    def coverage(self, capture_id=None, **arguments):
+        return self.inventory_reader().coverage(capture_id, **arguments)

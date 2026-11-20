@@ -67,6 +67,7 @@ mocked database clients; optional Neo4j integration tests exercise real transact
 | Environment variable | Default | Description |
 |----------------------|---------|-------------|
 | `NEO4J_TEST_URI` | Unset; Neo4j integration tests skipped | Bolt URI for an isolated test Neo4j; tests clean only resources under `https://graph-test.invalid/` |
+| `GRAPH_INVENTORY_TEST_URI` | Unset; inventory integration tests skipped | Bolt URI for a dedicated fresh Neo4j without authentication. Inventory tests accept an empty database or their own marked test database and clear it between fixtures. Never use application data or the general graph-test database. |
 | `GRAPH_ANALYZER_TEST_IMAGE` | Unset; analyzer container test skipped | Built command image containing `/opt/graph-analysis/analyze.cjs`; tests run it with networking disabled |
 
 ```shell

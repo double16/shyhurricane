@@ -10,18 +10,20 @@ logger = logging.getLogger(__name__)
 MAX_SOURCE_MAP_BYTES = 40 * 1024 * 1024
 
 
-def source_map_url(javascript_url: str) -> str | None:
+def source_map_candidates(javascript_url: str) -> list[str]:
     parsed = urlsplit(javascript_url)
     if parsed.scheme not in {"http", "https"} or not parsed.path.lower().endswith(".js"):
-        return None
-    return urlunsplit(parsed._replace(path=f"{parsed.path}.map"))
+        return []
+    return [urlunsplit(parsed._replace(path=f"{parsed.path}{suffix}"))
+            for suffix in (".map", ".MAP", "%2Emap", "%2EMAP")]
 
 
 def javascript_url_from_map(map_url: str) -> str | None:
     parsed = urlsplit(map_url)
-    if not parsed.path.lower().endswith(".js.map"):
-        return None
-    return urlunsplit(parsed._replace(path=parsed.path[:-4]))
+    for suffix in (".map", ".MAP", "%2Emap", "%2EMAP"):
+        if parsed.path.endswith(suffix) and parsed.path[:-len(suffix)].lower().endswith(".js"):
+            return urlunsplit(parsed._replace(path=parsed.path[:-len(suffix)]))
+    return None
 
 
 def _cached_map(store, map_url: str) -> str | None:
@@ -43,7 +45,7 @@ def _fetch_map(map_url: str, request_headers: dict) -> str | None:
     headers = {key: value for key, value in request_headers.items()
                if key.lower() in {"authorization", "cookie", "user-agent"}}
     try:
-        with httpx.Client(timeout=5, follow_redirects=False) as client:
+        with httpx.Client(timeout=5, follow_redirects=False, verify=False) as client:
             with client.stream("GET", map_url, headers=headers) as response:
                 if response.status_code != 200:
                     return None

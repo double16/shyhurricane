@@ -132,9 +132,22 @@ def statistics(connection, budget):
     logical, stored, retained, cached, jobs, retiring, progress = connection.execute(
         "SELECT logical,stored,retained,cached,pending,retiring,last_progress FROM graph_storage_totals WHERE id=1"
     ).fetchone()
+    inventory_logical, inventory_stored = connection.execute(
+        "SELECT logical,stored FROM graph_inventory_totals WHERE id=1"
+    ).fetchone()
+    logical += inventory_logical
+    stored += inventory_stored
+    retained += inventory_stored
     page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+    segment_bytes, segment_allocated, segments = connection.execute(
+        "SELECT bytes,allocated,segments FROM graph_payload_totals WHERE id=1"
+    ).fetchone()
     return {
         "logical_payload_bytes": logical,
+        "inventory_payload_bytes": inventory_stored,
+        "segment_bytes": segment_bytes,
+        "segment_allocated_bytes": segment_allocated,
+        "segment_count": segments,
         "stored_payload_bytes": stored,
         "retained_bytes": retained,
         "cache_bytes": cached,

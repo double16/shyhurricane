@@ -5,7 +5,9 @@
 ## Testing and contribution
 - Always write unit tests and check that they pass for new and changed business logic.
 - Changed and new code should have at least 80% code and branch coverage per file.
-- Always run unit tests to verify changes.
+- Run unit tests for changes to executable behavior.
+- Static prompt text and documentation-only changes are exempt from unit tests and coverage requirements.
+  Do not add or run tests that merely assert prompt wording.
 - Test both positive and negative scenarios.
 - Keep tests in files based on component or functionality. Use existing test files if applicable.
 
@@ -22,6 +24,25 @@
 - Use examples and diagrams to illustrate concepts.
 - Keep general user documentation in README.md. In-depth documentation in docs/.
 - Environment variables used for configuration must be documented in a table along-side similar variables.
+
+## Storage architecture and expected load
+- Prefer Neo4j for graph operations: relationships, traversal, searchable graph inventory, document membership,
+  and graph coverage. Prefer SQLite for relational data: queues, scheduling, checkpoints, transactional ownership,
+  publication obligations, and artifact metadata. Choose exceptions using measured workloads and document the reason.
+- Keep payload storage separate from graph query semantics. Small compressed payloads may remain inline in SQLite;
+  larger payloads should share packed segments. Avoid a file per fact or small artifact: filesystem entry overhead
+  was a production bottleneck.
+- Use the retained production-derived JavaScript IR case as a minimum large-input performance fixture:
+  **171,175 nodes, 146,817 edges, and 70,862,815 bytes (approximately 67.6 MiB) of uncompressed JSON IR**.
+  These counts describe one analyzed input, not the entire assessment, original JavaScript size, or physical
+  Neo4j storage. An assessment can contain many such inputs, capture versions, contexts, and retained generations;
+  do not treat these figures as an assessment-wide upper bound. A verified whole-assessment estimate is unavailable.
+- Design writes, reads, retries, accounting, and cleanup for bounded batches and memory at this scale and above.
+  Validate indexes and query plans with unrelated data present; avoid per-fact payload bookkeeping and full-catalog
+  scans on normal request or maintenance paths. Include payload, index, WAL, transaction-log, and retention overhead
+  when estimating disk requirements; serialized IR size alone is not a capacity estimate.
+- See [graph storage implementation and validation](docs/graph-storage-implementation.md) for benchmark methodology,
+  storage boundaries, and measured performance tradeoffs. Keep deployment identifiers out of fixtures and guidance.
 
 ## Python Best Practices
 - Use the `uv` tool for python ecosystem, i.e `uv run ...`
@@ -71,5 +92,6 @@
 - Use template literals for string concatenation
 
 ## LLM Prompt Best Practices
+- Keep prompts concise: avoid repeating tool schemas or guidance already present in the workflow.
 - When providing to an LLM a list of data with two or more items that have the same shape, prefer TOON over JSON.
 - When an LLM is to return structured data, prefer JSON.

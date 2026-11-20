@@ -636,7 +636,8 @@ class TraversalSnapshot:
 
     def finish(self, paths):
         self.metadata["truncation_reasons"] = sorted(set(self.metadata["truncation_reasons"]))
-        logger.info(
+        log = logger.warning if self.metadata["truncation_reasons"] else logger.debug
+        log(
             "Graph frontier complete paths=%s memberships=%s cached_nodes=%s seconds=%.3f reasons=%s reads=%s rows=%s empty_reads=%s expansions=%s max_depth=%s request=%s",
             paths,
             len(self.memberships),

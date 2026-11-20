@@ -81,7 +81,8 @@ def test_open_world_fetches_map_and_invalid_map_falls_back(monkeypatch):
     monkeypatch.setattr(analysis, "_run_opengrep", lambda source, source_map: result() if source_map is None else None)
 
     assert analysis.analyze_document(document(), True, Store(), queue) == 1
-    assert calls == [("https://example.com/app.js.map", {"Cookie": "session=x"})]
+    assert calls == [(f"https://example.com/app.js{suffix}", {"Cookie": "session=x"})
+                     for suffix in (".map", ".MAP", "%2Emap", "%2EMAP")]
 
 
 def test_indexed_map_scans_original_source(monkeypatch):
@@ -106,8 +107,10 @@ def test_unsupported_and_oversized_documents_are_skipped(monkeypatch):
 
 
 def test_source_map_url_preserves_query_and_requires_javascript():
-    assert analysis.source_map_url("https://example.com/app.js?v=1") == "https://example.com/app.js.map?v=1"
-    assert analysis.source_map_url("https://example.com/app.css") is None
+    assert analysis.source_map_candidates("https://example.com/app.js?v=1") == [
+        f"https://example.com/app.js{suffix}?v=1" for suffix in (".map", ".MAP", "%2Emap", "%2EMAP")
+    ]
+    assert analysis.source_map_candidates("https://example.com/app.css") == []
     assert analysis.javascript_url_from_map("https://example.com/app.js.map?v=1") == \
         "https://example.com/app.js?v=1"
     assert analysis.javascript_url_from_map("https://example.com/a.map") is None
@@ -133,7 +136,7 @@ def test_fetch_map_limits_response_and_forwards_selected_headers(monkeypatch):
 
     class Client:
         def __init__(self, **kwargs):
-            assert kwargs == {"timeout": 5, "follow_redirects": False}
+            assert kwargs == {"timeout": 5, "follow_redirects": False, "verify": False}
 
         def __enter__(self):
             return self

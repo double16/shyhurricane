@@ -173,7 +173,7 @@ async def test_metadata_timeout_preserves_completed_results(tmp_path, monkeypatc
     ArtifactStore("db").close()
     result = {"results": [{"id": "completed"}], "coverage": {"discovery": "complete"},
               "analysis_gaps": ["existing"], "truncation_reasons": []}
-    service = SimpleNamespace(paths=lambda scope: result,
+    service = SimpleNamespace(paths=lambda scope: result, attach_artifacts=lambda artifacts: None,
                               omitted_regions=MagicMock(side_effect=TimeoutError()))
     monkeypatch.setattr(graph_execution, "GraphQuery", lambda *args, **kwargs: service)
     monkeypatch.setattr(graph_execution, "report_progress", AsyncMock())

@@ -311,10 +311,10 @@ async def test_log_file_option_and_environment_precedence(service_runtime, monke
     await service.main()
     service.configure_file_logging.assert_called_once_with(
         "/tmp/command-line.log" if cli else "/tmp/environment.log",
-        console_enabled=True, max_bytes=10485760, backup_count=5,
+        console_enabled=True, max_bytes=10485760, backup_count=5, debug=False,
     )
     config = service_runtime.configs[0]
-    assert config["log_level"] == "debug"
+    assert config["log_level"] == "info"
     assert config["access_log"] is True
     assert config["log_config"] is None
 
@@ -332,7 +332,7 @@ async def test_default_log_file_uses_resolved_data_directory(service_runtime, mo
         monkeypatch.setattr(service.sys, "argv", ["mcp_service.py", "--data-dir", str(selected)])
     await service.main()
     service.configure_file_logging.assert_called_once_with(
-        str(selected / "logs" / "shyhurricane.log"), console_enabled=True, max_bytes=10485760, backup_count=5,
+        str(selected / "logs" / "shyhurricane.log"), console_enabled=True, max_bytes=10485760, backup_count=5, debug=False,
     )
 
 
@@ -475,3 +475,12 @@ async def test_invalid_rotation_settings_stop_startup(
     assert error.value.code == 2
     service.configure_file_logging.assert_not_called()
     service.get_server_context.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_debug_cli_enables_file_and_server_diagnostics(service_runtime, monkeypatch):
+    monkeypatch.setattr(service.sys, "argv", ["mcp_service.py", "--debug"])
+    monkeypatch.setattr(service, "file_logging_enabled", lambda: True)
+    await service.main()
+    assert service.configure_file_logging.call_args.kwargs["debug"] is True
+    assert service_runtime.configs[0]["log_level"] == "debug"

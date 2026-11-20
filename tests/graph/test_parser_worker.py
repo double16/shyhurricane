@@ -14,7 +14,7 @@ from shyhurricane.graph.model import Projection, projection_snapshot
 
 
 @pytest.mark.parametrize("failure", [
-    None, "error", "missing", "memory", "time", "disappeared", "offline", "output", "malformed", "exit",
+    None, "pending", "error", "missing", "memory", "time", "disappeared", "offline", "output", "malformed", "exit",
 ])
 def test_parent_bounds_and_reaps_parser(tmp_path, event, monkeypatch, failure):
     capture = event()
@@ -52,14 +52,18 @@ def test_parent_bounds_and_reaps_parser(tmp_path, event, monkeypatch, failure):
             Path(request["output"]).with_suffix(".tmp").write_text("interrupted output")
 
             Path(request["output"]).write_text("{" if failure == "malformed" else json.dumps(
-                {"error": "bad input"} if failure == "error" else projection_snapshot(Projection(capture))
+                {"error": "bad input"} if failure == "error" else
+                {"archive_pending": True} if failure == "pending" else projection_snapshot(Projection(capture))
             ))
         return process
 
     monkeypatch.setattr(parser_worker.subprocess, "Popen", start)
     cleanup = MagicMock(side_effect=OSError("no Docker"))
     monkeypatch.setattr(parser_worker.subprocess, "run", cleanup)
-    if failure in {"error", "missing", "memory", "time", "output", "malformed", "exit"}:
+    if failure == "pending":
+        with pytest.raises(parser_worker.ArchivePending):
+            parser_worker.parse(capture, artifacts)
+    elif failure in {"error", "missing", "memory", "time", "output", "malformed", "exit"}:
         with pytest.raises((ValueError, TimeoutError)):
             parser_worker.parse(capture, artifacts)
     else:
@@ -86,7 +90,7 @@ def test_timeout_escalates_termination_and_waits(tmp_path, event, monkeypatch):
     assert kill.call_count == process.wait.call_count == 2
 
 
-@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("failure", [False, True, "pending"])
 def test_child_writes_atomic_snapshot_or_explicit_error(tmp_path, event, monkeypatch, failure):
     capture = event()
     output = tmp_path / "out.json"
@@ -97,6 +101,8 @@ def test_child_writes_atomic_snapshot_or_explicit_error(tmp_path, event, monkeyp
     monkeypatch.setattr("shyhurricane.graph.epoch_catalog.SnapshotArtifacts", lambda *args: artifacts)
 
     def extract(*args, **kwargs):
+        if failure == "pending":
+            raise parser_worker.ArchivePending()
         if failure:
             raise ValueError("invalid capture")
         return Projection(capture)
@@ -106,8 +112,10 @@ def test_child_writes_atomic_snapshot_or_explicit_error(tmp_path, event, monkeyp
     parser_worker.main()
     artifacts.close.assert_called_once()
     result = json.loads(output.read_text())
-    assert ("error" in result) is failure
-    if failure:
+    assert ("error" in result) is (failure is True)
+    if failure == "pending":
+        assert result == {"archive_pending": True}
+    if failure is True:
         assert result["diagnostic"]["stage"] == "extraction"
         assert result["diagnostic"]["type"] == "ValueError"
         assert "invalid capture" not in json.dumps(result)

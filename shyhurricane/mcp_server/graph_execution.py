@@ -56,7 +56,7 @@ async def execute_graph(ctx, store, operation, *args, artifact_db=None, budget=N
 
             artifacts = ArtifactStore(artifact_db, readonly=True, budget=budget)
             try:
-                service.artifacts = artifacts
+                service.attach_artifacts(artifacts)
                 result = getattr(service, operation)(*args, **kwargs)
                 if isinstance(result, dict):
                     try:

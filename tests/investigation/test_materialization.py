@@ -14,8 +14,11 @@ from tests.investigation.test_storage import publish
 
 def drain(store, revision=1):
     store.set_setting("graph_revision", revision)
+    graph = Mock(read=Mock(side_effect=lambda statement, **kw: (
+        [{"id": kw["id"]}] if "RETURN p.id" in statement else []
+    )))
     for _ in range(200):
-        if not worker.materialize_one(store, Mock(), Mock(), revision):
+        if not worker.materialize_one(store, graph, Mock(), revision):
             return
     raise AssertionError("Derived work did not settle")
 

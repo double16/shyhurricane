@@ -4,7 +4,7 @@ import sqlite3
 from unittest.mock import MagicMock
 
 import pytest
-from neo4j.exceptions import ServiceUnavailable
+from neo4j.exceptions import ConnectionAcquisitionTimeoutError, ServiceUnavailable
 
 from shyhurricane.graph import epochs, worker
 from shyhurricane.graph.artifacts import ArtifactStore
@@ -33,6 +33,10 @@ def runtime(graph_paths, monkeypatch):
 
     monkeypatch.setattr(epochs.GraphPublisher, "publish", lambda self, p: publish("structural", p))
     monkeypatch.setattr(epochs.LinkPublisher, "publish", lambda self, p: publish("links", p))
+    inventory = MagicMock()
+    inventory.step.return_value = False
+    inventory.available.return_value = False
+    monkeypatch.setattr(epochs, "InventoryPipeline", lambda *args: inventory)
     engine = Epochs(artifacts, store)
     yield engine, artifacts, store, writes
     engine.close()
@@ -78,6 +82,27 @@ def test_failed_dependency_blocks_only_its_consumers(runtime, event):
     queue = MagicMock()
     engine.settle(queue)
     assert queue.ack_failed.call_count == 2 and queue.ack.call_count == 1
+
+
+def test_recovered_dependency_reprocesses_receiptless_failure_on_restart(runtime, event):
+    engine, artifacts, store, writes = runtime
+    dependency = artifacts.register(event(url="https://example.com/dependency.js"))
+    consumer = artifacts.register(event(url="https://example.com/consumer"))
+    # The dependency already recovered; the consumer has no queue receipt or retained epoch job.
+    artifacts.status(dependency["id"], "complete")
+    artifacts.status(consumer["id"], "failed", f"Dependency {dependency['id']} failed")
+    engine.close()
+    recovered = Epochs(artifacts, store)
+    try:
+        assert recovered.available()
+        assert drain(recovered)["phase"] == "done"
+        assert artifacts.connection.execute(
+            "SELECT status,error FROM work WHERE id=?", (consumer["id"],),
+        ).fetchone() == ("complete", "")
+        assert consumer["id"] in writes["structural"]
+        assert not recovered.available()
+    finally:
+        recovered.close()
 
 
 def test_dense_cycles_drain_with_one_publication_per_phase_and_no_replay(runtime, event):
@@ -171,12 +196,13 @@ def test_failure_is_visible_and_requires_explicit_queue_redelivery(runtime, even
     queue.ack.assert_called_once_with(id=1)
 
 
-def test_transient_retry_preserves_checkpoint_and_uses_backoff(runtime, event, monkeypatch):
+@pytest.mark.parametrize("error_type", [ServiceUnavailable, ConnectionAcquisitionTimeoutError])
+def test_transient_retry_preserves_checkpoint_and_uses_backoff(runtime, event, monkeypatch, error_type):
     engine, artifacts, _, _ = runtime
     capture = artifacts.register(event())
     engine.accept(capture, 1)
     original = epochs.GraphPublisher.publish
-    monkeypatch.setattr(epochs.GraphPublisher, "publish", MagicMock(side_effect=ServiceUnavailable("offline")))
+    monkeypatch.setattr(epochs.GraphPublisher, "publish", MagicMock(side_effect=error_type("offline")))
     status = drain(engine)
     assert status["retries"] == 1 and status["phase"] == "structural"
     assert status["next_attempt"] > epochs.time.time()
@@ -206,6 +232,47 @@ def test_legacy_work_and_unknown_checkpoint_versions_fail_before_publication(gra
     artifacts.close()
 
 
+@pytest.mark.parametrize("phase", ["done", "failed"])
+def test_finished_epochs_preserve_older_analyzer_history_and_accept_new_work(runtime, event, phase):
+    engine, artifacts, store, _ = runtime
+    engine.accept(artifacts.register(event(url="https://example.com/old")), 1)
+    drain(engine)
+    with artifacts.connection:
+        artifacts.connection.execute(
+            "UPDATE graph_epochs SET analyzer_version=?,phase=?", (epochs.ANALYZER_VERSION - 1, phase),
+        )
+    engine.close()
+    resumed = Epochs(artifacts, store)
+    try:
+        assert artifacts.connection.execute("SELECT analyzer_version,phase FROM graph_epochs").fetchone() == (
+            epochs.ANALYZER_VERSION - 1, phase,
+        )
+        resumed.accept(artifacts.register(event(url="https://example.com/new")), 2)
+        assert drain(resumed)["phase"] == "done"
+        assert artifacts.connection.execute(
+            "SELECT analyzer_version FROM graph_epochs ORDER BY id DESC LIMIT 1"
+        ).fetchone()[0] == epochs.ANALYZER_VERSION
+    finally:
+        resumed.close()
+
+
+@pytest.mark.parametrize("phase", ["references", "structural", "done", "failed"])
+def test_incompatible_epochs_remain_rejected_without_rewriting_history(runtime, phase):
+    _, artifacts, store, _ = runtime
+    # A mismatched analyzer is unsafe only for unfinished work; an unknown format is always unsafe.
+    version = EPOCH_VERSION + 1 if phase in {"done", "failed"} else EPOCH_VERSION
+    with artifacts.connection:
+        artifacts.connection.execute(
+            "INSERT INTO graph_epochs(version,analyzer_version,phase,snapshot,created_at) VALUES (?,?,?,'old',0)",
+            (version, epochs.ANALYZER_VERSION - 1, phase),
+        )
+    with pytest.raises(ValueError, match="Unsupported"):
+        Epochs(artifacts, store)
+    assert artifacts.connection.execute("SELECT version,analyzer_version,phase FROM graph_epochs").fetchone() == (
+        version, epochs.ANALYZER_VERSION - 1, phase,
+    )
+
+
 def test_empty_status_legacy_delivery_and_corrupt_checkpoint(runtime, event):
     engine, artifacts, _, _ = runtime
     assert epoch_status(engine.connection) is None
@@ -225,6 +292,9 @@ def test_empty_status_legacy_delivery_and_corrupt_checkpoint(runtime, event):
 
 
 def test_worker_consumes_raw_receipts_and_closes_resources(graph_paths, event, monkeypatch):
+    inventory = MagicMock()
+    inventory.step.return_value = inventory.available.return_value = False
+    monkeypatch.setattr(epochs, "InventoryPipeline", lambda *args: inventory)
     queue = get_persistent_queue("db", "graph_queue", auto_resume=False)
     queue.put(event())
     store = MagicMock()
@@ -396,13 +466,13 @@ def test_fetched_source_map_is_pinned_and_replayed_from_reference_cache(runtime,
 
     def fetch(self, url, source, headers, open_world, **kwargs):
         fetches.append(open_world)
-        return source_map
+        return {"content": source_map, "url": url + "%2Emap"}
 
     def runner(source, filename):
         analyses.append(filename)
         return {"nodes": [], "edges": [], "references": [], "gaps": []}
 
-    monkeypatch.setattr(ArtifactStore, "source_map", fetch)
+    monkeypatch.setattr(ArtifactStore, "resolve_source_map", fetch)
     monkeypatch.setattr(epochs, "extract", lambda *a, **kw: real_extract(*a, javascript_runner=runner, **kw))
     script = artifacts.register(event(url="https://example.com/app.js", mime="text/javascript", body="delivered();"))
     engine.accept(script, 1)
@@ -467,7 +537,7 @@ def test_explicit_rebuild_policy_does_not_fetch_source_maps(runtime, event, monk
         requests.append(open_world)
         return None
 
-    monkeypatch.setattr(ArtifactStore, "source_map", source_map)
+    monkeypatch.setattr(ArtifactStore, "resolve_source_map", source_map)
     monkeypatch.setattr("shyhurricane.javascript_deobfuscation.deobfuscate_javascript", lambda source: source)
     monkeypatch.setattr(epochs, "extract", lambda *a, **kw: real_extract(
         *a, javascript_runner=lambda *a: {"nodes": [], "edges": [], "references": [], "gaps": []}, **kw,
@@ -732,3 +802,26 @@ def test_failed_membership_commit_preserves_jobs_ownership_and_open_snapshot(run
     ).fetchone() is None
     assert engine.expand_membership(epoch)
     assert drain(engine)["phase"] == "done"
+
+
+def test_archive_yield_keeps_epoch_and_receipt_pending(runtime, event, monkeypatch):
+    from shyhurricane.graph.archive_checkpoint import ArchivePending
+
+    engine, artifacts, _, _ = runtime
+    capture = artifacts.register(event())
+    engine.accept(capture, 1)
+    engine.start()
+    original = engine.run_job
+    monkeypatch.setattr(engine, "run_job", MagicMock(side_effect=ArchivePending()))
+    engine.step()
+    status = epoch_status(engine.connection)
+    assert status["failed"] == status["blocked"] == status["retries"] == 0
+    assert status["current_job"] is None
+    queue = MagicMock()
+    engine.settle(queue)
+    queue.ack.assert_not_called()
+    queue.ack_failed.assert_not_called()
+    monkeypatch.setattr(engine, "run_job", original)
+    assert drain(engine)["phase"] == "done"
+    engine.settle(queue)
+    queue.ack.assert_called_once_with(id=1)

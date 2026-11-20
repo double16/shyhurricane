@@ -26,6 +26,16 @@ def populated(graph_paths, event):
     return capture
 
 
+@pytest.fixture
+def inventory_populated(populated, publish_inventory):
+    writer = ArtifactStore("db")
+    try:
+        publish_inventory(writer)
+    finally:
+        writer.close()
+    return publish_inventory.store
+
+
 def test_read_only_artifacts_do_not_initialize_or_allow_writes(populated):
     # Opening artifacts must not create or alter schema; PRAGMA query_only also rejects writes.
     reader = ArtifactStore("db", readonly=True, budget=QueryBudget())
@@ -34,76 +44,35 @@ def test_read_only_artifacts_do_not_initialize_or_allow_writes(populated):
     reader.close()
 
 
-def test_selective_query_plan_and_continued_results(populated):
+def test_selective_query_plan_and_continued_results(populated, inventory_populated):
     reader = ArtifactStore("db", readonly=True, budget=QueryBudget(seconds=30))
     statements = []
     reader.connection.set_trace_callback(statements.append)
+    GraphQuery(inventory_populated, artifacts=reader)
     result = manifest_query(reader, "example.com", kind="field", url=populated["data"]["url"], limit=3)
     ids = [row["id"] for row in result["results"]]
-    service = GraphQuery(None, artifacts=reader)
+    service = GraphQuery(inventory_populated, artifacts=reader)
     while result["continuation_token"]:
         token = result["continuation_token"]
         result = service.continue_query(token, limit=3)
         assert service.continue_query(token, limit=3) == result
         ids.extend(row["id"] for row in result["results"])
     assert len(ids) == len(set(ids)) == 12
-    candidate = next(sql for sql in statements if sql.startswith("SELECT f.id FROM"))
-    plan = reader.connection.execute("EXPLAIN QUERY PLAN " + candidate).fetchall()
-    assert any("graph_manifest_url" in row[3] for row in plan)
+    assert not any("graph_facts" in sql for sql in statements)
     assert not manifest_query(reader, "target.local", kind="field")["results"]
     assert not manifest_query(reader, "example.com", kind="field", role="sink")["results"]
     reader.close()
 
 
-def test_focused_inventory_work_does_not_scale_with_unrelated_captures(graph_paths, event):
-    writer = ArtifactStore("db")
-    capture = writer.register(event())
-    unit = writer.manifest.unit(capture["id"], "inventory", discovery="complete", flow="complete")
-    for index in range(20):
-        writer.manifest.fact(unit, capture["id"], "resource", {
-            "id": str(index), "url": f"https://example.com/api/{index}", "capture_status": "referenced",
-        })
-
-    def measured_page():
-        instructions = 0
-
-        def count():
-            nonlocal instructions
-            instructions += 100
-            return 0
-
-        writer.connection.set_progress_handler(count, 100)
-        try:
-            rows, cursor = writer.manifest.page("example.com", kind="resource")
-        finally:
-            writer.connection.set_progress_handler(None, 0)
-        assert len(rows) == 21 and cursor is None
-        assert sum(row["capture_status"] == "referenced" for row in rows) == 20
-        return instructions
-
-    try:
-        baseline = measured_page()
-        with writer.connection:
-            writer.connection.executemany(
-                "INSERT INTO captures(id,url,stamp,path) VALUES (?,?,?,?)",
-                ((f"unrelated-{index}", f"https://target.local/{index}", 0, "unused") for index in range(2000)),
-            )
-        populated = measured_page()
-        print(f"Inventory SQLite VM instructions: baseline={baseline}, with unrelated captures={populated}")
-        # Count SQLite VM work, not wall time: a focused page must not repeatedly select
-        # the entire capture catalog for each resource's captured/referenced classification.
-        assert populated <= baseline * 2 + 10000, (baseline, populated)
-    finally:
-        writer.close()
-
 
 @pytest.mark.parametrize("matches", [True, False])
-def test_context_filter_includes_an_elements_own_url(graph_paths, event, matches):
+def test_context_filter_includes_an_elements_own_url(graph_paths, event, matches, publish_inventory):
     writer = ArtifactStore("db")
     capture = writer.register(event())
-    unit = writer.manifest.unit(capture["id"], "references")
+    unit = writer.manifest.unit(capture["id"], "references", discovery="complete")
     target = "https://example.com/api"
     writer.manifest.fact(unit, capture["id"], "resource", {"id": "endpoint", "url": target})
+    publish_inventory(writer)
     try:
         rows, _ = writer.manifest.page(
             "example.com", kind="resource", context_url=target if matches else "https://example.com/missing",
@@ -122,17 +91,19 @@ def test_context_filter_includes_an_elements_own_url(graph_paths, event, matches
     ("GET", False, False, True, "referenced"),
 ])
 def test_inventory_classification_respects_temporal_and_method_filters(
-    graph_paths, event, method, historical, cutoff, frozen, expected,
+    graph_paths, event, method, historical, cutoff, frozen, expected, publish_inventory,
 ):
     writer = ArtifactStore("db")
     capture = writer.register(event())
-    unit = writer.manifest.unit(capture["id"], "references")
+    unit = writer.manifest.unit(capture["id"], "references", discovery="complete")
     target = "https://example.com/api"
     writer.manifest.fact(unit, capture["id"], "resource", {
         "id": "endpoint", "url": target, "method": "GET", "capture_status": "referenced",
     })
+    publish_inventory(writer)
     watermark = writer.manifest.watermark()
     writer.register(event(url=target, method=method, timestamp="2026-02-01T00:00:00Z"))
+    publish_inventory(writer)
     try:
         rows, _ = writer.manifest.page(
             "example.com", kind="resource", url=target, method="GET", historical=historical,
@@ -143,7 +114,7 @@ def test_inventory_classification_respects_temporal_and_method_filters(
         writer.close()
 
 
-def test_manifest_element_detail_survives_continuation(graph_paths, event):
+def test_manifest_element_detail_survives_continuation(graph_paths, event, inventory_populated):
     writer = ArtifactStore("db")
     capture = writer.register(event())
     unit = writer.manifest.unit(capture["id"], "elements", discovery="complete", flow="partial")
@@ -152,9 +123,14 @@ def test_manifest_element_detail_survives_continuation(graph_paths, event):
             "id": str(index), "url": capture["data"]["url"], "name": str(index), "role": "source",
             "import_key": "module", "context_urls": [capture["data"]["url"]] * 100,
         })
+    from test_inventory_pipeline import drain
+
+    from shyhurricane.graph.inventory_pipeline import InventoryPipeline
+
+    drain(InventoryPipeline(writer, inventory_populated))
     writer.close()
     reader = ArtifactStore("db", readonly=True, budget=QueryBudget())
-    service = GraphQuery(None, artifacts=reader)
+    service = GraphQuery(inventory_populated, artifacts=reader)
     try:
         for detail in ("compact", "full"):
             # Force discovery continuation so it must preserve the requested representation.
@@ -183,8 +159,9 @@ def test_manifest_element_detail_survives_continuation(graph_paths, event):
 
 
 @pytest.mark.parametrize("stage", ["page", "coverage"])
-def test_deadline_preserves_records_and_explicit_unknown_coverage(populated, monkeypatch, stage):
+def test_deadline_preserves_records_and_explicit_unknown_coverage(populated, monkeypatch, stage, inventory_populated):
     reader = ArtifactStore("db", readonly=True, budget=QueryBudget())
+    GraphQuery(inventory_populated, artifacts=reader)
     original = reader.manifest.page
     calls = 0
 
@@ -199,6 +176,7 @@ def test_deadline_preserves_records_and_explicit_unknown_coverage(populated, mon
 
     monkeypatch.setattr(reader.manifest, "page", page)
     monkeypatch.setattr(reader.manifest, "coverage", MagicMock(side_effect=TimeoutError("deadline")))
+    GraphQuery(inventory_populated, artifacts=reader)
     result = manifest_query(reader, "example.com", kind="field", limit=20)
     assert len(result["results"]) == 12
     assert result["coverage"] == {"discovery": "unknown", "flow": "unknown"}
@@ -260,72 +238,34 @@ def test_lock_contention_is_bounded(populated, graph_paths):
         reader.close()
 
 
-def test_sparse_physical_batches_resume_without_skipping_late_matches(populated):
+def test_sparse_physical_batches_do_not_hide_late_matches(populated, publish_inventory):
     writer = ArtifactStore("db")
-    unit = writer.manifest.unit(populated["id"], "sparse")
-    # Stable IDs place all out-of-scope candidates before the one valid fact.
-    from shyhurricane.graph.compact_manifest import term
-
-    with writer.connection:
+    unit = writer.manifest.unit(populated["id"], "sparse", discovery="complete")
+    with writer.manifest.batch():
         for index in range(5002):
             inside = index == 5001
-            target = populated["data"]["url"] if inside else "https://target.local/a"
-            payload = {"id": "last" if inside else "outside", "kind": "symbol", "url": target}
-            ref = writer.write(f"sparse-{inside}", payload)
-            writer.connection.execute(
-                "INSERT INTO graph_facts(id,unit,capture,kind_key,url_key,host_key,role_key,data,method,captured) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                ("zzz" if inside else f"000{index:06}", term(writer.connection, unit),
-                 term(writer.connection, populated["id"]), term(writer.connection, "symbol"),
-                 term(writer.connection, target), term(writer.connection, "example.com" if inside else "target.local"),
-                 term(writer.connection, "source"), ref, "GET", 0),
-            )
-    writer.close()
-    reader = ArtifactStore("db", readonly=True, budget=QueryBudget())
-    result = manifest_query(reader, "example.com", kind="symbol")
-    assert result["results"] == [] and result["continuation_token"]
-    result = GraphQuery(None, artifacts=reader).continue_query(result["continuation_token"])
+            writer.manifest.fact(unit, populated["id"], "symbol", {
+                "id": "last" if inside else "outside", "name": str(index),
+                "url": populated["data"]["url"] if inside else "https://target.local/a",
+            })
+    service = publish_inventory(writer)
+    result = service.elements("example.com", kinds=["symbol"])
     assert [row["id"] for row in result["results"]] == ["last"]
     assert not result["continuation_token"]
-    reader.close()
-
-
-def test_partial_enrichment_retains_only_fully_processed_candidates(populated, monkeypatch):
-    writer = ArtifactStore("db")
-    for index in range(3):
-        writer.manifest.unit(populated["id"], f"unit-{index}")
     writer.close()
-    reader = ArtifactStore("db", readonly=True, budget=QueryBudget())
-    execute = reader.connection.execute
-    calls = 0
-
-    def interrupted(sql, parameters=()):
-        nonlocal calls
-        if sql.startswith("SELECT discovery,flow,materialization"):
-            calls += 1
-            if calls == 2:
-                raise TimeoutError("deadline")
-        return execute(sql, parameters)
-
-    monkeypatch.setattr(reader.connection, "execute", interrupted)
-    records, cursor = reader.manifest.page("example.com", kind="analysis_unit")
-    assert len(records) == 1 and cursor == records[0]["manifest_id"]
-    remaining, cursor = reader.manifest.page("example.com", kind="analysis_unit", after=cursor)
-    assert len(remaining) == 4 and cursor is None
-    reader.close()
 
 
-async def test_metadata_timeout_preserves_element_records(populated, monkeypatch):
+async def test_metadata_timeout_preserves_element_records(populated, monkeypatch, inventory_populated):
     from shyhurricane.mcp_server.graph_execution import execute_graph
 
     monkeypatch.setattr(GraphQuery, "omitted_regions", MagicMock(side_effect=TimeoutError("deadline")))
-    result = await execute_graph(None, None, "elements", "example.com", artifact_db="db", kinds=["field"])
+    result = await execute_graph(None, inventory_populated, "elements", "example.com", artifact_db="db", kinds=["field"])
     assert len(result["results"]) == 12
     assert result["retrieval_truncated"] and "time_limit" in result["truncation_reasons"]
     assert "Deferred" in result["analysis_gaps"][-1]
 
 
-async def test_tool_cancellation_waits_for_sqlite_worker_cleanup(populated, monkeypatch):
+async def test_tool_cancellation_waits_for_sqlite_worker_cleanup(populated, monkeypatch, inventory_populated):
     import asyncio
 
     from shyhurricane.mcp_server.graph_execution import execute_graph
@@ -346,7 +286,7 @@ async def test_tool_cancellation_waits_for_sqlite_worker_cleanup(populated, monk
             finished.set()
 
     monkeypatch.setattr(GraphQuery, "elements", elements)
-    task = asyncio.create_task(execute_graph(None, None, "elements", "example.com", artifact_db="db"))
+    task = asyncio.create_task(execute_graph(None, inventory_populated, "elements", "example.com", artifact_db="db"))
     assert await asyncio.to_thread(started.wait, 2)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -356,7 +296,7 @@ async def test_tool_cancellation_waits_for_sqlite_worker_cleanup(populated, monk
 
 
 @pytest.mark.parametrize("stage", ["coverage", "omitted"])
-async def test_execution_metadata_deadline_does_not_discard_results(populated, monkeypatch, stage):
+async def test_execution_metadata_deadline_does_not_discard_results(populated, monkeypatch, stage, inventory_populated):
     from shyhurricane.mcp_server.graph_execution import execute_graph
 
     monkeypatch.setattr(GraphQuery, "elements", lambda *args: {"results": [{"id": "retained"}]})
@@ -365,7 +305,7 @@ async def test_execution_metadata_deadline_does_not_discard_results(populated, m
                             MagicMock(side_effect=TimeoutError("deadline")))
     else:
         monkeypatch.setattr(GraphQuery, "omitted_regions", MagicMock(side_effect=TimeoutError("deadline")))
-    result = await execute_graph(None, None, "elements", "example.com", artifact_db="db")
+    result = await execute_graph(None, inventory_populated, "elements", "example.com", artifact_db="db")
     assert result["results"] == [{"id": "retained"}]
     assert result["analysis_gaps"] == ["Graph metadata exceeded the query budget"]
     assert result["truncation_reasons"] == ["time_limit"]
@@ -435,14 +375,14 @@ def test_budget_reserves_checkpoint_time_and_never_extends_deadline(monkeypatch)
     assert budget.deadline == 130
 
 
-def test_continuation_does_not_hold_sqlite_read_lock_during_traversal(populated, monkeypatch):
+def test_continuation_does_not_hold_sqlite_read_lock_during_traversal(populated, monkeypatch, inventory_populated):
     from shyhurricane.graph.cursors import QueryCursors
 
     artifacts = ArtifactStore("db", readonly=True, budget=QueryBudget())
     cursors = QueryCursors(artifacts.root)
     token = cursors.save({"operation": "paths", "parameters": {}, "search": {}})
     cursors.close()
-    service = GraphQuery(None, artifacts=artifacts)
+    service = GraphQuery(inventory_populated, artifacts=artifacts)
 
     def paths(**kwargs):
         other = QueryCursors(artifacts.root)

@@ -10,6 +10,14 @@ from qdrant_client.http import models as qm
 
 from shyhurricane.graph.database import GraphStore
 from shyhurricane.graph.retry_policy import transient_neo4j_error
+from shyhurricane.investigation.checkpoints import (
+    Checkpoint,
+    CheckpointCapacityError,
+    CheckpointQuery,
+    CheckpointYield,
+    RestartCheckpoint,
+    recover_checkpoints,
+)
 from shyhurricane.investigation.engine import artifact_hash_verifier, correlate, correlation_query
 from shyhurricane.investigation.rules import aggregate_hotspot, derive
 from shyhurricane.investigation.storage import CorrelationStore
@@ -75,9 +83,11 @@ async def reconcile(store, client):
 
 
 def materialize_one(store, graph, artifacts, revision):
+    recover_checkpoints(store, graph, revision)
     job = store.next_job(revision)
     if job is None:
         return False
+    checkpoint = None
     try:
         if job["kind"] == "hotspot":
             members, limited, waiting = store.hotspot_members(job["id"], revision)
@@ -96,14 +106,41 @@ def materialize_one(store, graph, artifacts, revision):
                         candidate["analysis_gaps"].append("Related finding selection limited to 100 neighbors or keys")
                 store.publish_derived(job, candidates, dependency=result, limited=limited)
         else:
+            checkpoint = Checkpoint(store, graph, job, revision)
             result = correlate(
-                job, correlation_query(graph, revision), revision, verify_hash=artifact_hash_verifier(artifacts)
+                job, CheckpointQuery(correlation_query(graph, revision), checkpoint), revision,
+                verify_hash=artifact_hash_verifier(artifacts),
             )
             if len(result.get("pairing_keys", [])) > 100:
                 result["contexts_limited"] = True
                 result["analysis_gaps"].append("Related finding lookup limited to 100 keys")
-            store.publish(job, result, revision)
-        logger.info("Investigation refreshed kind=%s key=%s revision=%s", job["kind"], job["id"], revision)
+            published = store.publish(job, result, revision)
+            if published:
+                try:
+                    checkpoint.release()
+                except Exception:
+                    logger.warning("Correlation pin release deferred to expiry finding=%s", job["id"], exc_info=True)
+    except CheckpointCapacityError as error:
+        if checkpoint is not None:
+            checkpoint.reset()
+            try:
+                checkpoint.release()
+            except Exception:
+                logger.warning("Capacity failure pin release deferred to expiry", exc_info=True)
+        store.failed(job, error, transient=False)
+        logger.warning("Investigation capacity failure finding=%s reason=%s", job["id"], error)
+    except (CheckpointYield, TimeoutError) as error:
+        if checkpoint is not None:
+            if isinstance(error, RestartCheckpoint):
+                checkpoint.reset()
+            checkpoint.defer()
+            logger.info(
+                "Investigation checkpoint finding=%s stage=%s progressed=%s reads=%s seconds=%.3f reason=%s",
+                job["id"], checkpoint.stage, checkpoint.progressed, checkpoint.budget.reads,
+                time.monotonic() - checkpoint.budget.started, str(error),
+            )
+        else:
+            store.failed(job, error, transient=True)
     except Exception as error:
         transient = isinstance(error, (TimeoutError, OSError, sqlite3.OperationalError)) or transient_neo4j_error(error)
         store.failed(job, error, transient=transient)

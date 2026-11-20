@@ -524,6 +524,8 @@ async def expand_application_graph_analysis(
 
     server = await get_server_context()
     budget = QueryBudget()
+    if server.graph_store is None:
+        raise ToolError("Application graph is unavailable")
     try:
         item, result = await execute_graph(ctx, server.graph_store, "expansion", scope,
                                           capture_id, unit_id, artifact_db=server.db, budget=budget)

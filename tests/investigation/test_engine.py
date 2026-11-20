@@ -55,6 +55,9 @@ def flow(nodes=None, kind="FLOWS_TO"):
 
 
 class Query:
+    def read(self, statement, **parameters):
+        return []
+
     def __init__(self, operations=(), paths=None, resources=None, truncated=False):
         self.operations = list(operations)
         self.paths_result = paths

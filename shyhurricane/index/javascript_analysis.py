@@ -14,7 +14,7 @@ from shyhurricane.doc_type_model_map import map_mime_to_type
 from shyhurricane.finding_metadata import scanner_metadata
 from shyhurricane.graph.artifacts import recovered_sources
 from shyhurricane.source_maps import MAX_SOURCE_MAP_BYTES as MAX_SOURCE_MAP_BYTES
-from shyhurricane.source_maps import _cached_map, _fetch_map, _valid_map, javascript_url_from_map, source_map_url
+from shyhurricane.source_maps import _cached_map, _fetch_map, _valid_map, javascript_url_from_map, source_map_candidates
 from shyhurricane.task_queue.types import SaveFindingQueueItem
 from shyhurricane.utils import unix_command_image
 
@@ -98,17 +98,26 @@ def analyze_document(doc: Document, open_world: bool, content_store, finding_que
         target_url = map_url
         source_map = source
         source = ""
-    elif map_mime_to_type(doc.meta.get("content_type", "")) == "javascript" or source_map_url(url):
+    elif map_mime_to_type(doc.meta.get("content_type", "")) == "javascript" or source_map_candidates(url):
         target_url = url
-        map_url = source_map_url(url)
         if artifacts is not None:
             source_map = artifacts.source_map(url, source, json.loads(doc.meta.get("request_headers", "{}")),
                                               open_world, content_store, doc.meta.get("content_sha256"),
                                               json.loads(doc.meta.get("response_headers", "{}")))
         else:
-            source_map = _cached_map(content_store, map_url) if map_url else None
-            if source_map is None and map_url and open_world:
-                source_map = _fetch_map(map_url, json.loads(doc.meta.get("request_headers", "{}")))
+            source_map = None
+            candidates = source_map_candidates(url)
+            for candidate_url in candidates:
+                candidate = _cached_map(content_store, candidate_url)
+                if _valid_map(candidate):
+                    source_map = candidate
+                    break
+            if source_map is None and open_world:
+                for candidate_url in candidates:
+                    candidate = _fetch_map(candidate_url, json.loads(doc.meta.get("request_headers", "{}")))
+                    if _valid_map(candidate):
+                        source_map = candidate
+                        break
     else:
         return 0
 

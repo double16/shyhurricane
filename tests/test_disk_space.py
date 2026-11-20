@@ -151,7 +151,7 @@ def test_macos_capacity_and_fallback(monkeypatch, available):
 
     monkeypatch.setattr(disk_space, "_macos_available_capacity", native)
     valid = type(available) is int and 0 <= available <= 100 * GIB
-    assert disk_space._disk_capacity("/data/other-volume") == (100 * GIB, available if valid else GIB)
+    assert disk_space._disk_capacity("/data/other-volume") == (100 * GIB, max(GIB, available) if valid else GIB)
     assert paths == ["/data/other-volume"]
 
 

@@ -1,12 +1,20 @@
 """Only retryable Neo4j failures use automatic graph redelivery."""
 
 import pytest
-from neo4j.exceptions import CypherSyntaxError, Neo4jError, ServiceUnavailable, SessionExpired, TransientError
+from neo4j.exceptions import (
+    ConnectionAcquisitionTimeoutError,
+    CypherSyntaxError,
+    Neo4jError,
+    ServiceUnavailable,
+    SessionExpired,
+    TransientError,
+)
 
 from shyhurricane.graph.retry_policy import transient_neo4j_error
 
 
 @pytest.mark.parametrize("error,expected", [
+    (ConnectionAcquisitionTimeoutError("pool busy"), True),
     (ServiceUnavailable("down"), True),
     (SessionExpired("session"), True),
     (TransientError("temporary"), True),

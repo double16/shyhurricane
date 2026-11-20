@@ -22,6 +22,7 @@ from shyhurricane.persistent_queue import (
     open_persistent_queue,
 )
 from shyhurricane.task_queue.dir_busting_worker import dir_busting_worker
+from shyhurricane.task_queue.finding_retry import run as retry_finding
 from shyhurricane.task_queue.finding_worker import FindingContext, save_finding_worker
 from shyhurricane.task_queue.port_scan_worker import PortScanContext, port_scan_worker
 from shyhurricane.task_queue.spider_worker import spider_worker
@@ -141,14 +142,18 @@ def _task_router(db: str,
                     dir_busting_worker(item, ingest_queue, dir_busting_result_queue)
 
                 elif isinstance(item, SaveFindingQueueItem):
-                    if finding_ctx is None:
-                        finding_ctx = FindingContext(
-                            db=db,
-                            generator_config=generator_config,
-                            embedder_cache=embedder_cache,
-                            doc_type_queue=doc_type_queue, log_timestamp=log_timestamp)
-                        finding_ctx.warm_up()
-                    save_finding_worker(finding_ctx, item)
+                    def save():
+                        nonlocal finding_ctx
+                        if finding_ctx is None:
+                            context = FindingContext(
+                                db=db,
+                                generator_config=generator_config,
+                                embedder_cache=embedder_cache,
+                                doc_type_queue=doc_type_queue, log_timestamp=log_timestamp)
+                            context.warm_up()
+                            finding_ctx = context
+                        save_finding_worker(finding_ctx, item)
+                    retry_finding(save, stop_event)
 
                 if queued_scan:
                     scan_finding_queue.ack(item)

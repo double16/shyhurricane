@@ -16,7 +16,7 @@ from shyhurricane.doc_type_model_map import map_mime_to_type
 from shyhurricane.generator_config import GeneratorConfig
 from shyhurricane.graph.ingest import GraphCaptureError
 from shyhurricane.haystack_lifecycle import close_haystack_resources
-from shyhurricane.index.javascript_analysis import analyze_document, javascript_url_from_map, source_map_url
+from shyhurricane.index.javascript_analysis import analyze_document, javascript_url_from_map, source_map_candidates
 from shyhurricane.index.web_resources_pipeline import build_doc_type_pipeline, build_ingest_pipeline, build_stores
 from shyhurricane.persistent_queue import (
     get_doc_type_queue,
@@ -95,12 +95,30 @@ def _ingest_worker(db: str, generator_config: GeneratorConfig, health_state=None
                     index_log_path = None
 
             try:
-                output = pipeline.run({"input_router": {"text": str(item)}})
+                from shyhurricane.graph.artifacts import ArtifactStore
+                from shyhurricane.index.next_chunks import TASK, fetch_task
+
+                input_text = str(item)
+                if input_text.startswith('{"' + TASK + '":'):
+                    artifacts = ArtifactStore(db)
+                    try:
+                        input_text = fetch_task(
+                            input_text,
+                            open_world=get_server_config().open_world if open_world is None else open_world,
+                            artifacts=artifacts,
+                        )
+                    finally:
+                        artifacts.close()
+                    if input_text is not None:
+                        queue.put(input_text)
+                    queue.ack(item)
+                    continue
+                output = pipeline.run({"input_router": {"text": input_text}})
 
                 for doc in output.get("output", {}).get("documents", []):
                     if doc.meta.get("type") == "content":
                         doc_type_queue.put(doc)
-                        if (map_mime_to_type(doc.meta.get("content_type", "")) == "javascript" or source_map_url(
+                        if (map_mime_to_type(doc.meta.get("content_type", "")) == "javascript" or source_map_candidates(
                                 doc.meta.get("url", ""))
                                 or javascript_url_from_map(doc.meta.get("url", ""))):
                             if scan_finding_queue is None:

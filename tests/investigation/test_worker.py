@@ -1,5 +1,6 @@
 """Worker obligations survive unavailable dependencies and process interruptions."""
 
+import logging
 from contextlib import closing
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -48,8 +49,15 @@ async def test_reconcile_is_vector_free_bounded_and_restartable():
         assert client.scroll.call_count == 2
 
 
-def test_materialize_atomic_publish_and_failure_classes(monkeypatch):
-    monkeypatch.setattr(worker, "correlation_query", lambda *args: Query())
+def test_materialize_atomic_publish_and_failure_classes(monkeypatch, caplog):
+    caplog.set_level(logging.DEBUG, logger=worker.__name__)
+    def query(*args):
+        result = Query()
+        result.read = Mock(return_value=[])
+        return result
+
+    monkeypatch.setattr(worker, "correlation_query", query)
+    monkeypatch.setattr(worker.Checkpoint, "renew", lambda self: None)
     with closing(CorrelationStore("test")) as store:
         assert not worker.materialize_one(store, Mock(), Mock(), 1)
         store.submit("finding", "https://example.com/a", {})
@@ -57,6 +65,7 @@ def test_materialize_atomic_publish_and_failure_classes(monkeypatch):
         assert worker.materialize_one(store, Mock(), Mock(), 1)
         result = store.read("example.com")["results"][0]
         assert result["finding_ids"] == ["finding"]
+        assert not [record for record in caplog.records if record.name == worker.__name__]
         while store._select_job(("derive", "hotspot")):
             assert worker.materialize_one(store, Mock(), Mock(), 1)
         monkeypatch.setattr(worker, "correlate", Mock(side_effect=TimeoutError()))
@@ -67,6 +76,7 @@ def test_materialize_atomic_publish_and_failure_classes(monkeypatch):
         monkeypatch.setattr(worker, "correlate", Mock(side_effect=ValueError()))
         assert worker.materialize_one(store, Mock(), Mock(), 2)
         assert store.status()["failed"] == 1
+        assert any(record.name == worker.__name__ and record.levelno == logging.WARNING for record in caplog.records)
 
 
 def test_graph_revision_and_process_entrypoints(monkeypatch):

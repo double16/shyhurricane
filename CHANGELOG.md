@@ -2,20 +2,9 @@
 
 ## Unreleased
 
-### Fixes
-
-- Focus vulnerability classification on directly supported candidates.
-- Validate query expansion as structured JSON and load static patterns from editable YAML assets.
-- Validate model-generated JSON against task schemas and bound output generation, with cached
-  compatibility fallback for providers that reject structured outputs.
-- Pin Compose and managed Qdrant Docker images to major version 1 instead of `latest`.
-- Bound document embedding chunks and full-document previews to 2,048 tokens.
-- Preserve Ollama model tags when pulling and pull required models once at startup instead of
-  repeatedly during component creation. Skip installed models, matching explicit tags exactly.
-  Failed model inventory requests or required pulls stop startup.
-
 ### Features
 
+- Fetch explicitly declared Next.js chunks through background ingestion when open-world access is enabled.
 - Show the data directory beneath the dashboard configuration header, abbreviating the home directory as `~`.
 - Add managed database host networking and automatic fallback for disabled Docker bridges.
 - Show assessment title, aggregate health dot, and work status in interactive iTerm2 tabs.
@@ -68,6 +57,15 @@
   Accept scoped targets and optional analysis/active modes; render workflows without executing tools.
 
 ### Fixes
+
+- Validate query expansion as structured JSON and load static patterns from editable YAML assets.
+- Validate model-generated JSON against task schemas and bound output generation, with cached
+  compatibility fallback for providers that reject structured outputs.
+- Pin Compose and managed Qdrant Docker images to major version 1 instead of `latest`.
+- Bound document embedding chunks and full-document previews to 2048 tokens.
+- Preserve Ollama model tags when pulling and pull required models once at startup instead of
+  repeatedly during component creation. Skip installed models, matching explicit tags exactly.
+  Failed model inventory requests or required pulls stop startup.
 - Include macOS purgeable capacity in reported free space and indexing disk readiness, using
   PyObjC with an ordinary-free-space fallback when the native estimate is unavailable.
 - Return normalized XML and SVG content as text so ingestion accepts it instead of failing

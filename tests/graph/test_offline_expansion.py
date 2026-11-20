@@ -251,3 +251,33 @@ def test_unit_retry_digest_ignores_staging_ownership_tags(event, monkeypatch):
     assert any("GraphCleanupPending" in call.args[0] for call in tx.run.call_args_list)
     publisher.abandon(session, "generation")
     assert "u.staging_publication_id=null" in session.run.call_args.args[0]
+
+
+def test_deferred_archive_yield_keeps_expansion_pending(graph_paths, event, monkeypatch):
+    from shyhurricane.graph.archive_checkpoint import ArchivePending
+
+    artifacts = ArtifactStore("db")
+    capture = artifacts.register(event())
+    path = artifacts.write("source", {"source": "const a=1", "filename": "a.js", "contexts": []})
+    unit = artifacts.manifest.unit(capture["id"], "deferred.js", artifact=path)
+    runner = MagicMock(return_value={"nodes": [], "edges": [], "gaps": []})
+    monkeypatch.setattr("shyhurricane.graph.extract.run_javascript", runner)
+    original = archive_ir
+    monkeypatch.setattr("shyhurricane.graph.discovery_manifest.archive_ir", MagicMock(side_effect=ArchivePending()))
+    jobs = Expansions(artifacts, MagicMock())
+    jobs.accept({**capture, "analysis_unit_id": unit}, 1)
+    assert jobs.step() and jobs.available()
+    assert artifacts.connection.execute("SELECT state,error FROM graph_expansions").fetchone() == ("pending", "")
+    queue = MagicMock()
+    jobs.settle(queue)
+    queue.ack.assert_not_called()
+    queue.ack_failed.assert_not_called()
+    with artifacts.connection:
+        artifacts.connection.execute("DELETE FROM graph_cache")
+    monkeypatch.setattr("shyhurricane.graph.discovery_manifest.archive_ir", original)
+    monkeypatch.setattr(expansion.UnitPublisher, "publish", MagicMock())
+    assert jobs.step()
+    runner.assert_called_once()
+    assert artifacts.connection.execute("SELECT state FROM graph_expansions").fetchone()[0] == "done"
+    assert artifacts.connection.execute("SELECT count(*) FROM graph_archive_inputs").fetchone()[0] == 0
+    artifacts.close()

@@ -32,7 +32,7 @@ uv run python mcp_service.py --data-dir /srv/shyhurricane
   qdrant/                  Managed Qdrant storage
   graph/                   Managed Neo4j storage, including graph/logs/
   queues/<queue-name>/     Persistent ingest, document, finding, and graph queues
-  graph_state/             Compressed SQLite captures, artifacts, discovery catalog, and checkpoints
+  graph_state/             SQLite metadata, inline payloads, checkpoints, and packed payload segments
   logs/                    Diagnostic, indexing, and finding logs
   certs/                   Replay proxy CA and certificates
   tool_cache/              Tool history, cached output, and result_pages/
@@ -93,15 +93,19 @@ recreation or deletion occurs automatically.
 
 ## File logging
 
-Python logger messages at DEBUG and higher are appended to the UTF-8 file
+Python logger messages at INFO and higher are appended to the UTF-8 file
 `<data-dir>/logs/shyhurricane.log` by default. Set `LOG_FILE` or pass `--log-file` to override the
 destination. The command-line option overrides the environment variable. Parent directories are created;
 an unwritable destination stops startup with an error. Each record includes its timestamp, severity,
 logger name, process name, and PID. Exceptions logged with exception details include their tracebacks.
 The file remains active while the interactive dashboard suppresses console output, and worker
 processes inherit the destination. Uvicorn access messages also reach the file during dashboard use.
+Pass `--debug` to include DEBUG messages in the file, including messages from worker processes.
+Without this flag, detailed DEBUG diagnostics are omitted; INFO performance summaries remain available.
 Neo4j driver logging is limited to WARNING and higher to avoid formatting full graph parameter
 payloads. Application graph progress and failure logs remain available.
+Investigation materialization omits per-item success messages; failures and checkpoint timing
+diagnostics remain available, with completion state exposed through investigation status.
 Missing-property notifications from a new graph database are logged once per property per process;
 repeated notifications are suppressed. Other Neo4j warnings and errors remain visible.
 
@@ -164,6 +168,7 @@ Graph storage settings complement the analyzer settings in the
 
 | Environment variable | Default | Description |
 |----------------------|---------|-------------|
+| `GRAPH_SQLITE_CACHE_KIB` | 65536 | SQLite page cache per graph write connection, in KiB (1–1048576). Separate from artifact retention; processes have separate caches. |
 | `GRAPH_ARTIFACT_CACHE_MAX_BYTES` | `268435456` | Non-negative compressed-content budget per assessment for recomputable graph caches; `0` disables retention. Captured evidence, retained analysis, and active checkpoints are excluded. Reclamation runs asynchronously in bounded batches. |
 
 ## Managed database networking
