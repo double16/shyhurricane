@@ -7,7 +7,7 @@
   },
   "dependencies": {
     "@babel/parser": "^7.28.0",
-    "@babel/traverse": "^7.28.0"
+    "@babel/traverse": "^8.1.2"
   },
   "devDependencies": {
     "c8": "^10.1.3"
