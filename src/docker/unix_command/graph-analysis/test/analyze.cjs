@@ -50,6 +50,7 @@ test("Vite generated imports and dynamic unresolved globs retain boundaries", ()
     import.meta.glob('./views/*.vue'); import(dynamicPath); require('./shared.js');
     new Worker('/worker.js'); navigator.serviceWorker.register('/sw.js');`);
   assert(result.references.some((r) => r.url === "./one-123.js"));
+  assert(result.references.some((r) => r.url === "./one-123.js" && r.kind === "IMPORTS"));
   assert(result.references.some((r) => r.kind === "REGISTERS_WORKER"));
   assert(result.gaps.some((gap) => gap.includes("glob")));
   assert(result.gaps.some((gap) => gap.includes("Unresolved imports")));

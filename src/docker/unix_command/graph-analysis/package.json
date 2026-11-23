@@ -6,10 +6,10 @@
     "test": "c8 --check-coverage --per-file --lines 80 --branches 80 node --test test/*.cjs"
   },
   "dependencies": {
-    "@babel/parser": "^7.28.0",
-    "@babel/traverse": "^7.28.0"
+    "@babel/parser": "^8.1.2",
+    "@babel/traverse": "^8.1.2"
   },
   "devDependencies": {
-    "c8": "^10.1.3"
+    "c8": "^12.0.0"
   }
 }

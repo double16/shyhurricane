@@ -185,6 +185,11 @@ function analyze(source, filename = "source.js", mode = "summary") {
         nodes.get(id).imported_name = specifier.imported?.name || (specifier.type === "ImportDefaultSpecifier" ? "default" : "*");
       }
     },
+    ImportExpression(path) {
+      const node = path.node;
+      const source = node.source;
+      reference(source?.type === "StringLiteral" ? source.value : undefined, "IMPORTS", node);
+    },
     ExportNamedDeclaration(path) {
       const node = path.node;
       const declaration = node.declaration;
