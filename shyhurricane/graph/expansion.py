@@ -2,8 +2,10 @@
 
 import time
 
-from shyhurricane.graph.blob_store import owner_triggers
+from shyhurricane.graph.archive_checkpoint import ArchivePending
+from shyhurricane.graph.expansion_jobs import accept_job, initialize_jobs
 from shyhurricane.graph.extract import apply_javascript
+from shyhurricane.graph.inventory_updates import enqueue as enqueue_status
 from shyhurricane.graph.links import LinkPlanner
 from shyhurricane.graph.model import Projection, identity, projection_snapshot, restore_projection
 from shyhurricane.graph.retry_policy import transient_neo4j_error
@@ -14,28 +16,11 @@ class Expansions:
     def __init__(self, artifacts, store):
         self.artifacts, self.store = artifacts, store
         self.connection = artifacts.connection
-        self.connection.executescript(
-            "CREATE TABLE IF NOT EXISTS graph_expansions (id TEXT PRIMARY KEY,capture_id TEXT,unit_id TEXT,"
-            "state TEXT,error TEXT DEFAULT '',next_attempt REAL DEFAULT 0,checkpoint TEXT DEFAULT '');"
-            "CREATE TABLE IF NOT EXISTS graph_expansion_receipts (queue_id INTEGER PRIMARY KEY,job_id TEXT);"
-        )
-
-        owner_triggers(self.connection, "graph_expansions", "checkpoint", "id")
+        initialize_jobs(self.connection)
 
     def accept(self, item, queue_id):
-        key = identity("expand", item["id"], item["analysis_unit_id"])
         with self.connection:
-            self.connection.execute(
-                "INSERT OR IGNORE INTO graph_expansions(id,capture_id,unit_id,state) VALUES (?,?,?,'pending')",
-                (key, item["id"], item["analysis_unit_id"]),
-            )
-            self.connection.execute(
-                "UPDATE graph_expansions SET state='pending',next_attempt=0,checkpoint='' "
-                "WHERE id=? AND state='failed'",
-                (key,),
-            )
-            self.connection.execute("INSERT OR IGNORE INTO graph_expansion_receipts VALUES (?,?)", (queue_id, key))
-        return key
+            return accept_job(self.connection, item, queue_id)
 
     def available(self):
         return (
@@ -54,9 +39,12 @@ class Expansions:
         if row is None:
             return False
         key, capture, unit, checkpoint = row
+        record = None
         try:
             record = self.connection.execute(
-                "SELECT artifact,source_path FROM graph_manifest_units WHERE id=? AND capture_id=?", (unit, capture)
+                "SELECT coalesce(j.artifact,u.artifact),u.source_path,j.generation FROM graph_manifest_units u "
+                "JOIN graph_expansions j ON j.unit_id=u.id WHERE u.id=? AND u.capture_id=? AND j.id=?",
+                (unit, capture, key)
             ).fetchone()
             if record is None or not record[0]:
                 raise ValueError("Analysis unit has no retained IR; inspect discovery coverage")
@@ -77,11 +65,9 @@ class Expansions:
                     open_world=False,
                 )
             if "ir_artifact" in raw:
-                raw = {
-                    **self.artifacts.read(raw["ir_artifact"]),
-                    "contexts": raw["contexts"],
-                    "requires_context_shards": False,
-                }
+                from shyhurricane.graph.detail_recipe import resolve
+
+                raw = resolve(self.artifacts, raw)
             if raw.get("requires_context_shards"):
                 raise ValueError("Select an archived context-shard to bound consuming-document work")
             if "contexts" not in raw and "event" not in raw:
@@ -98,7 +84,10 @@ class Expansions:
                 from shyhurricane.graph.extract import run_javascript
 
                 source = raw
-                raw = run_javascript(source["source"], source["filename"], "summary")
+                analysis_key = identity("expansion-analysis", key, source)
+                raw = self.artifacts.archive_analysis(
+                    analysis_key, lambda: run_javascript(source["source"], source["filename"], "summary")
+                )
                 reference = self.connection.execute("SELECT path FROM captures WHERE id=?", (capture,)).fetchone()[0]
                 event = self.artifacts.read(reference)
                 analyzed = archive_ir(
@@ -111,6 +100,7 @@ class Expansions:
                         "flow=(SELECT flow FROM graph_manifest_units WHERE id=?) WHERE id=?",
                         (analyzed, analyzed, unit),
                     )
+                self.artifacts.release_archive_analysis(analysis_key)
                 raw.update(filename=source["filename"], contexts=source["contexts"])
             if len(raw.get("nodes", [])) > 4000 or len(raw.get("edges", [])) > 4000:
                 raise ValueError("Select an archived flow-shard or node-shard for bounded detail expansion")
@@ -158,12 +148,16 @@ class Expansions:
             UnitPublisher(self.store, unit).publish(projection)
             with self.connection:
                 self.connection.execute(
-                    "UPDATE graph_expansions SET state='done',error='',checkpoint='' WHERE id=?", (key,)
+                    "UPDATE graph_expansions SET state='done',error='',checkpoint='',artifact=NULL WHERE id=?", (key,)
                 )
                 self.connection.execute(
                     "UPDATE graph_manifest_units SET materialization='complete',error='' WHERE id=?", (unit,)
                 )
+                enqueue_status(self.connection, unit, record[2], "complete",
+                               flow="partial" if any("budget" in gap.lower() for gap in projection.gaps) else "complete")
             self.artifacts.delete(path)
+        except ArchivePending:
+            return True
         except Exception as error:
             transient = transient_neo4j_error(error)
             with self.connection:
@@ -175,6 +169,9 @@ class Expansions:
                     "UPDATE graph_manifest_units SET materialization=?,error=? WHERE id=?",
                     ("pending" if transient else "failed", str(error)[:1000], unit),
                 )
+                if record is not None:
+                    enqueue_status(self.connection, unit, record[2],
+                                   "pending" if transient else "failed", str(error))
         return True
 
     def settle(self, queue):

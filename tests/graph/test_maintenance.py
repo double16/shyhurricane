@@ -1,3 +1,4 @@
+from contextlib import closing
 from unittest.mock import MagicMock
 
 import pytest
@@ -154,32 +155,37 @@ def test_thread_start_close_and_shutdown_deadline(monkeypatch, caplog):
     assert "shutdown deadline" in caplog.text
 
 
-def test_coverage_reconciliation_has_independent_schedule_and_retries(monkeypatch):
+def test_inventory_reclamation_has_independent_schedule_and_retries(monkeypatch):
     monkeypatch.setattr(maintenance, "GraphStore", lambda location: MagicMock())
     repair = MagicMock()
-    monkeypatch.setattr(maintenance, "CoverageRepair", lambda db: repair)
+    repair.step.return_value = False
+    monkeypatch.setattr(maintenance, "InventoryCleanup", lambda *args: repair)
     now = [0.0]
     monkeypatch.setattr(maintenance.time, "monotonic", lambda: now[0])
     worker = GraphMaintenance("location", lambda: True, artifact_db="db")
+    worker.inventory_schedule = lambda now: ("idle", 1)
     worker.tick()
-    repair.tick.assert_called_once_with(worker.stop_event)
-    assert worker.next_attempt["coverage"] == 60
+    repair.step.assert_called_once_with(deadline=2)
+    assert worker.next_attempt["inventory"] == 60
     now[0] = 60
-    repair.tick.side_effect = RuntimeError("locked")
+    repair.step.side_effect = RuntimeError("locked")
     worker.tick()
-    assert worker.failures["coverage"] == 1
+    assert worker.failures["inventory"] == 1
     now[0] = 120
-    repair.tick.side_effect = None
+    repair.step.side_effect = None
+    repair.step.return_value = False
     worker.tick()
-    assert worker.failures["coverage"] == 0
+    assert worker.failures["inventory"] == 0
 
 
 def test_pending_storage_work_retries_promptly_without_failure_backoff(monkeypatch):
     monkeypatch.setattr(maintenance, "GraphStore", lambda location: MagicMock())
     repair = MagicMock()
+    repair.step.return_value = False
     storage = MagicMock()
+    storage.root = __import__("pathlib").Path("/tmp/test-graph")
     storage.tick.return_value = {"processed": 500, "pending": True}
-    monkeypatch.setattr(maintenance, "CoverageRepair", lambda db: repair)
+    monkeypatch.setattr(maintenance, "InventoryCleanup", lambda *args: repair)
     monkeypatch.setattr(maintenance, "StorageMaintenance", lambda db: storage)
     monkeypatch.setattr(maintenance.time, "monotonic", lambda: 0)
     worker = GraphMaintenance("location", lambda: True, artifact_db="db")
@@ -190,8 +196,9 @@ def test_pending_storage_work_retries_promptly_without_failure_backoff(monkeypat
 
 def test_storage_deferral_resets_failure_streak_and_retries(monkeypatch):
     monkeypatch.setattr(maintenance, "GraphStore", lambda location: MagicMock())
-    monkeypatch.setattr(maintenance, "CoverageRepair", lambda db: MagicMock())
+    monkeypatch.setattr(maintenance, "InventoryCleanup", lambda *args: MagicMock())
     storage = MagicMock()
+    storage.root = __import__("pathlib").Path("/tmp/test-graph")
     storage.tick.return_value = {"processed": 64, "pending": False, "deferred": True}
     monkeypatch.setattr(maintenance, "StorageMaintenance", lambda db: storage)
     monkeypatch.setattr(maintenance.time, "monotonic", lambda: 0)
@@ -210,8 +217,9 @@ def test_storage_deferral_resets_failure_streak_and_retries(monkeypatch):
 
 def test_storage_backoff_schedule_skips_early_attempts(monkeypatch):
     monkeypatch.setattr(maintenance, "GraphStore", lambda location: MagicMock())
-    monkeypatch.setattr(maintenance, "CoverageRepair", lambda db: MagicMock())
+    monkeypatch.setattr(maintenance, "InventoryCleanup", lambda *args: MagicMock())
     storage = MagicMock()
+    storage.root = __import__("pathlib").Path("/tmp/test-graph")
     storage.tick.return_value = {
         "processed": 0, "pending": True, "deferred": True, "next_attempt_seconds": 30,
     }
@@ -228,3 +236,65 @@ def test_storage_backoff_schedule_skips_early_attempts(monkeypatch):
     worker.tick()
     assert storage.tick.call_count == 2
     assert worker.failures["storage"] == 0
+
+
+@pytest.mark.parametrize("phase,elapsed,disk,expected", [
+    ("references", None, {}, "fallback"),
+    ("references", 60, {}, "active_epoch"),
+    ("references", 1800, {}, "fallback"),
+    ("done", 60, {}, "idle"),
+    ("failed", 60, {}, "idle"),
+    ("references", 60, {"state": "paused", "error": None}, "disk_pressure"),
+    ("references", 60, {"state": "paused", "error": "unavailable"}, "active_epoch"),
+])
+def test_inventory_policy(tmp_path, monkeypatch, phase, elapsed, disk, expected):
+    import sqlite3
+    from types import SimpleNamespace
+    monkeypatch.setattr(maintenance, "GraphStore", lambda location: MagicMock())
+    worker = GraphMaintenance("location", lambda: True, disk_snapshot=lambda: disk)
+    worker.storage_maintenance = SimpleNamespace(root=tmp_path)
+    with closing(sqlite3.connect(tmp_path / "artifacts.sqlite")) as connection, connection:
+        connection.execute("CREATE TABLE graph_epochs (id INTEGER PRIMARY KEY,phase TEXT)")
+        connection.execute("INSERT INTO graph_epochs (phase) VALUES (?)", (phase,))
+    worker.inventory_last_pass = None if elapsed is None else 0
+    assert worker.inventory_schedule(elapsed or 0)[0] == expected
+
+
+def test_inventory_lock_timeout_yields_without_failure_backoff(monkeypatch):
+    from neo4j.exceptions import Neo4jError
+
+    monkeypatch.setattr(maintenance, "GraphStore", lambda location: MagicMock())
+    monkeypatch.setattr(maintenance.time, "monotonic", lambda: 0)
+    worker = GraphMaintenance("location", lambda: True)
+    worker.storage_maintenance = MagicMock()
+    worker.storage_maintenance.tick.return_value = {"pending": False}
+    worker.inventory_cleanup = MagicMock()
+    worker.inventory_cleanup.step.side_effect = Neo4jError._hydrate_neo4j(
+        code="Neo.ClientError.Transaction.TransactionTimedOutClientConfiguration", message="busy",
+    )
+    worker.inventory_schedule = lambda now: ("disk_pressure", 5)
+    worker.next_attempt["inventory"] = 0
+    worker.failures["inventory"] = 0
+    worker.tick()
+    assert worker.next_attempt["inventory"] == 5
+    assert worker.failures["inventory"] == 0
+
+
+
+def test_completed_epoch_is_detected_even_if_next_epoch_is_active(tmp_path, monkeypatch):
+    import sqlite3
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(maintenance, "GraphStore", lambda location: MagicMock())
+    worker = GraphMaintenance("location", lambda: True)
+    worker.storage_maintenance = SimpleNamespace(root=tmp_path)
+    worker.inventory_last_pass = 0
+    with closing(sqlite3.connect(tmp_path / "artifacts.sqlite")) as connection, connection:
+        connection.execute("CREATE TABLE graph_epochs (id INTEGER PRIMARY KEY,phase TEXT)")
+        connection.execute("INSERT INTO graph_epochs VALUES (1,'references')")
+    assert worker.inventory_schedule(60)[0] == "active_epoch"
+    with closing(sqlite3.connect(tmp_path / "artifacts.sqlite")) as connection, connection:
+        connection.execute("UPDATE graph_epochs SET phase='done'")
+        connection.execute("INSERT INTO graph_epochs VALUES (2,'references')")
+    assert worker.inventory_schedule(120)[0] == "epoch_complete"
+    assert worker.inventory_schedule(121)[0] == "active_epoch"

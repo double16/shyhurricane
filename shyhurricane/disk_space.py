@@ -41,7 +41,8 @@ def _disk_capacity(path):
         try:
             available = _macos_available_capacity(path)
             if isinstance(available, int) and not isinstance(available, bool) and 0 <= available <= usage.total:
-                free = available
+                # Some volumes return zero for this optional estimate despite having ordinary free space.
+                free = max(free, available)
         except Exception:
             # A bridge or unsupported-volume failure must not disable the ordinary disk guard.
             logger.debug("macOS writable-capacity query failed; using ordinary free space", exc_info=True)

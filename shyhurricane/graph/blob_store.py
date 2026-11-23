@@ -2,16 +2,21 @@
 
 import hashlib
 import json
+import logging
 import os
 import time
 from contextlib import contextmanager
 
 from shyhurricane.graph import storage_accounting
+from shyhurricane.graph.payload_store import PayloadStore
+from shyhurricane.graph.performance import count, label, measured, phase, timed
 from shyhurricane.graph.storage_schema import VERSION, initialize, validate
 
 __all__ = ["BlobStore", "VERSION", "initialize", "validate", "cache_budget", "owner_triggers"]
 
 import zstandard
+
+logger = logging.getLogger(__name__)
 
 ENCODING_VERSION = 1
 DEFAULT_CACHE_BYTES = 256 * 1024 * 1024
@@ -30,21 +35,29 @@ def cache_budget():
 class BlobStore:
     def __init__(self, connection):
         self.connection = connection
+        self.payloads = PayloadStore(connection)
 
+    @timed("compress")
     def _pack(self, raw):
+        count("logical_bytes", len(raw))
         if len(raw) > MAX_DECODED_BYTES:
             raise ValueError("Graph artifact exceeds decoded size limit")
         packed = zstandard.ZstdCompressor(level=1, write_checksum=True).compress(raw)
         codec, payload = ("zstd", packed) if len(packed) < len(raw) else ("raw", raw)
+        count("stored_bytes", len(payload))
         return hashlib.sha256(raw).hexdigest(), codec, ENCODING_VERSION, len(raw), payload
 
     def _raw(self, digest, limit=MAX_DECODED_BYTES):
-        row = self.connection.execute(
-            "SELECT codec,version,size,payload FROM graph_blobs WHERE digest=?", (digest,)
-        ).fetchone()
+        with phase("payload_metadata"):
+            row = self.connection.execute(
+                "SELECT codec,version,size,stored,payload,segment,offset FROM graph_blobs WHERE digest=?", (digest,)
+            ).fetchone()
         if row is None:
             raise ValueError("Missing graph artifact content")
-        codec, version, size, payload = row
+        codec, version, size, stored, inline, segment, offset = row
+        with phase("payload_io"):
+            payload = self.payloads.read(inline, segment, offset, stored)
+        count("read_bytes", len(payload))
         if version != ENCODING_VERSION or codec not in {"raw", "zstd"}:
             raise ValueError("Unsupported graph artifact encoding")
         if not 0 <= size <= min(limit, MAX_DECODED_BYTES):
@@ -52,73 +65,68 @@ class BlobStore:
         try:
             if codec == "zstd" and zstandard.frame_content_size(payload) != size:
                 raise ValueError("Corrupt graph artifact size")
-            raw = (
-                payload
-                if codec == "raw"
-                else zstandard.ZstdDecompressor().decompress(
-                    payload, max_output_size=max(1, size), allow_extra_data=False
+            with phase("payload_decompress"):
+                raw = (
+                    payload
+                    if codec == "raw"
+                    else zstandard.ZstdDecompressor().decompress(
+                        payload, max_output_size=max(1, size), allow_extra_data=False
+                    )
                 )
-            )
         except zstandard.ZstdError as error:
             raise ValueError("Corrupt graph artifact") from error
+        count("decoded_bytes", len(raw))
         if len(raw) != size or hashlib.sha256(raw).hexdigest() != digest:
             raise ValueError("Corrupt graph artifact")
         return raw
 
-    def put(self, key, value, *, cache=False):
+    @measured("artifact_write", logger, summary_interval=60)
+    def put(self, key, value, *, cache=False, capture=False):
         """Return an immutable content reference; keys identify optional cache entries only."""
-        blobs, children, references = {}, set(), set()
-        expanded_bytes = 0
+        if capture:
+            event = {**value, "data": dict(value["data"])}
+            bodies = {}
+            for field in ("request_body", "response_body"):
+                body = event["data"].get(field)
+                if isinstance(body, str):
+                    bodies[field] = self.put("capture-body", body)
+                    event["data"][field] = None
+            value = {"event": event, "bodies": bodies}
+        references = set()
 
-        def encode(item):
-            nonlocal expanded_bytes
-            if isinstance(item, str):
-                if len(item) == 66 and item.startswith("a:") and all(c in "0123456789abcdef" for c in item[2:]):
-                    references.add(item)
-                if len(item) >= 1024:
-                    packed = self._pack(item.encode("utf-8", errors="surrogatepass"))
-                    blobs[packed[0]] = packed
-                    expanded_bytes += packed[3]
-                    children.add(packed[0])
-                    return {TEXT_TAG: packed[0]}
+        def visit(item):
+            if isinstance(item, str) and len(item) == 66 and item.startswith("a:"):
+                references.add(item)
             elif isinstance(item, dict):
-                encoded = {key: encode(val) for key, val in item.items()}
-                return {LITERAL_TAG: encoded} if set(item) in ({TEXT_TAG}, {LITERAL_TAG}) else encoded
+                for value in item.values():
+                    visit(value)
             elif isinstance(item, (tuple, list)):
-                return [encode(val) for val in item]
-            return item
+                for value in item:
+                    visit(value)
 
-        wire = encode(value)
-        raw = json.dumps(wire, ensure_ascii=False, separators=(",", ":")).encode("utf-8", errors="surrogatepass")
-        if len(raw) + expanded_bytes > MAX_DECODED_BYTES:
-            raise ValueError("Graph artifact exceeds decoded size limit")
-        packed = self._pack(raw)
-        blobs[packed[0]] = packed
-        reference = "a:" + packed[0]
-        for record in blobs.values():
-            self.connection.execute(
-                "INSERT OR IGNORE INTO graph_blobs(digest,codec,version,size,payload) VALUES (?,?,?,?,?)", record
-            )
-        now = time.time()
-        # Text leaves precede the artifact. Existing artifact dependencies are immutable.
-        for child in children:
-            self.connection.execute(
-                "INSERT INTO graph_nodes(id,kind,digest,created) VALUES (?,'text',?,?) "
-                "ON CONFLICT(id) DO UPDATE SET created=excluded.created,retiring=0",
-                ("t:" + child, child, now),
-            )
+        visit(value)
+        with phase("serialize"):
+            raw = json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8", errors="surrogatepass")
+        digest, codec, version, size, payload = self._pack(raw)
+        if not self.connection.in_transaction:
+            self.connection.execute("BEGIN IMMEDIATE")
+        existing = self.connection.execute("SELECT 1 FROM graph_blobs WHERE digest=?", (digest,)).fetchone()
+        inline, segment, offset = (None, None, None) if existing else self.payloads.put(payload)
         self.connection.execute(
-            "INSERT INTO graph_nodes(id,kind,digest,created) VALUES (?,'artifact',?,?) "
-            "ON CONFLICT(id) DO UPDATE SET created=excluded.created,retiring=0",
-            (reference, packed[0], now),
+            "INSERT OR IGNORE INTO graph_blobs(digest,codec,version,size,stored,payload,segment,offset) "
+            "VALUES (?,?,?,?,?,?,?,?)", (digest, codec, version, size, len(payload), inline, segment, offset),
         )
-        dependencies = {"t:" + child for child in children}
-        for child in references:
-            if child != reference and self.exists(child):
-                dependencies.add(child)
+        reference = "a:" + digest
+        label(artifact_id=reference)
+        now = time.time()
+        self.connection.execute(
+            "INSERT INTO graph_nodes(id,kind,digest,created) VALUES (?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET created=excluded.created,retiring=0",
+            (reference, "capture" if capture else "artifact", digest, now),
+        )
         self.connection.executemany(
             "INSERT OR IGNORE INTO graph_edges(parent,child) VALUES (?,?)",
-            ((reference, child) for child in dependencies),
+            ((reference, child) for child in references if child != reference and self.exists(child)),
         )
         if cache:
             self.connection.execute(
@@ -157,40 +165,37 @@ class BlobStore:
             raise
         return (True, self.read(row[0])) if row else (False, None)
 
+    @measured("artifact_read", logger, summary_interval=60)
     def read(self, ref, *, limit=MAX_DECODED_BYTES):
         with self.snapshot():
             return self._read(ref, limit=limit)
 
     def _read(self, ref, *, limit=MAX_DECODED_BYTES):
         row = self.connection.execute(
-            "SELECT digest FROM graph_nodes WHERE id=? AND kind='artifact' AND retiring=0", (ref,)
+            "SELECT digest,kind FROM graph_nodes WHERE id=? AND kind IN ('artifact','capture') AND retiring=0", (ref,)
         ).fetchone()
         if row is None:
             raise FileNotFoundError(f"Graph artifact unavailable: {ref}")
-        remaining = limit
-
-        def decode(item):
-            nonlocal remaining
-            if isinstance(item, dict):
-                if set(item) == {TEXT_TAG}:
-                    raw = self._raw(item[TEXT_TAG], remaining)
-                    remaining -= len(raw)
-                    return raw.decode("utf-8", errors="surrogatepass")
-                if set(item) == {LITERAL_TAG}:
-                    return {key: decode(val) for key, val in item[LITERAL_TAG].items()}
-                return {key: decode(val) for key, val in item.items()}
-            if isinstance(item, list):
-                return [decode(val) for val in item]
-            return item
-
-        raw = self._raw(row[0], remaining)
-        remaining -= len(raw)
-        return decode(json.loads(raw))
+        raw = self._raw(row[0], limit)
+        label(artifact_id="a:" + row[0])
+        with phase("payload_json"):
+            value = json.loads(raw)
+        if row[1] == "capture":
+            event = value["event"]
+            remaining = limit - len(raw)
+            for field, reference in value["bodies"].items():
+                body = self.read(reference, limit=remaining)
+                remaining -= len(body.encode("utf-8", errors="surrogatepass"))
+                if remaining < 0:
+                    raise ValueError("Graph artifact exceeds decoded size limit")
+                event["data"][field] = body
+            return event
+        return value
 
     def exists(self, ref):
         return (
             self.connection.execute(
-                "SELECT 1 FROM graph_nodes WHERE id=? AND kind='artifact' AND retiring=0", (ref,)
+                "SELECT 1 FROM graph_nodes WHERE id=? AND kind IN ('artifact','capture') AND retiring=0", (ref,)
             ).fetchone()
             is not None
         )
@@ -217,21 +222,33 @@ class BlobStore:
         return storage_accounting.statistics(self.connection, cache_budget())
 
 
+
+def owner_sql(table, column, key, action):
+    """Generate ownership maintenance without churning unchanged roots."""
+    guard = (
+        f"WHEN OLD.{key} IS NOT NEW.{key} OR OLD.{column} IS NOT NEW.{column} "
+        if action == "UPDATE" else ""
+    )
+    previous = (
+        f"DELETE FROM graph_object_owners WHERE owner='{table}:{column}:'||OLD.{key} "
+        f"AND OLD.{key} IS NOT NEW.{key}; "
+        if action == "UPDATE" else ""
+    )
+    return (
+        f"CREATE TRIGGER IF NOT EXISTS blob_{table}_{column}_{action} AFTER {action} ON {table} "
+        + guard + "BEGIN " + previous
+        + f"DELETE FROM graph_object_owners WHERE owner='{table}:{column}:'||NEW.{key} "
+        f"AND (NEW.{column} IS NULL OR NEW.{column} NOT LIKE 'a:%'); "
+        f"INSERT INTO graph_object_owners SELECT '{table}:{column}:'||NEW.{key},NEW.{column} "
+        f"WHERE NEW.{column} LIKE 'a:%' ON CONFLICT(owner) DO UPDATE SET ref=excluded.ref "
+        "WHERE ref IS NOT excluded.ref; END;"
+    )
+
+
 def owner_triggers(connection, table, column, key="rowid"):
     """Follow durable SQL owners even when callers update them directly."""
     for action in ("INSERT", "UPDATE"):
-        previous = (
-            f"DELETE FROM graph_object_owners WHERE owner='{table}:{column}:'||OLD.{key}; "
-            if action == "UPDATE"
-            else ""
-        )
-        connection.executescript(
-            f"CREATE TRIGGER IF NOT EXISTS blob_{table}_{column}_{action} AFTER {action} ON {table} BEGIN "
-            + previous
-            + f"DELETE FROM graph_object_owners WHERE owner='{table}:{column}:'||NEW.{key}; "
-            f"INSERT INTO graph_object_owners SELECT '{table}:{column}:'||NEW.{key},NEW.{column} "
-            f"WHERE NEW.{column} LIKE 'a:%'; END;"
-        )
+        connection.executescript(owner_sql(table, column, key, action))
     connection.executescript(
         f"CREATE TRIGGER IF NOT EXISTS blob_{table}_{column}_DELETE AFTER DELETE ON {table} BEGIN "
         f"DELETE FROM graph_object_owners WHERE owner='{table}:{column}:'||OLD.{key}; END;"

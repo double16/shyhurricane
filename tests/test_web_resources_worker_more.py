@@ -578,3 +578,33 @@ def test_index_workers_wait_before_database_pipeline_setup(monkeypatch, doc_type
     assert closed == [True]
     if doc_type and shutdown:
         assert result == 0
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_ingest_worker_delivers_next_chunk_response(monkeypatch, tmp_path, enabled):
+    from shyhurricane.index import next_chunks
+
+    queue = Queue()
+    stop = Event()
+    item = json.dumps({next_chunks.TASK: {"url": "https://example.com/_next/static/chunks/item.js"}})
+    payload = '{"request":{"endpoint":"https://example.com/_next/static/chunks/item.js"}}'
+    fetch = Mock(side_effect=lambda *args, **kwargs: stop.set() or (payload if enabled else None))
+    store = Mock()
+    monkeypatch.setattr("shyhurricane.graph.artifacts.ArtifactStore", lambda db: store)
+    monkeypatch.setattr(next_chunks, "fetch_task", fetch)
+    monkeypatch.setattr(web_resources, "persistent_queue_get", lambda *args, **kwargs: iter([item]))
+    monkeypatch.setattr(web_resources, "get_log_path", lambda *args: tmp_path / "index.jsonl")
+    monkeypatch.setattr(web_resources, "get_ingest_queue", lambda db: queue)
+    monkeypatch.setattr(web_resources, "get_doc_type_queue", lambda db: queue)
+    pipeline = Mock()
+    monkeypatch.setattr(web_resources, "build_ingest_pipeline", lambda **kwargs: pipeline)
+    monkeypatch.setattr(web_resources.faulthandler, "register", Mock())
+    monkeypatch.setattr(web_resources, "log_heap_stats", Mock())
+    monkeypatch.setattr(web_resources, "log_gpu_memory_summary", Mock())
+    monkeypatch.setattr(web_resources, "is_current_process_in_bad_state", lambda: False)
+    web_resources._ingest_worker("db", object(), stop_event=stop, open_world=enabled)
+    assert queue.acked == [item]
+    assert queue.items == ([payload] if enabled else [])
+    assert fetch.call_args.kwargs["open_world"] is enabled
+    store.close.assert_called_once()
+    pipeline.run.assert_not_called()

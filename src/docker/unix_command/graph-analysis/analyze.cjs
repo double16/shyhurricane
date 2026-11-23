@@ -2,7 +2,10 @@
 const parser = require("@babel/parser");
 const traverse = require("@babel/traverse").default;
 
+const { prepareSource } = require("./encoding.cjs");
+
 const { compress } = require("./library.cjs");
+const { nextBundleModules, nextManifestChunks } = require("./next-bundle.cjs");
 
 function analyze(source, filename = "source.js", mode = "summary") {
   if (!["summary", "full"].includes(mode)) throw new Error("Invalid library analysis mode");
@@ -685,9 +688,16 @@ function analyze(source, filename = "source.js", mode = "summary") {
   if (calls.some((item) => !item.callee || (!functions.has(item.callee) && !states.has(item.callee)))) {
     gaps.add("External/dynamic calls are conservative summaries; runtime dispatch is unproven");
   }
-  const result = { nodes: [...nodes.values()], edges: [...edges.values()], references,
+  const nextModules = source.includes("webpackChunk_N_E") || source.includes("TURBOPACK")
+    ? nextBundleModules(ast, gaps) : [];
+  const result = { ...(nextModules.length ? { next_modules: nextModules } : {}), nodes: [...nodes.values()], edges: [...edges.values()], references,
     gaps: [...gaps], analysis: { mode: "full" } };
-  return compress(result, mode);
+  const compressed = compress(result, mode);
+  if (source.includes("__BUILD_MANIFEST") || source.includes("__TURBOPACK_PAGE_BOOTSTRAP")) {
+    const chunks = nextManifestChunks(ast);
+    if (chunks.length) compressed.next_manifest_chunks = chunks;
+  }
+  return compressed;
 }
 
 module.exports = { analyze };
@@ -697,6 +707,19 @@ if (require.main === module) {
   process.stdin.on("data", (chunk) => { input += chunk; });
   process.stdin.on("end", () => {
     const request = JSON.parse(input);
-    process.stdout.write(JSON.stringify(analyze(request.source, request.filename, request.mode)));
+    if (request.action === "prepare") {
+      let result;
+      try {
+        const prepared = prepareSource(request.source, (text) => parser.parse(text, {
+          sourceType: "unambiguous", errorRecovery: true, plugins: ["jsx", "decorators-legacy", "importAttributes"],
+        }));
+        result = { source: prepared.source, transformation: prepared.transformation || null };
+      } catch {
+        result = { source: request.source, transformation: null };
+      }
+      process.stdout.write(JSON.stringify(result));
+    } else {
+      process.stdout.write(JSON.stringify(analyze(request.source, request.filename, request.mode)));
+    }
   });
 }

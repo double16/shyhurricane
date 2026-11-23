@@ -298,11 +298,11 @@ def test_summary_policy_cache_separation_and_source_preparation(graph_paths, eve
     first = extract(capture, artifacts)
     assert first.analysis[0]["mode"] == "summary" and deobfuscated == [source]
     extract(capture, artifacts)
-    assert len(calls) == 1
+    assert len(calls) == 2
     full = extract({**capture, "library_analysis": "full"}, artifacts)
     assert full.analysis[0]["mode"] == "full" and deobfuscated == [source, source, source]
     assert "library" not in full.analysis[0]
-    assert len(calls) == 2 and calls[-1]["mode"] == "full"
+    assert len(calls) == 3 and calls[-1]["mode"] == "full"
     artifacts.close()
 
 
@@ -405,7 +405,7 @@ def test_summary_source_map_recovery_is_not_skipped(graph_paths, event, monkeypa
     artifacts = ArtifactStore("db")
     source_map = json.dumps({"version": 3, "sources": ["node_modules/react/index.js", "app.js"],
                              "sourcesContent": ["export const React = {};", "eval(location.hash)"]})
-    monkeypatch.setattr(artifacts, "source_map", lambda *args, **kwargs: source_map)
+    monkeypatch.setattr(artifacts, "resolve_source_map", lambda *args, **kwargs: {"content": source_map, "url": None})
     monkeypatch.setattr(artifacts, "deobfuscate", lambda *args: pytest.fail("Recovered sources need no deobfuscation"))
     seen = []
 
@@ -679,3 +679,301 @@ def test_ui_origins_connect_captured_elements_to_sinks(event, javascript_runner,
 def test_ui_origin_attributes_exclude_static_content(event):
     graph = extract(event(body='<div id="static">text</div><div contenteditable="false">no</div>'))
     assert not any(node.get("ui_origin") for node in graph.nodes.values())
+
+
+@pytest.mark.parametrize("repair", [False, True])
+def test_encoding_preparation_preserves_capture_and_records_hashes(event, monkeypatch, repair):
+    capture = event(url="https://example.com/app.js", mime="application/javascript", body="captured")
+    calls = []
+
+    def run(source, filename, mode=None, **kwargs):
+        calls.append((source, kwargs))
+        if kwargs.get("action") == "prepare":
+            return {"source": "repaired" if repair else source,
+                    "transformation": "latin1-to-utf8-v1" if repair else None}
+        return {"nodes": [], "edges": [], "references": [], "gaps": []}
+
+    monkeypatch.setattr("shyhurricane.graph.extract.run_javascript", run)
+    # The default runner identity is bound at function definition time.
+    result = extract(capture, javascript_runner=run)
+    assert capture["data"]["response_body"] == "captured"
+    assert calls[-1][0] == ("repaired" if repair else "captured")
+    assert any("original_sha256=" in gap for gap in result.gaps) is repair
+
+
+def test_manifest_replay_reuses_durable_payload_and_adds_contexts(graph_paths, monkeypatch):
+    artifacts = ArtifactStore("db")
+    manifest = artifacts.manifest
+    data = {"id": "source", "url": "https://example.com/", "role": "source"}
+    key = manifest.fact("unit", "capture", "symbol", data)
+    put = manifest.blobs.put
+    calls = []
+    monkeypatch.setattr(manifest.blobs, "put", lambda *args, **kwargs: calls.append(args) or put(*args, **kwargs))
+    assert manifest.fact("unit", "capture", "symbol", data, contexts=["context"]) == key
+    assert not calls
+    refs = artifacts.connection.execute("SELECT shard FROM graph_inventory_outbox ORDER BY rowid").fetchall()
+    records = [row for (ref,) in refs for row in manifest.shards.read(ref)]
+    assert records[-1]["_context_ids"] == ["context"]
+    assert manifest.fact("unit", "capture", "symbol", {**data, "role": "sink"}) != key
+    assert not calls  # Facts live in shared shards, without per-fact artifact objects.
+    artifacts.close()
+
+
+def test_normalization_timeout_retains_repaired_source(graph_paths, event, monkeypatch):
+    artifacts = ArtifactStore("db")
+    monkeypatch.setattr(artifacts, "source_map", lambda *args, **kwargs: None)
+
+    def normalize(*args):
+        raise TimeoutError("deadline")
+
+    monkeypatch.setattr(artifacts, "deobfuscate", normalize)
+    calls = []
+
+    def run(source, filename, mode=None, **kwargs):
+        if kwargs.get("action") == "prepare":
+            return {"source": "repaired", "transformation": "latin1-to-utf8-v1"}
+        calls.append(source)
+        return {"nodes": [], "edges": [], "references": [], "gaps": []}
+
+    monkeypatch.setattr("shyhurricane.graph.extract.run_javascript", run)
+    capture = event(url="https://example.com/app.js", mime="application/javascript", body="captured")
+    result = extract(capture, artifacts, javascript_runner=run)
+    assert calls == ["repaired"]
+    assert capture["data"]["response_body"] == "captured"
+    assert any("normalization deadline" in gap for gap in result.gaps)
+    artifacts.close()
+
+
+def test_next_flight_imports_and_observed_action(event):
+    body = '1:I["module",[42,"static/chunks/client.js"],"default"]\n'
+    graph = extract(event(body=body, mime="text/x-component", method="POST",
+                          request_headers={"Next-Action": "opaque-example"}))
+    assert any(node.get("url") == "https://example.com/_next/static/chunks/client.js"
+               for node in graph.nodes.values())
+    assert {"LOADS", "REQUESTS"} <= kinds(graph)
+    assert any("no verified client module attribution" in gap for gap in graph.gaps)
+
+
+def test_next_inline_flight_fragment_join(event):
+    first = json.dumps([1, '1:I["module",["/_next/static/chunks/'])
+    second = json.dumps([1, 'lazy.js"],"default"]\n'])
+    graph = extract(event(body=f"<html><script>self.__next_f.push({first})</script>"
+                               f"<script>self.__next_f.push({second})</script></html>"))
+    assert any(node.get("url") == "https://example.com/_next/static/chunks/lazy.js"
+               for node in graph.nodes.values())
+
+
+def test_next_flight_rejects_unverified_and_incomplete_references(event):
+    body = ('1:I["module",["https://example.com/fake.js","static/chunks/../fake.js",3],"default"]\n'
+            '2:I{}\n3:I[\n4:T20,\n5:I["module",["static/chunks/fake.js"],"default"]\n'
+            '6:I["module",["static/chunks/incomplete.js"],"default"]')
+    graph = extract(event(body=body, mime="text/x-component", request_headers={"Next-Action": "unrelated"}))
+    assert not {"LOADS", "REQUESTS"} & kinds(graph)
+    assert any("incomplete row" in gap for gap in graph.gaps)
+    assert any("Unsupported Next.js Flight import record" in gap for gap in graph.gaps)
+    assert any("length-prefixed" in gap for gap in graph.gaps)
+
+
+def test_next_flight_budget_and_bootstrap_validation():
+    from shyhurricane.graph.next_client import flight_assets, inline_flight
+
+    gaps = []
+    flight_assets("x" * (1024 * 1024 + 1), pytest.fail, gaps, "test")
+    assert gaps == ["Next.js Flight analysis budget reached"]
+    assert inline_flight("self.__next_f.push(variable)") is None
+    assert inline_flight("(self.__next_f=self.__next_f||[]).push([0])") is None
+    assert inline_flight("self.__next_f.other()") is None
+
+
+def test_next_actions_remain_capture_local(event):
+    def capture(action, timestamp, mime):
+        return extract(event(method="POST", mime=mime, timestamp=timestamp,
+                             request_headers={"Next-Action": action}))
+
+    first = capture("first", "2026-01-01T00:00:01Z", "text/x-component")
+    second = capture("second", "2026-01-01T00:00:02Z", "text/x-component")
+    ordinary = capture("first", "2026-01-01T00:00:03Z", "text/html")
+    left, = (edge for edge in first.edges.values() if edge["kind"] == "REQUESTS")
+    right, = (edge for edge in second.edges.values() if edge["kind"] == "REQUESTS")
+    assert left["source"] != right["source"] and left["target"] == right["target"]
+    assert "REQUESTS" not in kinds(ordinary)
+
+
+def test_next_flight_outlined_chunk_paths(event):
+    body = ('1:I[8500,["974","$5","$6","$7"],"default"]\n'
+            '5:"static/chunks/app/page.js"\n'
+            '6:"static/chunks/ambiguous.js"\n6:"static/chunks/other.js"\n')
+    graph = extract(event(body=body, mime="text/x-component"))
+    assert {node["url"] for node in graph.nodes.values() if "/_next/" in node.get("url", "")} == {
+        "https://example.com/_next/static/chunks/app/page.js",
+    }
+    assert any("Unsupported Next.js Flight import record" in gap for gap in graph.gaps)
+
+
+@pytest.mark.parametrize("bundler", ["webpack", "turbopack"])
+def test_next_production_bootstrap_extracts_chunk_dependencies(event, bundler):
+    fixture = Path(__file__).parents[1] / "fixtures" / "next-client" / "flight-excerpts.jsonl"
+    records = [json.loads(line) for line in fixture.read_text().splitlines()]
+    html = next(record["html"] for record in records if record["bundler"] == bundler)
+    graph = extract(event(body=f"<html>{html}</html>"), javascript_runner=lambda *_: {})
+    assert any(evidence["rule"] == "next.flight-import" for evidence in graph.evidence.values())
+    assert any(evidence["rule"] == "next.flight-module-chunk" for evidence in graph.evidence.values())
+    assert "NAVIGATES_TO" not in kinds(graph)
+
+
+def test_next_flight_module_declarations_are_scoped_to_capture(event):
+    body = '1:I[42,["static/chunks/client.js"],"default"]\n'
+    first = extract(event(body=body, mime="text/x-component"))
+    second = extract(event(body=body, mime="text/x-component", timestamp="2026-01-01T00:00:01Z"))
+    for graph in (first, second):
+        declaration, = (edge for edge in graph.edges.values() if edge["kind"] == "IMPORTS")
+        module = graph.nodes[declaration["target"]]
+        assert module["kind"] == "module_reference"
+        assert any(edge["source"] == module["id"] and edge["kind"] == "LOADS" for edge in graph.edges.values())
+    assert {n["id"] for n in first.nodes.values() if n["kind"] == "module_reference"}.isdisjoint(
+        n["id"] for n in second.nodes.values() if n["kind"] == "module_reference"
+    )
+
+
+def test_next_flight_invalid_module_identity_preserves_chunk_evidence(event):
+    body = '1:I[{},["static/chunks/client.js"],"default"]\n2:I[42,["static/chunks/client.js"],null]\n'
+    graph = extract(event(body=body, mime="text/x-component"))
+    assert "LOADS" in kinds(graph)
+    assert "IMPORTS" not in kinds(graph)
+
+
+def test_next_compiled_module_registration_requires_delivered_chunk(event, javascript_runner):
+    body = "self.webpackChunk_N_E.push([[1],{42:()=>{}}]);"
+    chunk = extract(event(url="https://example.com/_next/static/chunks/client.js", body=body,
+                          mime="application/javascript"), javascript_runner=javascript_runner)
+    assert any(n["name"] == "Compiled module 42" and n["kind"] == "module_definition"
+               for n in chunk.nodes.values())
+    assert any(e["rule"] == "next.bundle-registration" for e in chunk.evidence.values())
+    ordinary = extract(event(url="https://example.com/app.js", body=body, mime="application/javascript"),
+                       javascript_runner=javascript_runner)
+    assert not any(e["rule"] == "next.bundle-registration" for e in ordinary.evidence.values())
+
+
+def test_next_pages_manifest_declares_chunk_at_captured_asset_base(event):
+    graph = extract(
+        event(
+            url="https://example.com/base/_next/static/build/_buildManifest.js",
+            body='self.__BUILD_MANIFEST = {"/items/[id]":["static/chunks/item.js",'
+                 '"static/chunks/../other.js","static/chunks/item.css"],"sortedPages":["/items/[id]"]};',
+            mime="application/javascript",
+        ),
+        javascript_runner=lambda *_: {},
+    )
+    assert {node["url"] for node in graph.nodes.values() if "/chunks/" in node["url"]} == {
+        "https://example.com/base/_next/static/chunks/item.js",
+    }
+    assert any(item["rule"] == "next.pages-manifest" for item in graph.evidence.values())
+
+
+@pytest.mark.parametrize("body", [
+    'self.__BUILD_MANIFEST = {',
+    'self.__BUILD_MANIFEST = {"/":["static/chunks/item.js"]} + dynamic',
+    'self.__BUILD_MANIFEST = ["/"]',
+    'self.__BUILD_MANIFEST = {"/":42}',
+    'self.__BUILD_MANIFEST = {"/":[null,"static/chunks/%2e/item.js"]}',
+    'differentGlobal = {"/":["static/chunks/item.js"]}',
+])
+def test_next_pages_manifest_ignores_unsupported_entries(event, body):
+    graph = extract(
+        event(url="https://example.com/_next/static/build/_buildManifest.js",
+              body=body, mime="application/javascript"),
+        javascript_runner=lambda *_: {},
+    )
+    assert not any(item["rule"] == "next.pages-manifest" for item in graph.evidence.values())
+
+
+def test_next_pages_manifest_projects_analyzer_results(event):
+    graph = extract(
+        event(
+            url="https://example.com/_next/static/build/_buildManifest.js",
+            body="self.__BUILD_MANIFEST = makeManifest();",
+            mime="application/javascript",
+        ),
+        javascript_runner=lambda *_: {
+            "next_manifest_chunks": [
+                ["/items/[id]", "static/chunks/pages/items/[id].js"],
+                ["/items/[id]", "https://example.com/outside.js"],
+            ],
+        },
+    )
+    assert {node["url"] for node in graph.nodes.values() if "/chunks/" in node["url"]} == {
+        "https://example.com/_next/static/chunks/pages/items/%5Bid%5D.js",
+    }
+
+
+@pytest.mark.parametrize("asset_base", [
+    "https://example.com/base/_next/",
+    "https://cdn.example.com/assets/_next/",
+])
+def test_inline_flight_uses_observed_script_asset_base(event, asset_base):
+    record = json.dumps([1, '1:I[42,["static/chunks/client.js"],"default"]' + chr(10)])
+    body = (
+        f'<html><script src="{asset_base}static/chunks/runtime.js"></script>'
+        f'<script>self.__next_f.push({record})</script></html>'
+    )
+    graph = extract(event(body=body), javascript_runner=lambda *_: {})
+    assert any(
+        node.get("url") == asset_base + "static/chunks/client.js"
+        for node in graph.nodes.values()
+    )
+
+
+def test_ambiguous_inline_flight_asset_base_is_not_resolved(event):
+    record = json.dumps([1, '1:I[42,["static/chunks/client.js"],"default"]' + chr(10)])
+    body = (
+        '<html><script src="https://cdn.example.com/_next/static/chunks/a.js"></script>'
+        '<script src="/_next/static/chunks/b.js"></script>'
+        f'<script>self.__next_f.push({record})</script></html>'
+    )
+    graph = extract(event(body=body), javascript_runner=lambda *_: {})
+    assert "Next.js Flight asset base is ambiguous" in graph.gaps
+    assert not any(item["rule"] == "next.flight-import" for item in graph.evidence.values())
+
+
+@pytest.mark.parametrize("declared_module", ["42", "99", None])
+def test_fetched_module_binds_only_matching_declarations(event, declared_module):
+    references = [{"id": "reference-id", "module_id": declared_module}]
+    graph = extract(
+        event(
+            url="https://example.com/_next/static/chunks/client.js",
+            body="delivered source",
+            mime="application/javascript",
+            capture_provenance={
+                "kind": "next_manifest_fetch", "declaring_capture": "declaring-capture",
+                "module_references": json.dumps(references),
+            },
+        ),
+        javascript_runner=lambda *_: {
+            "next_modules": [{"id": 42, "bundler": "webpack", "location": "1:0"}],
+        },
+    )
+    module = next(node for node in graph.nodes.values() if node["kind"] == "module_definition")
+    if declared_module == "42":
+        assert module["declaring_reference_ids"] == ["reference-id"]
+        assert module["declaring_capture_id"] == "declaring-capture"
+        assert len(module["source_sha256"]) == 64
+    else:
+        assert "declaring_reference_ids" not in module
+
+
+def test_fetched_module_ignores_malformed_declaration_metadata(event):
+    graph = extract(
+        event(
+            url="https://example.com/_next/static/chunks/client.js",
+            body="delivered source", mime="application/javascript",
+            capture_provenance={
+                "kind": "next_manifest_fetch", "declaring_capture": "declaring-capture",
+                "module_references": "invalid",
+            },
+        ),
+        javascript_runner=lambda *_: {
+            "next_modules": [{"id": 42, "bundler": "webpack", "location": "1:0"}],
+        },
+    )
+    module = next(node for node in graph.nodes.values() if node["kind"] == "module_definition")
+    assert "declaring_reference_ids" not in module

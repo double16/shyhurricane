@@ -13,7 +13,7 @@ from shyhurricane.investigation.jobs import POLICY_VERSION, JobStore
 from shyhurricane.investigation.targets import target_coordinates
 
 MAX_TARGETS = 1000
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 6
 
 
 def store_path(db):
@@ -53,7 +53,7 @@ class CorrelationStore(JobStore):
                 "state TEXT NOT NULL,due REAL NOT NULL,requested_revision INTEGER NOT NULL DEFAULT 0,"
                 "requested_policy INTEGER NOT NULL DEFAULT 0,"
                 "attempts INTEGER NOT NULL DEFAULT 0,error TEXT,PRIMARY KEY(kind,key))",
-                "CREATE INDEX IF NOT EXISTS ready_jobs ON jobs(due,kind,key) WHERE state='pending'",
+                "CREATE INDEX IF NOT EXISTS ready_jobs ON jobs(kind,due,key) WHERE state='pending'",
                 "CREATE TABLE IF NOT EXISTS targets(id TEXT PRIMARY KEY,payload TEXT NOT NULL,"
                 "priority INTEGER NOT NULL,anchor_rank INTEGER NOT NULL,kind TEXT NOT NULL,"
                 "hypothesis INTEGER NOT NULL,job_key TEXT NOT NULL)",
@@ -68,9 +68,37 @@ class CorrelationStore(JobStore):
                 "CREATE TABLE IF NOT EXISTS memberships(key TEXT,finding_id TEXT,PRIMARY KEY(key,finding_id))",
                 "CREATE INDEX IF NOT EXISTS membership_finding ON memberships(finding_id,key)",
                 "CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY,value TEXT NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS checkpoints (finding_id TEXT PRIMARY KEY,generation INTEGER NOT NULL,"
+                "revision TEXT NOT NULL,policy INTEGER NOT NULL,graph_revision INTEGER NOT NULL,"
+                "pin TEXT NOT NULL,updated REAL NOT NULL,expires REAL NOT NULL DEFAULT 0,"
+                "progress REAL,stage TEXT NOT NULL DEFAULT '')",
+                "CREATE TABLE IF NOT EXISTS checkpoint_pages (finding_id TEXT NOT NULL,key TEXT NOT NULL,"
+                "payload TEXT NOT NULL,size INTEGER NOT NULL,PRIMARY KEY(finding_id,key))",
+            )
+            statements += (
+                "CREATE TABLE IF NOT EXISTS checkpoint_usage(finding_id TEXT PRIMARY KEY,bytes INTEGER NOT NULL)",
+                "CREATE TABLE IF NOT EXISTS checkpoint_total(id INTEGER PRIMARY KEY CHECK(id=1),bytes INTEGER NOT NULL)",
+                "INSERT OR IGNORE INTO checkpoint_total VALUES(1,0)",
             )
             for statement in statements:
                 self.connection.execute(statement)
+            for event, body in (
+                ("INSERT", "INSERT INTO checkpoint_usage VALUES(new.finding_id,new.size) "
+                 "ON CONFLICT(finding_id) DO UPDATE SET bytes=bytes+new.size; "
+                 "UPDATE checkpoint_total SET bytes=bytes+new.size WHERE id=1;"),
+                ("DELETE", "UPDATE checkpoint_usage SET bytes=bytes-old.size WHERE finding_id=old.finding_id; "
+                 "DELETE FROM checkpoint_usage WHERE bytes=0; "
+                 "UPDATE checkpoint_total SET bytes=bytes-old.size WHERE id=1;"),
+                ("UPDATE", "UPDATE checkpoint_usage SET bytes=bytes-old.size WHERE finding_id=old.finding_id; "
+                 "INSERT INTO checkpoint_usage VALUES(new.finding_id,new.size) "
+                 "ON CONFLICT(finding_id) DO UPDATE SET bytes=bytes+new.size; "
+                 "DELETE FROM checkpoint_usage WHERE bytes=0; "
+                 "UPDATE checkpoint_total SET bytes=bytes+new.size-old.size WHERE id=1;"),
+            ):
+                self.connection.execute(
+                    f"CREATE TRIGGER IF NOT EXISTS checkpoint_bytes_{event.lower()} "
+                    f"AFTER {event} ON checkpoint_pages BEGIN {body} END"
+                )
             self.connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.connection.execute("PRAGMA journal_mode=WAL")
 
@@ -224,6 +252,8 @@ class CorrelationStore(JobStore):
             for key in old_keys | keys:
                 self.enqueue("hotspot", key)
             self.acknowledge(job)
+            self.connection.execute("DELETE FROM checkpoint_pages WHERE finding_id=?", (job["id"],))
+            self.connection.execute("DELETE FROM checkpoints WHERE finding_id=?", (job["id"],))
             self._setting("last_success", time.time())
         return True
 
@@ -494,6 +524,31 @@ class CorrelationStore(JobStore):
             "last_successful_refresh": self.setting("last_success"),
             "last_reconciliation": self.setting("last_reconciliation"),
             "error": self.setting("worker_error"),
+            "deferred": self.connection.execute(
+                "SELECT count(*) FROM jobs WHERE state='pending' AND attempts>0"
+            ).fetchone()[0],
+            "checkpoint_storage": {
+                "used_bytes": self.connection.execute(
+                    "SELECT bytes FROM checkpoint_total WHERE id=1"
+                ).fetchone()[0],
+                "finding_limit_bytes": 64 * 1024 * 1024,
+                "total_limit_bytes": 256 * 1024 * 1024,
+                "active_finding": self.connection.execute(
+                    "SELECT min(finding_id) FROM checkpoints"
+                ).fetchone()[0],
+                "admission_waiting": self.connection.execute(
+                    "SELECT count(*) FROM jobs WHERE kind='correlate' AND state='pending' "
+                    "AND key NOT IN (SELECT finding_id FROM checkpoints)"
+                ).fetchone()[0],
+                "capacity_failures": self.connection.execute(
+                    "SELECT count(*) FROM jobs WHERE state='failed' AND error='CheckpointCapacityError'"
+                ).fetchone()[0],
+            },
+            "refresh_progress": [dict(zip(
+                ("finding_id", "stage", "checkpoint_at", "last_progress_at"), row
+            )) for row in self.connection.execute(
+                "SELECT finding_id,stage,updated,progress FROM checkpoints ORDER BY updated DESC LIMIT 100"
+            )],
         }
 
 

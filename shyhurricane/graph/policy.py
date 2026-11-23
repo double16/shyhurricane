@@ -2,7 +2,7 @@
 
 import os
 
-ANALYZER_VERSION = 9
+ANALYZER_VERSION = 15
 
 
 def library_analysis(value=None):

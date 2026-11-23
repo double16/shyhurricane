@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -14,6 +15,9 @@ from pathlib import Path
 from uuid import uuid4
 
 import psutil
+
+from shyhurricane.graph.archive_checkpoint import ArchivePending
+from shyhurricane.graph.parser_diagnostics import stage as parser_stage
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +53,12 @@ def parse(event, artifacts, *, document_contexts=None, open_world=False, **extra
         "snapshot_path": str(marker) if marker else artifacts.snapshot_reference,
         "extract_options": extract_options,
     }
-    environment = {**os.environ, "_SHYHURRICANE_PARSE_CONTAINER": name}
+    diagnostics = output.with_suffix(".stages")
+    environment = {
+        **os.environ, "_SHYHURRICANE_PARSE_CONTAINER": name,
+        "_SHYHURRICANE_PARSE_DIAGNOSTICS": str(diagnostics),
+        "_SHYHURRICANE_PARSE_DEADLINE": str(time.monotonic() + MAX_SECONDS),
+    }
     started = time.monotonic()
     logger.debug("Graph parser started capture=%s epoch=%s", event["id"], artifacts.reference_epoch)
     with tempfile.TemporaryFile(mode="w+") as source:
@@ -76,22 +85,38 @@ def parse(event, artifacts, *, document_contexts=None, open_world=False, **extra
                 except psutil.NoSuchProcess:
                     continue
                 if time.monotonic() - started > MAX_SECONDS or rss > MAX_RSS:
-                    raise TimeoutError("Graph parser time or memory budget reached; retained source needs expansion")
+                    reason = "rss_limit" if rss > MAX_RSS else "time_limit"
+                    raise TimeoutError(f"Graph parser {reason}; retained source needs expansion")
                 time.sleep(0.1)
             if process.returncode != 0 or not output.exists():
                 raise ValueError("Graph parser failed; retained source remains available")
             if output.stat().st_size > MAX_OUTPUT_BYTES:
                 raise TimeoutError("Graph parser output budget reached; expand a smaller analysis unit")
             result = json.loads(output.read_text())
+            if result.get("archive_pending"):
+                raise ArchivePending()
             if "error" in result:
                 detail = result.get("diagnostic", {})
                 logger.warning(
                     "Graph parser failed capture=%s epoch=%s stage=%s traceback=%s",
                     event["id"], artifacts.reference_epoch, detail.get("stage"), detail.get("traceback"),
                 )
+                if "sqlite_errorcode" in detail:
+                    error = sqlite3.OperationalError(result["error"])
+                    error.sqlite_errorcode = detail["sqlite_errorcode"]
+                    error.sqlite_errorname = detail["sqlite_errorname"]
+                    logger.warning("Graph parser SQLite code=%s name=%s",
+                                   error.sqlite_errorcode, error.sqlite_errorname)
+                    raise error
                 raise ValueError(result["error"])
             return restore_projection(result)
+        except ArchivePending:
+            logger.info("Graph parser archive pending capture=%s", event["id"])
+            raise
         except Exception as error:
+            if diagnostics.exists():
+                logger.warning("Graph parser stages capture=%s epoch=%s records=%s",
+                               event["id"], artifacts.reference_epoch, diagnostics.read_text()[-8192:])
             logger.warning(
                 "Graph parser stopped capture=%s epoch=%s elapsed=%.3f exit=%s reason=%s",
                 event["id"], artifacts.reference_epoch, time.monotonic() - started,
@@ -118,6 +143,10 @@ def parse(event, artifacts, *, document_contexts=None, open_world=False, **extra
                     timeout=10,
                     check=False,
                 )
+            if diagnostics.exists():
+                logger.info("Graph parser stages capture=%s epoch=%s records=%s",
+                            event["id"], artifacts.reference_epoch, diagnostics.read_text()[-8192:])
+            diagnostics.unlink(missing_ok=True)
             output.unlink(missing_ok=True)
             output.with_suffix(".tmp").unlink(missing_ok=True)
             if marker:
@@ -147,6 +176,8 @@ def main():
                 **request.get("extract_options", {}),
             )
         )
+    except ArchivePending:
+        result = {"archive_pending": True}
     except Exception as error:
         # Frame locations retain the call chain without captured values or exception messages.
         frames = traceback.extract_tb(error.__traceback__)[-32:]
@@ -158,14 +189,21 @@ def main():
                 "traceback": [f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}" for frame in frames],
             },
         }
+        if isinstance(error, sqlite3.Error) and hasattr(error, "sqlite_errorcode"):
+            result["diagnostic"].update(sqlite_errorcode=error.sqlite_errorcode,
+                                        sqlite_errorname=error.sqlite_errorname)
     finally:
         if artifacts is not None:
             artifacts.close()
+        from shyhurricane.graph.performance import flush_child_metrics
+
+        flush_child_metrics()
     output = Path(request["output"])
     temporary = output.with_suffix(".tmp")
     with temporary.open("w") as stream:
         os.chmod(temporary, 0o600)
-        json.dump(result, stream)
+        with parser_stage("serialization"):
+            json.dump(result, stream)
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temporary, output)

@@ -81,18 +81,41 @@ failure stops the epoch visibly; newer inputs remain durable.
 
 ### Graph-state storage
 
-`graph_state/artifacts.sqlite` holds captures, shared response/source text, complete IR, detail
-shards, manifest facts, and restart checkpoints. Artifacts use compact JSON encoded as Zstandard
-level 1 BLOBs, or raw bytes when compression would enlarge them. SHA-256 content addresses share
-identical payloads and large text across captures and projections. Readers validate encoding version,
-decoded size, and checksum. Opaque references identify immutable content, not file paths. Replacing a
-checkpoint creates a new reference; parser workers receive the epoch snapshot reference explicitly.
-Nested artifact dependencies resolve to existing immutable objects, forming an acyclic graph.
+`graph_state/artifacts.sqlite` holds capture metadata, checkpoints, ownership, publication
+obligations, and payload locations. Neo4j holds the complete searchable discovery inventory,
+normalized document membership, coverage, and graph relationships. Discovery inventory remains
+independent of the bounded materialized summaries used for traversal.
 
-The manifest interns repeated identifiers and URLs as integer keys. Context documents are stored
-once per distinct version, with separate compact membership tables. Indexed metadata selects bounded
-candidates before payload decompression; public IDs, pagination order, snapshot watermarks, temporal
-selection, and coverage semantics remain independent of storage keys.
+Payloads use compact JSON compressed with Zstandard level 1, or raw bytes when compression would
+enlarge them. Compressed values up to 64 KiB stay inline in SQLite. Larger values share append-only
+files beneath `graph_state/payload_segments/`, normally capped at 64 MiB. A larger single value
+occupies its own sealed segment. Logical inventory shards contain at most 500 records or 4 MiB
+decoded, with bounded oversized-record handling. Each shard contains independently compressed
+record frames and an authenticated offset directory, so a focused page reads only selected frames.
+It does not create a filesystem file for each shard or record.
+SHA-256 content addresses share identical content. Captured bodies are stored separately from
+capture envelopes, and detail recipes refer to retained IR ranges instead of duplicating full IR.
+Readers validate encoding version, decoded size, frame size, offset-directory digest, record
+digest, checksum, and record identity.
+Opaque references identify immutable content rather than physical paths.
+
+Segment appends and new directory entries are synchronized before SQLite commits their locations.
+An interrupted append leaves an uncommitted tail that the next writer or maintenance pass trims.
+Missing committed bytes fail explicitly. Sparse sealed segments are compacted in bounded batches;
+retired files remain for one hour to protect existing SQLite read snapshots. This packing preserves
+the small-file overhead benefit of the former SQLite-only payload store.
+
+Archive batches commit shard publication obligations and their progress cursor together. The worker
+publishes bounded Neo4j batches with deterministic receipts, then acknowledges them locally.
+Context publication advances a durable cursor in batches of at most 500 memberships. Activation
+validates all receipts and switches the unit's generation at a shared publication revision.
+Retries replay confirmed batches without duplicating facts. Acknowledged obligations retain
+shard pins and receipt identities while releasing their duplicate delivery metadata. Indexed scope
+and membership groups select relevant generations before bounded fact seeks; publication counts
+and cleanup use generation indexes. Inventory continuations pin revisions for
+up to ten minutes. Cleanup removes relationships before facts and releases local shard and artifact
+pins only after the remote generation is confirmed cleaned. Coverage includes pending replacements;
+previously activated results remain readable during publication.
 
 Captured evidence, successful external source-map responses, complete analysis, and expansion shards
 remain retained. External source-map evidence remains unverified; retaining it does not establish
@@ -108,7 +131,7 @@ snapshots and pinned source-map records; unused content is reclaimed asynchronou
 objects have a one-hour grace period before orphan reclamation. A cache hit renews this grace before
 returning nested references, allowing the caller to save its next checkpoint safely. Eviction drops
 the cache key while preserving this read/staging grace, so physical disk usage may remain above the
-cache budget temporarily; `staged_bytes` reports this allocation. Complete reads use SQLite snapshots.
+cache budget temporarily; `staged_bytes` reports this allocation. Payload reads use SQLite snapshots, and inventory reads use pinned Neo4j revisions.
 Parser output is temporary and is
 removed after parsing; a worker restart removes abandoned parser output before starting new parsers.
 There are at most 64 artifact lock files, independent of artifact count. A small
@@ -138,7 +161,9 @@ its own retired-generation cleanup and may reuse allocation rather than return i
 
 `graph.storage` in `/status` reads aggregate counters and allocation metadata. It reports
 `logical_payload_bytes`, `stored_payload_bytes`, `retained_bytes`, `cache_bytes`, `staged_bytes`, cache
-budget, database/WAL allocation, and reclaimable SQLite bytes. Classification totals can temporarily
+budget, database/WAL and segment allocation, and reclaimable SQLite bytes. `segment_count`,
+`segment_bytes`, and `segment_allocated_bytes` come from transactional counters, without scanning
+payload files during status refresh. Classification totals can temporarily
 lag while `accounting_pending` is true. `pending_work_count` counts queued classification jobs and
 retiring nodes; `last_maintenance_progress_at` is the Unix timestamp of the last committed work.
 Maintenance continues enforcing the cache budget as classification converges.
@@ -410,6 +435,40 @@ imports, and supplied build-manifest chunk/CSS/asset dependencies. An unexpanded
 files that were not supplied. Recovered source-map paths are virtual identifiers, not fetchable URLs
 or filesystem destinations.
 
+When open-world access is enabled, ingestion queues explicitly declared Next.js JavaScript
+chunks from captured Pages Router build manifests and App Router Flight references.
+Each request uses a five-second timeout and a 40 MiB decoded-body limit, without
+credentials or redirects. Existing successful captures are reused. Chunk references are
+resolved against the declaring capture's asset origin and base path. Inline Flight references
+use the unique Next.js asset base evidenced by script URLs in the same HTML response,
+including CDN origins. Conflicting asset bases leave those references unresolved.
+Standalone Flight responses retain their explicit origin-relative chunk interpretation. Sources larger than
+1 MiB are skipped for automatic collection. Open-world access is checked again when the
+queued request runs. Successful responses pass through ordinary ingestion and JavaScript
+analysis, with graph resource properties identifying the manifest fetch and declaring capture.
+Matching compiled module definitions retain declaring module-reference IDs, the declaring capture
+ID, and the analyzed source hash. These bind a retrieved response version to its declarations.
+Separate HTTP requests retain independent capture versions.
+
+Failed requests leave the declaring capture available and are reported in ingestion logs.
+Capture-local delivery records coalesce repeated submissions. Interrupted queue delivery
+can repeat a request, and ordinary capture ingestion handles repeated responses.
+
+For the Next.js Pages Router, captured build manifests with literal route mappings or literal Webpack string aliases
+contribute declared JavaScript dependencies relative to the captured manifest asset base.
+For the App Router, the graph can read explicit local chunk paths from supported Flight import rows in
+captured `text/x-component` responses and literal inline bootstrap fragments. Import rows with a
+module ID and export name also declare a capture-local module reference linked to the named
+chunk resources. The JavaScript analyzer records literal Webpack and Turbopack module factory
+registrations on delivered chunk captures, with source locations. The graph retains each
+definition with the capture that supplied it. A Flight module ID and chunk URL provide
+candidate matches across captures when the chunk contents have not been tied to the same build. A captured POST
+with a `Next-Action` header and a Flight response contributes an observed action request.
+Client module attribution remains unresolved. Flight records provide dependency evidence, and
+prefetch responses do not by themselves establish navigation. The Flight extractor processes
+at most 1 MiB of text and 10,000 rows per input. Unsupported length-prefixed records stop
+extraction at that point.
+
 This is bounded, conservative static analysis. Dynamic dispatch, runtime-generated URLs, aliases
 without explicit mappings, framework transformations, missing modules, and backend implementation
 can leave gaps. Source/sink classifications and paths are candidates for investigation, not confirmed
@@ -448,10 +507,10 @@ the established five-second interval, including continuations and offline expans
 Saved-page maintenance runs in the background every 60 seconds, inspecting at most 100 entries
 or one second per pass. Requested pages retain integrity checks; explicit full cleanup remains available.
 Unfinished coverage is reported as `unknown`, with no unit count and an explicit analysis gap.
-Incomplete deferred-unit details are also reported as a gap. Cancellation interrupts the SQLite
-read and closes its read-only connection. These retrieval fixes need no data rebuild or migration.
+Incomplete deferred-unit details are also reported as a gap. Cancellation interrupts payload reads, propagates the shared query deadline to Neo4j, and closes
+the read-only artifact connection.
 
-The SQLite discovery manifest is independent of the Neo4j projection. Endpoint and element discovery
+The Neo4j discovery inventory is independent of the bounded traversal projection. Endpoint and element discovery
 page retained declarations, references, and IR facts even when summary selection omits their nodes.
 Each result includes an `analysis_unit_id`. Coverage reports discovery and flow separately using
 `complete`, `partial`, `pending`, `blocked`, or `failed`. Completeness describes supported static
@@ -609,6 +668,8 @@ and policy changes are processed by a subsequent frozen epoch.
 
 Timeouts and memory failures split candidate/hydration batches. Transient Neo4j connection,
 transaction-timeout, read-only, and retryable server errors remain pending for automatic retry.
+Connection-pool acquisition timeouts also retain pending work. Graph drivers allow up to five
+seconds to acquire a connection before the normal bounded retry schedule applies.
 Epoch retries back off for 5, 30, then 120 seconds, capped at 120 seconds until recovery;
 their queue receipts remain processing without a success or failed acknowledgement.
 Terminal capture failures quarantine the affected job and block its dependent inputs; independent jobs
@@ -623,6 +684,10 @@ the publication revision. Retrieval indexing waits continue to include outstandi
 A phase-level failed epoch is terminal: its diagnostics and checkpoints remain retained, while
 unrelated waiting inputs can start a new epoch. Failed inputs require explicit redelivery; the
 failed-queue retry action submits them to a new finite epoch rather than resuming the failed one.
+When a failed prerequisite subsequently completes, idle epoch scheduling automatically submits
+retained dependency-blocked captures for real reprocessing, even without a remaining queue receipt.
+An indexed scan checks at most 100 failed records per pass and repeats after 60 seconds when caught
+up. Failure status remains until processing completes; unrelated terminal failures are not retried.
 Membership expansion commits its replacement snapshot and new jobs together, then reopens the
 snapshot before further work so parser subprocesses use the current retained reference and policies.
 A failed replacement commit leaves the prior snapshot usable. A matching explicit rebuild
@@ -818,8 +883,133 @@ retry is intended. Code installation alone does not restart workers or retry an 
 
 ## Finding correlation
 
+Finished graph epochs retain their original analyzer version and do not prevent startup after an
+analyzer upgrade. Unfinished epochs require the analyzer version that created their checkpoints;
+unknown checkpoint formats remain rejected. Historical analyzer versions alone do not require a
+graph rebuild.
+
 The background investigation worker consumes published graph revisions and saved findings to
 materialize exact URL/method anchors, compatible code operations, script consumers, flow witnesses,
 shared hotspots, and explicit chain candidates. `find_investigation_targets` reads these saved results;
 `graph.investigation` in `/status` reports progress, lag, and failures. Candidate scores are investigation
 priority and do not establish exploitation. See [finding correlation](investigation-targets.md).
+
+### Parser diagnostics and encoding recovery
+
+Parser diagnostics record source-map, normalization, JavaScript analysis, projection construction,
+and serialization stages without captured bodies. Time and RSS failures are distinguished.
+Supervised normalization receives half the remaining parser deadline, reserving time for original-source
+analysis after normalization times out. The overall parser deadline still applies.
+
+Before normalization, JavaScript syntax is checked. Only `InvalidOrUnexpectedToken` permits a strict
+Latin-1-to-UTF-8 reversal. The reversal must round-trip exactly and parse without recovery errors.
+Captured bodies remain unchanged; analysis gaps record the inferred transformation and source hashes.
+Analysis version 10 invalidates prior IR cache keys. Existing work is not automatically retried.
+Historical epoch failure records remain after a successful retry clears current work failures.
+
+Discovery archival is timed separately from projection construction. Retries reuse committed immutable
+fact payloads and still merge context memberships, reducing repeated storage work after interruption.
+Deploy the updated command image together with the Python worker: the encoding preparation protocol
+requires the new `/opt/graph-analysis/encoding.cjs` and analyzer entry point. Older command images do
+not implement this protocol. Validate isolated captures before retrying failed work.
+
+### Resumable discovery archives
+
+Artifact schema version 4 and the native inventory schema require fresh SQLite and Neo4j graph
+stores and replay of saved inputs; populated older stores are rejected rather than migrated. Keep replayable inputs before replacing storage.
+
+Large JavaScript discovery archives persist batches of up to 500 facts and yield after a
+30-second archive slice or when less than five seconds remain in the parser budget. Detail
+shards commit individually. Facts and their cursor commit together, so a restart resumes
+after the last committed batch. Yielded work remains pending; it does not fail its queue
+receipt or block dependent captures. The parser's 240-second safety limit still applies.
+
+Checkpoint ownership retains IR, contexts, and analyzer output independently of cache eviction.
+Final manifest ownership retains completed IR; temporary ownership is released on completion.
+Logs report checkpoint identity, phase, completed/total counts, batch and commit durations,
+and yield/resume events. Parser stage records include UTC Unix timestamps and elapsed seconds.
+Coverage remains pending until the complete archive is durable.
+
+Deploy against fresh storage and replay inputs separately. Validate that archive cursors advance,
+previously affected captures and their dependents finish, and graph epochs continue advancing.
+
+Archive batches acquire SQLite write locks before duplicate lookups. SQLite BUSY and LOCKED
+errors preserve pending epoch work and use the epoch retry schedule. Parser diagnostics retain
+numeric SQLite codes and symbolic names without captured values or arbitrary error messages.
+
+Archive batch diagnostic records use stage `archive-batch` and include checkpoint identity,
+phase, committed offset, row count, SQL call count, and elapsed wall-clock seconds.
+`lock_seconds` measures entering the atomic batch, `sql_seconds` measures execute and fetch
+calls inside the batch, `preparation_seconds` is the remaining callback time (including hashing,
+serialization, compression, and Python overhead), and `commit_seconds` measures batch exit.
+SQL time includes SQLite execution, triggers, and any waits during those calls; it is not pure
+CPU time. Measurements exclude initial IR loading and cursor creation. The parent logs the
+latest bounded diagnostic tail per parser slice; these records are not an exhaustive batch history.
+
+Fresh artifact storage installs guarded accounting triggers at initialization. Earlier databases
+are rejected; startup does not rewrite their triggers or migrate their contents. FULL synchronization and cache
+spilling remain enabled. Batch records include fixed SQL-family timings; maintenance logs
+passive checkpoint duration, busy status, WAL frames, and checkpointed frames. Commit timing
+still includes any automatic checkpoint work.
+
+### Operational performance summaries
+
+Normal logs include `Graph performance` followed by a JSON object. These measurements require no
+benchmark instrumentation and add no database queries. Summaries contain operation counts, byte
+counts, elapsed seconds, phase timings, throughput, and opaque correlation IDs. They exclude scope
+URLs, captured bodies, headers, SQL parameters, and exception messages.
+
+| Event | Level and frequency | Diagnostic fields |
+|-------|---------------------|-------------------|
+| `inventory_publish` | INFO per bounded work step; idle/backoff polls are silent | Stage, generation/unit/capture IDs, batch/shard IDs, sequence, records/sec, metadata bytes, Neo4j attempt count, write versus receipt replay, reservation/write/acknowledgment/SQLite commit/activation timing |
+| `inventory_read` | INFO once per inventory page, including failed or partial reads | Request ID, returned/decoded record counts, distinct shards, actual bytes read, decoded bytes, segment-handle hits/opens, pin/query/I/O/decompression/verification/JSON timing |
+| `shard_write` | INFO once per logical shard write | Shard ID, records, decoded/stored bytes, reuse versus new storage, caller transaction flag, serialization/compression/persistence timing |
+| `artifact_write`, `artifact_read` | INFO aggregates once per minute of activity per operation type; per-operation DEBUG; errors at WARNING | Aggregate operation count, bytes, total/max elapsed time and phase totals; detailed artifact IDs at DEBUG |
+| `segment_maintenance` | INFO per non-idle maintenance pass | Shards deleted, records/bytes copied, segments retired/deleted, orphan files removed, tail bytes trimmed, copy throughput, lock/lookup/GC/copy/retirement/directory-scan/commit timing |
+
+Start with the operation's `elapsed_seconds`, then compare `phase_seconds`. Delivery's `neo4j_write`
+includes driver-managed retries and remote commit; `neo4j_attempts` counts callback attempts.
+`sqlite_ack` measures the local update, while `sqlite_commit` measures leaving the caller's SQLite
+transaction. A shard's persistence timing excludes an outer transaction's later commit when
+`caller_transaction` is true. Nested artifact operations have inclusive elapsed times; do not sum
+nested operation durations to infer overall wall time. Byte counts describe encoded or read content,
+not physical disk allocation. Counters in `outcome="error"` summaries describe attempted work and
+must not be treated as committed progress.
+
+A supervised parser disables ordinary child logging. It therefore accumulates a bounded set of
+performance totals and forwards cumulative snapshots through its existing stage diagnostic file,
+on initial progress, at most once per 30 seconds thereafter, and on exit. Parent logs retain them as
+`stage="performance"` records with operation/failure counts, total/max elapsed time, phase totals,
+and byte/record totals. Select the final snapshot, or the latest available snapshot after a crash,
+for each parser slice and event; do not sum repeated cumulative snapshots. These child summaries
+omit per-artifact IDs. A hard kill can lose measurements since the last snapshot; diagnostic writes
+are best effort and never turn successful analysis into a failed capture.
+
+These are log records subject to the existing logging level and retention configuration. There is
+no new metrics database or percentile exporter. Derive latency distributions and throughput from
+retained successful operation summaries; correlate publication IDs with existing epoch, archive,
+storage-maintenance, and WAL-checkpoint diagnostics.
+
+
+### Inventory cleanup scheduling
+
+Inventory generation cleanup prefers idle periods and completed epochs. While an epoch is active
+(including retry waits), it runs only a bounded fallback pass every 30 minutes. After restart,
+one fallback pass is permitted. Scheduling checks persisted epoch state on its normal 60-second
+cadence; other maintenance operations can add delay. Unavailable epoch state is treated as active. Idle passes continue once per second while
+work remains. A genuine low-disk pause from the existing disk guard permits passes every five
+seconds; disk measurement errors do not enable this override.
+
+Each inventory pass has a two-second operation budget and selects at most 100 candidates outside
+the publication lock. Marking a generation for deletion rechecks ownership and reader pins under
+a transaction timeout of at most 250 milliseconds. Individual deletion batches contain at most
+500 records. Candidate paging wraps to revisit protected generations. The five-minute retirement
+grace and remote cleanup confirmation before local artifact release remain in force. Driver and
+server cancellation can add overhead beyond operation deadlines.
+
+Other graph maintenance, payload segment reclamation, SQLite accounting, and passive checkpoints
+retain their independent schedules. INFO scheduling transitions and `inventory_cleanup` performance
+summaries expose policy, candidate counts, deletion counts, and operation time. Repeated active-epoch
+deferrals are DEBUG messages. These scheduling defaults are internal constants, with no new CLI or
+environment settings. Startup installs the additional generation state/ID index idempotently; no
+payload migration or database rebuild is required.

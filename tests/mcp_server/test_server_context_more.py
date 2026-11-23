@@ -241,6 +241,7 @@ async def test_expansion_reuses_durable_writer_and_rejects_shutdown(tmp_path, mo
     from shyhurricane.persistent_queue import read_active_queue_size
 
     monkeypatch.setattr("shyhurricane.data_paths.persistent_queue_path", lambda *args: tmp_path)
+    monkeypatch.setattr("shyhurricane.graph.expansion_request.reserve", lambda *args: None)
     ctx = make_context()
     item = {"id": "capture", "data": {"url": "https://example.com/"}, "analysis_unit_id": "unit"}
     try:
@@ -255,3 +256,44 @@ async def test_expansion_reuses_durable_writer_and_rejects_shutdown(tmp_path, mo
     finally:
         ctx._closed = False
         ctx.close()
+
+
+async def test_expansion_cancellation_waits_for_reservation_cleanup(monkeypatch):
+    import asyncio
+
+    from shyhurricane.graph.budget import QueryBudget
+
+    ctx = make_context()
+    ctx._graph_expansion_writer = Mock()
+    started, finished = Event(), Event()
+
+    def reserve(db, item, budget):
+        started.set()
+        assert budget.cancelled.wait(2)
+        finished.set()
+        budget.check()
+
+    monkeypatch.setattr("shyhurricane.graph.expansion_request.reserve", reserve)
+    task = asyncio.create_task(ctx.enqueue_graph_expansion({}, QueryBudget()))
+    assert await asyncio.to_thread(started.wait, 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set()
+    ctx._graph_expansion_writer.put.assert_not_called()
+    ctx.close()
+
+
+@pytest.mark.parametrize("error", [OSError("queue unavailable"), TimeoutError("queue deadline")])
+async def test_expansion_wakeup_failure_keeps_durable_acceptance(monkeypatch, error):
+    from unittest.mock import AsyncMock
+
+    from shyhurricane.graph.budget import QueryBudget
+
+    ctx = make_context()
+    ctx._graph_expansion_writer = Mock(put=AsyncMock(side_effect=error))
+    reservation = Mock()
+    monkeypatch.setattr("shyhurricane.graph.expansion_request.reserve", reservation)
+    await ctx.enqueue_graph_expansion({"id": "accepted"}, QueryBudget())
+    reservation.assert_called_once()
+    ctx.close()

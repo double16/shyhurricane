@@ -18,6 +18,7 @@ def all_loggers():
 
 @pytest.fixture(autouse=True)
 def restore_logging(monkeypatch):
+    monkeypatch.delenv("_SHYHURRICANE_DEBUG_LOGGING", raising=False)
     monkeypatch.delenv("LOG_FILE", raising=False)
     monkeypatch.delenv("LOG_MAX_BYTES", raising=False)
     monkeypatch.delenv("LOG_BACKUP_COUNT", raising=False)
@@ -67,7 +68,7 @@ def test_append_utf8_all_levels_third_party_and_traceback(tmp_path, monkeypatch)
     third_party.disabled = True
     third_party.propagate = False
     logging.disable(logging.CRITICAL)
-    logging_config.configure_file_logging(str(path), console_enabled=False)
+    logging_config.configure_file_logging(str(path), console_enabled=False, debug=True)
     assert logging_config.file_logging_enabled()
     assert Path(logging_config.os.environ["LOG_FILE"]) == path
     for level in (logging.DEBUG, logging.INFO, logging.WARNING, logging.ERROR, logging.CRITICAL):
@@ -112,7 +113,7 @@ def test_neo4j_payload_logging_is_suppressed_before_formatting(tmp_path):
 
 def test_http_client_request_traces_are_suppressed_but_warnings_and_app_debug_remain(tmp_path):
     path = tmp_path / "http-client.log"
-    logging_config.configure_file_logging(str(path), console_enabled=False)
+    logging_config.configure_file_logging(str(path), console_enabled=False, debug=True)
     http_loggers = [
         logging.getLogger("httpx"),
         logging.getLogger("httpcore.connection"),
@@ -243,8 +244,10 @@ def write_spawned_log(destination, number):
         logger.exception("worker Qdrant failed %s", number)
 
 
-def test_spawned_workers_append_to_same_destination(tmp_path):
+@pytest.mark.parametrize("debug", [False, True])
+def test_spawned_workers_append_to_same_destination(tmp_path, debug):
     path = tmp_path / "workers.log"
+    logging_config.configure_file_logging(str(path), console_enabled=False, debug=debug)
     context = multiprocessing.get_context("spawn")
     processes = [context.Process(target=write_spawned_log, args=(str(path), number)) for number in range(2)]
     try:
@@ -255,7 +258,7 @@ def test_spawned_workers_append_to_same_destination(tmp_path):
             assert process.exitcode == 0
         text = path.read_text()
         for number in range(2):
-            assert f"worker debug {number}" in text
+            assert (f"worker debug {number}" in text) is debug
             assert f"RuntimeError: worker traceback {number}" in text
             assert f"worker Qdrant failed {number} (ResponseHandlingException): Qdrant unavailable" in text
         assert text.count("Traceback (most recent call last)") == 2
@@ -509,3 +512,20 @@ def test_test_process_disables_haystack_telemetry_before_initialization():
 
     telemetry = import_module("haystack.telemetry._telemetry")
     assert telemetry.telemetry is None
+
+
+@pytest.mark.parametrize("debug", [False, True])
+def test_file_level_default_and_explicit_debug(tmp_path, debug):
+    path = tmp_path / "levels.log"
+    options = {"debug": True} if debug else {}
+    logging_config.configure_file_logging(str(path), console_enabled=False, **options)
+    logger = logging.getLogger("application.levels")
+    logger.debug("detail")
+    logger.info("progress")
+    logger.warning("warning")
+    text = path.read_text()
+    assert ("detail" in text) is debug
+    assert "progress" in text and "warning" in text
+    assert logging_config.os.environ["_SHYHURRICANE_DEBUG_LOGGING"] == ("1" if debug else "0")
+    logging_config.configure_file_logging(str(path), console_enabled=False, debug=False)
+    assert not logger.isEnabledFor(logging.DEBUG)

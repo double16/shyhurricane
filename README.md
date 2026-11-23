@@ -2,7 +2,7 @@
 
 <img src="shyhurricane/assets/shyhurricane.png" alt="Hurricane picking padlock logo" width="150" style="float: left; margin-right:10px;" />
 
-ShyHurricane is an MCP server to assist AI in offensive security testing of web applications.
+ShyHurricane is an MCP server to assist AI in security assessments of web applications using RAG and application graph analysis.
 
 Web application resources are stored in a vector database. Raw content may be retrieved by filters or embeddings. Relationships
 are mapped in a graph database for flow analysis. JavaScript is deobfuscated, reversed from source maps, graphed and
@@ -69,6 +69,10 @@ and report the limitation. Low-power workflows use predicate-only retrieval and 
 All assessment prompts use an endpoint-first graph workflow: overview, focused candidates,
 traces, then step evidence. They request full graph details only when needed, distinguish bounded
 examples from complete results, and keep navigation hypotheses separate from data-flow evidence.
+Focused discovery includes HTML elements and HTTP fields as well as JavaScript source/sink
+operations. When input links are missing, workflows pivot through associated scripts, trace backward
+from sinks, and inspect captured code. They distinguish missing graph links from incomplete analysis
+and do not infer application-wide absence from one disconnected field or filtered query.
 
 Prompt workflows name the tool arguments explicitly: continuation results map to `token`, deferred
 `analysis_unit_id` values map to `unit_id`, and saved-page tokens map to `page_token`.
@@ -219,7 +223,10 @@ Explicit scope takes precedence. Opaque IDs require explicit scope, and `end` ne
 For example, `find_application_endpoints(url="https://app.example.com:8443/api/items")` uses
 `app.example.com:8443` scope while retaining the exact URL filter.
 
-Discovery inventories and full IR are retained separately from bounded Neo4j summaries. Results report
+Neo4j discovery inventories and retained full IR are separate from bounded traversal summaries.
+Small compressed payloads stay in SQLite; larger payloads share packed files to bound filesystem
+entry counts. This storage redesign requires fresh SQLite and Neo4j graph stores; existing data
+is not migrated. Results report
 discovery/flow coverage and deferred analysis units. Use `continue_application_graph_query` for
 exploration continuations and `expand_application_graph_analysis` for offline detail expansion.
 
@@ -308,7 +315,8 @@ Use Qdrant 1.17 or newer and fresh collections for the tuned payload index setti
 including missing indexes repaired at startup, use the same tuning policy.
 
 Diagnostic logs default to `<data-dir>/logs/shyhurricane.log`. Override the destination with
-`--log-file` or `LOG_FILE`. Logs rotate at 10 MiB and retain five numbered backups by default.
+`--log-file` or `LOG_FILE`. Files record INFO and higher by default; pass `--debug` to include
+DEBUG diagnostics from the server and workers. Logs rotate at 10 MiB and retain five numbered backups by default.
 Use `--log-max-bytes`/`LOG_MAX_BYTES` and `--log-backup-count`/`LOG_BACKUP_COUNT` to configure
 rotation; a byte limit of `0` disables it.
 
@@ -559,3 +567,10 @@ prepare this cache before offline operation.
 Existing vectors remain readable. For consistent chunk boundaries, rebuild affected vector
 collections from retained source data rather than replaying over existing child IDs, which
 can leave stale chunks. Back up data and retain replayable inputs before rebuilding.
+
+With open-world access enabled, ingestion fetches JavaScript chunks explicitly declared in captured
+Next.js build manifests and Flight records. Fetched responses enter normal ingestion and retain
+their declaring capture as provenance. See the [application graph guide](docs/application-graph.md).
+
+Source-map discovery tries suffixes `.map`, `.MAP`, `%2Emap`, and `%2EMAP` in order,
+stopping at the first valid map. Network requests require open-world access.

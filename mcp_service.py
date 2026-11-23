@@ -22,9 +22,9 @@ import shyhurricane.mcp_server.tools.find_indexed_metadata  # noqa: F401
 import shyhurricane.mcp_server.tools.find_web_resources  # noqa: F401
 import shyhurricane.mcp_server.tools.find_wordlists  # noqa: F401
 import shyhurricane.mcp_server.tools.findings  # noqa: F401
-import shyhurricane.mcp_server.tools.investigation  # noqa: F401
 import shyhurricane.mcp_server.tools.get_result_page  # noqa: F401
 import shyhurricane.mcp_server.tools.indexers  # noqa: F401
+import shyhurricane.mcp_server.tools.investigation  # noqa: F401
 import shyhurricane.mcp_server.tools.port_scan  # noqa: F401
 import shyhurricane.mcp_server.tools.register_hostname_address  # noqa: F401
 import shyhurricane.mcp_server.tools.register_http_headers  # noqa: F401
@@ -124,6 +124,7 @@ async def main():
     )
     ap.add_argument("--log-file", default=os.environ.get("LOG_FILE"),
                     help="Append Python logs here (or set LOG_FILE; default: <data-dir>/logs/shyhurricane.log)")
+    ap.add_argument("--debug", action="store_true", help="Include DEBUG diagnostics in the log file")
     add_data_dir_argument(ap)
     ap.add_argument("--log-max-bytes", type=log_max_bytes,
                     default=os.environ.get("LOG_MAX_BYTES", str(DEFAULT_LOG_MAX_BYTES)),
@@ -159,7 +160,7 @@ async def main():
         args.log_file = os.path.join(args.data_dir, "logs", "shyhurricane.log")
     try:
         configure_file_logging(args.log_file, console_enabled=not is_tty,
-                               max_bytes=args.log_max_bytes, backup_count=args.log_backup_count)
+                               max_bytes=args.log_max_bytes, backup_count=args.log_backup_count, debug=args.debug)
     except (OSError, RuntimeError) as error:
         ap.error(f"Cannot open log file {args.log_file!r}: {error}")
     if is_tty:
@@ -209,7 +210,7 @@ async def main():
             port=args.port,
             loop="asyncio",
             lifespan="on",
-            log_level="debug" if file_logging_enabled() else "critical" if is_tty else "info",
+            log_level=("debug" if args.debug else "info") if file_logging_enabled() else "critical" if is_tty else "info",
             access_log=not is_tty or file_logging_enabled(),
             log_config=None if is_tty or file_logging_enabled() else uvicorn.config.LOGGING_CONFIG,
             timeout_graceful_shutdown=300,

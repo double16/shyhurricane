@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import threading
+from contextlib import closing
 
 import pytest
 
@@ -55,7 +56,7 @@ def test_content_deduplication_and_transactional_owners(storage, event):
     body = "<html>same response</html>" * 5000
     first = storage.register(event(body=body))
     second = storage.register(event(url="https://example.com/other", body=body))
-    digest = hashlib.sha256(body.encode()).hexdigest()
+    digest = hashlib.sha256(json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
     assert storage.connection.execute("SELECT count(*) FROM graph_blobs WHERE digest=?", (digest,)).fetchone() == (1,)
     for capture in (first, second):
         assert storage.latest(capture["data"]["url"]) == capture
@@ -155,7 +156,7 @@ def test_size_limits_and_raw_codec(storage, monkeypatch):
 
 def test_version_rejection_without_legacy_mutation(tmp_path):
     path = tmp_path / "old.sqlite"
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute("CREATE TABLE captures (id TEXT)")
         with pytest.raises(ValueError, match="fresh assessment"):
             initialize(connection)
@@ -163,7 +164,7 @@ def test_version_rejection_without_legacy_mutation(tmp_path):
             validate(connection)
         assert connection.execute("PRAGMA user_version").fetchone() == (0,)
         assert connection.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall() == [("captures",)]
-    with sqlite3.connect(":memory:") as connection:
+    with closing(sqlite3.connect(":memory:")) as connection, connection:
         connection.execute("PRAGMA user_version=99")
         with pytest.raises(ValueError):
             initialize(connection)
@@ -188,7 +189,7 @@ def test_concurrent_cache_writers_and_reopen(storage):
     assert len(calls) == 1
     assert all(value == results[0] for value in results)
     assert len(list(storage.root.glob("artifact-lock-*"))) <= 64
-    with sqlite3.connect(database) as connection:
+    with closing(sqlite3.connect(database)) as connection, connection:
         validate(connection)
         ref = connection.execute("SELECT ref FROM graph_objects").fetchone()[0]
         assert BlobStore(connection).read(ref) == results[0]
@@ -205,16 +206,11 @@ def test_normalized_context_versions_and_fact_payloads(storage, event):
     assert storage.connection.execute("SELECT count(*) FROM graph_context_members").fetchone() == (4,)
     for unit in units:
         storage.manifest.fact(unit, capture["id"], "field", {"name": "same", "url": context["url"]})
-    assert storage.connection.execute(
-        "SELECT count(DISTINCT data) FROM graph_facts f " "JOIN graph_terms t ON t.key=f.kind_key WHERE t.value='field'"
-    ).fetchone() == (1,)
-    plan = storage.connection.execute(
-        "EXPLAIN QUERY PLAN SELECT id FROM graph_facts WHERE url_key="
-        "(SELECT key FROM graph_terms WHERE value=?) ORDER BY id LIMIT 1000",
-        (context["url"],),
-    ).fetchall()
-    assert any("graph_manifest_url" in row[3] for row in plan)
-    assert all("SCAN graph_facts" not in row[3] for row in plan)
+    shards = storage.connection.execute("SELECT shard FROM graph_inventory_outbox").fetchall()
+    fields = [row for (ref,) in shards for row in storage.manifest.shards.read(ref) if row["kind"] == "field"]
+    assert len(fields) == 3
+    assert {row["name"] for row in fields} == {"same"}
+    assert storage.connection.execute("SELECT 1 FROM sqlite_master WHERE name='graph_facts'").fetchone() is None
 
 
 def test_storage_maintenance_statistics_and_busy_writer(storage):
@@ -225,13 +221,13 @@ def test_storage_maintenance_statistics_and_busy_writer(storage):
     before = maintenance.statistics()
     assert before["wal_bytes"] >= 0 and before["allocated_bytes"] > 0
     maintenance.tick(threading.Event())
-    with sqlite3.connect(storage.root / "artifacts.sqlite") as writer:
+    with closing(sqlite3.connect(storage.root / "artifacts.sqlite")) as writer, writer:
         writer.execute("BEGIN IMMEDIATE")
         result = maintenance.tick(threading.Event())
         assert result["deferred"] and result["pending"]
         writer.rollback()
     maintenance.tick(threading.Event())
-    with sqlite3.connect(storage.root / "artifacts.sqlite") as connection:
+    with closing(sqlite3.connect(storage.root / "artifacts.sqlite")) as connection, connection:
         connection.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     assert maintenance.statistics()["wal_bytes"] == 0
 
@@ -336,7 +332,6 @@ def test_worker_removes_only_abandoned_parser_files(graph_paths, event, monkeypa
 
 def test_catalog_allocation_reduces_repeated_context_and_payload_data(storage, event, tmp_path):
     """Compare the actual catalog to the previous repeated-string representation."""
-    from contextlib import closing
 
     contexts = []
     for index in range(10):
@@ -389,9 +384,8 @@ def test_catalog_allocation_reduces_repeated_context_and_payload_data(storage, e
     assert compact_bytes < old_bytes * 0.7
     assert storage.connection.execute("SELECT count(*) FROM graph_context_documents").fetchone() == (10,)
     assert storage.connection.execute("SELECT count(*) FROM graph_context_members").fetchone() == (1000,)
-    assert storage.connection.execute(
-        "SELECT count(*) FROM graph_facts f JOIN graph_terms t " "ON t.key=f.kind_key WHERE t.value='field'"
-    ).fetchone() == (400,)
+    shards = storage.connection.execute("SELECT shard FROM graph_inventory_outbox").fetchall()
+    assert sum(row["kind"] == "field" for (ref,) in shards for row in storage.manifest.shards.read(ref)) == 400
 
 
 def test_fresh_store_initialization_is_safe_for_concurrent_openers(graph_paths):
@@ -418,7 +412,7 @@ def test_old_store_rejected_in_writable_and_readonly_modes(graph_paths):
         ArtifactStore("db")
     assert artifact.read_text() == "{}"
     assert not (root / "artifacts.sqlite").exists()
-    with sqlite3.connect(root / "artifacts.sqlite") as connection:
+    with closing(sqlite3.connect(root / "artifacts.sqlite")) as connection, connection:
         connection.execute("CREATE TABLE captures(id TEXT)")
     with pytest.raises(ValueError, match="fresh assessment"):
         ArtifactStore("db")
@@ -434,12 +428,15 @@ def test_cached_nested_parser_does_not_hold_parent_bucket_lock(storage):
 import sqlite3
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from shyhurricane.graph.artifacts import ArtifactStore
 from shyhurricane.graph.blob_store import BlobStore
+from shyhurricane.graph.shard_store import ShardStore
 store = object.__new__(ArtifactStore)
 store.root, store.budget = Path(sys.argv[1]), None
 store.connection = sqlite3.connect(store.root / "artifacts.sqlite")
 store.blobs = BlobStore(store.connection)
+store.manifest = SimpleNamespace(shards=ShardStore(store.root, store.connection))
 assert store.cached("child-key", lambda: "value") == "value"
 store.close()
 """
@@ -458,7 +455,7 @@ def test_dead_expired_and_busy_cache_leases(storage, monkeypatch):
     with cache_leases.cache_lease(storage.root, "fixture"):
         pass
     path = storage.root / "cache-leases.sqlite"
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute("INSERT INTO leases VALUES ('expired',1,'old',0)")
         connection.execute("INSERT INTO leases VALUES ('dead',99999999,'old',999999999999)")
         connection.execute("INSERT INTO leases VALUES ('busy',?,'old',999999999999)", (os.getpid(),))
@@ -468,13 +465,13 @@ def test_dead_expired_and_busy_cache_leases(storage, monkeypatch):
         pass
 
     def release(seconds):
-        with sqlite3.connect(path) as connection:
+        with closing(sqlite3.connect(path)) as connection, connection:
             connection.execute("DELETE FROM leases WHERE ref='busy'")
 
     monkeypatch.setattr(cache_leases.time, "sleep", release)
     with pytest.raises(RuntimeError), cache_leases.cache_lease(storage.root, "busy"):
         raise RuntimeError("failed factory")
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         assert connection.execute("SELECT count(*) FROM leases").fetchone() == (0,)
 
 

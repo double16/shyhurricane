@@ -24,8 +24,11 @@ def timeout():
 @pytest.fixture
 def jobs(graph_paths):
     artifacts = ArtifactStore("db")
-    yield Continuations(artifacts)
-    artifacts.close()
+    work = Continuations(artifacts)
+    try:
+        yield work
+    finally:
+        work.artifacts.close()
 
 
 def script(event):

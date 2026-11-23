@@ -5,10 +5,12 @@ import os
 import subprocess
 
 from shyhurricane.command_image import unix_command_image
+from shyhurricane.graph.parser_diagnostics import measured, remaining_seconds
 
 logger = logging.getLogger(__name__)
 
 
+@measured("normalization")
 def deobfuscate_javascript(content: str, *, image=None) -> str:
     if not content:
         return content
@@ -23,6 +25,16 @@ def deobfuscate_javascript(content: str, *, image=None) -> str:
     logger.debug(f"Deobfuscating javascript with command {' '.join(docker_command)}")
     proc = subprocess.Popen(docker_command, universal_newlines=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.DEVNULL)
+    if "_SHYHURRICANE_PARSE_DEADLINE" in os.environ:
+        try:
+            result, _ = proc.communicate(content, timeout=max(0.001, remaining_seconds() / 2))
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            subprocess.run(["docker", "rm", "-f", os.environ["_SHYHURRICANE_PARSE_CONTAINER"]],
+                           capture_output=True, timeout=5, check=False)
+            raise TimeoutError("JavaScript normalization deadline reached; original source retained")
+        return result if proc.returncode == 0 and result.strip() else content
     result = ""
     try:
         proc.stdin.write(content)

@@ -67,7 +67,7 @@ def test_idle_and_selection_use_partial_index_without_findings_scan():
         assert not any("FROM findings WHERE id>" in sql for sql in statements)
         plan = store.connection.execute(
             "EXPLAIN QUERY PLAN SELECT kind,key FROM jobs INDEXED BY ready_jobs "
-            "WHERE state='pending' AND due<=? ORDER BY due,kind,key LIMIT 1",
+            "WHERE state='pending' AND kind='correlate' AND due<=? ORDER BY due,key LIMIT 1",
             (1,),
         ).fetchall()
         assert any("ready_jobs" in row[3] for row in plan)

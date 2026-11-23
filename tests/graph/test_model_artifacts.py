@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import json
+from urllib.parse import quote
 
 import pytest
 
@@ -81,7 +82,7 @@ def test_negative_map_cache_and_safe_recovery(graph_paths, monkeypatch):
     monkeypatch.setattr(javascript_analysis, "_fetch_map", lambda *args: calls.append(args) or "bad")
     assert cache.source_map("https://example.com/app.js", "raw", {}, True) is None
     assert cache.source_map("https://example.com/app.js", "raw", {}, True) is None
-    assert len(calls) == 1
+    assert len(calls) == 4
     content = json.dumps({"sections": [{"map": {"sources": ["../../escape.js"], "sourcesContent": ["source"]}}]})
     assert recovered_sources(content) == [("../../escape.js", "source")]
     assert not (graph_paths / "escape.js").exists()
@@ -199,3 +200,37 @@ def test_artifacts_survive_relocation(graph_paths, event, monkeypatch):
     assert store.register(capture) == capture
     assert store.read(reference) == capture
     store.close()
+
+
+@pytest.mark.parametrize("suffix,count", [(".map", 1), (".MAP", 2), ("%2Emap", 3), ("%2EMAP", 4)])
+def test_encoded_map_provenance_is_retained(graph_paths, monkeypatch, suffix, count):
+    cache = ArtifactStore("db")
+    mapping = json.dumps({"version": 3, "sources": []})
+    calls = []
+
+    def fetch(url, headers):
+        calls.append(url)
+        return mapping if url.endswith(suffix) else "invalid"
+
+    monkeypatch.setattr(javascript_analysis, "_fetch_map", fetch)
+    expected = {"content": mapping, "url": f"https://example.com/app.js{suffix}"}
+    assert cache.resolve_source_map("https://example.com/app.js", "raw", {}, True) == expected
+    assert len(calls) == count
+    assert cache.resolve_source_map("https://example.com/app.js", "raw", {}, False) == expected
+    assert len(calls) == count
+    cache.close()
+
+
+def test_cached_encoded_map_and_inline_provenance(graph_paths, event, monkeypatch):
+    cache = ArtifactStore("db")
+    mapping = json.dumps({"version": 3, "sources": []})
+    monkeypatch.setattr(javascript_analysis, "_fetch_map", lambda *args: pytest.fail("network"))
+    url = "https://example.com/app.js%2EMAP"
+    cache.register(event(url=url, body=mapping, mime="application/json"))
+    assert cache.resolve_source_map("https://example.com/app.js", "raw", {}, False) == {
+        "content": mapping, "url": url,
+    }
+    assert cache.resolve_source_map(
+        "https://example.com/app.js", "//# sourceMappingURL=data:application/json," + quote(mapping), {}, False
+    ) == {"content": mapping, "url": None}
+    cache.close()

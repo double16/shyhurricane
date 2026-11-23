@@ -16,12 +16,13 @@ from shyhurricane.graph.markup import scan_markup, scan_svg
 from shyhurricane.graph.model import Projection
 
 
-def test_late_markup_facts_survive_decorations_and_detail_limit(graph_paths, event):
+def test_late_markup_facts_survive_decorations_and_detail_limit(graph_paths, event, publish_inventory):
     artifacts = ArtifactStore("db")
     capture = artifacts.register(event(body="<div>text</div>" * 12000 +
                                       '<form action="/save"><input name="secret"></form><script src="/tail.js"></script>'))
     graph = extract(capture, artifacts)
     assert any(node.get("url") == "https://example.com/save" for node in graph.nodes.values())
+    publish_inventory(artifacts)
     resources, _ = artifacts.manifest.page("example.com", kind="resource")
     assert {"https://example.com/save", "https://example.com/tail.js"} <= {row["url"] for row in resources}
     facts = []
@@ -30,7 +31,7 @@ def test_late_markup_facts_survive_decorations_and_detail_limit(graph_paths, eve
     artifacts.close()
 
 
-def test_normalized_memberships_keep_current_and_obsolete_contexts(graph_paths, event):
+def test_normalized_memberships_keep_current_and_obsolete_contexts(graph_paths, event, publish_inventory):
     artifacts = ArtifactStore("db")
     capture = artifacts.register(event())
     unit = artifacts.manifest.unit(capture["id"], "fixture", discovery="complete", flow="complete")
@@ -39,7 +40,10 @@ def test_normalized_memberships_keep_current_and_obsolete_contexts(graph_paths, 
     second = artifacts.manifest.fact(unit, capture["id"], "field", {"url": capture["data"]["url"], "name": "value"},
                                      contexts=["current"])
     assert first == second
-    assert artifacts.connection.execute("SELECT count(*) FROM graph_manifest_contexts").fetchone()[0] == 2
+    refs = artifacts.connection.execute("SELECT shard FROM graph_inventory_outbox").fetchall()
+    assert {ctx for (ref,) in refs for row in artifacts.manifest.shards.read(ref)
+            for ctx in row.get("_context_ids", [])} == {"old", "current"}
+    publish_inventory(artifacts)
     with pytest.raises(ValueError):
         artifacts.manifest.unit(capture["id"], "bad", flow="unknown")
     with pytest.raises(ValueError):
@@ -47,7 +51,7 @@ def test_normalized_memberships_keep_current_and_obsolete_contexts(graph_paths, 
     artifacts.close()
 
 
-def test_paged_inventory_reaches_every_fact_without_neo4j(graph_paths, event):
+def test_paged_inventory_reaches_every_fact_through_neo4j(graph_paths, event, publish_inventory):
     artifacts = ArtifactStore("db")
     capture = artifacts.register(event())
     unit = artifacts.manifest.unit(capture["id"], "fixture", discovery="complete", flow="partial")
@@ -55,18 +59,18 @@ def test_paged_inventory_reaches_every_fact_without_neo4j(graph_paths, event):
         artifacts.manifest.fact(unit, capture["id"], "resource", {
             "id": str(i), "url": f"https://example.com/{i}", "method": "GET",
         })
+    publish_inventory(artifacts)
     page = manifest_query(artifacts, "example.com", kind="resource", limit=7)
     selected = {row["id"] for row in page["results"]}
     while page["continuation_token"]:
-        from shyhurricane.graph.query import GraphQuery
-        page = GraphQuery(MagicMock(), artifacts=artifacts).continue_query(page["continuation_token"], limit=7)
+        page = publish_inventory(artifacts).continue_query(page["continuation_token"], limit=7)
         selected.update(row["id"] for row in page["results"])
     assert {str(i) for i in range(60)} <= selected
     assert page["coverage"]["flow"] in {"pending", "partial"}
     artifacts.close()
 
 
-def test_archived_ir_shards_are_addressable_and_expansion_is_offline(graph_paths, event):
+def test_archived_ir_shards_are_addressable_and_expansion_is_offline(graph_paths, event, publish_inventory):
     artifacts = ArtifactStore("db")
     capture = artifacts.register(event(url="https://example.com/app.js", mime="text/javascript"))
     raw = {"nodes": [{"id": "source", "kind": "symbol", "role": "source"},
@@ -78,8 +82,11 @@ def test_archived_ir_shards_are_addressable_and_expansion_is_offline(graph_paths
         "SELECT id,artifact FROM graph_manifest_units WHERE source_path LIKE '%#flow-shard=%'"
     ).fetchall()
     assert len(shards) == 1
-    assert artifacts.read(shards[0][1])["edges"] == raw["edges"]
+    from shyhurricane.graph.detail_recipe import resolve
+
+    assert resolve(artifacts, artifacts.read(shards[0][1]))["edges"] == raw["edges"]
     queue = MagicMock()
+    publish_inventory(artifacts)
     result = expand_analysis(artifacts, queue, "example.com", capture["id"], shards[0][0])
     assert result["status"] == "pending" and queue.put.call_args.args[0]["offline_analysis"]
     assert queue.put.call_args.args[0]["analysis_unit_id"] == shards[0][0]
@@ -133,20 +140,21 @@ def test_cursor_expiry_capacity_and_size_are_explicit(tmp_path, monkeypatch):
     store.close()
 
 
-def test_fact_payload_limit_keeps_blob_and_reference(graph_paths, event, monkeypatch):
-    from shyhurricane.graph import manifest
-
+def test_fact_payload_limit_keeps_blob_and_reference(graph_paths, event, monkeypatch, publish_inventory):
     artifacts = ArtifactStore("db")
     capture = artifacts.register(event())
-    unit = artifacts.manifest.unit(capture["id"], "oversized")
-    monkeypatch.setattr(manifest, "PAGE_BYTES", 100)
+    unit = artifacts.manifest.unit(capture["id"], "oversized", discovery="complete")
     key = artifacts.manifest.fact(unit, capture["id"], "field", {
         "url": "https://example.com/", "name": "x" * 200,
     })
-    payload = artifacts.read(artifacts.connection.execute(
-        "SELECT data FROM graph_manifest_facts WHERE id=?", (key,)
-    ).fetchone()[0])
-    assert artifacts.read(payload["artifact"])["name"] == "x" * 200
+    references = artifacts.connection.execute("SELECT shard FROM graph_inventory_outbox").fetchall()
+    payload = next(row for (ref,) in references for row in artifacts.manifest.shards.read(ref)
+                   if row["manifest_id"] == key)
+    assert payload["name"] == "x" * 200
+    publish_inventory(artifacts)
+    from shyhurricane.graph import inventory_reader
+
+    monkeypatch.setattr(inventory_reader, "PAGE_BYTES", 100)
     records, _ = artifacts.manifest.page("example.com", kind="field")
     assert records[0]["oversized"]
     artifacts.close()
@@ -172,8 +180,7 @@ def test_repeated_fact_edges_keep_both_document_versions(event):
     assert {edge["context_capture_id"] for edge in graph.edges.values()} == {"old", "current"}
 
 
-def test_inventory_filters_precede_paging_and_continuations_freeze_versions(graph_paths, event):
-    from shyhurricane.graph.query import GraphQuery
+def test_inventory_filters_precede_paging_and_continuations_freeze_versions(graph_paths, event, publish_inventory):
 
     artifacts = ArtifactStore("db")
     old = artifacts.register(event(body="old"))
@@ -182,8 +189,9 @@ def test_inventory_filters_precede_paging_and_continuations_freeze_versions(grap
         artifacts.manifest.fact(unit, old["id"], "resource", {
             "id": str(index), "url": f"https://example.com/api/{index}", "method": "POST",
         })
+    publish_inventory(artifacts)
     first = manifest_query(artifacts, "example.com", kind="resource", method="POST", limit=3)
-    query = GraphQuery(MagicMock(), artifacts=artifacts)
+    query = publish_inventory(artifacts)
     artifacts.register(event(body="new", timestamp="2026-02-01T00:00:00Z"))
     token = first["continuation_token"]
     second = query.continue_query(token, limit=3)
@@ -193,6 +201,7 @@ def test_inventory_filters_precede_paging_and_continuations_freeze_versions(grap
         second = query.continue_query(second["continuation_token"], limit=3)
         selected.update(record["id"] for record in second["results"])
     assert selected == {str(index) for index in range(12)}
+    publish_inventory(artifacts)
     assert not manifest_query(artifacts, "example.com", method="POST")["results"]
     assert len(manifest_query(artifacts, "example.com", method="POST", historical=True)["results"]) == 12
     assert len(manifest_query(artifacts, "example.com", method="POST", as_of=old["observed_at"])["results"]) == 12
@@ -202,7 +211,7 @@ def test_inventory_filters_precede_paging_and_continuations_freeze_versions(grap
     artifacts.close()
 
 
-def test_coverage_is_scope_specific_and_isolated_nodes_have_detail_units(graph_paths, event):
+def test_coverage_is_scope_specific_and_isolated_nodes_have_detail_units(graph_paths, event, publish_inventory):
     artifacts = ArtifactStore("db")
     capture = artifacts.register(event())
     other = artifacts.register(event(url="https://target.local/"))
@@ -213,6 +222,7 @@ def test_coverage_is_scope_specific_and_isolated_nodes_have_detail_units(graph_p
         "nodes": [{"id": "alone", "role": "sink", "kind": "call"}], "edges": [],
     }, contexts=[{"id": "current", "url": "https://example.com/"},
                  {"id": "obsolete", "url": "https://example.com/"}])
+    publish_inventory(artifacts)
     assert artifacts.manifest.coverage(scope="example.com")["flow"] == "complete"
     assert artifacts.manifest.coverage(scope="target.local")["flow"] == "failed"
     assert artifacts.connection.execute(
@@ -231,7 +241,8 @@ def test_discovery_batch_retains_committed_chunks_and_rolls_back_failed_tail(gra
             for index in range(501):
                 artifacts.manifest.fact(unit, capture["id"], "field", {"name": str(index), "url": "https://example.com/"})
             raise RuntimeError("killed")
-    count = artifacts.connection.execute("SELECT count(*) FROM graph_manifest_facts WHERE unit_id=? AND kind='field'", (unit,)).fetchone()[0]
+    references = artifacts.connection.execute("SELECT shard FROM graph_inventory_outbox").fetchall()
+    count = sum(row["kind"] == "field" for (ref,) in references for row in artifacts.manifest.shards.read(ref))
     assert count == 500
     assert not artifacts.manifest.batching
     artifacts.close()
@@ -257,7 +268,7 @@ def test_deferred_inline_script_is_retained_in_html_and_svg(graph_paths, event):
     artifacts.close()
 
 
-def test_path_continuation_advances_frontier_and_replays_at_same_revision(graph_paths, event, monkeypatch):
+def test_path_continuation_advances_frontier_and_replays_at_same_revision(graph_paths, event, monkeypatch, publish_inventory):
     from collections import defaultdict
 
     from shyhurricane.graph import query
@@ -294,7 +305,7 @@ def test_path_continuation_advances_frontier_and_replays_at_same_revision(graph_
 
     monkeypatch.setattr("shyhurricane.graph.traversal.TraversalSnapshot", Snapshot)
     monkeypatch.setattr(query, "MAX_ENTITIES", 1)
-    service = GraphQuery(MagicMock(), artifacts=artifacts)
+    service = publish_inventory(artifacts)
     service.pin_query = MagicMock()
     first = service.paths("example.com", "a", end="c", mode="flow")
     assert first["continuation_token"] and not first["results"]
@@ -315,24 +326,24 @@ def test_path_continuation_advances_frontier_and_replays_at_same_revision(graph_
     artifacts.close()
 
 
-def test_manifest_element_selection_uses_persisted_contexts_and_bounds(graph_paths, event, monkeypatch):
-    from shyhurricane.graph import manifest
-    from shyhurricane.graph.query import GraphQuery
+def test_manifest_element_selection_uses_persisted_contexts_and_bounds(graph_paths, event, monkeypatch, publish_inventory):
 
     artifacts = ArtifactStore("db")
     capture = artifacts.register(event(url="https://example.com/app.js"))
     document = artifacts.register(event(url="https://example.com/document"))
-    unit = artifacts.manifest.unit(capture["id"], "fixture")
+    unit = artifacts.manifest.unit(capture["id"], "fixture", discovery="complete")
     for index in range(4):
         artifacts.manifest.fact(unit, capture["id"], "symbol", {
             "id": str(index), "url": "https://example.com/app.js", "role": "source", "name": "value" * 20,
         }, contexts=[document["id"]])
-    service = GraphQuery(MagicMock(), artifacts=artifacts)
+    service = publish_inventory(artifacts)
     result = service.elements("example.com", role="source", kinds=["symbol"],
                               context_url="https://example.com/document")
     assert len(result["results"]) == 4
     assert not service.elements("example.com", kinds=["cookie"])["results"]
-    monkeypatch.setattr(manifest, "PAGE_BYTES", 250)
+    from shyhurricane.graph import inventory_reader
+
+    monkeypatch.setattr(inventory_reader, "PAGE_BYTES", 500)
     rows, cursor = artifacts.manifest.page("example.com", kind="symbol")
     assert len(rows) == 1 and cursor
     assert not artifacts.manifest.page("https://example.com/other", kind="symbol")[0]
@@ -357,8 +368,7 @@ def test_cursor_global_storage_and_retained_count_are_bounded(tmp_path, monkeypa
     store.close()
 
 
-def test_external_script_inventory_uses_current_document_membership_without_fact_fanout(graph_paths, event):
-    from shyhurricane.graph.query import GraphQuery
+def test_external_script_inventory_uses_current_document_membership_without_fact_fanout(graph_paths, event, publish_inventory):
 
     artifacts = ArtifactStore("db")
     old = artifacts.register(event(url="https://example.com/document", body="old"))
@@ -367,35 +377,35 @@ def test_external_script_inventory_uses_current_document_membership_without_fact
            "edges": []}
     archive_ir(artifacts, script, script["data"]["url"], script["data"]["url"], raw,
                contexts=[{"id": old["id"], "url": old["data"]["url"], "base": old["data"]["url"]}])
-    query = GraphQuery(MagicMock(), artifacts=artifacts)
+    query = publish_inventory(artifacts)
     assert len(query.elements("https://example.com/document", role="source")["results"]) == 50
     assert artifacts.connection.execute("SELECT count(*) FROM graph_unit_contexts").fetchone()[0] == 1
-    assert artifacts.connection.execute("SELECT count(*) FROM graph_manifest_contexts").fetchone()[0] == 0
+    assert artifacts.connection.execute("SELECT 1 FROM sqlite_master WHERE name='graph_fact_contexts'").fetchone() is None
     artifacts.register(event(url=old["data"]["url"], body="new", timestamp="2026-02-01T00:00:00Z"))
+    publish_inventory(artifacts)
     assert not query.elements("example.com", role="source")["results"]
     assert len(query.elements("example.com", role="source", historical=True)["results"]) == 50
     assert len(query.elements("example.com", role="source", as_of=old["observed_at"])["results"]) == 50
     artifacts.close()
 
 
-def test_deferred_markup_shard_keeps_ancestry_and_reuses_discovered_node_ids(graph_paths, event):
+def test_deferred_markup_shard_keeps_ancestry_and_reuses_discovered_node_ids(graph_paths, event, publish_inventory):
     artifacts = ArtifactStore("db")
     body = '<base href="/assets/"><form id="owner" method="POST" action="save"><fieldset disabled>'
     body += '<input name="padding">' * 10010
     body += '<input id="tail" name="important"></fieldset></form>'
     capture = artifacts.register(event(body=body))
     extract(capture, artifacts)
-    discovered = next(
-        payload for (reference,) in artifacts.connection.execute(
-            "SELECT data FROM graph_manifest_facts WHERE kind='field'"
-        ) if (payload := artifacts.read(reference)).get("attributes", {}).get("id") == "tail"
-    )
+    references = artifacts.connection.execute("SELECT shard FROM graph_inventory_outbox").fetchall()
+    discovered = next(payload for (reference,) in references for payload in artifacts.manifest.shards.read(reference)
+                      if payload.get("attributes", {}).get("id") == "tail")
     detail = extract(capture, markup_offset=10000, markup_limit=1000, record_discovery=False)
     assert discovered["id"] in detail.nodes
     assert not detail.nodes[discovered["id"]]["form_successful"]
     assert any(node.get("url") == "https://example.com/assets/save" and node.get("method") == "POST"
                for node in detail.nodes.values())
     assert len(detail.nodes) < 1000
+    publish_inventory(artifacts)
     units = manifest_query(artifacts, "example.com", kind="analysis_unit")["results"]
     assert any(row["source_path"].endswith("#markup-shard=10") for row in units)
     artifacts.close()
@@ -415,7 +425,7 @@ def test_svg_window_keeps_namespaced_ancestry_and_stable_semantic_identity(graph
     artifacts.close()
 
 
-def test_future_and_unverified_source_maps_cannot_replace_delivered_code(graph_paths, event, monkeypatch):
+def test_future_and_unverified_source_maps_cannot_replace_delivered_code(graph_paths, event, monkeypatch, publish_inventory):
     artifacts = ArtifactStore("db")
     monkeypatch.setattr(artifacts, "deobfuscate", lambda body, function: body)
     bundle = artifacts.register(event(url="https://example.com/app.js", mime="text/javascript", body="safe();"))
@@ -437,6 +447,7 @@ def test_future_and_unverified_source_maps_cannot_replace_delivered_code(graph_p
     assert graph.candidate_sources[0]["association"] == "unverified_external"
     assert calls == ["safe();"]  # Cached delivered-code IR is reused.
     artifacts.manifest.unit(earlier["id"], "capture:" + earlier["data"]["url"], discovery="failed", flow="failed")
+    publish_inventory(artifacts)
     assert artifacts.manifest.coverage(scope="example.com")["flow"] != "failed"
     assert artifacts.manifest.coverage(scope="example.com", historical=True)["flow"] == "failed"
     artifacts.close()
@@ -475,3 +486,77 @@ def test_markup_window_preserves_explicit_form_owners_outside_the_window(event, 
                for node in graph.nodes.values())
     ignored = next(node for node in graph.nodes.values() if node.get("field_name") == "ignored")
     assert ignored["form_selectors"] == []
+
+
+@pytest.mark.parametrize("coverage_timeout", [False, True])
+def test_manifest_timeout_preserves_completed_rows_and_checkpoint(tmp_path, coverage_timeout):
+    from types import SimpleNamespace
+
+    from shyhurricane.graph.budget import QueryBudget
+
+    manifest = MagicMock()
+    manifest.watermark.return_value = {"revision": 1, "expires": 9999999999}
+    manifest.page.side_effect = [
+        ([{"id": "one", "manifest_id": "first"}], "first"),
+        TimeoutError("read deadline"),
+    ]
+    manifest.coverage.side_effect = TimeoutError("coverage deadline") if coverage_timeout else None
+    manifest.coverage.return_value = {"discovery": "complete", "flow": "partial"}
+    artifacts = SimpleNamespace(root=tmp_path, manifest=manifest, budget=QueryBudget())
+    store = QueryCursors(tmp_path)
+    try:
+        result = manifest_query(artifacts, "example.com", limit=2, cursor_store=store)
+        assert result["results"] == [{"id": "one", "manifest_id": "first"}]
+        assert result["retrieval_truncated"] and "time_limit" in result["truncation_reasons"]
+        state, _ = store.load(result["continuation_token"])
+        assert state["after"] == "first" and state["seen"] == ["one"]
+        assert len(result["analysis_gaps"]) == (2 if coverage_timeout else 1)
+    finally:
+        store.close()
+
+
+def test_manifest_coverage_timeout_after_last_page_and_failed_checkpoint(tmp_path):
+    from types import SimpleNamespace
+
+    from shyhurricane.graph.budget import QueryBudget
+
+    manifest = MagicMock()
+    manifest.watermark.return_value = {"revision": 1}
+    manifest.page.return_value = ([], None)
+    manifest.coverage.side_effect = TimeoutError("coverage deadline")
+    artifacts = SimpleNamespace(root=tmp_path, manifest=manifest, budget=QueryBudget())
+    store = MagicMock()
+    store.save.side_effect = OSError("disk full")
+    result = manifest_query(artifacts, "example.com", cursor_store=store, detail="compact")
+    assert result["results"] == [] and result["continuation_token"] is None
+    assert result["coverage"] == {"discovery": "unknown", "flow": "unknown"}
+    assert result["truncation_reasons"] == ["time_limit"]
+    assert "restart required" in result["analysis_gaps"][-1]
+    store.close.assert_not_called()
+
+
+@pytest.mark.parametrize("with_queue", [False, True])
+def test_expand_analysis_validates_scope_and_retained_artifact(graph_paths, event, with_queue):
+    from shyhurricane.graph.budget import QueryBudget
+
+    artifacts = ArtifactStore("db")
+    try:
+        capture = artifacts.register(event())
+        reader = MagicMock()
+        reader.lookup_unit.return_value = {"artifact": "a:retained", "generation": "generation"}
+        artifacts.manifest.inventory_reader = lambda: reader
+        artifacts.budget = QueryBudget()
+        queue = MagicMock() if with_queue else None
+        result = expand_analysis(artifacts, queue, "example.com", capture["id"], "unit")
+        item, response = (queue.put.call_args.args[0], result) if with_queue else result
+        assert item["offline_analysis"] and item["inventory_generation"] == "generation"
+        assert response["analysis_unit_id"] == "unit" and response["status"] == "pending"
+        reader.lookup_unit.assert_called_once_with("example.com", "unit", capture["id"])
+        for selected, capture_id in [
+            (None, capture["id"]), ({"artifact": None}, capture["id"]), ({"artifact": "a:retained"}, "missing")
+        ]:
+            reader.lookup_unit.return_value = selected
+            with pytest.raises(ValueError, match="unavailable"):
+                expand_analysis(artifacts, queue, "example.com", capture_id, "unit")
+    finally:
+        artifacts.close()

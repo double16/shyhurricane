@@ -1,5 +1,6 @@
 """Publication estimates and nonblocking monitor-cache behavior."""
 
+from contextlib import closing
 from types import SimpleNamespace
 
 from shyhurricane.graph.statistics import summarize_captures
@@ -142,7 +143,7 @@ def test_reference_counts_distinct_missing_urls_without_migration(graph_paths):
 
     path = graph_paths / "graph_state" / "artifacts.sqlite"
     path.parent.mkdir()
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         connection.executescript(
             "CREATE TABLE refs(url TEXT,capture_id TEXT);"
             "CREATE TABLE captures(id TEXT,url TEXT);"
@@ -152,7 +153,7 @@ def test_reference_counts_distinct_missing_urls_without_migration(graph_paths):
         ])
         connection.executemany("INSERT INTO captures VALUES (?,?)", [("one", "known"), ("two", "known")])
     assert ReferenceStatistics("db").statistics() == {"unresolved_references": 1}
-    with sqlite3.connect(path) as connection:
+    with closing(sqlite3.connect(path)) as connection, connection:
         assert connection.execute("SELECT name FROM sqlite_master WHERE type='index'").fetchall() == []
         connection.execute("DELETE FROM refs")
     assert ReferenceStatistics("db").statistics() == {"unresolved_references": 0}

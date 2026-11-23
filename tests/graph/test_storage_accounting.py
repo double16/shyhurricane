@@ -52,8 +52,8 @@ def oracle(store):
     retained_blobs = {nodes[node] for node in retained}
     cached_blobs = {nodes[node] for node in cached} - retained_blobs
     blobs = {
-        digest: (size, len(payload))
-        for digest, size, payload in connection.execute("SELECT digest,size,payload FROM graph_blobs")
+        digest: (size, stored)
+        for digest, size, stored in connection.execute("SELECT digest,size,stored FROM graph_blobs")
     }
     result = store.statistics()
     assert result["logical_payload_bytes"] == sum(v[0] for v in blobs.values())
@@ -222,7 +222,7 @@ def test_statistics_use_only_counters_and_indexed_maintenance_queries(store):
     statements = []
     store.connection.set_trace_callback(statements.append)
     store.statistics()
-    assert len(statements) <= 5
+    assert len(statements) <= 6
     assert not any("graph_object_owners" in query or "RECURSIVE" in query for query in statements)
     store.connection.set_trace_callback(None)
     for query in [
@@ -324,7 +324,7 @@ def test_scale_600000_owners_keeps_statistics_and_cleanup_bounded(tmp_path, monk
         statistics_seconds = time.perf_counter() - started
         connection.set_progress_handler(None, 0)
         connection.set_trace_callback(None)
-        assert len(statements) <= 5 and instructions[0] <= 10000
+        assert len(statements) <= 6 and instructions[0] <= 10000
         assert all("graph_object_owners" not in query and "RECURSIVE" not in query for query in statements)
         assert statistics["cache_bytes"] > 0
         passes, durations = 0, []
@@ -360,6 +360,8 @@ def test_scale_600000_owners_keeps_statistics_and_cleanup_bounded(tmp_path, monk
 @pytest.mark.parametrize("code", [None, sqlite3.SQLITE_INTERRUPT, sqlite3.SQLITE_ERROR])
 def test_reclamation_has_independent_budget_and_preserves_real_errors(store, tmp_path, monkeypatch, code):
     from shyhurricane.graph import storage_maintenance
+
+    monkeypatch.setattr(storage_maintenance.SegmentMaintenance, "tick", lambda *args, **kwargs: 0)
 
     monkeypatch.setattr(storage_maintenance, "persistent_queue_path", lambda *args: tmp_path)
     monkeypatch.setattr(storage_maintenance, "PASS_ITEMS", 0)
@@ -522,6 +524,8 @@ def test_contention_preserves_committed_batch(store, tmp_path, monkeypatch, code
 @pytest.mark.parametrize("stage", ["validate", "pending", "vacuum", "checkpoint", "checkpoint-result", "unknown"])
 def test_contention_at_other_stages(store, tmp_path, monkeypatch, stage):
     from shyhurricane.graph import storage_maintenance
+
+    monkeypatch.setattr(storage_maintenance.SegmentMaintenance, "tick", lambda *args, **kwargs: 0)
 
     monkeypatch.setattr(storage_maintenance, "persistent_queue_path", lambda *args: tmp_path)
     monkeypatch.setattr(storage_maintenance, "PASS_ITEMS", 0)

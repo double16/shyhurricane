@@ -51,6 +51,8 @@ def capture_unit_path(event):
 
 def capture_event(request_response, *, backfill: bool = False) -> dict:
     data = request_response.model_dump() if hasattr(request_response, "model_dump") else dict(request_response)
+    if hasattr(request_response, "capture_provenance") and request_response.capture_provenance is not None:
+        data["capture_provenance"] = request_response.capture_provenance
     capture_id = identity("capture", data)
     try:
         value = str(data.get("timestamp", "")).replace("Z", "+00:00")

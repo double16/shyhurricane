@@ -256,7 +256,7 @@ async def test_query_errors_are_explicit_and_no_fetch_occurs(monkeypatch):
             await tools.query(None, "test", "elements", "example.com")
 
 
-async def test_continuation_and_offline_expansion_tools(graph_paths, event, monkeypatch):
+async def test_continuation_and_offline_expansion_tools(graph_paths, event, monkeypatch, publish_inventory):
     import inspect
 
     from shyhurricane.graph.artifacts import ArtifactStore
@@ -277,7 +277,10 @@ async def test_continuation_and_offline_expansion_tools(graph_paths, event, monk
 
     artifacts = ArtifactStore("db")
     capture = artifacts.register(event())
-    unit = artifacts.manifest.unit(capture["id"], "fixture")
+    unit = artifacts.manifest.unit(capture["id"], "fixture", discovery="complete",
+                                   artifact=artifacts.write("detail", {"nodes": [], "edges": []}))
+    publish_inventory(artifacts)
+    server.graph_store = publish_inventory.store
     artifacts.close()
     monkeypatch.setattr(tools, "execute_graph", graph_execution.execute_graph)
     server.enqueue_graph_expansion = AsyncMock()
@@ -292,6 +295,13 @@ async def test_graph_execution_decorates_manifest_coverage_and_closes_artifacts(
     ArtifactStore("db").close()
     service = SimpleNamespace(elements=lambda scope: {"results": []},
                               omitted_regions=lambda scope: [{"analysis_unit_id": "deferred"}])
+    def attach(artifacts):
+        service.artifacts = artifacts
+        artifacts.manifest.reader = SimpleNamespace(
+            coverage=lambda *args, **kwargs: {"discovery": "pending", "flow": "pending"}
+        )
+
+    service.attach_artifacts = attach
     monkeypatch.setattr(graph_execution, "GraphQuery", lambda *args, **kwargs: service)
     result = await graph_execution.execute_graph(None, object(), "elements", "example.com", artifact_db="db")
     assert result["coverage"]["discovery"] == "pending"
@@ -671,3 +681,52 @@ async def test_optional_blank_filters_normalize_before_dispatch(monkeypatch, bla
     for field in ("url", "context_url", "method"):
         assert run.await_args.kwargs[field] is None
         assert history.await_args.kwargs[field] is None
+
+
+@pytest.mark.parametrize("operation", ["continue", "expand"])
+@pytest.mark.parametrize("outcome", ["success", "unavailable", "invalid", "cancelled"])
+async def test_graph_continuation_and_expansion_dispatch(monkeypatch, operation, outcome):
+    import asyncio
+
+    server = SimpleNamespace(db="db", graph_store=None if outcome == "unavailable" else object(),
+                             enqueue_graph_expansion=AsyncMock())
+    monkeypatch.setattr(tools, "get_server_context", AsyncMock(return_value=server))
+    payload = {"offline_analysis": True}
+    result = {"work_id": "work", "status": "pending"}
+    execute = AsyncMock(return_value=({"results": [], "instructions": "complete"} if operation == "continue"
+                                     else (payload, result)))
+    if outcome == "invalid":
+        execute.side_effect = ValueError("invalid token or unit")
+    elif outcome == "cancelled":
+        execute.side_effect = asyncio.CancelledError()
+    monkeypatch.setattr(tools, "execute_graph", execute)
+
+    async def invoke():
+        if operation == "continue":
+            return await tools.continue_application_graph_query.__wrapped__(None, "token", limit=3)
+        return await tools.expand_application_graph_analysis(None, "example.com", "capture", "unit")
+
+    if outcome == "unavailable":
+        with pytest.raises(ToolError, match="unavailable"):
+            await invoke()
+        execute.assert_not_awaited()
+    elif outcome == "invalid":
+        with pytest.raises(ToolError, match="invalid token or unit"):
+            await invoke()
+    elif outcome == "cancelled":
+        with pytest.raises(asyncio.CancelledError):
+            await invoke()
+        if operation == "expand":
+            with pytest.raises(TimeoutError):
+                execute.call_args.kwargs["budget"].check()
+    else:
+        response = await invoke()
+        if operation == "continue":
+            assert response.results == []
+            assert execute.call_args.args[2:] == ("continue_query", "token")
+            assert execute.call_args.kwargs == {"artifact_db": "db", "limit": 3}
+        else:
+            assert response == result
+            server.enqueue_graph_expansion.assert_awaited_once_with(payload, execute.call_args.kwargs["budget"])
+    if outcome != "success":
+        server.enqueue_graph_expansion.assert_not_awaited()

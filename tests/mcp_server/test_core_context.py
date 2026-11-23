@@ -1,8 +1,22 @@
+from importlib.metadata import version
+
 import pytest
 from mcp import MCPError
 
 import shyhurricane.mcp_server as mcp_server
 from shyhurricane.mcp_server.server_context import ServerContext
+
+
+def test_server_metadata():
+    server = mcp_server.mcp_instance
+    assert server.name == "shyhurricane"
+    assert server.title == "ShyHurricane"
+    assert server.description
+    assert server.version == version("shyhurricane")
+    assert server.website_url == "https://github.com/double16/shyhurricane"
+    assert len(server.icons) == 1
+    assert server.icons[0].src.endswith("/shyhurricane/assets/shyhurricane.png")
+    assert server.icons[0].mime_type == "image/png"
 
 
 class LifespanContext:

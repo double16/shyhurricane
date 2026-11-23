@@ -1,6 +1,9 @@
 """Transactional, body-free scope metadata for persistent indexing queues."""
 
 import json
+import os
+import sys
+import traceback
 import sqlite3
 import time
 from pathlib import Path
@@ -49,6 +52,14 @@ class ScopedAckQueue(persistqueue.SQLiteAckQueue):
     def initialize_scopes(self):
         with self.tran_lock, self._putter as connection:
             connection.execute(
+                "CREATE TABLE IF NOT EXISTS queue_failure (queue_id INTEGER PRIMARY KEY, "
+                "failed_at REAL, attempts INTEGER, error_type TEXT, detail TEXT, pid INTEGER, stage TEXT)"
+            )
+            connection.execute(
+                f"CREATE TRIGGER IF NOT EXISTS queue_failure_delete AFTER DELETE ON {self._table_name} "
+                "BEGIN DELETE FROM queue_failure WHERE queue_id=OLD._id; END"
+            )
+            connection.execute(
                 "CREATE TABLE IF NOT EXISTS indexing_scope (queue_id INTEGER, url TEXT, doc_id TEXT, "
                 "capture_id TEXT, unresolved INTEGER, PRIMARY KEY(queue_id,url,doc_id,capture_id))"
             )
@@ -64,6 +75,35 @@ class ScopedAckQueue(persistqueue.SQLiteAckQueue):
             )
             for row_id, data in rows:
                 self._write_scopes(connection, row_id, data)
+
+    def ack_failed(self, item=None, id=None, *, error=None, stage=None):
+        """Commit failure status and bounded diagnostic evidence together."""
+        item, search = self._check_id(item, id)
+        with self.action_lock:
+            queue_id = self._find_item_id(item, search)
+            if queue_id is None:
+                return None
+            error = error or sys.exception()
+            detail = "".join(traceback.format_exception(error)) if error else "Details unavailable"
+            encoded = detail.encode("utf-8")
+            if len(encoded) > 65536:
+                detail = encoded[:65500].decode("utf-8", errors="ignore") + "\n[truncated]"
+            with self.tran_lock, self._putter as connection:
+                updated = connection.execute(
+                    "UPDATE ack_queue_default SET status=9 WHERE _id=?", (queue_id,)
+                )
+                if not updated.rowcount:
+                    return None
+                connection.execute(
+                    "INSERT INTO queue_failure VALUES (?,?,?,?,?,?,?) "
+                    "ON CONFLICT(queue_id) DO UPDATE SET failed_at=excluded.failed_at, "
+                    "attempts=queue_failure.attempts+1,error_type=excluded.error_type, "
+                    "detail=excluded.detail,pid=excluded.pid,stage=excluded.stage",
+                    (queue_id, time.time(), 1, type(error).__name__ if error else "Unknown",
+                     detail, os.getpid(), stage or Path(self.path).name),
+                )
+            self._unack_cache.pop(queue_id, None)
+            return queue_id
 
     def _write_scopes(self, connection, row_id, data):
         try:

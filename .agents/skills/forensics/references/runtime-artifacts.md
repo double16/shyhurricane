@@ -27,7 +27,7 @@ Relationship Graph for full defaults and semantics. Confirm behavior against dep
 
 | Artifact | Evidence and limitations |
 |---|---|
-| `<data-dir>/logs/shyhurricane.log` or log override and rotated siblings | DEBUG+ application diagnostics, logged tracebacks, process/PID, access messages; inspect effective rotation settings and retained coverage; raw subprocess output and unlogged exceptions may be absent |
+| `<data-dir>/logs/shyhurricane.log` or log override and rotated siblings | INFO+ application diagnostics (DEBUG with `--debug`), logged tracebacks, process/PID, access messages; inspect effective rotation settings and retained coverage; raw subprocess output and unlogged exceptions may be absent |
 | `<data-dir>/logs/index-*.jsonl`, `finding-*.jsonl` | Index/finding records grouped by startup UTC filename timestamp; inspect record shape before filtering |
 | `<cache-path>/history.jsonl` | Tool names, arguments, and timestamps; not proof of completion; serialization can fall back to repr, so handle malformed/non-JSON lines |
 | `<cache-path>/result_pages/` | Saved bounded result snapshots with original indexing status and expiration; reading a snapshot does not refresh indexing |
@@ -144,6 +144,20 @@ locations; Homebrew and custom launch paths depend on the installed service defi
 
 ## Read-only queue and artifact queries
 
+Inspect retained queue failure diagnostics before searching rotating logs:
+
+```sh
+UV_CACHE_DIR="$PWD/.uv-cache" uv run python -m shyhurricane.queue_failures /absolute/data --detail
+```
+
+Use `--queue type_specific_index` to filter, `--limit 20` to bound results (the default),
+and `--resolved` to include retained failures after retry or success. The command reads SQLite
+without queue constructors, payload deserialization, or retries. Records include the latest
+bounded exception detail, cumulative failure count, UTC Unix timestamp, PID, and stage.
+Diagnostics survive log rotation but disappear when the queue row is deleted. Older failures
+may report details unavailable; this does not establish that processing succeeded.
+Exception text can contain sensitive input data; redact shared excerpts.
+
 Queue directories are `ingest_queue`, `doc_type_queue`, `scan_finding_queue`, and `graph_queue`.
 The following Python example opens an existing database without constructors or payload decoding.
 Run from the repo using its UV environment; substitute a verified absolute path.
@@ -241,3 +255,52 @@ Profile only a bounded, read-only query when the investigation authorizes its lo
 Source anchors: `shyhurricane/data_paths.py`, `persistent_queue.py`, `queue_scopes.py`,
 `logging_config.py`, `graph/artifacts.py`, `graph/scheduling.py`, `graph/publication.py`,
 `graph/worker.py`, and `mcp_server/__init__.py`. Recheck these when deployment versions differ.
+
+### Resumable discovery archive evidence
+
+Current graph storage retains `graph_archive_progress(id,artifact,phase,offset)` for archive recovery.
+Inspect its schema first, then read at most 20 rows to identify unfinished archives:
+
+```sql
+SELECT id,phase,offset FROM graph_archive_progress WHERE phase<>-1 LIMIT 20;
+```
+
+Phases 0–3 represent nodes, references, edge shards, and isolated-node shards; -1 means
+complete. Offsets advance only with committed data. Correlate checkpoint IDs with
+`Graph archive batch`, `yield`, and `resume` log events. A cooperative archive yield keeps
+its epoch job pending and is distinct from a parser timeout or failed queue receipt.
+Stage timestamps are UTC Unix seconds; batch logs include elapsed and commit durations.
+Do not run constructors or retry work to inspect cursors.
+
+### Graph SQLite writer tuning
+
+Fresh artifact schema version 4 keeps scheduling, ownership, checkpoints, inline payloads, and
+publication obligations in SQLite. Searchable facts, contexts, and coverage live in Neo4j inventory
+generations. Populated older SQLite or Neo4j formats are rejected without migration. Inspect the
+deployed source and `PRAGMA user_version` read-only rather than relying on old log descriptions.
+`GRAPH_SQLITE_CACHE_KIB` defaults to 65536 KiB per writer, separately from artifact retention.
+
+Use bounded read-only SQL to inspect publication and payload allocation:
+
+```sql
+SELECT id,generation,sequence,state FROM graph_inventory_outbox WHERE state='pending' LIMIT 20;
+SELECT id,unit_id,state,error FROM graph_inventory_generations WHERE state='failed' LIMIT 20;
+SELECT bytes,allocated,segments FROM graph_payload_totals WHERE id=1;
+```
+
+Compressed values up to 64 KiB stay inline. Larger values share files beneath
+`graph_state/payload_segments/`; a shard reference is not a file path. Missing or truncated committed
+segments indicate corruption. Normal maintenance recovers uncommitted append tails and unregistered
+files. Never trim, delete, or repack live segments to investigate them. An SQLite-only backup omits
+packed payload bytes: quiesce writers and maintenance and retain the segment files as well.
+
+Remote receipts commit before local acknowledgements, so repeated pending delivery can be normal
+recovery. Read pins protect retired inventory revisions until expiry. Cleanup removes relationships
+before nodes and releases local payload pins only after Neo4j confirms a cleaned tombstone. Never
+reset local obligations to bypass a remote publication failure.
+
+Archive batch records include fixed SQL-family call counts and seconds for blob, node, fact,
+and other operations. Triggers execute inside these measured calls. Passive checkpoint logs
+report duration, busy status, WAL frames, and checkpointed frames. Commit duration still
+includes automatic checkpoints; do not attribute all commit time to synchronization alone.
+Compare equivalent batches and repeated scratch runs before interpreting tuning gains.
