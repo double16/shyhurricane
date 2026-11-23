@@ -47,7 +47,7 @@ dependencies = [
     "psutil~=7.2.1",
     "guppy3>=3.1.6,<3.3.0",
     "einops~=0.8.1",
-    "cachetools>=7.1.7,<7.4.0",
+    "cachetools>=7.1.7,<8.1.0",
     "pydantic",
     "litellm-haystack>=1.2.0",
     "textual>=7.3,<8.3",
