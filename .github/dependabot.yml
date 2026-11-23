@@ -29,7 +29,7 @@ updates:
       interval: "monthly"
 
   - package-ecosystem: "npm"
-    directory: "/src/docker/unix_command"
+    directory: "/src/docker/unix_command/graph-analysis/"
     schedule:
       interval: "monthly"
     groups:
