@@ -10,7 +10,7 @@ def initialize(connection):
     if version == VERSION:
         return
     if version or connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone():
-        raise ValueError("Unsupported graph storage version; use a fresh assessment directory")
+        raise ValueError(f"Unsupported graph storage version (found {version}, expected {VERSION}); use a fresh assessment directory")
     connection.execute("PRAGMA auto_vacuum=INCREMENTAL")
     connection.executescript(
         "BEGIN IMMEDIATE;"
@@ -142,5 +142,6 @@ def _root_triggers():
 
 
 def validate(connection):
-    if connection.execute("PRAGMA user_version").fetchone()[0] != VERSION:
-        raise ValueError("Unsupported graph storage version; use a fresh assessment directory")
+    version = connection.execute("PRAGMA user_version").fetchone()[0]
+    if version != VERSION:
+        raise ValueError(f"Unsupported graph storage version (found {version}, expected {VERSION}); use a fresh assessment directory")

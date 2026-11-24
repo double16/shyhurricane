@@ -30,6 +30,7 @@ RUN apt-get update &&\
     apt-get clean
 
 # Install opengrep (fork of semgrep that is open)
+# NOTE: opengrep refers to 64-bit x86 as "x86", not the typical "x86_64".
 RUN ARCH=$(uname -m) && \
     if [ "$ARCH" = "x86_64" ]; then OPENGREP_ARCH="x86"; else OPENGREP_ARCH="${ARCH}"; fi && \
     OPENGREP_VERSION=$(curl -s https://api.github.com/repos/opengrep/opengrep/releases/latest | grep "tag_name" | cut -d ":" -f 2 | tr -d " ,\"") && \
