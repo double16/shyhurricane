@@ -38,7 +38,7 @@ class CorrelationStore(JobStore):
             version = self.connection.execute("PRAGMA user_version").fetchone()[0]
             populated = self.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone()
             if populated and version != SCHEMA_VERSION:
-                raise ValueError("Unsupported correlation database; rebuild assessment storage")
+                raise ValueError(f"Unsupported correlation database (found {version}, expected {SCHEMA_VERSION}); rebuild assessment storage")
             statements = (
                 "CREATE TABLE IF NOT EXISTS findings (id TEXT PRIMARY KEY,title TEXT NOT NULL DEFAULT '',"
                 "target TEXT NOT NULL,"

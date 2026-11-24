@@ -1,4 +1,4 @@
-FROM python:3.14-slim
+FROM python:3.13-slim
 
 # https://docs.docker.com/engine/install/debian/
 RUN apt update &&\
@@ -16,7 +16,7 @@ Signed-By: /etc/apt/keyrings/docker.asc
 EOF
 
 RUN apt update &&\
-    apt install -y --no-install-recommends build-essential docker-ce-cli curl nmap haveged &&\
+    apt install -y --no-install-recommends build-essential git docker-ce-cli curl nmap haveged &&\
     apt clean
 
 WORKDIR /app
